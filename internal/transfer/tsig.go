@@ -8,7 +8,6 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
@@ -476,7 +475,7 @@ func calculateMAC(key, data []byte, algorithm string) ([]byte, error) {
 		return nil, fmt.Errorf("HMAC-MD5 is no longer supported for TSIG (cryptographically broken). Use hmac-sha256 or hmac-sha512")
 	case HmacSHA1:
 		// SHA-1 is deprecated, log warning but support for compatibility
-		log.Printf("WARNING: HMAC-SHA1 is deprecated for TSIG. Consider using SHA-256 or SHA-512.")
+		fmt.Printf("WARNING: HMAC-SHA1 is deprecated for TSIG. Consider using SHA-256 or SHA-512.\n")
 		h := hmac.New(sha1.New, key)
 		h.Write(data)
 		mac = h.Sum(nil)

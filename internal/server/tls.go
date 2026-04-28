@@ -82,6 +82,9 @@ type TLSProfileConfig struct {
 	TrustedCACertPool *x509.CertPool
 
 	// InsecureSkipVerify skips certificate verification (for testing only).
+	// SECURITY (LOW-001): Setting this in production config disables all cert
+	// validation. This field exists for test environments; operators must ensure
+	// it is never enabled in production YAML.
 	InsecureSkipVerify bool
 }
 

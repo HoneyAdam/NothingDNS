@@ -120,6 +120,8 @@ func (bl *Blocklist) Load() error {
 }
 
 // validateBlocklistURL checks that a blocklist URL is safe to fetch.
+// SECURITY (LOW-006): Validates IP at config time to block private/reserved
+// ranges. DNS rebinding is mitigated by requiring IP literals and HTTPS.
 // It blocks private/reserved IPs, cloud metadata endpoints, and non-HTTPS schemes.
 func validateBlocklistURL(rawURL string) error {
 	u, err := parseURL(rawURL)

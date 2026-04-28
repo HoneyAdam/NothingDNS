@@ -24,7 +24,7 @@ export function NotificationProvider({ children }: { children: ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   const addNotification = useCallback((type: NotificationType, title: string, message?: string) => {
-    const id = `notif-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const id = `notif-${Date.now()}-${crypto.randomUUID()}`;
     setNotifications(prev => [...prev, { id, type, title, message, timestamp: new Date() }]);
 
     // Auto-remove after 5s

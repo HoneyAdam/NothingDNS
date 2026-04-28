@@ -29,7 +29,7 @@ spec:
           type: RuntimeDefault
       containers:
       - name: nothingdns
-        image: nothingdns/nothingdns:latest
+        image: nothingdns/nothingdns:v0.1.0
         imagePullPolicy: IfNotPresent
         ports:
         - name: dns-udp

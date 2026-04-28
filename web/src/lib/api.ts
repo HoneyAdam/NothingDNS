@@ -36,7 +36,10 @@ export async function downloadAuthenticated(path: string, filename: string): Pro
 }
 
 export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
+  };
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   const opts: RequestInit = { method, headers };

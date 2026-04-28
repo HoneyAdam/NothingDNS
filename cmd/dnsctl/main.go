@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"time"
@@ -47,53 +48,59 @@ var (
 )
 
 func main() {
+	os.Exit(runMain(os.Args[1:]))
+}
+
+func runMain(args []string) int {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
 	// Global flags
-	flag.StringVar(&globalFlags.Server, "server", "http://localhost:8080", "NothingDNS API server URL")
-	flag.StringVar(&globalFlags.APIKey, "api-key", "", "API key for authentication")
+	fs.StringVar(&globalFlags.Server, "server", "http://localhost:8080", "NothingDNS API server URL")
+	fs.StringVar(&globalFlags.APIKey, "api-key", "", "API key for authentication")
 
-	// Custom usage
-	flag.Usage = printUsage
-
-	flag.Parse()
-
-	args := flag.Args()
-	if len(args) < 1 {
-		printUsage()
-		os.Exit(1)
+	if err := fs.Parse(args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
 	}
 
-	cmdName := args[0]
+	parsedArgs := fs.Args()
+	if len(parsedArgs) < 1 {
+		printUsage()
+		return 1
+	}
+
+	cmdName := parsedArgs[0]
 
 	// Handle version
 	if cmdName == "version" {
 		fmt.Printf("%s version %s\n", Name, util.Version)
-		os.Exit(0)
+		return 0
 	}
 
 	// Handle help
 	if cmdName == "help" {
-		if len(args) > 1 {
-			printCommandHelp(args[1])
-		} else {
-			printUsage()
+		if len(parsedArgs) > 1 {
+			return printCommandHelp(parsedArgs[1])
 		}
-		os.Exit(0)
+		printUsage()
+		return 0
 	}
 
 	// Find and run command
 	for _, cmd := range commands {
 		if cmd.Name == cmdName {
-			if err := cmd.Run(args[1:]); err != nil {
+			if err := cmd.Run(parsedArgs[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		}
 	}
 
 	fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmdName)
 	fmt.Fprintf(os.Stderr, "Run '%s help' for usage.\n", os.Args[0])
-	os.Exit(1)
+	return 1
 }
 
 func printUsage() {
@@ -134,7 +141,7 @@ Run '%s help <command>' for more information on a command.
 `, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 }
 
-func printCommandHelp(cmdName string) {
+func printCommandHelp(cmdName string) int {
 	helpTexts := map[string]string{
 		"zone": `Usage: dnsctl zone <subcommand> [options]
 
@@ -211,7 +218,8 @@ Subcommands:
 	help, ok := helpTexts[cmdName]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", cmdName)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println(help)
+	return 0
 }

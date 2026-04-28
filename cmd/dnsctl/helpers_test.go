@@ -17,11 +17,14 @@ import (
 
 func captureOutput(fn func()) string {
 	oldStdout := os.Stdout
+	oldStderr := os.Stderr
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	os.Stderr = w
 	fn()
 	w.Close()
 	os.Stdout = oldStdout
+	os.Stderr = oldStderr
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
 	r.Close()

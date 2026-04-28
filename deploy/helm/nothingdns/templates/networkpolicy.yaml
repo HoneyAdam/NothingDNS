@@ -42,6 +42,19 @@ spec:
           port: 9090
       from: []
   egress:
-    # Allow all outbound for upstream DNS queries
-    - {}
+    # DNS upstream (UDP/TCP port 53) and HTTPS for blocklists/DoH
+    - to: []
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+        - protocol: TCP
+          port: 443
+    # Allow cluster-internal communication for gossip/Raft
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 7946
 {{- end }}

@@ -3,7 +3,9 @@ package auth
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/hmac"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha512"
 	"crypto/subtle"
@@ -13,9 +15,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nothingdns/nothingdns/internal/util"
-	"time"
 )
 
 // Role represents a user's RBAC role.
@@ -38,6 +40,8 @@ type User struct {
 }
 
 // Token represents an active authentication token.
+// SECURITY (LOW-015): Role is cached at generation time for serialization only.
+// Authorization always uses the live user store role via ValidateToken.
 type Token struct {
 	Token     string    `json:"token"`
 	Signature string    `json:"signature"` // HMAC signature for verification
@@ -49,9 +53,13 @@ type Token struct {
 
 // Store manages users and tokens.
 type Store struct {
-	mu            sync.RWMutex
-	users         map[string]*User
-	tokens        map[string]*Token
+	mu     sync.RWMutex
+	users  map[string]*User
+	tokens map[string]*Token
+	// SECURITY (LOW-019/020): Secret strength depends on operator choice.
+	// No minimum entropy enforcement or key rotation support. Operators must
+	// generate strong secrets (≥32 bytes from crypto/rand) and rotate them
+	// manually by revoking all tokens and restarting with a new secret.
 	secret        []byte        // HMAC signing key
 	tokenFilePath string        // Path to persist tokens (optional)
 	tokenExpiry   time.Duration // TTL for newly-issued tokens (VULN-032)
@@ -138,6 +146,9 @@ func NewStore(cfg *Config) (*Store, error) {
 			CreatedAt: time.Now().UTC().Format(time.RFC3339),
 			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
 		}
+		// SECURITY (LOW-012): The generated password is NEVER logged. It exists only
+		// in memory during this function. Operators must use the localhost-only
+		// bootstrap endpoint or config reload to set a known password.
 		// Warn that default admin was created — password must be set via first login or config
 		util.Warnf("No users configured. Default admin account created. Set password via dashboard or API before use.")
 	}
@@ -146,7 +157,7 @@ func NewStore(cfg *Config) (*Store, error) {
 }
 
 // HashPassword hashes a password with a random salt using PBKDF2-HMAC-SHA512.
-// This is a memory-hard key derivation function resistant to GPU/ASIC attacks.
+// Uses crypto/pbkdf2 for a standard, audited implementation (MED-001).
 // Parameters: 310,000 iterations (OWASP 2023 recommendation for SHA-512), 64-byte output.
 // Returns the hash that can be stored and later verified.
 func HashPassword(password string, salt []byte) []byte {
@@ -163,55 +174,15 @@ func HashPassword(password string, salt []byte) []byte {
 	iterations := 310000
 	keyLen := 64
 
-	h := hmac.New(sha512.New, []byte(password))
-	blockSize := h.Size()
-	numBlocks := (keyLen + blockSize - 1) / blockSize
-
-	result := make([]byte, keyLen)
-
-	for block := 1; block <= numBlocks; block++ {
-		// Salt || INT_32_BE(block) - computed once per block
-		blockData := make([]byte, len(salt)+4)
-		copy(blockData, salt)
-		blockData[len(salt)] = byte(block >> 24)
-		blockData[len(salt)+1] = byte(block >> 16)
-		blockData[len(salt)+2] = byte(block >> 8)
-		blockData[len(salt)+3] = byte(block)
-
-		// U1 = PRF(Password, Salt || INT(i))
-		h.Reset()
-		h.Write(blockData)
-		u := make([]byte, 0, h.Size())
-		u = h.Sum(u)
-
-		// Accumulator for this block: T = U1 XOR U2 XOR ... XOR Uc
-		blockResult := make([]byte, len(u))
-		copy(blockResult, u)
-
-		// Subsequent iterations: Uj = PRF(Password, Uj-1)
-		for j := 2; j <= iterations; j++ {
-			h.Reset()
-			h.Write(u)
-			u = make([]byte, 0, h.Size())
-			u = h.Sum(u)
-			for k := 0; k < len(u); k++ {
-				blockResult[k] ^= u[k]
-			}
-		}
-
-		// Copy this block's result into the final key
-		start := (block - 1) * blockSize
-		end := start + blockSize
-		if end > keyLen {
-			end = keyLen
-		}
-		copy(result[start:end], blockResult[:end-start])
+	key, err := pbkdf2.Key(sha512.New, password, salt, iterations, keyLen)
+	if err != nil {
+		panic("pbkdf2 failed: " + err.Error())
 	}
 
 	// Prepend salt to hash (salt bytes | key bytes)
-	hash := make([]byte, len(salt)+len(result))
+	hash := make([]byte, len(salt)+len(key))
 	copy(hash, salt)
-	copy(hash[len(salt):], result)
+	copy(hash[len(salt):], key)
 	return hash
 }
 
@@ -282,6 +253,10 @@ func VerifyPassword(password string, hash []byte) bool {
 }
 
 // GenerateToken creates a new authentication token for a user.
+// SECURITY (LOW-016/017): No refresh tokens or concurrent session limits.
+// Clients must re-authenticate after expiry. Unlimited tokens per user are
+// permitted. Operators requiring stricter session control should implement
+// refresh-token flow and max-concurrent limits externally.
 func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -384,12 +359,15 @@ func (s *Store) RevokeAllTokens(username string) {
 // server CPU compared to a normal login (VULN-021).
 const MaxPasswordBytes = 128
 
-// ValidatePassword rejects empty passwords and passwords larger than
-// MaxPasswordBytes. Length-only for now — upstream callers (bootstrap) may
-// add stricter policy.
+// ValidatePassword rejects empty passwords, passwords shorter than
+// MinPasswordBytes, and passwords larger than MaxPasswordBytes.
 func ValidatePassword(password string) error {
+	const MinPasswordBytes = 8
 	if password == "" {
 		return fmt.Errorf("password must not be empty")
+	}
+	if len(password) < MinPasswordBytes {
+		return fmt.Errorf("password must be at least %d characters", MinPasswordBytes)
 	}
 	if len(password) > MaxPasswordBytes {
 		return fmt.Errorf("password must be at most %d bytes", MaxPasswordBytes)
@@ -444,15 +422,18 @@ func (s *Store) UpdateUser(username, password string, role Role) (*User, error) 
 	if password != "" {
 		user.Hash = HashPassword(password, nil)
 	}
+	roleChanged := role != "" && user.Role != role
 	if role != "" {
 		user.Role = role
 	}
 	user.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	// Revoke all tokens for this user (password changed)
-	for token, t := range s.tokens {
-		if t.Username == username {
-			delete(s.tokens, token)
+	// Revoke all tokens for this user (password or role changed) (LOW-013).
+	if password != "" || roleChanged {
+		for token, t := range s.tokens {
+			if t.Username == username {
+				delete(s.tokens, token)
+			}
 		}
 	}
 
@@ -557,6 +538,20 @@ func (s *Store) Load(path string) error {
 	var users map[string]*User
 	if err := json.Unmarshal(data, &users); err != nil {
 		return err
+	}
+
+	// Validate loaded users (LOW-008)
+	for username, u := range users {
+		if u == nil || u.Username == "" || username == "" {
+			delete(users, username)
+			continue
+		}
+		switch u.Role {
+		case RoleAdmin, RoleOperator, RoleViewer:
+			// valid
+		default:
+			u.Role = RoleViewer
+		}
 	}
 
 	s.mu.Lock()
@@ -674,11 +669,18 @@ func (s *Store) LoadTokensSigned(path string) error {
 		return fmt.Errorf("deserializing tokens: %w", err)
 	}
 
-	// Load tokens, filtering out expired ones
+	// Load tokens, filtering out expired and malformed entries (LOW-008).
 	now := time.Now()
 	for token, t := range tokens {
-		if now.After(t.ExpiresAt) {
+		if t == nil || t.Token == "" || t.Username == "" || now.After(t.ExpiresAt) {
 			delete(tokens, token)
+			continue
+		}
+		switch t.Role {
+		case RoleAdmin, RoleOperator, RoleViewer:
+			// valid
+		default:
+			t.Role = RoleViewer
 		}
 	}
 
@@ -686,12 +688,13 @@ func (s *Store) LoadTokensSigned(path string) error {
 	return nil
 }
 
-// deriveAESKey derives a 32-byte AES-256 key from the HMAC secret.
-// Uses a simple but effective derivation: SHA-512(secret) truncated to 32 bytes.
+// deriveAESKey derives a 32-byte AES-256 key from the HMAC secret using HKDF (RFC 5869).
+// Replaces the previous SHA-512 truncation with a proper extract-and-expand KDF (MED-002).
 func deriveAESKey(secret []byte) []byte {
-	h := sha512.Sum512(secret)
-	key := make([]byte, 32)
-	copy(key, h[:32])
+	key, err := hkdf.Key(sha512.New, secret, nil, "nothingdns-token-encryption", 32)
+	if err != nil {
+		panic("hkdf failed: " + err.Error())
+	}
 	return key
 }
 

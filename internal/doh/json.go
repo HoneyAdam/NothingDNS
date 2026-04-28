@@ -42,6 +42,8 @@ type JSONRecord struct {
 }
 
 // EncodeJSON converts a DNS message to the JSON API format.
+// SECURITY (LOW-021): Data fields contain raw DNS payload text (TXT/SPF).
+// Consumers must treat these as untrusted and escape before DOM insertion.
 func EncodeJSON(msg *protocol.Message) ([]byte, error) {
 	if msg == nil {
 		return nil, fmt.Errorf("nil message")

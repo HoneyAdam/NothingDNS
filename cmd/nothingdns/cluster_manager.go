@@ -76,14 +76,14 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 	}
 
 	// Start cluster metrics updater
-	go mgr.metricsUpdater(metricsCollector)
+	go mgr.metricsUpdater(metricsCollector, 30*time.Second)
 
 	return mgr, nil
 }
 
 // metricsUpdater periodically updates cluster metrics.
-func (m *ClusterManager) metricsUpdater(metricsCollector *metrics.MetricsCollector) {
-	ticker := time.NewTicker(30 * time.Second)
+func (m *ClusterManager) metricsUpdater(metricsCollector *metrics.MetricsCollector, interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

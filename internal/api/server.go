@@ -54,6 +54,9 @@ type Server struct {
 	authStore       *auth.Store
 	metrics         *metrics.MetricsCollector
 	validator       *dnssec.Validator
+	// SECURITY (LOW-026): zoneSigners is protected by RWMutex. Writes are rare
+	// (zone reload / DNSSEC key rollover) and reads are frequent. sync.Map is
+	// not used because the map is small and RWMutex performs better.
 	zoneSigners     map[string]*dnssec.Signer // zone name → signer
 	zoneSignersMu   sync.RWMutex
 	rpzEngine       *rpz.Engine

@@ -99,7 +99,10 @@ func (h *ReloadHandler) Stop() {
 	h.wg.Wait()
 }
 
-// Reload triggers a manual reload
+// Reload triggers a manual reload.
+// SECURITY (MED-010): Callbacks execute with an RLock, but each component
+// is responsible for its own atomic state management. The ReloadManager
+// uses atomic.Pointer[Config] for consistent config snapshots.
 func (h *ReloadHandler) Reload() []ReloadError {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

@@ -15,6 +15,10 @@ metadata:
         deny all;
       }
 spec:
+  tls:
+  - hosts:
+    - dns.example.com
+    secretName: nothingdns-tls
   rules:
   - host: dns.example.com
     http:

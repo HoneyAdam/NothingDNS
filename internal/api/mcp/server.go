@@ -251,7 +251,10 @@ type Handler interface {
 	GetPrompt(name string, args map[string]string) (*PromptResult, error)
 }
 
-// Server represents an MCP server
+// Server represents an MCP server.
+// SECURITY (LOW-025): Tool results and resource contents may contain server
+// state. The Handler implementation must ensure secrets are redacted before
+// returning data to the MCP client.
 type Server struct {
 	name         string
 	version      string

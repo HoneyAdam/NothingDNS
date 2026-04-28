@@ -1,11 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { type DashboardStats, type QueryLogResponse, type Zone, type UpstreamsResponse, type BlocklistStatus, type UserInfo, type MetricsHistory, type RPZRulesResponse } from '@/lib/api';
 
-// Helper to get auth token
+import { useAuthStore } from '@/stores/authStore';
+
+// Helper to get auth token from the in-memory Zustand store only (LOW-005).
+// Never read from document.cookie — the backend cookie is HttpOnly.
 function getToken(): string | null {
-  const match = document.cookie.match(/ndns_token=([^;]+)/);
-  if (match) return decodeURIComponent(match[1]);
-  return null;
+  return useAuthStore.getState().token;
 }
 
 // API fetch wrapper with auth

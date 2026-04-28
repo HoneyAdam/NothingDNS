@@ -72,7 +72,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookie
-	// VULN-057: Secure=true only when TLS is active; otherwise silently dropped by browsers
+	// SECURITY (LOW-018): Secure flag is conditional on r.TLS != nil.
+	// Plaintext deployments transmit cookies unencrypted. Deploy behind TLS
+	// or a TLS-terminating reverse proxy for production.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "ndns_token",
 		Value:    token.Token,
@@ -93,6 +95,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleBootstrap creates the first admin user when no users exist.
 // This endpoint allows initial setup without pre-configured credentials.
+// SECURITY (LOW-009): Restricted to localhost. Defense-in-depth: require a
+// bootstrap token from file or environment variable for production deployments.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -183,7 +187,9 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookie
-	// VULN-057: Secure=true only when TLS is active; otherwise silently dropped by browsers
+	// SECURITY (LOW-018): Secure flag is conditional on r.TLS != nil.
+	// Plaintext deployments transmit cookies unencrypted. Deploy behind TLS
+	// or a TLS-terminating reverse proxy for production.
 	http.SetCookie(w, &http.Cookie{
 		Name:     "ndns_token",
 		Value:    token.Token,

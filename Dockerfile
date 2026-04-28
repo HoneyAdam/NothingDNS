@@ -67,6 +67,16 @@ VOLUME ["/data"]
 # Default configuration path
 ENV NOTHINGDNS_CONFIG=/etc/nothingdns/nothingdns.yaml
 
+# Health check delegated to orchestrator (K8s/Docker Swarm) probes.
+# Scratch images cannot run shell commands; orchestrator-level health
+# checks are the only viable option (MED-014).
+# Example Docker Compose healthcheck:
+#   healthcheck:
+#     test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+#     interval: 30s
+#     timeout: 5s
+#     retries: 3
+
 # Entry point
 ENTRYPOINT ["/usr/local/bin/nothingdns"]
 

@@ -644,7 +644,10 @@ func (h *DNSToolsHandler) ListPrompts() ([]Prompt, error) {
 	}, nil
 }
 
-// GetPrompt implements Handler
+// GetPrompt implements Handler.
+// SECURITY (LOW-022): Domain/zoneName values are embedded into prompt text via
+// fmt.Sprintf. Inputs originate from authenticated API calls but should still be
+// treated as untrusted when rendered in downstream UIs.
 func (h *DNSToolsHandler) GetPrompt(name string, args map[string]string) (*PromptResult, error) {
 	switch name {
 	case "troubleshoot_dns":

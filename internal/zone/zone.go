@@ -368,18 +368,18 @@ func (p *parser) handleInclude(args []string) error {
 
 	includeFile := args[0]
 
-	// SECURITY: Check for path traversal in the include path itself
-	// Block obvious traversal attempts before any path resolution
-	if strings.Contains(includeFile, "..") {
-		return fmt.Errorf("$INCLUDE path traversal attempt blocked: %s", includeFile)
-	}
-
 	// SECURITY: Absolute paths are rejected unconditionally. The previous
 	// implementation skipped the zone-directory confinement check when
 	// filepath.IsAbs(args[0]) was true, so `$INCLUDE /etc/shadow` reached
 	// os.Open. Zone authors must use paths relative to the parent zone file.
 	if filepath.IsAbs(includeFile) {
 		return fmt.Errorf("$INCLUDE absolute path not allowed: %s", includeFile)
+	}
+
+	// SECURITY: Validate the include path is local (no traversal).
+	// filepath.IsLocal replaces the weaker strings.Contains("..") blacklist (LOW-007).
+	if !filepath.IsLocal(includeFile) {
+		return fmt.Errorf("$INCLUDE path traversal attempt blocked: %s", includeFile)
 	}
 
 	// Resolve relative to the directory of the current file

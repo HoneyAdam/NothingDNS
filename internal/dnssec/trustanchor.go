@@ -209,6 +209,9 @@ type keyDigestXML struct {
 }
 
 // ParseTrustAnchorXML parses RFC 7958 format trust anchor XML.
+// SECURITY (MED-008): Go's encoding/xml does not resolve external entities
+// by default, so XXE is not exploitable. Trust anchor files must still be
+// locally curated and kept under operator control.
 func ParseTrustAnchorXML(data []byte) ([]*TrustAnchor, error) {
 	var xmlAnchors trustAnchorXML
 	if err := xml.Unmarshal(data, &xmlAnchors); err != nil {

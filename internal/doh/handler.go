@@ -79,7 +79,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
 
@@ -226,6 +226,8 @@ func (rw *jsonResponseWriter) MaxSize() int {
 }
 
 // handleGET processes GET requests with base64url-encoded DNS query.
+// SECURITY (MED-009): GET-based DoH can theoretically be used for amplification.
+// This endpoint shares the same per-IP rate limiter as UDP queries.
 func (h *Handler) handleGET(r *http.Request) ([]byte, error) {
 	dnsParam := r.URL.Query().Get("dns")
 	if dnsParam == "" {

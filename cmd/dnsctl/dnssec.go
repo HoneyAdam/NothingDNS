@@ -56,9 +56,7 @@ func cmdDNSSECGenerateKey(args []string) error {
 	outputDir := fs.String("output", ".", "Output directory for key files")
 	keySize := fs.Int("keysize", 0, "Key size in bits (for RSA: 2048, 3072, 4096)")
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+	fs.Parse(args)
 
 	if *zone == "" {
 		return fmt.Errorf("zone name is required")
@@ -127,9 +125,7 @@ func cmdDNSSECDSFromDNSKEY(args []string) error {
 	keyFile := fs.String("keyfile", "", "Public key file path (required)")
 	digestType := fs.Int("digest", 2, "Digest type (1=SHA-1, 2=SHA-256, 4=SHA-384)")
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+	fs.Parse(args)
 
 	if *zone == "" || *keyFile == "" {
 		return fmt.Errorf("zone and keyfile are required")
@@ -172,9 +168,7 @@ func cmdDNSSECSignZone(args []string) error {
 	nsec3Salt := fs.String("salt", "", "NSEC3 salt (hex string)")
 	validity := fs.String("validity", "720h", "Signature validity (Go duration)")
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+	fs.Parse(args)
 
 	if *zone == "" || *inputFile == "" {
 		return fmt.Errorf("zone and input are required")
@@ -397,9 +391,7 @@ func parseZoneRecords(data, origin string) ([]*protocol.ResourceRecord, error) {
 
 func cmdDNSSECVerifyAnchor(args []string) error {
 	fs := flag.NewFlagSet("verify-anchor", flag.ExitOnError)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+	fs.Parse(args)
 
 	if fs.NArg() < 1 {
 		return fmt.Errorf("trust anchor file path is required")
@@ -758,9 +750,7 @@ func cmdDNSSECValidateZone(args []string) error {
 	zoneFile := fs.String("zone", "", "Zone file to validate (required)")
 	ignoreTime := fs.Bool("ignore-time", false, "Ignore signature timestamps (for testing)")
 
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
+	fs.Parse(args)
 
 	if *zoneFile == "" {
 		return fmt.Errorf("zone file is required (-zone)")

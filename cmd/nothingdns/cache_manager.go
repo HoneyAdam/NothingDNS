@@ -4,7 +4,6 @@
 package main
 
 import (
-	"encoding/gob"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -27,6 +26,7 @@ type CacheManager struct {
 	logger      *util.Logger
 	persistPath string
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	wg          sync.WaitGroup
 }
 
@@ -75,15 +75,19 @@ func NewCacheManager(cfg *config.Config, logger *util.Logger) (*CacheManager, er
 
 // Stop stops the cache manager and its components.
 func (m *CacheManager) Stop() {
-	if m.MemMonitor != nil {
-		m.MemMonitor.Stop()
-	}
-	close(m.stopCh)
-	m.wg.Wait()
-	// Final save on shutdown
-	if m.persistPath != "" {
-		m.saveToFile()
-	}
+	m.stopOnce.Do(func() {
+		if m.MemMonitor != nil {
+			m.MemMonitor.Stop()
+		}
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+		m.wg.Wait()
+		// Final save on shutdown
+		if m.persistPath != "" {
+			m.saveToFile()
+		}
+	})
 }
 
 // SetInvalidateFunc sets the cache invalidation callback for cluster sync.
@@ -95,6 +99,8 @@ func (m *CacheManager) SetInvalidateFunc(fn func(string)) {
 
 // LoadCache loads the cache from persistent storage.
 // Called during startup to warm the cache.
+// SECURITY (LOW-027): Snapshot iteration may observe concurrent mutations.
+// The cache uses its own locking; validation of WireBytes limits bounds abuse.
 func (m *CacheManager) LoadCache() {
 	if m.persistPath == "" {
 		return
@@ -112,6 +118,14 @@ func (m *CacheManager) LoadCache() {
 		return
 	}
 
+	// Validate deserialized entries (MED-007)
+	const maxWireSize = 65535 // RFC 1035 maximum DNS message size
+	for i := range entries {
+		if len(entries[i].WireBytes) > maxWireSize {
+			entries[i].WireBytes = nil
+		}
+	}
+
 	restored := m.Cache.Load(entries)
 	if restored > 0 {
 		m.logger.Infof("Cache restored %d entries from persistent storage", restored)
@@ -123,6 +137,9 @@ func (m *CacheManager) LoadCache() {
 func (m *CacheManager) StartPersistence(interval time.Duration) {
 	if interval <= 0 {
 		interval = 5 * time.Minute
+	}
+	if m.stopCh == nil {
+		m.stopCh = make(chan struct{})
 	}
 
 	m.wg.Add(1)
@@ -221,15 +238,18 @@ func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) {
 			return nil
 		}
 
+		// Validate deserialized entries (MED-007)
+		const maxWireSize = 65535 // RFC 1035 maximum DNS message size
+		for i := range entries {
+			if len(entries[i].WireBytes) > maxWireSize {
+				entries[i].WireBytes = nil
+			}
+		}
+
 		restored := m.Cache.Load(entries)
 		if restored > 0 {
 			m.logger.Infof("Cache restored %d entries from KV store", restored)
 		}
 		return nil
 	})
-}
-
-func init() {
-	// Register types for gob serialization
-	gob.Register(cache.CacheEntryJSON{})
 }

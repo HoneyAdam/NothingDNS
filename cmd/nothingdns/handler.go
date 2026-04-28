@@ -82,11 +82,17 @@ type integratedHandler struct {
 }
 
 // ServeDNS implements the server.Handler interface.
+// SECURITY (LOW-028): All DNS transports (UDP/TCP/DoH/DoT/DoQ) share the same
+// per-IP rate limiter by design. Operators requiring transport-specific limits
+// should deploy separate listeners with independent limiter instances.
 func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Message) {
+	reqID := util.GenerateRequestID()
+
 	// Panic recovery — prevents handler crashes from crashing the server
 	defer func() {
 		if rec := recover(); rec != nil {
-			h.logger.Errorf("Panic in ServeDNS: %v", rec)
+			// Sanitize panic value before logging to prevent info leak (MED-006).
+			h.logger.Errorf("Panic in ServeDNS: internal error (req_id=%s)", reqID)
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
@@ -95,7 +101,6 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 	}()
 
 	start := time.Now()
-	reqID := util.GenerateRequestID()
 
 	// Track response code for tracing and observability
 	var rcodeStr string
@@ -589,8 +594,8 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		} else {
 			resp, err = h.upstream.Query(r)
 		}
-		r.Header.ID = origID // Restore after upstream call
 		if err != nil {
+			r.Header.ID = origID // Restore before returning
 			h.logger.Warnf("Upstream query failed for %s: %v", qname, err)
 			// RFC 8767: Try serve-stale when upstream is unavailable
 			if stale := h.cache.GetStale(cacheKey); stale != nil && stale.Message != nil {
@@ -610,6 +615,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 
 		// Validate response ID matches query ID to prevent spoofing
 		if resp.Header.ID != r.Header.ID {
+			r.Header.ID = origID // Restore before returning
 			h.logger.Warnf("Upstream response ID mismatch for %s: got %d, want %d", qname, resp.Header.ID, r.Header.ID)
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
@@ -617,6 +623,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 			sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
 			return
 		}
+		r.Header.ID = origID // Restore after successful validation
 
 		// Validate DNSSEC if enabled and response has signatures
 		dnssecValidated := false
