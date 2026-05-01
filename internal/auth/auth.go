@@ -49,6 +49,7 @@ type Token struct {
 	Role      Role      `json:"role"`
 	ExpiresAt time.Time `json:"expires_at"`
 	CreatedAt time.Time `json:"created_at"`
+	LastAccess time.Time `json:"last_access"` // For session activity tracking
 }
 
 // Store manages users and tokens.
@@ -56,6 +57,10 @@ type Store struct {
 	mu     sync.RWMutex
 	users  map[string]*User
 	tokens map[string]*Token
+	// MaxSessionsPerUser limits concurrent sessions per user (0 = unlimited).
+	// When a new login would exceed the limit, the oldest session is revoked.
+	maxSessionsPerUser int
+	activeSessions     map[string]int // username → count of active tokens
 	// SECURITY (LOW-019/020): Secret strength depends on operator choice.
 	// No minimum entropy enforcement or key rotation support. Operators must
 	// generate strong secrets (≥32 bytes from crypto/rand) and rotate them
@@ -72,9 +77,10 @@ func (s *Store) TokenExpiry() time.Duration {
 
 // Config holds auth store configuration.
 type Config struct {
-	Secret      string   `yaml:"secret"`       // HMAC signing key
-	Users       []User   `yaml:"users"`        // Initial users
-	TokenExpiry Duration `yaml:"token_expiry"` // Token TTL (default: 24h)
+	Secret            string   `yaml:"secret"`        // HMAC signing key
+	Users             []User   `yaml:"users"`         // Initial users
+	TokenExpiry       Duration `yaml:"token_expiry"`  // Token TTL (default: 24h)
+	MaxSessionsPerUser int     `yaml:"max_sessions_per_user"` // Max concurrent sessions per user (0 = unlimited)
 }
 
 type Duration struct {
@@ -116,6 +122,8 @@ func NewStore(cfg *Config) (*Store, error) {
 		tokens:      make(map[string]*Token),
 		secret:      secret,
 		tokenExpiry: cfg.TokenExpiry.Duration,
+		maxSessionsPerUser: cfg.MaxSessionsPerUser,
+		activeSessions: make(map[string]int),
 	}
 	if s.tokenExpiry <= 0 {
 		s.tokenExpiry = 24 * time.Hour
@@ -253,10 +261,8 @@ func VerifyPassword(password string, hash []byte) bool {
 }
 
 // GenerateToken creates a new authentication token for a user.
-// SECURITY (LOW-016/017): No refresh tokens or concurrent session limits.
-// Clients must re-authenticate after expiry. Unlimited tokens per user are
-// permitted. Operators requiring stricter session control should implement
-// refresh-token flow and max-concurrent limits externally.
+// When MaxSessionsPerUser > 0 and the user has reached their session limit,
+// the oldest session is revoked before issuing the new one.
 func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -264,6 +270,24 @@ func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, er
 	user, ok := s.users[username]
 	if !ok {
 		return nil, fmt.Errorf("user not found")
+	}
+
+	// Enforce session limit: revoke oldest token if at capacity
+	if s.maxSessionsPerUser > 0 {
+		if count := s.activeSessions[username]; count >= s.maxSessionsPerUser {
+			oldestToken := ""
+			oldestTime := time.Time{}
+			for tok, t := range s.tokens {
+				if t.Username == username && (oldestTime.IsZero() || t.CreatedAt.Before(oldestTime)) {
+					oldestTime = t.CreatedAt
+					oldestToken = tok
+				}
+			}
+			if oldestToken != "" {
+				delete(s.tokens, oldestToken)
+			}
+		}
+		s.activeSessions[username]++
 	}
 
 	// Generate random token
@@ -284,6 +308,7 @@ func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, er
 		Role:      user.Role,
 		ExpiresAt: now.Add(expiry),
 		CreatedAt: now,
+		LastAccess: now,
 	}
 
 	s.tokens[token] = t
@@ -322,9 +347,13 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 		s.mu.RUnlock()
 		s.mu.Lock()
 		delete(s.tokens, tokenStr)
+		s.activeSessions[token.Username]--
 		s.mu.Unlock()
 		return nil, fmt.Errorf("token expired")
 	}
+
+	// Update LastAccess timestamp
+	token.LastAccess = time.Now()
 
 	user, ok := s.users[token.Username]
 	s.mu.RUnlock()
@@ -339,6 +368,9 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 func (s *Store) RevokeToken(tokenStr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if t, ok := s.tokens[tokenStr]; ok {
+		s.activeSessions[t.Username]--
+	}
 	delete(s.tokens, tokenStr)
 }
 
@@ -352,6 +384,7 @@ func (s *Store) RevokeAllTokens(username string) {
 			delete(s.tokens, token)
 		}
 	}
+	delete(s.activeSessions, username)
 }
 
 // MaxPasswordBytes bounds accepted password size. PBKDF2 iterations run over
@@ -435,6 +468,7 @@ func (s *Store) UpdateUser(username, password string, role Role) (*User, error) 
 				delete(s.tokens, token)
 			}
 		}
+		delete(s.activeSessions, username)
 	}
 
 	return user, nil
@@ -456,6 +490,7 @@ func (s *Store) DeleteUser(username string) error {
 			delete(s.tokens, token)
 		}
 	}
+	delete(s.activeSessions, username)
 	return nil
 }
 
@@ -682,6 +717,7 @@ func (s *Store) LoadTokensSigned(path string) error {
 		default:
 			t.Role = RoleViewer
 		}
+		s.activeSessions[t.Username]++
 	}
 
 	s.tokens = tokens

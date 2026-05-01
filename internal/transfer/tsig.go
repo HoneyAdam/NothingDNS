@@ -8,6 +8,7 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -63,6 +64,10 @@ type TSIGKey struct {
 	Algorithm string    // Algorithm name (e.g., hmac-sha256)
 	Secret    []byte    // Raw key bytes
 	CreatedAt time.Time // When key was created
+	// AllowedCIDRs restricts which client IPs can use this key for AXFR/IXFR.
+	// If empty, no IP restriction is applied (key can be used from any IP).
+	// This prevents a key from being used by an unauthorized client if leaked.
+	AllowedCIDRs []string // JSON/YAML: comma-separated CIDR notation
 }
 
 // TSIGRecord represents a TSIG resource record
@@ -132,6 +137,31 @@ func (ks *KeyStore) HasKeys() bool {
 	ks.mu.RLock()
 	defer ks.mu.RUnlock()
 	return len(ks.keys) > 0
+}
+
+// ValidateKeySource checks if a client IP is allowed to use the named key.
+// Returns nil if allowed, or an error describing the restriction.
+// If the key has no AllowedCIDRs, the check is a no-op (IP is not restricted).
+func (ks *KeyStore) ValidateKeySource(keyName string, clientIP net.IP) error {
+	ks.mu.RLock()
+	key, ok := ks.keys[strings.ToLower(keyName)]
+	ks.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("TSIG key not found: %s", keyName)
+	}
+	if len(key.AllowedCIDRs) == 0 {
+		return nil // No IP restriction on this key
+	}
+	for _, cidr := range key.AllowedCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			return fmt.Errorf("invalid TSIG key %s AllowedCIDR %q: %w", keyName, cidr, err)
+		}
+		if ipNet.Contains(clientIP) {
+			return nil
+		}
+	}
+	return fmt.Errorf("client IP %s not in TSIG key %s allowed list", clientIP, keyName)
 }
 
 // RotateKey replaces the current key with a new one, keeping the old key

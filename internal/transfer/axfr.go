@@ -195,6 +195,11 @@ func (s *AXFRServer) HandleAXFR(req *protocol.Message, clientIP net.IP) ([]*prot
 			return nil, nil, fmt.Errorf("TSIG key not found: %s", keyName)
 		}
 
+		// SECURITY (CWE-290): Verify client IP is in the key's AllowedCIDRs
+		if err := s.keyStore.ValidateKeySource(keyName, clientIP); err != nil {
+			return nil, nil, fmt.Errorf("TSIG client IP check failed: %w", err)
+		}
+
 		if err := VerifyMessage(req, key, nil); err != nil {
 			return nil, nil, fmt.Errorf("TSIG verification failed: %w", err)
 		}

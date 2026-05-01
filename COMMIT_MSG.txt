@@ -1,0 +1,21 @@
+security: address audit findings — session limits, TSIG IP binding, entropy validation
+
+Session limits (CWE-307):
+- Add max_sessions_per_user config option to Config and auth.Config
+- NewStore initializes maxSessionsPerUser and activeSessions map
+- GenerateToken enforces limit by revoking oldest session when at capacity
+- ValidateToken updates LastAccess on each use
+- RevokeToken/RevokeAllTokens/UpdateUser/DeleteUser clean up activeSessions
+- LoadTokensSigned rebuilds activeSessions from loaded tokens
+
+TSIG source IP binding (CWE-290):
+- Add AllowedCIDRs field to TSIGKey struct
+- KeyStore.ValidateKeySource() checks client IP against allowed CIDRs
+- Wire ValidateKeySource into HandleIXFR, HandleAXFR, HandleNOTIFY, HandleUpdate
+- Returns error if client IP not in any allowed CIDR for the key
+
+Entropy validation for secrets (CWE-312):
+- Add secretHasMinEntropy() to config — rejects secrets < 32 bytes and
+  flags low-entropy strings where >85% of chars fall in ≤2 character classes
+- validateSecrets() now calls secretHasMinEntropy for cluster.encryption_key
+  and per-slave-zone tsig_secret fields

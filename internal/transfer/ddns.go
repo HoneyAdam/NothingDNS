@@ -189,6 +189,10 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 			return h.createUpdateResponse(req, protocol.RcodeNotAuth), nil
 		}
 
+		if err := h.keyStore.ValidateKeySource(keyName, clientIP); err != nil {
+			return h.createUpdateResponse(req, protocol.RcodeNotAuth), nil
+		}
+
 		if err := VerifyMessage(req, key, nil); err != nil {
 			return h.createUpdateResponse(req, protocol.RcodeNotAuth), nil
 		}

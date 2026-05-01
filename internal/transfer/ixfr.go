@@ -154,6 +154,10 @@ func (s *IXFRServer) HandleIXFR(req *protocol.Message, clientIP net.IP) ([]*prot
 			return nil, fmt.Errorf("TSIG key not found: %s", keyName)
 		}
 
+		if err := s.axfrServer.keyStore.ValidateKeySource(keyName, clientIP); err != nil {
+			return nil, fmt.Errorf("TSIG client IP check failed: %w", err)
+		}
+
 		if err := VerifyMessage(req, key, nil); err != nil {
 			return nil, fmt.Errorf("TSIG verification failed: %w", err)
 		}

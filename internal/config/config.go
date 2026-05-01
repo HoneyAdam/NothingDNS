@@ -1723,6 +1723,50 @@ func looksLikePlaceholderSecret(s string) string {
 	return ""
 }
 
+// secretHasMinEntropy returns an error if the secret is below 32 bytes or
+// appears to be low-entropy (detectable via Shannon entropy heuristic).
+func secretHasMinEntropy(name, secret string) error {
+	if len(secret) < 32 {
+		return fmt.Errorf("%s is too short: %d bytes (minimum 32)", name, len(secret))
+	}
+	// Shannon entropy: count character class frequencies
+	var lower, upper, digit, other int
+	for _, b := range secret {
+		switch {
+		case b >= 'a' && b <= 'z':
+			lower++
+		case b >= 'A' && b <= 'Z':
+			upper++
+		case b >= '0' && b <= '9':
+			digit++
+		default:
+			other++
+		}
+	}
+	n := float64(len(secret))
+	// If all chars fall in 2 or fewer classes, it's likely patterned — flag it
+	classes := 0
+	if lower > 0 {
+		classes++
+	}
+	if upper > 0 {
+		classes++
+	}
+	if digit > 0 {
+		classes++
+	}
+	if other > 0 {
+		classes++
+	}
+	if classes <= 2 && int(n) > 0 {
+		dominant := float64(max(lower, max(upper, max(digit, other))))
+		if dominant/n > 0.85 {
+			return fmt.Errorf("%s appears low-entropy (%.0f%% in one char class) — use a cryptographically random value", name, dominant/n*100)
+		}
+	}
+	return nil
+}
+
 // validateSecrets refuses to start when a secret field still contains a known
 // template placeholder (VULN-050). The failure mode being prevented: an
 // operator copies deploy/production.yaml verbatim, the server hashes
@@ -1748,6 +1792,22 @@ func (c *Config) validateSecrets() []string {
 			errors = append(errors, fmt.Sprintf(
 				"http.users[%d] (%q) password still contains placeholder %q — set it via an environment variable or replace with a real secret before starting",
 				i, user.Username, token))
+		}
+	}
+
+	// Validate cluster encryption key entropy
+	if c.Cluster.Enabled && c.Cluster.EncryptionKey != "" {
+		if err := secretHasMinEntropy("cluster.encryption_key", c.Cluster.EncryptionKey); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+
+	// Validate per-slave TSIG secrets
+	for i, slave := range c.SlaveZones {
+		if slave.TSIGSecret != "" {
+			if err := secretHasMinEntropy(fmt.Sprintf("slave_zones[%d].tsig_secret", i), slave.TSIGSecret); err != nil {
+				errors = append(errors, err.Error())
+			}
 		}
 	}
 

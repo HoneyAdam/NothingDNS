@@ -272,6 +272,9 @@ func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP
 		if !ok {
 			return h.createNOTIFYResponse(req, protocol.RcodeNotAuth), fmt.Errorf("TSIG key not found: %s", keyName)
 		}
+		if err := h.keyStore.ValidateKeySource(keyName, clientIP); err != nil {
+			return h.createNOTIFYResponse(req, protocol.RcodeNotAuth), fmt.Errorf("TSIG client IP check failed: %w", err)
+		}
 		if err := VerifyMessage(req, key, nil); err != nil {
 			return h.createNOTIFYResponse(req, protocol.RcodeNotAuth), fmt.Errorf("TSIG verification failed: %w", err)
 		}
