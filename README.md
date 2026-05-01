@@ -1050,17 +1050,26 @@ systemctl start nothingdns
 systemctl reload nothingdns
 ```
 
+## Documentation
+
+Detailed documentation lives under [docs/](docs/):
+
+- [docs/README.md](docs/README.md) — documentation index
+- [docs/SPECIFICATION.md](docs/SPECIFICATION.md) — functional specification
+- [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) — implementation details
+- [docs/OPERATIONS.md](docs/OPERATIONS.md) — deployment, backup/recovery, monitoring
+- [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) — full YAML config reference
+- [docs/SECURITY.md](docs/SECURITY.md) — security policy and vulnerability reporting
+- [docs/CHANGELOG.md](docs/CHANGELOG.md) — release history
+
 ## License
 
 MIT License - See LICENSE file for details
 
 ## Contributing
 
-Contributions are welcome! Please ensure:
-
-1. All tests pass (`go test ./...`)
-2. Code follows Go conventions (`go fmt`, `go vet`)
-3. New features include tests
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full
+guide (development environment, build/test commands, PR checklist).
 
 ## Roadmap
 
@@ -1089,9 +1098,8 @@ Contributions are welcome! Please ensure:
 - [x] Iterative recursive resolver
 - [x] Runtime memory monitoring and OOM protection
 - [x] Audit logging
-- [x] Production-ready code quality (see [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md))
+- [x] Production-ready code quality (see [docs/archive/PRODUCTION_READINESS.md](docs/archive/PRODUCTION_READINESS.md))
 - [x] DNS64/NAT64 support (RFC 6147)
 - [x] SVCB/HTTPS record types (RFC 9460)
 - [x] DNS Cookies anti-spoofing (RFC 7873)
 - [x] QNAME Minimization privacy (RFC 7816)
-# test
