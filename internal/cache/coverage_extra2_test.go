@@ -49,7 +49,7 @@ func TestRemainingTTL_NegativeDurationCoversNegativeBranch(t *testing.T) {
 // in SetNegative by configuring negativeTTL < minTTL.
 func TestSetNegative_MinTTLClamping(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.MinTTL = 10 * time.Second
 	config.NegativeTTL = 2 * time.Second // negativeTTL < minTTL
 	c := New(config)
@@ -75,7 +75,7 @@ func TestSetNegative_MinTTLClamping(t *testing.T) {
 // in SetNegative by configuring negativeTTL > maxTTL.
 func TestSetNegative_MaxTTLClamping(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.MaxTTL = 5 * time.Second
 	config.NegativeTTL = 120 * time.Second // negativeTTL > maxTTL
 	c := New(config)
@@ -97,21 +97,23 @@ func TestSetNegative_MaxTTLClamping(t *testing.T) {
 	}
 }
 
-// TestEvictOldest_NilElement covers the `if element == nil { return }`
-// branch in evictOldest. This is a defensive path that triggers when
-// the LRU list is empty. We call evictOldest directly on a fresh cache
-// with an empty LRU list to exercise this branch without causing an
-// infinite loop in addEntry.
+// TestEvictOldest_NilElement covers the empty-list branch in
+// cacheShard.evictOldest (returns false when lruBack is nil). Calls into
+// the per-shard helper directly since this defensive path is unreachable
+// via the public API.
 func TestEvictOldest_NilElement(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
-	// The cache is freshly created, so the LRU list is empty.
-	// Calling evictOldest directly hits the `if element == nil { return }` branch.
-	c.mu.Lock()
-	c.evictOldest()
-	c.mu.Unlock()
+	// Fresh cache: every shard has an empty LRU list. Call evictOldest on
+	// shard 0 to exercise the `if s.lruBack == nil { return false }` branch.
+	s := &c.shards[0]
+	s.mu.Lock()
+	if s.evictOldest() {
+		t.Error("evictOldest on empty shard should return false")
+	}
+	s.mu.Unlock()
 
 	// Verify no evictions were recorded (since there was nothing to evict).
 	stats := c.Stats()

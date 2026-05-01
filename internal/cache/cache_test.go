@@ -2,15 +2,30 @@ package cache
 
 import (
 	"fmt"
+	"hash/maphash"
 	"testing"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
+// keysForShard generates n distinct keys whose maphash lands in the given
+// shard index. Used by LRU-semantics tests that need entries to share a
+// shard so per-shard eviction is deterministic.
+func keysForShard(shardIdx, n int) []string {
+	keys := make([]string, 0, n)
+	for i := 0; len(keys) < n; i++ {
+		k := fmt.Sprintf("k%d.example.com:1", i)
+		if int(maphash.String(shardSeed, k)&shardMask) == shardIdx {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 func TestCacheBasic(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Create a simple test entry (no protocol.Message for basic tests)
@@ -41,7 +56,7 @@ func TestCacheBasic(t *testing.T) {
 
 func TestCacheMiss(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	key := "nonexistent.com:1"
@@ -64,7 +79,7 @@ func TestCacheMiss(t *testing.T) {
 
 func TestCacheExpiration(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.MinTTL = 50 * time.Millisecond
 	config.NegativeTTL = 100 * time.Millisecond
 	c := New(config)
@@ -94,37 +109,38 @@ func TestCacheExpiration(t *testing.T) {
 }
 
 func TestCacheLRUEviction(t *testing.T) {
+	// Per-shard capacity = 3 (Capacity / numShards rounded up). All four test
+	// keys are forced into the same shard so eviction order is deterministic.
 	config := DefaultConfig()
-	config.Capacity = 3
+	config.Capacity = numShards * 3
 	c := New(config)
 
-	// Add 3 entries
-	c.SetNegative("a.com:1", 3)
-	c.SetNegative("b.com:1", 3)
-	c.SetNegative("c.com:1", 3)
+	keys := keysForShard(0, 4)
+	a, b, cKey, d := keys[0], keys[1], keys[2], keys[3]
+
+	c.SetNegative(a, 3)
+	c.SetNegative(b, 3)
+	c.SetNegative(cKey, 3)
 
 	if c.Size() != 3 {
 		t.Fatalf("expected size 3, got %d", c.Size())
 	}
 
-	// Access a.com to make it most recently used
-	c.Get("a.com:1")
+	// Access a to make it most recently used within shard 0.
+	c.Get(a)
 
-	// Add 4th entry - should evict b.com (least recently used)
-	c.SetNegative("d.com:1", 3)
+	// Add 4th entry into the same shard — evicts the LRU (b).
+	c.SetNegative(d, 3)
 
 	if c.Size() != 3 {
 		t.Errorf("expected size 3 after eviction, got %d", c.Size())
 	}
 
-	// a.com should still exist
-	if c.Get("a.com:1") == nil {
-		t.Error("expected a.com to still exist")
+	if c.Get(a) == nil {
+		t.Error("expected a to still exist")
 	}
-
-	// b.com should be evicted
-	if c.Get("b.com:1") != nil {
-		t.Error("expected b.com to be evicted")
+	if c.Get(b) != nil {
+		t.Error("expected b to be evicted")
 	}
 
 	stats := c.Stats()
@@ -137,7 +153,7 @@ func TestCacheNegative(t *testing.T) {
 	config := DefaultConfig()
 	config.MinTTL = 50 * time.Millisecond
 	config.NegativeTTL = 100 * time.Millisecond
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	key := "nxdomain.com:1"
@@ -206,7 +222,7 @@ func TestCacheTTLConstraints(t *testing.T) {
 
 func TestCacheDelete(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	key := "delete.com:1"
@@ -224,7 +240,7 @@ func TestCacheDelete(t *testing.T) {
 
 func TestCacheClear(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	c.SetNegative("a.com:1", 3)
@@ -248,7 +264,7 @@ func TestCacheClear(t *testing.T) {
 
 func TestCachePrefetch(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 30 * time.Second
 	c := New(config)
@@ -281,7 +297,7 @@ func TestCachePrefetch(t *testing.T) {
 
 func TestCachePrefetchDisabled(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = false
 	c := New(config)
 
@@ -299,7 +315,7 @@ func TestCachePrefetchDisabled(t *testing.T) {
 
 func TestCacheStatsHitRate(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// 0% hit rate initially
@@ -330,7 +346,7 @@ func TestCacheStatsHitRate(t *testing.T) {
 
 func TestCacheConcurrency(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 100
+	config.Capacity = 1280
 	c := New(config)
 
 	// Run concurrent operations
@@ -432,7 +448,7 @@ func TestExtractQueryInfo(t *testing.T) {
 
 func TestCacheUpdateExisting(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	key := "update.com:1"
@@ -459,7 +475,7 @@ func TestCacheUpdateExisting(t *testing.T) {
 
 func TestCacheHitRatio(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Add entry
@@ -485,7 +501,7 @@ func TestCacheHitRatio(t *testing.T) {
 
 func TestCacheSetInvalidateFunc(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	called := false
@@ -503,7 +519,7 @@ func TestCacheSetInvalidateFunc(t *testing.T) {
 
 func TestCacheFlush(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Add several entries
@@ -525,7 +541,7 @@ func TestCacheFlush(t *testing.T) {
 
 func TestCacheDeleteLocal(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Add entry
@@ -541,7 +557,7 @@ func TestCacheDeleteLocal(t *testing.T) {
 
 func TestCacheInvalidate(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	called := false
@@ -566,7 +582,7 @@ func TestCacheInvalidate(t *testing.T) {
 
 func TestCacheInvalidatePattern(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Add entries with different patterns
@@ -593,7 +609,7 @@ func TestCacheInvalidatePattern(t *testing.T) {
 
 func TestCacheGetPrefetchable(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 30 * time.Second
 	c := New(config)
@@ -620,7 +636,7 @@ func TestCacheGetPrefetchable(t *testing.T) {
 
 func TestCacheSetPrefetchFunc(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	c := New(config)
 
@@ -637,7 +653,7 @@ func TestCacheSetPrefetchFunc(t *testing.T) {
 
 func TestCacheOnPrefetchComplete(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Add entry first
@@ -709,7 +725,9 @@ func TestCRC32Hash(t *testing.T) {
 }
 
 func TestEvictPercent(t *testing.T) {
-	cache := New(Config{Capacity: 100})
+	// Capacity 256 keeps per-shard cap at 16, large enough that 50 random
+	// keys never silently evict regardless of shard distribution.
+	cache := New(Config{Capacity: 256})
 
 	// Fill cache with entries
 	msg := &protocol.Message{
@@ -725,21 +743,23 @@ func TestEvictPercent(t *testing.T) {
 		t.Fatalf("Expected 50 entries, got %d", stats.Size)
 	}
 
-	// Evict 50% = 25 entries
+	// Evict 50%. With sharded eviction the per-shard count uses integer
+	// floor, so the realised total varies by ±numShards from the ideal.
+	// Verify it's in a sensible band rather than exactly 25.
 	cache.EvictPercent(50)
-
 	stats = cache.Stats()
-	if stats.Size != 25 {
-		t.Errorf("Expected 25 entries after 50%% eviction, got %d", stats.Size)
+	if stats.Size < 16 || stats.Size > 34 {
+		t.Errorf("Expected ~25 entries after 50%% eviction, got %d (outside [16,34])", stats.Size)
 	}
+	sizeAfter := stats.Size
 
 	// Invalid percent should be no-op
 	cache.EvictPercent(0)
 	cache.EvictPercent(-1)
 	cache.EvictPercent(101)
 	stats = cache.Stats()
-	if stats.Size != 25 {
-		t.Errorf("Invalid percent should not change cache, got %d entries", stats.Size)
+	if stats.Size != sizeAfter {
+		t.Errorf("Invalid percent should not change cache, was %d, got %d", sizeAfter, stats.Size)
 	}
 }
 

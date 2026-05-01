@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"hash/maphash"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,9 +95,51 @@ func (s *Stats) HitRatio() float64 {
 	return s.HitRate()
 }
 
-// Cache is a thread-safe DNS cache with LRU eviction.
+// numShards is the number of independent cache shards. A power of two so
+// shard selection reduces to a bitmask. 16 is a sweet spot: enough to
+// distribute contention across many cores without bloating per-shard
+// metadata or under-utilising small caches.
+const numShards = 16
+
+const shardMask uint64 = numShards - 1
+
+// lruPromoteMask gates probabilistic LRU promotion on cache hits. With mask
+// 0x0F roughly 1-in-16 hits acquire the write lock to call moveToFront; the
+// other 15 stay under RLock and return without serializing on the shard.
+// The first hit on each entry always promotes (see Cache.Get) so freshly
+// cached items still reach MRU exactly once before sampling kicks in.
+const lruPromoteMask uint64 = 0x0F
+
+// shardSeed randomises shard distribution per process; defends against
+// adversarial keys engineered to all collide in one shard.
+var shardSeed = maphash.MakeSeed()
+
+// cacheShard holds a subset of the cache's entries protected by its own
+// RWMutex. Sharding spreads contention across numShards independent locks
+// so different keys do not serialise on a single global mutex.
+type cacheShard struct {
+	mu       sync.RWMutex
+	entries  map[string]*Entry
+	lruFront *Entry
+	lruBack  *Entry
+	capacity int
+
+	// Per-shard stat counters; summed by Cache.Stats. Keeping them local to
+	// the shard avoids cross-shard cache-line bouncing on every hit.
+	hits        uint64
+	misses      uint64
+	evictions   uint64
+	expirations uint64
+	staleServed uint64
+}
+
+// Cache is a sharded, thread-safe DNS cache with LRU eviction per shard.
 type Cache struct {
-	// Configuration
+	shards [numShards]cacheShard
+
+	// Configuration. Reads are lock-free (simple value types, mirroring the
+	// pre-sharding design); UpdateConfig serialises writes via cfgMu.
+	cfgMu             sync.Mutex
 	capacity          int
 	minTTL            time.Duration
 	maxTTL            time.Duration
@@ -104,28 +147,18 @@ type Cache struct {
 	negativeTTL       time.Duration
 	prefetchEnabled   bool
 	prefetchThreshold time.Duration
+	serveStale        bool
+	staleGrace        time.Duration
 
-	// Serve-stale (RFC 8767) configuration
-	serveStale bool
-	staleGrace time.Duration // How long past expiry to serve stale entries
-
-	// Storage
-	mu      sync.RWMutex
-	entries map[string]*Entry
-
-	// Intrusive LRU list: lruFront = most recently used, lruBack = least recently used.
-	// An entry is in the list when entry.prev != nil || entry == lruFront.
-	lruFront *Entry
-	lruBack  *Entry
-
-	// Statistics (atomically accessed for reads)
-	stats Stats
-
-	// Prefetch callback
-	prefetchFunc func(key string, qtype uint16)
-
-	// Invalidation callback for cluster sync
+	// Callbacks
+	callbackMu     sync.Mutex
+	prefetchFunc   func(key string, qtype uint16)
 	invalidateFunc func(key string)
+}
+
+// shardOf returns the shard responsible for the given key.
+func (c *Cache) shardOf(key string) *cacheShard {
+	return &c.shards[maphash.String(shardSeed, key)&shardMask]
 }
 
 // Config holds cache configuration.
@@ -156,9 +189,9 @@ func DefaultConfig() Config {
 	}
 }
 
-// New creates a new DNS cache with the given configuration.
+// New creates a new sharded DNS cache with the given configuration.
 func New(config Config) *Cache {
-	return &Cache{
+	c := &Cache{
 		capacity:          config.Capacity,
 		minTTL:            config.MinTTL,
 		maxTTL:            config.MaxTTL,
@@ -168,20 +201,25 @@ func New(config Config) *Cache {
 		prefetchThreshold: config.PrefetchThreshold,
 		serveStale:        config.ServeStale,
 		staleGrace:        config.StaleGrace,
-		entries:           make(map[string]*Entry, config.Capacity),
-		stats:             Stats{Capacity: config.Capacity},
 	}
+
+	perShard := perShardCapacity(config.Capacity)
+	for i := range c.shards {
+		c.shards[i].entries = make(map[string]*Entry, perShard)
+		c.shards[i].capacity = perShard
+	}
+	return c
 }
 
-// lruPromoteMask gates probabilistic LRU promotion on cache hits. With mask
-// 0x0F roughly 1-in-16 hits acquire the write lock to call moveToFront; the
-// other 15 stay under RLock and return without serializing on c.mu. A pure
-// RWMutex offered no read concurrency previously because every Get took
-// c.mu.Lock() to update LRU links — the parallel benchmark showed a 3.2×
-// degradation. The first hit on each entry always promotes (see Cache.Get)
-// so freshly cached items still reach MRU exactly once before sampling
-// kicks in. Standard practice in W-TinyLFU / Caffeine-style caches.
-const lruPromoteMask uint64 = 0x0F
+// perShardCapacity divides total capacity across shards, rounding up so the
+// total never falls below the requested value. Always at least 1.
+func perShardCapacity(total int) int {
+	per := (total + numShards - 1) / numShards
+	if per < 1 {
+		per = 1
+	}
+	return per
+}
 
 // MakeKey creates a cache key from query name, type, and DNSSEC DO bit.
 // VULN-060: DO bit included so DNSSEC and plain responses don't share cache entries.
@@ -226,37 +264,39 @@ func crc32Hash(s string) uint64 {
 
 // Get retrieves an entry from the cache.
 // Returns nil if not found or expired.
-// Uses RLock for the read-only fast path, promoting to Lock only for
-// LRU promotion or expired entry removal.
+// Uses RLock for the read-only fast path; promotion to MRU is probabilistic
+// so the write lock is rarely taken on the hot path.
 func (c *Cache) Get(key string) *Entry {
-	// Fast path: read-only lookup under RLock.
-	c.mu.RLock()
-	entry, exists := c.entries[key]
+	s := c.shardOf(key)
+
+	// Fast path: read-only lookup under shard RLock.
+	s.mu.RLock()
+	entry, exists := s.entries[key]
 	if !exists {
-		c.mu.RUnlock()
-		atomic.AddUint64(&c.stats.Misses, 1)
+		s.mu.RUnlock()
+		atomic.AddUint64(&s.misses, 1)
 		return nil
 	}
 
 	now := time.Now()
 	if entry.IsExpired(now) {
-		c.mu.RUnlock()
+		s.mu.RUnlock()
 		// Slow path: remove expired entry under exclusive lock.
-		c.mu.Lock()
+		s.mu.Lock()
 		// Re-verify the same entry is still there (may have changed).
-		if e, ok := c.entries[key]; ok && e == entry {
+		if e, ok := s.entries[key]; ok && e == entry {
 			if c.serveStale {
 				staleDeadline := entry.ExpireTime.Add(c.staleGrace)
 				if now.After(staleDeadline) {
-					c.removeEntry(entry)
+					s.removeEntry(entry)
 				}
 			} else {
-				c.removeEntry(entry)
+				s.removeEntry(entry)
 			}
-			atomic.AddUint64(&c.stats.Expirations, 1)
+			atomic.AddUint64(&s.expirations, 1)
 		}
-		atomic.AddUint64(&c.stats.Misses, 1)
-		c.mu.Unlock()
+		atomic.AddUint64(&s.misses, 1)
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -264,19 +304,19 @@ func (c *Cache) Get(key string) *Entry {
 	// most hits to avoid serializing the hot path. The first Get of a fresh
 	// entry always promotes (CAS gate) so newly cached items reach MRU
 	// before sampling applies.
-	c.mu.RUnlock()
-	hits := atomic.AddUint64(&c.stats.Hits, 1)
+	s.mu.RUnlock()
+	hits := atomic.AddUint64(&s.hits, 1)
 	firstTouch := atomic.CompareAndSwapUint32(&entry.touched, 0, 1)
 	if !firstTouch && hits&lruPromoteMask != 0 {
 		return entry
 	}
 
-	c.mu.Lock()
+	s.mu.Lock()
 	// Verify entry is still in the map (could have been evicted).
-	if _, ok := c.entries[key]; ok {
-		c.moveToFront(entry)
+	if _, ok := s.entries[key]; ok {
+		s.moveToFront(entry)
 	}
-	c.mu.Unlock()
+	s.mu.Unlock()
 
 	return entry
 }
@@ -290,10 +330,11 @@ func (c *Cache) GetStale(key string) *Entry {
 		return nil
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	s := c.shardOf(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	entry, exists := c.entries[key]
+	entry, exists := s.entries[key]
 	if !exists {
 		return nil
 	}
@@ -308,13 +349,13 @@ func (c *Cache) GetStale(key string) *Entry {
 	staleDeadline := entry.ExpireTime.Add(c.staleGrace)
 	if now.After(staleDeadline) {
 		// Past stale grace — remove it
-		c.removeEntry(entry)
+		s.removeEntry(entry)
 		return nil
 	}
 
 	// Serve the stale entry with a short TTL (RFC 8767 §4 recommends 30s)
-	c.moveToFront(entry)
-	atomic.AddUint64(&c.stats.StaleServed, 1)
+	s.moveToFront(entry)
+	atomic.AddUint64(&s.staleServed, 1)
 
 	staleEntry := &Entry{
 		Key:        entry.Key,
@@ -330,22 +371,24 @@ func (c *Cache) GetStale(key string) *Entry {
 
 // StaleServed returns the count of stale entries served.
 func (c *Cache) StaleServed() uint64 {
-	return atomic.LoadUint64(&c.stats.StaleServed)
+	var total uint64
+	for i := range c.shards {
+		total += atomic.LoadUint64(&c.shards[i].staleServed)
+	}
+	return total
 }
 
 // Set adds or updates an entry in the cache.
 func (c *Cache) Set(key string, msg *protocol.Message, ttl uint32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	s := c.shardOf(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	c.setInternal(key, msg, ttl, false)
+	c.setInternal(s, key, msg, ttl, false)
 }
 
 // SetNegative adds a negative cache entry (NXDOMAIN or NODATA).
 func (c *Cache) SetNegative(key string, rcode uint8) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	// Apply min/max TTL constraints to negative TTL
 	ttl := c.negativeTTL
 	if ttl < c.minTTL {
@@ -364,11 +407,15 @@ func (c *Cache) SetNegative(key string, rcode uint8) {
 		IsNegative: true,
 	}
 
-	c.addEntry(key, entry)
+	s := c.shardOf(key)
+	s.mu.Lock()
+	s.addEntry(key, entry)
+	s.mu.Unlock()
 }
 
-// setInternal adds or updates an entry with the given TTL.
-func (c *Cache) setInternal(key string, msg *protocol.Message, ttl uint32, isPrefetch bool) {
+// setInternal adds or updates an entry with the given TTL. Must be called
+// with the shard's mutex held.
+func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, ttl uint32, isPrefetch bool) {
 	// Apply min/max TTL constraints
 	duration := time.Duration(ttl) * time.Second
 	if duration < c.minTTL {
@@ -403,145 +450,155 @@ func (c *Cache) setInternal(key string, msg *protocol.Message, ttl uint32, isPre
 		IsNegative:  false,
 	}
 
-	c.addEntry(key, entry)
+	s.addEntry(key, entry)
 }
 
-// addEntry adds an entry to the cache, handling eviction if needed.
-func (c *Cache) addEntry(key string, entry *Entry) {
+// addEntry adds an entry to the shard, handling eviction if needed.
+// Must be called with s.mu held for writing.
+func (s *cacheShard) addEntry(key string, entry *Entry) {
 	// Check if key already exists
-	if oldEntry, exists := c.entries[key]; exists {
-		c.intrusiveRemove(oldEntry)
+	if oldEntry, exists := s.entries[key]; exists {
+		s.intrusiveRemove(oldEntry)
 	}
 
 	// Evict oldest entries if at capacity
-	for len(c.entries) >= c.capacity {
-		c.evictOldest()
+	for len(s.entries) >= s.capacity {
+		if !s.evictOldest() {
+			break
+		}
 	}
 
 	// Add to map and LRU list
-	c.pushFront(entry)
-	c.entries[key] = entry
+	s.pushFront(entry)
+	s.entries[key] = entry
 }
 
-// removeEntry removes an entry from the cache.
-func (c *Cache) removeEntry(entry *Entry) {
-	c.intrusiveRemove(entry)
-	delete(c.entries, entry.Key)
+// removeEntry removes an entry from the shard.
+// Must be called with s.mu held for writing.
+func (s *cacheShard) removeEntry(entry *Entry) {
+	s.intrusiveRemove(entry)
+	delete(s.entries, entry.Key)
 }
 
-// evictOldest removes the least recently used entry.
-func (c *Cache) evictOldest() {
-	if c.lruBack == nil {
-		return
+// evictOldest removes the least recently used entry. Returns true if an
+// entry was evicted, false if the LRU list was empty.
+// Must be called with s.mu held for writing.
+func (s *cacheShard) evictOldest() bool {
+	if s.lruBack == nil {
+		return false
 	}
-	entry := c.lruBack
-	c.removeEntry(entry)
-	atomic.AddUint64(&c.stats.Evictions, 1)
+	entry := s.lruBack
+	s.removeEntry(entry)
+	atomic.AddUint64(&s.evictions, 1)
+	return true
 }
 
 // pushFront inserts entry at the front of the LRU list (most recently used).
-func (c *Cache) pushFront(entry *Entry) {
+func (s *cacheShard) pushFront(entry *Entry) {
 	entry.prev = nil
-	entry.next = c.lruFront
-	if c.lruFront != nil {
-		c.lruFront.prev = entry
+	entry.next = s.lruFront
+	if s.lruFront != nil {
+		s.lruFront.prev = entry
 	}
-	c.lruFront = entry
-	if c.lruBack == nil {
-		c.lruBack = entry
+	s.lruFront = entry
+	if s.lruBack == nil {
+		s.lruBack = entry
 	}
 }
 
 // moveToFront moves an existing entry to the front of the LRU list.
-func (c *Cache) moveToFront(entry *Entry) {
-	if entry == c.lruFront {
+func (s *cacheShard) moveToFront(entry *Entry) {
+	if entry == s.lruFront {
 		return // already at front
 	}
-	c.intrusiveRemove(entry)
-	c.pushFront(entry)
+	s.intrusiveRemove(entry)
+	s.pushFront(entry)
 }
 
 // intrusiveRemove removes an entry from the intrusive LRU list.
-func (c *Cache) intrusiveRemove(entry *Entry) {
+func (s *cacheShard) intrusiveRemove(entry *Entry) {
 	if entry.prev != nil {
 		entry.prev.next = entry.next
 	} else {
-		c.lruFront = entry.next
+		s.lruFront = entry.next
 	}
 	if entry.next != nil {
 		entry.next.prev = entry.prev
 	} else {
-		c.lruBack = entry.prev
+		s.lruBack = entry.prev
 	}
 	entry.prev = nil
 	entry.next = nil
 }
 
-// EvictPercent removes approximately percent of entries from the cache,
+// EvictPercent removes approximately percent of entries from each shard,
 // starting with the least recently used entries.
 func (c *Cache) EvictPercent(percent int) {
 	if percent <= 0 || percent > 100 {
 		return
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	count := len(c.entries) * percent / 100
-	if count == 0 && len(c.entries) > 0 {
-		count = 1 // Always evict at least one if cache has entries
-	}
-
-	for i := 0; i < count; i++ {
-		if c.lruBack == nil {
-			break
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.Lock()
+		count := len(s.entries) * percent / 100
+		if count == 0 && len(s.entries) > 0 {
+			count = 1 // Always evict at least one if shard has entries
 		}
-		c.removeEntry(c.lruBack)
-		atomic.AddUint64(&c.stats.Evictions, 1)
+		for j := 0; j < count; j++ {
+			if !s.evictOldest() {
+				break
+			}
+		}
+		s.mu.Unlock()
 	}
 }
 
 // SetInvalidateFunc sets the callback function for cache invalidation.
 func (c *Cache) SetInvalidateFunc(fn func(key string)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.callbackMu.Lock()
 	c.invalidateFunc = fn
+	c.callbackMu.Unlock()
 }
 
 // Delete removes an entry from the cache.
 func (c *Cache) Delete(key string) {
-	var notify bool
-	var fn func(string)
-	c.mu.Lock()
-	if entry, exists := c.entries[key]; exists {
-		c.removeEntry(entry)
+	s := c.shardOf(key)
+	s.mu.Lock()
+	notify := false
+	if entry, exists := s.entries[key]; exists {
+		s.removeEntry(entry)
 		notify = true
 	}
-	fn = c.invalidateFunc
-	c.mu.Unlock()
+	s.mu.Unlock()
 
-	// Notify outside lock to prevent deadlock
-	if notify && fn != nil {
-		fn(key)
+	if notify {
+		c.callbackMu.Lock()
+		fn := c.invalidateFunc
+		c.callbackMu.Unlock()
+		if fn != nil {
+			fn(key)
+		}
 	}
 }
 
 // Clear removes all entries from the cache.
 func (c *Cache) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Unlink all entries for GC
-	for e := c.lruFront; e != nil; {
-		next := e.next
-		e.prev = nil
-		e.next = nil
-		e = next
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.Lock()
+		// Unlink all entries for GC
+		for e := s.lruFront; e != nil; {
+			next := e.next
+			e.prev = nil
+			e.next = nil
+			e = next
+		}
+		s.entries = make(map[string]*Entry, s.capacity)
+		s.lruFront = nil
+		s.lruBack = nil
+		s.mu.Unlock()
 	}
-	c.entries = make(map[string]*Entry, c.capacity)
-	c.lruFront = nil
-	c.lruBack = nil
 }
 
 // Flush is an alias for Clear.
@@ -552,12 +609,12 @@ func (c *Cache) Flush() {
 // DeleteLocal removes an entry without triggering invalidation callback.
 // Used when receiving invalidation from cluster to avoid broadcast loops.
 func (c *Cache) DeleteLocal(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if entry, exists := c.entries[key]; exists {
-		c.removeEntry(entry)
+	s := c.shardOf(key)
+	s.mu.Lock()
+	if entry, exists := s.entries[key]; exists {
+		s.removeEntry(entry)
 	}
+	s.mu.Unlock()
 }
 
 // Invalidate removes an entry and broadcasts invalidation to cluster.
@@ -568,67 +625,89 @@ func (c *Cache) Invalidate(key string) {
 // InvalidatePattern removes entries matching a pattern and broadcasts invalidations.
 // Pattern uses prefix matching (e.g., "example.com" matches "www.example.com:A")
 func (c *Cache) InvalidatePattern(pattern string) []string {
-	c.mu.Lock()
-
 	var invalidated []string
-	for key := range c.entries {
-		// Extract domain from key (format: "domain:type")
-		domain, _ := ExtractQueryInfo(key)
-		if strings.Contains(domain, pattern) || strings.HasSuffix(domain, pattern) {
-			if entry, exists := c.entries[key]; exists {
-				c.removeEntry(entry)
-				invalidated = append(invalidated, key)
+
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.Lock()
+		for key := range s.entries {
+			// Extract domain from key (format: "domain:type")
+			domain, _ := ExtractQueryInfo(key)
+			if strings.Contains(domain, pattern) || strings.HasSuffix(domain, pattern) {
+				if entry, exists := s.entries[key]; exists {
+					s.removeEntry(entry)
+					invalidated = append(invalidated, key)
+				}
 			}
 		}
+		s.mu.Unlock()
 	}
-	fn := c.invalidateFunc
-	c.mu.Unlock()
 
-	// Notify invalidation callback outside lock to prevent deadlock
-	if fn != nil {
-		for _, key := range invalidated {
-			fn(key)
+	if len(invalidated) > 0 {
+		c.callbackMu.Lock()
+		fn := c.invalidateFunc
+		c.callbackMu.Unlock()
+		if fn != nil {
+			for _, key := range invalidated {
+				fn(key)
+			}
 		}
 	}
 	return invalidated
 }
 
-// Stats returns a copy of the current cache statistics.
+// Stats returns a copy of the current cache statistics, summed across shards.
 func (c *Cache) Stats() Stats {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	var hits, misses, evictions, expirations, staleServed uint64
+	var size int
+	for i := range c.shards {
+		s := &c.shards[i]
+		hits += atomic.LoadUint64(&s.hits)
+		misses += atomic.LoadUint64(&s.misses)
+		evictions += atomic.LoadUint64(&s.evictions)
+		expirations += atomic.LoadUint64(&s.expirations)
+		staleServed += atomic.LoadUint64(&s.staleServed)
+		s.mu.RLock()
+		size += len(s.entries)
+		s.mu.RUnlock()
+	}
 
 	return Stats{
-		Hits:        atomic.LoadUint64(&c.stats.Hits),
-		Misses:      atomic.LoadUint64(&c.stats.Misses),
-		Evictions:   atomic.LoadUint64(&c.stats.Evictions),
-		Expirations: atomic.LoadUint64(&c.stats.Expirations),
-		StaleServed: atomic.LoadUint64(&c.stats.StaleServed),
-		Size:        len(c.entries),
-		Capacity:    c.stats.Capacity,
+		Hits:        hits,
+		Misses:      misses,
+		Evictions:   evictions,
+		Expirations: expirations,
+		StaleServed: staleServed,
+		Size:        size,
+		Capacity:    c.capacity,
 	}
 }
 
 // Size returns the current number of entries in the cache.
 func (c *Cache) Size() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.entries)
+	var size int
+	for i := range c.shards {
+		c.shards[i].mu.RLock()
+		size += len(c.shards[i].entries)
+		c.shards[i].mu.RUnlock()
+	}
+	return size
 }
 
 // GetPrefetchable returns entries that are due for prefetching.
 func (c *Cache) GetPrefetchable() []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	now := time.Now()
 	var keys []string
 
-	for _, entry := range c.entries {
-		if entry.ShouldPrefetch(now) {
-			// Extract query type from key for prefetch callback
-			keys = append(keys, entry.Key)
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.RLock()
+		for _, entry := range s.entries {
+			if entry.ShouldPrefetch(now) {
+				keys = append(keys, entry.Key)
+			}
 		}
+		s.mu.RUnlock()
 	}
 
 	return keys
@@ -636,18 +715,15 @@ func (c *Cache) GetPrefetchable() []string {
 
 // SetPrefetchFunc sets the callback function for prefetching.
 func (c *Cache) SetPrefetchFunc(fn func(key string, qtype uint16)) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.callbackMu.Lock()
 	c.prefetchFunc = fn
+	c.callbackMu.Unlock()
 }
 
 // UpdateConfig updates the runtime cache configuration.
 // This allows changing cache behavior without restarting the server.
 func (c *Cache) UpdateConfig(cfg Config) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.cfgMu.Lock()
 	c.capacity = cfg.Capacity
 	c.minTTL = cfg.MinTTL
 	c.maxTTL = cfg.MaxTTL
@@ -657,16 +733,24 @@ func (c *Cache) UpdateConfig(cfg Config) {
 	c.prefetchThreshold = cfg.PrefetchThreshold
 	c.serveStale = cfg.ServeStale
 	c.staleGrace = cfg.StaleGrace
-	c.stats.Capacity = cfg.Capacity
+	c.cfgMu.Unlock()
+
+	perShard := perShardCapacity(cfg.Capacity)
+	for i := range c.shards {
+		c.shards[i].mu.Lock()
+		c.shards[i].capacity = perShard
+		c.shards[i].mu.Unlock()
+	}
 }
 
 // OnPrefetchComplete marks a prefetch as complete and resets the prefetch flag.
 func (c *Cache) OnPrefetchComplete(key string, msg *protocol.Message, ttl uint32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	s := c.shardOf(key)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// Update with new TTL but mark as prefetch to avoid infinite prefetch loop
-	c.setInternal(key, msg, ttl, true)
+	c.setInternal(s, key, msg, ttl, true)
 }
 
 // ExtractQueryInfo extracts the query name and type from a cache key.
@@ -702,41 +786,43 @@ type CacheEntryJSON struct {
 // Negative entries are excluded because they have very short TTLs and
 // add little value on restart. Only entries that have not yet expired are included.
 func (c *Cache) Save() []CacheEntryJSON {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	now := time.Now()
 	var entries []CacheEntryJSON
 
-	for _, entry := range c.entries {
-		// Skip expired entries
-		if entry.IsExpired(now) {
-			continue
-		}
-		// Skip negative entries (short TTL, low value on restart)
-		if entry.IsNegative {
-			continue
-		}
-		// Skip entries without a message (shouldn't happen)
-		if entry.Message == nil {
-			continue
-		}
+	for i := range c.shards {
+		s := &c.shards[i]
+		s.mu.RLock()
+		for _, entry := range s.entries {
+			// Skip expired entries
+			if entry.IsExpired(now) {
+				continue
+			}
+			// Skip negative entries (short TTL, low value on restart)
+			if entry.IsNegative {
+				continue
+			}
+			// Skip entries without a message (shouldn't happen)
+			if entry.Message == nil {
+				continue
+			}
 
-		// Pack message to wire format
-		buf := make([]byte, entry.Message.WireLength())
-		n, err := entry.Message.Pack(buf)
-		if err != nil {
-			continue // Skip entries that can't be packed
-		}
+			// Pack message to wire format
+			buf := make([]byte, entry.Message.WireLength())
+			n, err := entry.Message.Pack(buf)
+			if err != nil {
+				continue // Skip entries that can't be packed
+			}
 
-		entries = append(entries, CacheEntryJSON{
-			Key:        entry.Key,
-			WireBytes:  buf[:n],
-			TTL:        entry.TTL,
-			RCode:      entry.RCode,
-			IsNegative: entry.IsNegative,
-			ExpireTime: entry.ExpireTime,
-		})
+			entries = append(entries, CacheEntryJSON{
+				Key:        entry.Key,
+				WireBytes:  buf[:n],
+				TTL:        entry.TTL,
+				RCode:      entry.RCode,
+				IsNegative: entry.IsNegative,
+				ExpireTime: entry.ExpireTime,
+			})
+		}
+		s.mu.RUnlock()
 	}
 
 	return entries
@@ -746,9 +832,6 @@ func (c *Cache) Save() []CacheEntryJSON {
 // Only non-expired entries are restored. Entries that have already
 // expired are skipped. The cache is not cleared before loading.
 func (c *Cache) Load(entries []CacheEntryJSON) (restored int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	now := time.Now()
 	for _, e := range entries {
 		// Skip expired entries
@@ -769,7 +852,10 @@ func (c *Cache) Load(entries []CacheEntryJSON) (restored int) {
 		}
 
 		// Use setInternal to add without triggering callbacks
-		c.setInternal(e.Key, msg, remainingTTL, false)
+		s := c.shardOf(e.Key)
+		s.mu.Lock()
+		c.setInternal(s, e.Key, msg, remainingTTL, false)
+		s.mu.Unlock()
 		restored++
 	}
 

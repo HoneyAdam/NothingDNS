@@ -12,7 +12,7 @@ import (
 // gets clamped up to minTTL.
 func TestSetInternal_MinTTLClamping(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.MinTTL = 5 * time.Second
 	c := New(config)
 
@@ -40,7 +40,7 @@ func TestSetInternal_MinTTLClamping(t *testing.T) {
 // gets clamped down to maxTTL.
 func TestSetInternal_MaxTTLClamping(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.MaxTTL = 1 * time.Hour
 	c := New(config)
 
@@ -65,7 +65,7 @@ func TestSetInternal_MaxTTLClamping(t *testing.T) {
 // less than or equal to the prefetch threshold offset, CanPrefetch is false.
 func TestSetInternal_ShortTTLNoPrefetch(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 30 * time.Second
 	config.MinTTL = 1 * time.Second // allow short TTL
@@ -88,7 +88,7 @@ func TestSetInternal_ShortTTLNoPrefetch(t *testing.T) {
 // and PrefetchDue is set correctly.
 func TestSetInternal_PrefetchEnabledDurationGreaterThanThreshold(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 30 * time.Second
 	c := New(config)
@@ -120,7 +120,7 @@ func TestSetInternal_PrefetchEnabledDurationGreaterThanThreshold(t *testing.T) {
 // via isPrefetch=true path in setInternal).
 func TestOnPrefetchComplete_SetsNotPrefetchable(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 30 * time.Second
 	c := New(config)
@@ -151,7 +151,7 @@ func TestOnPrefetchComplete_SetsNotPrefetchable(t *testing.T) {
 // a non-nil protocol.Message in the updated entry.
 func TestOnPrefetchComplete_WithMessage(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	// Create initial entry.
@@ -178,28 +178,27 @@ func TestOnPrefetchComplete_WithMessage(t *testing.T) {
 	}
 }
 
-// TestEvictOldest_EmptyCache verifies that evicting from an empty cache
-// (LRU list has no elements) does not panic. We test this indirectly by
-// creating a cache with capacity 1, adding two entries to trigger eviction,
-// then verifying the state is correct.
+// TestEvictOldest_EmptyCache verifies eviction triggers when a shard hits
+// capacity. Forces both keys into shard 0 with a per-shard cap of 1 so the
+// second insertion deterministically evicts the first.
 func TestEvictOldest_EmptyCache(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 1
+	config.Capacity = numShards // per-shard cap = 1
 	c := New(config)
 
-	// Add first entry - cache is at capacity.
-	c.SetNegative("first.com:1", 3)
+	keys := keysForShard(0, 2)
+	first, second := keys[0], keys[1]
 
-	// Add second entry - triggers evictOldest on the first entry.
-	c.SetNegative("second.com:1", 3)
+	// Add first entry — shard 0 is at capacity.
+	c.SetNegative(first, 3)
+	// Add second entry — triggers evictOldest on the first entry.
+	c.SetNegative(second, 3)
 
-	// first.com should be evicted.
-	if c.Get("first.com:1") != nil {
-		t.Error("expected first.com to be evicted")
+	if c.Get(first) != nil {
+		t.Error("expected first to be evicted")
 	}
-	// second.com should exist.
-	if c.Get("second.com:1") == nil {
-		t.Error("expected second.com to exist")
+	if c.Get(second) == nil {
+		t.Error("expected second to exist")
 	}
 
 	stats := c.Stats()
@@ -263,7 +262,7 @@ func TestRemainingTTL_NegativeDuration(t *testing.T) {
 // returns entries whose PrefetchDue time is in the past.
 func TestGetPrefetchable_EntriesDueForPrefetch(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 50 * time.Millisecond
 	config.MinTTL = 1 * time.Second
@@ -272,13 +271,14 @@ func TestGetPrefetchable_EntriesDueForPrefetch(t *testing.T) {
 	c.Set("due.com:1", nil, 120)
 
 	// Manually set PrefetchDue to the past so it's immediately due.
-	c.mu.Lock()
-	if e, ok := c.entries["due.com:1"]; ok {
+	s := c.shardOf("due.com:1")
+	s.mu.Lock()
+	if e, ok := s.entries["due.com:1"]; ok {
 		e.PrefetchDue = time.Now().Add(-1 * time.Second)
 		e.CanPrefetch = true
 		e.IsNegative = false
 	}
-	c.mu.Unlock()
+	s.mu.Unlock()
 
 	keys := c.GetPrefetchable()
 	found := false
@@ -297,7 +297,7 @@ func TestGetPrefetchable_EntriesDueForPrefetch(t *testing.T) {
 // returns only entries that are due, not all prefetchable entries.
 func TestGetPrefetchable_MixedDueAndNotDue(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	config.PrefetchEnabled = true
 	config.PrefetchThreshold = 50 * time.Millisecond
 	config.MinTTL = 1 * time.Second
@@ -307,19 +307,24 @@ func TestGetPrefetchable_MixedDueAndNotDue(t *testing.T) {
 	c.Set("due.com:1", nil, 120)
 	c.Set("notdue.com:1", nil, 120)
 
-	// Manipulate: one is due, one is not.
-	c.mu.Lock()
-	if e, ok := c.entries["due.com:1"]; ok {
-		e.PrefetchDue = time.Now().Add(-1 * time.Second)
-		e.CanPrefetch = true
-		e.IsNegative = false
+	// Manipulate: one is due, one is not. Each key may live in a different
+	// shard, so resolve and lock per-key.
+	for _, kc := range []struct {
+		key string
+		due time.Duration
+	}{
+		{"due.com:1", -1 * time.Second},
+		{"notdue.com:1", 1 * time.Hour},
+	} {
+		s := c.shardOf(kc.key)
+		s.mu.Lock()
+		if e, ok := s.entries[kc.key]; ok {
+			e.PrefetchDue = time.Now().Add(kc.due)
+			e.CanPrefetch = true
+			e.IsNegative = false
+		}
+		s.mu.Unlock()
 	}
-	if e, ok := c.entries["notdue.com:1"]; ok {
-		e.PrefetchDue = time.Now().Add(1 * time.Hour)
-		e.CanPrefetch = true
-		e.IsNegative = false
-	}
-	c.mu.Unlock()
 
 	keys := c.GetPrefetchable()
 
@@ -344,7 +349,7 @@ func TestGetPrefetchable_MixedDueAndNotDue(t *testing.T) {
 // TestSet_WithNonNilMessage verifies that Set stores a non-nil protocol.Message.
 func TestSet_WithNonNilMessage(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	msg := protocol.NewMessage(protocol.Header{
@@ -387,7 +392,7 @@ func TestSet_WithNonNilMessage(t *testing.T) {
 // invoke the invalidate callback.
 func TestDeleteLocal_DoesNotCallCallback(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	config.Capacity = 128
 	c := New(config)
 
 	var callbackKeys []string
@@ -412,7 +417,9 @@ func TestDeleteLocal_DoesNotCallCallback(t *testing.T) {
 // the list of invalidated keys.
 func TestInvalidatePattern_ReturnsKeys(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	// Per-shard cap = 8 so all three keys survive insertion regardless of
+	// shard distribution.
+	config.Capacity = 128
 	c := New(config)
 
 	c.SetNegative("test.example.com:1", 3)
@@ -441,7 +448,9 @@ func TestInvalidatePattern_ReturnsKeys(t *testing.T) {
 // is called for each key invalidated by InvalidatePattern.
 func TestInvalidatePattern_WithCallback(t *testing.T) {
 	config := DefaultConfig()
-	config.Capacity = 10
+	// Cap per-shard at 8 so all three keys survive regardless of which shard
+	// each lands in (per-shard cap = ceil(128/16) = 8).
+	config.Capacity = 128
 	c := New(config)
 
 	var callbackKeys []string
