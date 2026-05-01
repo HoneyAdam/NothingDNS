@@ -159,6 +159,63 @@ var compressionPool = sync.Pool{
 	},
 }
 
+// messagePool reuses *Message instances across UnpackMessage calls. The
+// pre-allocated section slices stay attached to the Message between uses
+// so their backing arrays are reused, eliminating slice allocs as well as
+// the *Message alloc when callers Release() after handling. Capacities
+// reflect typical DNS responses: 1 question, a few answers, a small
+// authority section, and 1 additional (often the OPT record).
+var messagePool = sync.Pool{
+	New: func() any {
+		return &Message{
+			Questions:   make([]*Question, 0, 1),
+			Answers:     make([]*ResourceRecord, 0, 4),
+			Authorities: make([]*ResourceRecord, 0, 2),
+			Additionals: make([]*ResourceRecord, 0, 1),
+		}
+	},
+}
+
+// Release returns the Message to the internal pool so its struct and
+// section-slice backing arrays can be reused by a future UnpackMessage.
+// After calling Release the Message and any sub-objects (Questions,
+// Answers, Authorities, Additionals, and their nested Names/RData) MUST
+// NOT be accessed — the pointers may be reissued to a different request.
+//
+// If the Message (or parts of it) outlives the request — e.g. cached or
+// queued for later — call Copy() before Release(). It's safe to call
+// Release on a nil Message.
+//
+// Phase 3A: only the *Message and its section-slice backing arrays are
+// pooled. Per-record structs (Question, ResourceRecord, Name, label
+// slices, RData) still allocate fresh on Unpack and are reclaimed by GC
+// after Release nils them in the slice.
+func (m *Message) Release() {
+	if m == nil {
+		return
+	}
+	// Nil out element pointers so the released sub-records can be GC'd
+	// even though the slice backing array stays in the pool.
+	for i := range m.Questions {
+		m.Questions[i] = nil
+	}
+	m.Questions = m.Questions[:0]
+	for i := range m.Answers {
+		m.Answers[i] = nil
+	}
+	m.Answers = m.Answers[:0]
+	for i := range m.Authorities {
+		m.Authorities[i] = nil
+	}
+	m.Authorities = m.Authorities[:0]
+	for i := range m.Additionals {
+		m.Additionals[i] = nil
+	}
+	m.Additionals = m.Additionals[:0]
+	m.Header = Header{}
+	messagePool.Put(m)
+}
+
 // Pack serializes the DNS message to wire format.
 func (m *Message) Pack(buf []byte) (int, error) {
 	// Update header counts
@@ -224,44 +281,42 @@ func (m *Message) Pack(buf []byte) (int, error) {
 	return offset, nil
 }
 
-// Unpack deserializes a DNS message from wire format.
+// Unpack deserializes a DNS message from wire format. The returned
+// Message is drawn from a sync.Pool; callers that no longer need the
+// Message after handling SHOULD call (*Message).Release() to return it
+// to the pool. Failure to Release just falls back to GC reclamation —
+// no leak, only a missed pooling opportunity.
 func UnpackMessage(buf []byte) (*Message, error) {
 	if len(buf) < HeaderLen {
 		return nil, ErrBufferTooSmall
 	}
 
-	msg := &Message{}
+	msg := messagePool.Get().(*Message)
 
 	// Unpack header
 	if err := msg.Header.Unpack(buf[:HeaderLen]); err != nil {
+		msg.Release()
 		return nil, fmt.Errorf("unpacking header: %w", err)
 	}
 	offset := HeaderLen
 
-	// Pre-allocate slices based on header counts to reduce append growth
-	if msg.Header.QDCount > 0 {
-		msg.Questions = make([]*Question, 0, msg.Header.QDCount)
-	}
-	if msg.Header.ANCount > 0 {
-		msg.Answers = make([]*ResourceRecord, 0, msg.Header.ANCount)
-	}
-	if msg.Header.NSCount > 0 {
-		msg.Authorities = make([]*ResourceRecord, 0, msg.Header.NSCount)
-	}
-	if msg.Header.ARCount > 0 {
-		msg.Additionals = make([]*ResourceRecord, 0, msg.Header.ARCount)
-	}
+	// Pooled section slices already exist (zero-length, with backing array
+	// from the previous Release or the pool's New func). append() grows
+	// them as needed; no per-call slice allocation in the steady state.
 
 	// Unpack questions
 	if int(msg.Header.QDCount) > MaxQuestions {
+		msg.Release()
 		return nil, fmt.Errorf("too many questions: %d (max %d)", msg.Header.QDCount, MaxQuestions)
 	}
 	for i := 0; i < int(msg.Header.QDCount); i++ {
 		if offset >= len(buf) {
+			msg.Release()
 			return nil, ErrBufferTooSmall
 		}
 		q, n, err := UnpackQuestion(buf, offset)
 		if err != nil {
+			msg.Release()
 			return nil, fmt.Errorf("unpacking question %d: %w", i, err)
 		}
 		msg.Questions = append(msg.Questions, q)
@@ -270,14 +325,17 @@ func UnpackMessage(buf []byte) (*Message, error) {
 
 	// Unpack answers
 	if int(msg.Header.ANCount) > MaxAnswers {
+		msg.Release()
 		return nil, fmt.Errorf("too many answer records: %d (max %d)", msg.Header.ANCount, MaxAnswers)
 	}
 	for i := 0; i < int(msg.Header.ANCount); i++ {
 		if offset >= len(buf) {
+			msg.Release()
 			return nil, ErrBufferTooSmall
 		}
 		rr, n, err := UnpackResourceRecord(buf, offset)
 		if err != nil {
+			msg.Release()
 			return nil, fmt.Errorf("unpacking answer %d: %w", i, err)
 		}
 		msg.Answers = append(msg.Answers, rr)
@@ -286,14 +344,17 @@ func UnpackMessage(buf []byte) (*Message, error) {
 
 	// Unpack authorities
 	if int(msg.Header.NSCount) > MaxAuthorities {
+		msg.Release()
 		return nil, fmt.Errorf("too many authority records: %d (max %d)", msg.Header.NSCount, MaxAuthorities)
 	}
 	for i := 0; i < int(msg.Header.NSCount); i++ {
 		if offset >= len(buf) {
+			msg.Release()
 			return nil, ErrBufferTooSmall
 		}
 		rr, n, err := UnpackResourceRecord(buf, offset)
 		if err != nil {
+			msg.Release()
 			return nil, fmt.Errorf("unpacking authority %d: %w", i, err)
 		}
 		msg.Authorities = append(msg.Authorities, rr)
@@ -302,14 +363,17 @@ func UnpackMessage(buf []byte) (*Message, error) {
 
 	// Unpack additionals
 	if int(msg.Header.ARCount) > MaxAdditionals {
+		msg.Release()
 		return nil, fmt.Errorf("too many additional records: %d (max %d)", msg.Header.ARCount, MaxAdditionals)
 	}
 	for i := 0; i < int(msg.Header.ARCount); i++ {
 		if offset >= len(buf) {
+			msg.Release()
 			return nil, ErrBufferTooSmall
 		}
 		rr, n, err := UnpackResourceRecord(buf, offset)
 		if err != nil {
+			msg.Release()
 			return nil, fmt.Errorf("unpacking additional %d: %w", i, err)
 		}
 		msg.Additionals = append(msg.Additionals, rr)

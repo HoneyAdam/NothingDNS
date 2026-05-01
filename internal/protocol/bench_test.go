@@ -91,6 +91,27 @@ func BenchmarkMessageUnpack(b *testing.B) {
 	}
 }
 
+// BenchmarkMessageUnpack_Released measures Unpack when the caller releases
+// the Message after each use, exercising the *Message + section-slice
+// pooling. Compare against BenchmarkMessageUnpack to see the steady-state
+// allocation reduction.
+func BenchmarkMessageUnpack_Released(b *testing.B) {
+	msg := buildTestMessage()
+	buf := make([]byte, 512)
+	n, err := msg.Pack(buf)
+	if err != nil {
+		b.Fatalf("pack: %v", err)
+	}
+	wire := buf[:n]
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		m, _ := UnpackMessage(wire)
+		m.Release()
+	}
+}
+
 func BenchmarkMessagePackUnpackRoundTrip(b *testing.B) {
 	msg := buildTestMessage()
 	buf := make([]byte, 512)
