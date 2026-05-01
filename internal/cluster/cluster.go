@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
 	"time"
@@ -227,6 +228,22 @@ func (c *Cluster) initGossip() error {
 		return fmt.Errorf("creating gossip protocol: %w", err)
 	}
 	c.gossip = gossip
+
+	// SECURITY: Loud warning when cluster is operating in plaintext mode with
+	// non-loopback seed nodes. Any node on the network can join and receive zone
+	// updates, cache invalidations, and config sync payloads.
+	if c.config.AllowInsecureCluster && len(c.config.SeedNodes) > 0 {
+		hasNonLocal := false
+		for _, seed := range c.config.SeedNodes {
+			if !isLoopbackHost(seed) {
+				hasNonLocal = true
+				break
+			}
+		}
+		if hasNonLocal {
+			c.logger.Warnf("SECURITY: cluster.allow_insecure=true with non-loopback seed nodes — gossip traffic is PLAINTEXT and node identity is UNVERIFIED; set cluster.encryption_key for production deployments")
+		}
+	}
 
 	gossip.SetCallbacks(
 		c.handleNodeJoin,
@@ -804,6 +821,21 @@ func (c *Cluster) handleConfigSync(payload ConfigSyncPayload) {
 		return
 	}
 	c.logger.Infof("Config sync applied from leader %s (SHA=%s)", payload.NodeID, payload.ConfigSHA256)
+}
+
+// isLoopbackHost returns true if the seed node address refers to localhost.
+func isLoopbackHost(seed string) bool {
+	// Strip port if present
+	host, _, err := net.SplitHostPort(seed)
+	if err != nil {
+		host = seed // no port, use whole string
+	}
+	// Check if it resolves to a loopback IP
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	// Also treat by-name localhost variants as loopback
+	return host == "localhost" || host == "::1" || host == "127.0.0.1"
 }
 
 // cacheSyncLoop processes cache synchronization events.
