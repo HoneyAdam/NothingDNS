@@ -491,6 +491,11 @@ type HTTPConfig struct {
 	// Auth secret for JWT signing (auto-generated if empty)
 	AuthSecret string `yaml:"auth_secret"`
 
+	// TokenPersistencePath writes/loads encrypted session tokens to this file
+	// path. When set, tokens survive server restarts. When empty, tokens are
+	// in-memory only and all sessions are invalidated on restart.
+	TokenPersistencePath string `yaml:"token_persistence_path"`
+
 	// DoH (DNS over HTTPS) settings
 	DoHEnabled bool   `yaml:"doh_enabled"` // Enable DoH endpoint
 	DoHPath    string `yaml:"doh_path"`    // DoH endpoint path (default: /dns-query)
@@ -1185,6 +1190,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.HTTP.AuthToken = httpNode.GetString("auth_token")
 		cfg.HTTP.AuthTokenRole = httpNode.GetString("auth_token_role")
 		cfg.HTTP.AuthSecret = httpNode.GetString("auth_secret")
+		cfg.HTTP.TokenPersistencePath = httpNode.GetString("token_persistence_path")
 		cfg.HTTP.AllowedOrigins = getStringSlice(httpNode, "allowed_origins", cfg.HTTP.AllowedOrigins)
 		cfg.HTTP.DoHEnabled = getBool(httpNode, "doh_enabled", cfg.HTTP.DoHEnabled)
 		cfg.HTTP.DoHPath = httpNode.GetString("doh_path")

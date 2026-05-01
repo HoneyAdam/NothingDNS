@@ -241,6 +241,16 @@ func run() error {
 	}
 	logger.Infof("Auth store initialized with %d users", len(cfg.Server.HTTP.Users))
 
+	// Restore persistent tokens from file if configured
+	if cfg.Server.HTTP.TokenPersistencePath != "" {
+		authStore.SetTokenFilePath(cfg.Server.HTTP.TokenPersistencePath)
+		if err := authStore.LoadTokensSigned(cfg.Server.HTTP.TokenPersistencePath); err != nil {
+			logger.Warnf("Failed to load persisted tokens from %s: %v", cfg.Server.HTTP.TokenPersistencePath, err)
+		} else {
+			logger.Infof("Loaded session tokens from %s", cfg.Server.HTTP.TokenPersistencePath)
+		}
+	}
+
 	// Warn if using legacy single-token auth without multi-user auth
 	// In this mode, RBAC is not enforced - token holders have full access to all endpoints
 	if cfg.Server.HTTP.AuthToken != "" && len(cfg.Server.HTTP.Users) == 0 {
@@ -834,6 +844,13 @@ func run() error {
 
 				// Stop security manager (rate limiter)
 				securityManager.Stop()
+
+				// Persist session tokens to file if configured
+				if cfg.Server.HTTP.TokenPersistencePath != "" {
+					if err := authStore.SaveTokensSigned(cfg.Server.HTTP.TokenPersistencePath); err != nil {
+						logger.Warnf("Failed to persist tokens to %s: %v", cfg.Server.HTTP.TokenPersistencePath, err)
+					}
+				}
 
 				// Stop cache manager (memory monitor)
 				cacheManager.Stop()
