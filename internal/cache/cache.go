@@ -34,6 +34,11 @@ type Entry struct {
 	IsNegative bool // True for NXDOMAIN/NODATA entries
 	IsStale    bool // True when serving a stale entry (RFC 8767)
 
+	// touched is set atomically by Get on first access so that the very
+	// first cache hit always promotes the entry to MRU. Subsequent hits use
+	// probabilistic promotion (see Cache.Get).
+	touched uint32
+
 	// Intrusive LRU list pointers (front = most recent, back = least recent)
 	prev *Entry
 	next *Entry
@@ -168,6 +173,16 @@ func New(config Config) *Cache {
 	}
 }
 
+// lruPromoteMask gates probabilistic LRU promotion on cache hits. With mask
+// 0x0F roughly 1-in-16 hits acquire the write lock to call moveToFront; the
+// other 15 stay under RLock and return without serializing on c.mu. A pure
+// RWMutex offered no read concurrency previously because every Get took
+// c.mu.Lock() to update LRU links — the parallel benchmark showed a 3.2×
+// degradation. The first hit on each entry always promotes (see Cache.Get)
+// so freshly cached items still reach MRU exactly once before sampling
+// kicks in. Standard practice in W-TinyLFU / Caffeine-style caches.
+const lruPromoteMask uint64 = 0x0F
+
 // MakeKey creates a cache key from query name, type, and DNSSEC DO bit.
 // VULN-060: DO bit included so DNSSEC and plain responses don't share cache entries.
 //
@@ -245,14 +260,22 @@ func (c *Cache) Get(key string) *Entry {
 		return nil
 	}
 
-	// Entry is valid. Promote in LRU under exclusive lock.
+	// Entry is valid. Probabilistic LRU promotion: skip the write lock on
+	// most hits to avoid serializing the hot path. The first Get of a fresh
+	// entry always promotes (CAS gate) so newly cached items reach MRU
+	// before sampling applies.
 	c.mu.RUnlock()
+	hits := atomic.AddUint64(&c.stats.Hits, 1)
+	firstTouch := atomic.CompareAndSwapUint32(&entry.touched, 0, 1)
+	if !firstTouch && hits&lruPromoteMask != 0 {
+		return entry
+	}
+
 	c.mu.Lock()
 	// Verify entry is still in the map (could have been evicted).
 	if _, ok := c.entries[key]; ok {
 		c.moveToFront(entry)
 	}
-	atomic.AddUint64(&c.stats.Hits, 1)
 	c.mu.Unlock()
 
 	return entry
