@@ -8,11 +8,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
@@ -120,6 +120,10 @@ type Resolver struct {
 	// singleflight deduplicates concurrent upstream queries for the same
 	// (name, qtype) to prevent cold-cache thundering herd (VULN-069).
 	sfGroup singleflight[*protocol.Message]
+
+	// shuffleIdx provides deterministic, thread-safe shuffle for load distribution.
+	// Uses atomic increment to rotate the starting point, avoiding math/rand.
+	shuffleIdx uint64
 }
 
 // NewResolver creates a new iterative resolver.
@@ -356,8 +360,16 @@ func (r *Resolver) queryDelegation(ctx context.Context, name string, qtype uint1
 		addrs = append(addrs, deleg.addrs[nsName]...)
 	}
 
-	// Shuffle for load distribution
-	rand.Shuffle(len(addrs), func(i, j int) { addrs[i], addrs[j] = addrs[j], addrs[i] })
+	// Rotate the slice for load distribution using atomic counter.
+	// This is deterministic (not random) and thread-safe without math/rand.
+	if len(addrs) > 0 {
+		n := uint64(len(addrs))
+		start := atomic.AddUint64(&r.shuffleIdx, 1) % n
+		rotated := make([]string, len(addrs))
+		copy(rotated, addrs[start:])
+		copy(rotated[n-start:], addrs[:start])
+		addrs = rotated
+	}
 
 	var lastErr error
 	for _, addr := range addrs {

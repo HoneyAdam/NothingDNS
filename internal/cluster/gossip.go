@@ -1253,7 +1253,11 @@ func (gp *GossipProtocol) startElection() {
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
 		data := msgBytes
 		if gp.aead != nil {
-			data, _ = gp.encrypt(data)
+			var err error
+			data, err = gp.encrypt(data)
+			if err != nil {
+				util.Warnf("gossip: failed to encrypt election message: %v - sending plaintext", err)
+			}
 		}
 		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
 			util.Warnf("gossip: failed to send election message to %s: %v", addr, err)
@@ -1295,7 +1299,11 @@ func (gp *GossipProtocol) AnnounceLeader() error {
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
 		data := msgBytes
 		if gp.aead != nil {
-			data, _ = gp.encrypt(data)
+			var err error
+			data, err = gp.encrypt(data)
+			if err != nil {
+				util.Warnf("gossip: failed to encrypt leader announcement: %v - sending plaintext", err)
+			}
 		}
 		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
 			util.Warnf("gossip: failed to send leader announcement to %s: %v", addr, err)
