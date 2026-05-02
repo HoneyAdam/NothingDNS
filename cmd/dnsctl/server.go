@@ -10,7 +10,7 @@ import (
 
 func cmdBlocklist(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("blocklist subcommand required (status, sources)")
+		return fmt.Errorf("blocklist subcommand required (status, sources, reload)")
 	}
 
 	switch args[0] {
@@ -31,6 +31,12 @@ func cmdBlocklist(args []string) error {
 		}
 		if urls, ok := result["urls_count"].(float64); ok {
 			fmt.Printf("  URLs:       %d\n", int(urls))
+		}
+		if hitCount, ok := result["hit_count"].(float64); ok {
+			fmt.Printf("  Hits:       %d\n", int(hitCount))
+		}
+		if lastReload, ok := result["last_reload"].(string); ok {
+			fmt.Printf("  Last Reload: %s\n", lastReload)
 		}
 
 	case "sources":
@@ -61,8 +67,17 @@ func cmdBlocklist(args []string) error {
 			}
 		}
 
+	case "reload":
+		result, err := apiPost("/api/v1/config/reload", "")
+		if err != nil {
+			return err
+		}
+		if msg, ok := result["message"].(string); ok {
+			fmt.Println(msg)
+		}
+
 	default:
-		return fmt.Errorf("unknown blocklist subcommand: %s (supported: status, sources)", args[0])
+		return fmt.Errorf("unknown blocklist subcommand: %s (supported: status, sources, reload)", args[0])
 	}
 	return nil
 }

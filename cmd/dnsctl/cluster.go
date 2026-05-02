@@ -1,13 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 )
 
 func cmdCluster(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("cluster subcommand required (status, peers)")
+		return fmt.Errorf("cluster subcommand required (status, peers, join, leave)")
 	}
 
 	switch args[0] {
@@ -47,8 +48,42 @@ func cmdCluster(args []string) error {
 			}
 		}
 
+	case "join":
+		if len(args) < 2 {
+			return fmt.Errorf("seed node address required: dnsctl cluster join <address>[:port]")
+		}
+		seedAddr := args[1]
+		body := map[string]interface{}{
+			"seed_address": seedAddr,
+		}
+		b, _ := json.Marshal(body)
+		result, err := apiPost("/api/v1/cluster/join", string(b))
+		if err != nil {
+			return err
+		}
+		if msg, ok := result["message"].(string); ok {
+			fmt.Println(msg)
+		}
+
+	case "leave":
+		if len(args) < 2 {
+			return fmt.Errorf("node ID required: dnsctl cluster leave <node-id>")
+		}
+		nodeID := args[1]
+		body := map[string]interface{}{
+			"node_id": nodeID,
+		}
+		b, _ := json.Marshal(body)
+		result, err := apiDelete("/api/v1/cluster/leave", string(b))
+		if err != nil {
+			return err
+		}
+		if msg, ok := result["message"].(string); ok {
+			fmt.Println(msg)
+		}
+
 	default:
-		return fmt.Errorf("unknown cluster subcommand: %s (supported: status, peers)", args[0])
+		return fmt.Errorf("unknown cluster subcommand: %s (supported: status, peers, join, leave)", args[0])
 	}
 	return nil
 }

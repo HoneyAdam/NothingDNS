@@ -85,8 +85,32 @@ func cmdZone(args []string) error {
 			fmt.Println(msg)
 		}
 
+	case "export":
+		if len(args) < 2 {
+			return fmt.Errorf("zone name required: dnsctl zone export <zone>")
+		}
+		zoneName := args[1]
+		result, err := apiGet("/api/v1/zones/" + zoneName + "/export")
+		if err != nil {
+			return err
+		}
+		if content, ok := result["content"].(string); ok {
+			fmt.Print(content)
+		} else {
+			// fallback: print entire response as raw text
+			for k, v := range result {
+				if k == "content" || k == "zone" || k == "data" {
+					if s, ok := v.(string); ok {
+						fmt.Print(s)
+						return nil
+					}
+				}
+			}
+			fmt.Println(result)
+		}
+
 	default:
-		return fmt.Errorf("unknown zone subcommand: %s (supported: list, add, remove, reload)", args[0])
+		return fmt.Errorf("unknown zone subcommand: %s (supported: list, add, remove, reload, export)", args[0])
 	}
 	return nil
 }
