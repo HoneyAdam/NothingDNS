@@ -1,15 +1,12 @@
-dnsctl: implement missing subcommands (zone export, cluster join/leave, blocklist reload)
+api: add cluster join/leave endpoints and cluster manager methods
 
-zone: implement `zone export` for BIND-format zone export via GET /api/v1/zones/{name}/export
+Add /api/v1/cluster/join (POST) and /api/v1/cluster/leave (DELETE) handlers
+in api_cluster.go. Both require operator role and return proper JSON
+responses.
 
-cluster: implement `cluster join` and `cluster leave` subcommands for cluster
-membership management. join POSTs to /api/v1/cluster/join, leave DELETEs
-to /api/v1/cluster/leave.
+Add Cluster.JoinSeed() and Cluster.LeaveCluster() methods to cluster.go.
+JoinSeed delegates to gossip.Join in SWIM mode; returns an error for Raft
+consensus mode (dynamic joining not supported). LeaveCluster delegates to
+StartDraining + CompleteDraining(true).
 
-blocklist: add `blocklist reload` subcommand that calls /api/v1/config/reload
-to reload blocklists and all config.
-
-cache: pass optional name argument to flush to allow targeted cache invalidation.
-
-cluster peers: restore error return when API returns non-array nodes field
-(matching the existing test expectation).
+Route registration added in server.go mux.

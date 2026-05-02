@@ -709,6 +709,24 @@ func (c *Cluster) handleNodeJoin(node *Node) {
 	}
 }
 
+// JoinSeed attempts to join an existing cluster via a seed node.
+// Only supported in SWIM/gossip mode; returns an error for Raft consensus.
+func (c *Cluster) JoinSeed(seedAddr string) error {
+	if c.consensus == ConsensusRaft {
+		return fmt.Errorf("dynamic node joining not supported in Raft consensus mode")
+	}
+	return c.gossip.Join(seedAddr)
+}
+
+// LeaveCluster initiates graceful departure from the cluster.
+// Drains active connections before closing the gossip/raft transport.
+func (c *Cluster) LeaveCluster() error {
+	if err := c.StartDraining(); err != nil {
+		return fmt.Errorf("draining: %w", err)
+	}
+	return c.CompleteDraining(true)
+}
+
 // handleNodeLeave handles a node leave event.
 func (c *Cluster) handleNodeLeave(node *Node) {
 	c.logger.Infof("Node left: %s (%s)", node.ID, node.Addr)

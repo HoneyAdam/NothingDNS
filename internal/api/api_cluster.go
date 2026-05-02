@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 )
 
@@ -101,4 +102,73 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
-// handleBlocklists returns blocklist stats or adds a new blocklist entry.
+// handleClusterJoin joins the cluster via a seed node address.
+// POST /api/v1/cluster/join { "seed_address": "host:port" }
+func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.requireOperator(w, r) {
+		return
+	}
+	if s.cluster == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Cluster not available")
+		return
+	}
+
+	var req struct {
+		SeedAddress string `json:"seed_address"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+		return
+	}
+	if req.SeedAddress == "" {
+		s.writeError(w, http.StatusBadRequest, "seed_address is required")
+		return
+	}
+
+	// Dynamic node joining is only supported in SWIM (gossip) mode.
+	// Raft consensus does not support runtime node addition.
+	if err := s.cluster.JoinSeed(req.SeedAddress); err != nil {
+		s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to join cluster"))
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, &MessageResponse{
+		Message: "Joined cluster via " + req.SeedAddress,
+	})
+}
+
+// handleClusterLeave removes the local node from the cluster gracefully.
+// DELETE /api/v1/cluster/leave { "node_id": "..." }
+func (s *Server) handleClusterLeave(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.requireOperator(w, r) {
+		return
+	}
+	if s.cluster == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "Cluster not available")
+		return
+	}
+
+	// Drain connections before leaving so in-flight queries complete.
+	if err := s.cluster.StartDraining(); err != nil {
+		s.writeError(w, http.StatusInternalServerError, sanitizeError(err, "Failed to drain connections"))
+		return
+	}
+
+	// CompleteDraining(true) initiates graceful departure from the cluster.
+	if err := s.cluster.CompleteDraining(true); err != nil {
+		s.writeError(w, http.StatusInternalServerError, sanitizeError(err, "Failed to leave cluster"))
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, &MessageResponse{
+		Message: "Node left cluster gracefully",
+	})
+}

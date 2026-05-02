@@ -551,6 +551,8 @@ func (s *Server) Start() error {
 	// Cluster management (always registered, returns proper JSON when disabled)
 	mux.HandleFunc("/api/v1/cluster/status", s.handleClusterStatus)
 	mux.HandleFunc("/api/v1/cluster/nodes", s.handleClusterNodes)
+	mux.HandleFunc("/api/v1/cluster/join", s.handleClusterJoin)
+	mux.HandleFunc("/api/v1/cluster/leave", s.handleClusterLeave)
 
 	// Zone management
 	mux.HandleFunc("/api/v1/zones", s.handleZones)
