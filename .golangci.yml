@@ -1,0 +1,51 @@
+# NothingDNS Linting Configuration
+# golangci-lint configuration
+# Run: golangci-lint run ./...
+
+linters-settings:
+  golangci-lint version
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - dogsled
+    - errcheck
+    - errorlint
+    - exhaustive
+    - exportloopref
+    - gofmt
+    - goimports
+    - gosimple
+    - govet
+    - ineffassign
+    - nakedret
+    - prealloc
+    - staticcheck
+    - structcheck
+    - typecheck
+    - unconvert
+    - unused
+    - varcheck
+    - waste
+
+run:
+  timeout: 10m
+  tests: true
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+output:
+  format: colored-line-number
+  print-issued-lines: true
+  print-linter-name: true
+
+severity:
+  default: error
+  rules:
+    - linters:
+        - staticcheck
+      severity: warning

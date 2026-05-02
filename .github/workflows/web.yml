@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write
 
 jobs:
   web:
@@ -32,8 +33,57 @@ jobs:
       - name: Lint
         run: cd web && npm run lint
 
+      - name: Run tests
+        run: cd web && npm test -- --coverage
+
       - name: Build
         run: cd web && npm run build
         env:
           VITE_API_URL: /api
           VITE_WS_URL: /ws
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: web/coverage/coverage-final.json
+          flags: frontend
+          name: nothingdns-web
+          fail_ci_if_error: false
+
+  security:
+    runs-on: ubuntu-latest
+    needs: web
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: cd web && npm install
+
+      - name: Run npm audit
+        run: cd web && npm audit --audit-level=moderate
+
+      - name: Run Retire.js
+        run: |
+          npm install -g retire@latest
+          retire --path web/src --ignorefile retire.json
+
+      - name: Run Snyk
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          languages: javascript
+          queries: security-extended

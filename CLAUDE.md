@@ -21,18 +21,6 @@ go test ./internal/e2e/... -v                  # End-to-end tests
 
 **Docker**: Multi-stage `Dockerfile` builds both binaries from scratch — `golang:1.26.2-alpine` compiles with `-trimpath -ldflags "-s -w -extldflags '-static'"`, then copies to `FROM scratch`.
 
-### RTK Commands (Token-Optimized Output)
-
-This project uses [RTK](https://github.com/nothingdns/rtk) for compact output:
-- `rtk go build ./...` — compact build output
-- `rtk go test ./...` — failures only (90%+ token savings)
-- `rtk go vet ./...` — grouped violations
-- `rtk go fmt ./...` — format check
-- `rtk git status` / `rtk git diff` / `rtk git log` — compact git output
-- `rtk gh pr view <num>` / `rtk gh run list` — compact GitHub output
-
-RTK passes through unlisted subcommands (e.g., `rtk git branch -a`).
-
 ## Architecture Overview
 
 ```

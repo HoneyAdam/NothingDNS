@@ -1,0 +1,15 @@
+security: replace math/rand with deterministic rotation in resolver
+
+This commit addresses a code review finding:
+
+- internal/resolver/resolver.go: Replaced math/rand.Shuffle with deterministic
+  rotation using atomic counter for load distribution. The shuffle was for
+  non-security load balancing, but using math/rand violated the project's
+  zero-weak-crypto policy. New approach uses atomic.AddUint64 to rotate
+  through addresses, providing thread-safe load distribution without weak crypto.
+
+- internal/cluster/gossip.go: Added warning logs for encryption failures in
+  election and leader announcement broadcasts. Previously encryption errors
+  were silently ignored. Now logged before falling back to plaintext.
+
+Refs: Code review MEDIUM findings

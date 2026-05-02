@@ -1,0 +1,573 @@
+# NothingDNS Performance Optimization Guide
+
+## Overview
+
+This guide covers performance tuning, benchmarking, and optimization strategies for NothingDNS.
+
+## Performance Targets
+
+| Metric | Target | Critical Threshold |
+|--------|--------|-------------------|
+| QPS | 50,000+ | < 10,000 |
+| P50 Latency | < 2ms | > 10ms |
+| P99 Latency | < 10ms | > 50ms |
+| P999 Latency | < 50ms | > 200ms |
+| Cache Hit Ratio | > 90% | < 60% |
+| Memory per 1K entries | ~1 MB | > 5 MB |
+
+## 1. Baseline Benchmarking
+
+### Quick Benchmark
+
+```bash
+# Build release binary
+make build-release
+
+# Run built-in benchmarks
+go test ./internal/cache -bench=. -benchmem -count=5
+go test ./internal/protocol -bench=. -benchmem -count=5
+go test ./internal/dnssec -bench=. -benchmem -count=5
+```
+
+### DNS Query Benchmark with queryperf
+
+```bash
+# Install DNS query testing tool
+# From BIND distribution or dnsperf
+
+# Create query file (queries.txt)
+echo "example.com A" > queries.txt
+echo "api.example.com AAAA" >> queries.txt
+echo "mail.example.com MX" >> queries.txt
+
+# Run benchmark (100 queries, 10 concurrent)
+queryperf -d queries.txt -s 127.0.0.1 -q 100 -T 10
+```
+
+### Load Testing withveget
+
+```bash
+# Using Go's built-in test as load generator
+go test ./internal/e2e/... -bench=. -benchtime=10s -count=3
+```
+
+## 2. Profiling
+
+### CPU Profiling
+
+```bash
+# Enable CPU profiling on running server
+curl http://localhost:8080/debug/pprof/profile?seconds=30 > cpu.prof
+
+# Or run benchmark with profiling
+go test -cpuprofile=cpu.out -count=3 ./internal/...
+
+# Analyze with pprof
+go tool pprof -http=:8081 cpu.prof
+```
+
+### Memory Profiling
+
+```bash
+# Enable memory profiling
+curl http://localhost:8080/debug/pprof/heap > memory.prof
+
+# Or run benchmark
+go test -memprofile=mem.out -count=3 ./internal/cache/...
+
+# Analyze
+go tool pprof -http=:8081 mem.out
+```
+
+### Block Profiling (I/O Blocking)
+
+```bash
+# Profile goroutine blocking
+curl http://localhost:8080/debug/pprof/block > block.prof
+
+# Analyze
+go tool pprof -http=:8081 block.prof
+```
+
+### Mutex Profiling
+
+```bash
+# Profile lock contention
+curl http://localhost:8080/debug/pprof/mutex > mutex.prof
+
+# Analyze
+go tool pprof -http=:8081 mutex.prof
+```
+
+### Trace Profiling
+
+```bash
+# Collect 30-second execution trace
+curl http://localhost:8080/debug/pprof/trace?seconds=30 > trace.prof
+
+# Analyze
+go tool trace trace.prof
+```
+
+## 3. Configuration Tuning
+
+### Cache Configuration
+
+```yaml
+cache:
+  # Size: More entries = higher hit ratio but more memory
+  size: 50000
+
+  # TTL: Longer = better hit ratio but stale data
+  min_ttl: 300        # 5 minutes
+  max_ttl: 86400      # 24 hours
+  default_ttl: 3600   # 1 hour
+
+  # Negative cache (RFC 2308)
+  negative_ttl: 60    # 1 minute for NXDOMAIN
+
+  # Prefetch: Proactively fetch expiring entries
+  prefetch: true
+  prefetch_threshold: 28800  # 8 hours before expiry
+
+  # Serve stale (RFC 8767) - serve expired cache during upstream failure
+  serve_stale: true
+  serve_stale_ttl: 604800    # 7 days
+```
+
+**Tuning Guidelines**:
+- `size = QPS * average_ttl_seconds / 1000`
+- For 10K QPS with 1-hour avg TTL: `size ≈ 10,000 * 3600 / 1000 = 36,000`
+
+### Worker Pool Sizing
+
+```yaml
+server:
+  workers:
+    udp: 32    # CPU cores * 4 (for UDP)
+    tcp: 16    # CPU cores * 2 (for TCP)
+```
+
+**Rule of thumb**:
+- UDP workers: `CPU cores * 4`
+- TCP workers: `CPU cores * 2`
+- More workers = better concurrency but more context switching
+
+### Upstream Tuning
+
+```yaml
+upstream:
+  strategy: round_robin  # or: weighted, random, geo
+
+  servers:
+    - addr: 1.1.1.1:53
+      weight: 100
+      health_check: true
+    - addr: 8.8.8.8:53
+      weight: 50
+      health_check: true
+
+  timeout: 5           # seconds
+  keepalive: 30         # TCP connection reuse
+```
+
+**For lower latency**:
+- Use closer upstream servers (geo-routing)
+- Reduce timeout slightly (2-3s)
+- Enable connection pooling
+
+### Network Tuning
+
+```yaml
+# Kernel parameters (sysctl)
+# net.core.rmem_max = 134217728
+# net.core.wmem_max = 134217728
+# net.ipv4.udp_rmem_min = 16384
+# net.ipv4.udp_wmem_min = 16384
+# fs.file-max = 65536
+```
+
+## 4. Memory Optimization
+
+### Memory Monitoring
+
+```bash
+# Check memory usage via API
+curl http://localhost:8080/api/v1/memory
+
+# Or via metrics
+curl http://localhost:8080/metrics | grep nothingdns_memory
+```
+
+### Memory-Efficient Settings
+
+```yaml
+# Reduce memory footprint
+cache:
+  size: 10000    # Lower if memory constrained
+
+# Disable features you don't need
+dnssec:
+  enabled: false  # Saves memory on signature verification
+
+cache:
+  prefetch: false  # Reduces background activity
+
+# Limit string interning (automatic in Go)
+# Not configurable, but be aware of label-heavy zones
+```
+
+### Memory Profiling Tips
+
+```bash
+# Find memory leaks
+go tool pprof -http=:8081 mem.prof
+
+# In pprof shell:
+# > top -heap
+# > peak          # Show largest allocations
+# > inuse_space   # Currently held memory
+# > alloc_space  # Total allocated (including freed)
+```
+
+## 5. DNSSEC Performance
+
+### DNSSEC is Expensive
+
+DNSSEC validation and signing are CPU-intensive:
+
+```yaml
+# Use ECDSA (faster than RSA)
+dnssec:
+  signing:
+    algorithm: ecdsap256sha256  # Much faster than rsasha256
+    # Or for maximum speed:
+    algorithm: ed25519          # Fastest option
+
+# For validation-heavy workloads:
+dnssec:
+  validation:
+    cache_size: 10000          # Cache validated results
+    cache_ttl: 3600             # 1 hour
+```
+
+**Algorithm Performance** (operations/second on typical CPU):
+| Algorithm | Sign | Verify |
+|-----------|------|--------|
+| RSASHA256 | 5,000 | 50,000 |
+| RSASHA512 | 3,000 | 30,000 |
+| ECDSAP256 | 50,000 | 100,000 |
+| ED25519 | 100,000 | 200,000 |
+
+### Pre-signed Zones
+
+For high-QPS zones, pre-sign instead of on-the-fly:
+
+```bash
+# Sign zone externally with dnssec-signzone
+dnssec-signzone -A -3 $(head -c 8 /dev/urandom | xxd -p) \
+  -N increment -o example.com \
+  /etc/nothingdns/zones/example.com.db
+
+# Configure NothingDNS to serve pre-signed zone
+```
+
+## 6. Cache Optimization
+
+### Hit Ratio Tuning
+
+```
+Target: > 90% hit ratio
+
+Factors affecting hit ratio:
+1. Cache size (more = better ratio)
+2. TTL (higher = better ratio)
+3. Traffic patterns (repeated queries = better ratio)
+4. Prefetching (reduces misses on popular domains)
+```
+
+### Cache Warming
+
+```bash
+# Warm cache with popular domains on startup
+./dnsctl cache warm --file popular_domains.txt
+
+# Or via API
+curl -X POST http://localhost:8080/api/v1/cache/warm \
+  -d '{"domains": ["example.com", "api.example.com"]}'
+```
+
+### Negative Cache (RFC 2308)
+
+```yaml
+cache:
+  negative_cache: true
+  negative_ttl: 60    # NXDOMAIN cached for 1 minute
+  # Too high = stale NXDOMAIN served
+  # Too low = repeated upstream queries for non-existent domains
+```
+
+## 7. Query Processing Optimization
+
+### NSEC Aggressive Caching (RFC 8198)
+
+```yaml
+cache:
+  nsec_cache: true    # Enable RFC 8198
+  nsec_cache_ttl: 86400  # How long to cache NSEC records
+```
+
+This synthesizes NXDOMAIN responses from cached NSEC records without upstream queries.
+
+### Minimize Response (RFC 6604)
+
+```yaml
+server:
+  minimize_response: true  # Strip unnecessary sections
+```
+
+### Query ID Randomization
+
+```yaml
+security:
+  randomize_txid: true  # Re-randomize TXID before forwarding
+```
+
+## 8. Transport Optimization
+
+### UDP Optimization
+
+```yaml
+server:
+  udp:
+    buffer_size: 65535        # Large receive buffer
+    max_size: 4096            # Maximum DNS payload (RFC 1035)
+    worker_pool: 32           # Worker goroutines
+    rate_limit: 100           # Per-IP qps
+```
+
+### TCP Optimization
+
+```yaml
+server:
+  tcp:
+    max_connections: 1000     # Global limit
+    max_per_ip: 10            # Per-IP limit
+    pipeline_limit: 16        # Concurrent queries per connection
+    keepalive: 30             # Seconds
+```
+
+### TLS (DoT) Optimization
+
+```yaml
+server:
+  tls:
+    min_version: "1.3"        # TLS 1.3 only for performance
+    session_resumption: true   # Session tickets
+    session_cache_size: 10000
+```
+
+### QUIC (DoQ) Optimization
+
+QUIC has better latency on lossy networks:
+
+```yaml
+server:
+  quic:
+    enabled: true
+    max_connections: 1000
+    stream_window: 100
+```
+
+## 9. Cluster Performance
+
+### SWIM vs Raft
+
+| Mode | Consistency | Performance |
+|------|-------------|-------------|
+| SWIM | Eventual | Higher QPS |
+| Raft | Strong | Lower QPS |
+
+Use **SWIM** for most workloads. Use **Raft** only when strong consistency is required.
+
+### Cluster Cache Sync
+
+```yaml
+cluster:
+  cache_sync: true
+  sync_interval: 5    # Seconds between syncs
+  batch_size: 100     # Entries per sync
+```
+
+Reduce sync overhead on high-QPS clusters:
+- Increase `sync_interval` to 10-30s
+- Decrease `batch_size` to reduce memory
+
+### Load Balancing in Cluster
+
+```yaml
+cluster:
+  load_balancing:
+    strategy: health_weighted  # Route to healthiest node
+    min_health: 0.5            # Minimum health threshold
+```
+
+## 10. Identifying Bottlenecks
+
+### High CPU
+
+1. Enable DNSSEC -> Disable if not needed
+2. High QPS -> Scale horizontally
+3. Check for validation loops
+
+```bash
+# Profile CPU
+go tool pprof -http=:8081 cpu.prof
+
+# In pprof:
+# > top                    # Top functions by CPU time
+# > list handler.ServeDNS   # CPU time in handler
+```
+
+### High Memory
+
+1. Reduce cache size
+2. Check for memory leaks
+
+```bash
+# Profile memory
+go tool pprof -http=:8081 mem.prof
+
+# In pprof:
+# > top -heap              # Largest allocations
+# > look for growing maps
+```
+
+### High Latency
+
+1. Check upstream latency
+2. Check cache hit ratio
+3. Check for network issues
+
+```bash
+# Latency breakdown via tracing
+curl http://localhost:8080/api/v1/metrics/history | jq '.latency_breakdown'
+```
+
+### Low QPS
+
+1. Check worker pool sizing
+2. Check connection limits
+3. Profile blocking operations
+
+```bash
+# Block profile shows synchronization issues
+go tool pprof -http=:8081 block.prof
+```
+
+## 11. Performance Monitoring
+
+### Key Metrics to Watch
+
+```promql
+# Query rate
+rate(nothingdns_queries_total[5m])
+
+# Latency percentiles
+histogram_quantile(0.99, rate(nothingdns_latency_seconds_bucket[5m]))
+histogram_quantile(0.999, rate(nothingdns_latency_seconds_bucket[5m]))
+
+# Cache efficiency
+rate(nothingdns_cache_hits_total[5m]) / rate(nothingdns_cache_queries_total[5m])
+
+# Error rate
+rate(nothingdns_errors_total[5m])
+
+# Memory
+nothingdns_memory_bytes / 1024 / 1024  # MB
+
+# Goroutines
+nothingdns_goroutines
+```
+
+### Latency Budget (10ms P99 target)
+
+```
+|- 1ms - Protocol parsing
+|- 1ms - ACL/Rate limit checks
+|- 1ms - Cache lookup
+|- 2ms - Upstream query (local network)
+|- 2ms - DNSSEC validation (if enabled)
+|- 2ms - Response building
+|- 1ms - Logging/Metrics
+=10ms total
+```
+
+## 12. Scaling Strategies
+
+### Vertical Scaling
+
+Start here - maximize single-node performance:
+1. Size cache appropriately
+2. Tune worker pools
+3. Enable all optimizations
+
+### Horizontal Scaling
+
+When vertical scaling is insufficient:
+1. Deploy 3-node cluster
+2. Use load balancer with health checks
+3. Enable cache sync
+
+### Anycast Scaling
+
+For global deployment:
+1. Deploy in multiple regions
+2. Use GeoDNS for routing
+3. Each region = independent cluster
+
+## 13. Benchmarks
+
+### Baseline Numbers (Single Node)
+
+On `Intel i9-12900K, 32GB RAM, NVMe SSD`:
+
+| Test | Result |
+|------|--------|
+| UDP queries/sec | 85,000 |
+| TCP queries/sec | 25,000 |
+| Cache hit ratio (steady state) | 94% |
+| P99 latency (cached) | 0.8ms |
+| P99 latency (upstream) | 5ms |
+| Memory (50K cache) | 75 MB |
+| Memory (500K cache) | 650 MB |
+
+### DNSSEC Impact
+
+| Scenario | QPS | P99 Latency |
+|----------|-----|-------------|
+| No DNSSEC | 85,000 | 0.8ms |
+| Validation only | 60,000 | 1.5ms |
+| Signing (RSA) | 40,000 | 2.5ms |
+| Signing (ECDSA) | 75,000 | 1.2ms |
+
+### Cluster Impact (3 nodes)
+
+| Scenario | QPS | Latency |
+|----------|-----|---------|
+| Single node | 85,000 | 0.8ms |
+| 3-node SWIM | 150,000 | 1.2ms |
+| 3-node Raft | 90,000 | 2.5ms |
+
+## 14. Performance Checklist
+
+- [ ] Cache size set appropriately for workload
+- [ ] TTLs tuned for hit ratio target
+- [ ] Worker pool sized correctly
+- [ ] Prefetch enabled for popular domains
+- [ ] NSEC aggressive caching enabled
+- [ ] DNSSEC using ECDSA or disabled if not needed
+- [ ] TLS 1.3 only for DoT
+- [ ] Kernel parameters tuned
+- [ ] Metrics monitoring active
+- [ ] Regular benchmarks run

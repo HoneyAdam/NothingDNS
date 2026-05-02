@@ -1,7 +1,7 @@
 # NothingDNS Makefile
 # Provides convenient shortcuts for common development tasks
 
-.PHONY: all build build-server build-cli build-web build-docker test test-short test-verbose test-race vet fmt lint clean install dev help
+.PHONY: all build build-server build-cli build-web build-docker build-release test test-short test-verbose test-race test-e2e test-pkg test-run test-coverage vet fmt fmt-check fmt-all lint staticcheck clean clean-all install dev dev-watch validate-config deps tidy update-deps ci release help benchmark security-check docs docker-push helm-install helm-template setup-hooks lint-ci backup health-check
 
 # Binary names
 SERVER_BINARY := nothingdns
@@ -217,6 +217,97 @@ release: clean vet test build-release
 	@echo "✓ Release build complete"
 
 # =============================================================================
+# Benchmark Targets
+# =============================================================================
+
+## Run benchmarks for a specific package (usage: make benchmark PKG=./internal/cache)
+benchmark:
+	@test -n "$(PKG)" || (echo "Usage: make benchmark PKG=./internal/package"; exit 1)
+	@go test $(PKG) -bench=. -benchmem -count=3
+
+# =============================================================================
+# Security Targets
+# =============================================================================
+
+## Run security checks (govulncheck, staticcheck)
+security-check:
+	@echo "Running security checks..."
+	@go install golang.org/x/vuln/cmd/govulncheck@latest
+	@govulncheck ./...
+	@go install honnef.co/go/tools/cmd/staticcheck@latest
+	@staticcheck ./...
+	@echo "✓ Security checks passed"
+
+# =============================================================================
+# Documentation Targets
+# =============================================================================
+
+## Generate API documentation (requires swag)
+docs:
+	@test -n "$(SWAG)" || (which swag > /dev/null 2>&1) || (echo "swag not installed. Run: go install github.com/swaggo/swag/cmd/swag@latest"; exit 1)
+	@swag init -g cmd/nothingdns/main.go -o docs/api
+	@echo "✓ API docs generated"
+
+## Serve API documentation locally
+docs-serve:
+	@test -n "$(SWAGGER_PORT)" || SWAGGER_PORT=8081
+	@npx swagger-ui-cli serve docs/api/swagger.yaml --port=$(SWAGGER_PORT)
+
+# =============================================================================
+# Docker & Helm Targets
+# =============================================================================
+
+## Build and push Docker image (usage: make docker-push TAG=v1.0.0)
+docker-push:
+	@test -n "$(TAG)" || (echo "Usage: make docker-push TAG=v1.0.0"; exit 1)
+	@docker build -t $(DOCKER_IMAGE):$(TAG) -t $(DOCKER_IMAGE):latest .
+	@docker push $(DOCKER_IMAGE):$(TAG)
+	@docker push $(DOCKER_IMAGE):latest
+
+## Install using Helm
+helm-install:
+	@test -n "$(RELEASE)" || (echo "Usage: make helm-install RELEASE=my-release"; exit 1)
+	@helm install $(RELEASE) deploy/helm/nothingdns
+
+## Template Helm chart (dry-run)
+helm-template:
+	@test -n "$(RELEASE)" || (echo "Usage: make helm-template RELEASE=my-release"; exit 1)
+	@helm template $(RELEASE) deploy/helm/nothingdns
+
+# =============================================================================
+# Development Helpers
+# =============================================================================
+
+## Format all code (Go + others)
+fmt-all:
+	@echo "Formatting all code..."
+	@go fmt ./...
+	@cd web && npm run format 2>/dev/null || true
+	@find . -name '*.sh' -exec shfmt -w {} \; 2>/dev/null || true
+	@echo "✓ Formatting complete"
+
+## Setup git hooks and development environment
+setup-hooks:
+	@echo "Setting up git hooks..."
+	@chmod +x scripts/pre-commit scripts/install-hooks.sh
+	@./scripts/install-hooks.sh
+
+## Run CI-style linting (golangci-lint)
+lint-ci:
+	@which golangci-lint > /dev/null 2>&1 || (echo "Installing golangci-lint..."; go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest)
+	@golangci-lint run ./...
+
+## Run backup script
+backup:
+	@chmod +x scripts/backup.sh
+	@./scripts/backup.sh /var/backups/nothingdns
+
+## Run health check script
+health-check:
+	@chmod +x scripts/health-check.sh
+	@./scripts/health-check.sh localhost:8080
+
+# =============================================================================
 # Help
 # =============================================================================
 
@@ -245,18 +336,42 @@ help:
 	@echo "Lint Targets:"
 	@echo "  make vet             - Run go vet"
 	@echo "  make fmt             - Format Go code"
+	@echo "  make fmt-all         - Format all code (Go, JS, shell)"
 	@echo "  make fmt-check       - Check if code is formatted"
 	@echo "  make lint            - Run all linters"
+	@echo "  make staticcheck     - Run staticcheck"
+	@echo ""
+	@echo "Benchmark Targets:"
+	@echo "  make benchmark       - Run benchmarks (usage: make benchmark PKG=./internal/cache)"
+	@echo ""
+	@echo "Security Targets:"
+	@echo "  make security-check  - Run govulncheck and staticcheck"
+	@echo ""
+	@echo "Documentation Targets:"
+	@echo "  make docs            - Generate API docs with swag"
 	@echo ""
 	@echo "Development:"
 	@echo "  make dev             - Run server in development mode"
+	@echo "  make dev-watch       - Run server with hot reload on file changes"
 	@echo "  make install         - Install binaries to GOPATH/bin"
 	@echo "  make validate-config - Validate a config file"
+	@echo "  make setup-hooks     - Install git hooks"
+	@echo "  make lint-ci         - Run golangci-lint"
+	@echo "  make health-check    - Run health checks"
+	@echo ""
+	@echo "Docker & Helm:"
+	@echo "  make up              - Run with docker-compose"
+	@echo "  make down            - Stop docker-compose"
+	@echo "  make docker-push     - Build and push Docker image (TAG=v1.0.0)"
+	@echo "  make helm-install    - Install using Helm (RELEASE=my-release)"
+	@echo "  make helm-template   - Dry-run Helm template (RELEASE=my-release)"
 	@echo ""
 	@echo "Maintenance:"
 	@echo "  make clean           - Remove build artifacts"
+	@echo "  make clean-all       - Remove everything including Go cache"
 	@echo "  make deps            - Download dependencies"
 	@echo "  make tidy            - Tidy go modules"
+	@echo "  make update-deps     - Update all dependencies"
 	@echo ""
 	@echo "CI/CD:"
 	@echo "  make ci              - Run CI checks (vet, test, build)"

@@ -1,141 +1,206 @@
 # Contributing to NothingDNS
 
-NothingDNS'e katkı sağladığınız için teşekkürler. Bu rehber geliştirme ortamı,
-kod stili, test gereksinimleri ve PR sürecini açıklar.
+Thank you for your interest in contributing to NothingDNS!
 
-## Geliştirme Ortamı
-
-### Gereksinimler
-
-- **Go**: 1.25.0 veya üzeri (toolchain go1.26.2)
-- **Node + pnpm**: web/ dashboard'u derlemek için (yalnızca dashboard üzerinde
-  çalışıyorsanız gereklidir)
-- **Git**: Kod kontrolü ve commit için
-- **Docker** (opsiyonel): Container build doğrulaması için
-
-### Build
+## Quick Start
 
 ```bash
-# Sunucu binary'si
-go build -o nothingdns ./cmd/nothingdns
+# Clone the repository
+git clone https://github.com/NothingDNS/NothingDNS.git
+cd NothingDNS
 
-# CLI
-go build -o dnsctl ./cmd/dnsctl
+# Setup development environment
+./scripts/dev-setup.sh
 
-# Statik build (CGO_ENABLED=0)
-CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -extldflags '-static'" -o nothingdns ./cmd/nothingdns
+# Run the server
+make dev
 ```
 
-### Web Dashboard
+## Development Workflow
+
+### 1. Branch Naming
+
+```
+feature/description     # New features
+bugfix/description      # Bug fixes
+docs/description        # Documentation improvements
+refactor/description   # Code refactoring
+security/description   # Security-related changes
+```
+
+### 2. Making Changes
+
+1. Create a branch from `main`:
+   ```bash
+   git checkout -b feature/my-feature
+   ```
+
+2. Make your changes, following the coding standards
+
+3. Run tests:
+   ```bash
+   make test
+   make lint
+   ```
+
+4. Commit with a clear message:
+   ```bash
+   git commit -m "feature: add support for X"
+   ```
+
+### 3. Coding Standards
+
+#### Go Code
+
+- Follow [Effective Go](https://go.dev/doc/effective_go)
+- Run `gofmt` before committing
+- Use `go vet` and `staticcheck`
+- Write tests for new functionality
+
+#### File Organization
+
+```
+cmd/nothingdns/       # Main application
+cmd/dnsctl/           # CLI tool
+internal/             # Internal packages (no external imports)
+pkg/                  # Public packages (if any)
+```
+
+#### Error Handling
+
+- Return errors with context using `fmt.Errorf("operation: %w", err)`
+- Handle all errors explicitly
+- Use `errors.Is()` and `errors.As()` for error checking
+
+#### Logging
+
+- Use structured logging (`log.Info`, `log.Error`, etc.)
+- Include relevant context (request ID, zone name, etc.)
+- Don't log sensitive information
+
+### 4. Testing
 
 ```bash
-cd web
-pnpm install
-pnpm run build   # Çıktı: ../internal/dashboard/static/dist/
+# Run all tests
+make test
+
+# Run specific package tests
+make test-pkg PKG=./internal/cache
+
+# Run with verbose output
+make test-verbose
+
+# Run E2E tests
+make test-e2e
+
+# Run with race detector
+make test-race
 ```
 
-`internal/dashboard/static/dist/` `go:embed` ile derlemeye gömülür; bu yüzden
-git'te tracked olarak kalır. Dashboard'u değiştirdiyseniz, build çıktısını da
-commit'leyin.
+#### Test Coverage
 
-## Kod Stili
+- New code should include tests
+- Aim for > 80% coverage on new packages
+- Run `make test-coverage` to generate coverage report
 
-### Bağımlılık Politikası — Strict Zero
+### 5. Documentation
 
-NothingDNS yalnızca Go stdlib + `golang.org/x/sys` (platform soket çağrıları)
-kullanır. Bu çekirdek bir tasarım kısıtlamasıdır:
+Update documentation when:
+- Adding new features
+- Changing configuration options
+- Modifying API endpoints
+- Updating dependencies
 
-- Yeni third-party import **eklemeyin**.
-- DNS protokolü, YAML parser, JWT, Raft, Gossip — hepsi bu repo içinde
-  hand-rolled.
+Documentation files:
+- `docs/*.md` — User-facing documentation
+- `internal/*/README.md` — Package documentation
+- Code comments — Implementation details
 
-### Paylaşılan Yardımcılar
+### 6. Git Commit Messages
 
-Yeniden yazmak yerine var olanı kullanın:
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
-- `protocol.CanonicalWireName()` — canonical name encoder
-- `internal/config/` parser'ı — `advance()` ve `peek()` `TokenComment`'ı
-  otomatik atlar; comment'ı parse mantığında ele almayın
+```
+type(scope): description
 
-### Gotcha'lar
+[optional body]
 
-[CLAUDE.md](CLAUDE.md)'deki "Known Gotchas" bölümünde toplananları okuyun.
-Önemli noktalar:
-
-- `sync.Pool` buffer'ları `defer pool.Put()`'tan önce **kopyalanmalıdır**;
-  referans geri alınabilir.
-- Upstream TCP mesajları için `len(packed) > 65535` kontrolü zorunlu.
-- UDP truncation **record-boundary-aware** olmalı, byte düzeyinde kesim
-  yapılmamalı.
-- Health-check goroutine'leri **tur başına ayrı** `sync.WaitGroup` kullanır;
-  ana WG paylaşılmaz.
-
-### Commit Mesajları
-
-Conventional commits tarzı kısa prefix kullanın:
-
-- `feat:` yeni özellik
-- `fix:` hata düzeltme
-- `docs:` yalnızca doküman
-- `chore:` build/araç değişikliği, kaynak kodu etkilemeyen
-- `security:` güvenlik düzeltmesi
-- `perf:` performans optimizasyonu
-- `refactor:` davranış değiştirmeyen yeniden yapılandırma
-- `test:` yalnızca test eklemek/düzeltmek
-
-Atomic commit kuralı: bir commit, mantıksal olarak tek bir değişikliği temsil
-etmeli ve build'i kırmamalı.
-
-## Test
-
-### Komutlar
-
-```bash
-go vet ./...                              # Lint, sıfır uyarı
-go test ./... -count=1 -short             # Hızlı testler (kısa mod)
-go test ./internal/protocol/ -run TestX   # Tek test
-go test ./internal/e2e/... -v             # End-to-end testler
-go test -race ./...                       # Race detection (yavaş)
+[optional footer]
 ```
 
-### RTK ile Token Tasarrufu
+Types:
+- `feat` — New feature
+- `fix` — Bug fix
+- `docs` — Documentation
+- `style` — Formatting
+- `refactor` — Refactoring
+- `test` — Tests
+- `chore` — Build/process changes
 
-[RTK](https://github.com/nothingdns/rtk) kompakt çıktı sağlar:
+Examples:
+```
+feat(cache): add NSEC aggressive caching
 
-```bash
-rtk go build ./...      # kompakt build çıktısı
-rtk go test ./...       # yalnızca başarısızlıklar (90%+ token tasarrufu)
-rtk go vet ./...        # gruplandırılmış ihlaller
-rtk git status          # kompakt git çıktısı
+implements RFC 8198 for faster NXDOMAIN responses
 ```
 
-### Test Gereksinimleri
+```
+fix(cluster): handle network partition gracefully
 
-- Yeni bir public API → unit test gerekli
-- Yeni bir DNS özelliği → e2e test (`internal/e2e/`) gerekli
-- Bug fix → regression test, fix'le aynı commit'te
+Previously, cluster would deadlock. Now uses timeout
+for gossip exchanges to detect failed nodes.
+```
 
-## PR Kontrol Listesi
+### 7. Pull Request Process
 
-PR açmadan önce:
+1. **Fork** the repository
+2. **Create** a feature branch
+3. **Make** your changes with tests
+4. **Ensure** all tests pass (`make ci`)
+5. **Update** documentation
+6. **Submit** a pull request
 
-- [ ] `go vet ./...` temiz çıkıyor
-- [ ] `go test ./... -count=1 -short` geçiyor
-- [ ] `go build ./...` ve `go build -o nothingdns ./cmd/nothingdns` çalışıyor
-- [ ] Dashboard değiştiyse `pnpm run build` çıktısı commit'lendi
-- [ ] Yeni bir public alan/komut/config → ilgili dokümante belge güncellendi
-  ([docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md),
-  [docs/SPECIFICATION.md](docs/SPECIFICATION.md), CLI'da
-  [cmd/dnsctl/README.md](cmd/dnsctl/README.md))
-- [ ] [docs/CHANGELOG.md](docs/CHANGELOG.md) "Unreleased" bölümüne özet
-  eklendi
-- [ ] Commit mesajı conventional prefix kullanıyor
+#### PR Template
 
-## Güvenlik
+```markdown
+## Description
+Brief description of changes
 
-Güvenlik açığı bulduysanız [docs/SECURITY.md](docs/SECURITY.md) yönergelerini
-takip edin. Public issue açmayın.
+## Motivation
+Why is this change needed?
 
-## Lisans
+## Testing
+How was this tested?
 
-Katkılarınız [LICENSE](LICENSE) (MIT) kapsamında lisanslanır.
+## Checklist
+- [ ] Tests added/updated
+- [ ] Documentation updated
+- [ ] Code follows style guidelines
+- [ ] PR title follows Conventional Commits
+```
+
+### 8. Code Review
+
+- Address reviewer feedback
+- Keep PRs focused and small (< 500 lines preferred)
+- Reference issues in PR description
+
+### 9. Reporting Issues
+
+Use [GitHub Issues](https://github.com/NothingDNS/NothingDNS/issues) for:
+- Bug reports
+- Feature requests
+- Documentation improvements
+
+For security issues, see [SECURITY.md](../SECURITY.md).
+
+## Resources
+
+- [Architecture](../docs/ARCHITECTURE.md) — System design
+- [API Reference](../docs/API_REFERENCE.md) — REST API documentation
+- [Configuration](../docs/CONFIG_REFERENCE.md) — Configuration options
+- [Troubleshooting](../docs/TROUBLESHOOTING.md) — Common issues
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
