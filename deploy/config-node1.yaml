@@ -13,16 +13,19 @@ upstream:
   servers:
     - 1.1.1.1:53
     - 8.8.8.8:53
-  timeout: 5
+    - 8.8.4.4:53
+  timeout: 5s
+  health_check: 30s
 
 cache:
+  enabled: true
   size: 10000
-  min_ttl: 300
-  max_ttl: 86400
   default_ttl: 3600
+  max_ttl: 86400
+  min_ttl: 300
   negative_ttl: 60
   prefetch: true
-  prefetch_threshold: 28800
+  prefetch_threshold: 60
 
 cluster:
   enabled: true
@@ -39,6 +42,22 @@ logging:
   level: info
   format: json
   output: stdout
+
+security:
+  rate_limit:
+    enabled: true
+    rate: 100
+    burst: 200
+
+dnssec:
+  enabled: true
+
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    bind: ":9153"
+    path: /metrics
 
 zones:
   - /etc/nothingdns/zones/example.com.zone

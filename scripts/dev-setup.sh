@@ -1,5 +1,5 @@
 #!/bin/bash
-# NothingDNS Development Environment Setup
+# NothingDNS Development Environment Setup v1.1
 # Run: ./scripts/dev-setup.sh
 
 set -euo pipefail
@@ -83,7 +83,7 @@ setup_hooks() {
 setup_web() {
     print_step "Setting up web dashboard..."
 
-    if [ !d "web" ] && [ -f "web/package.json" ]; then
+    if [ ! -d "web" ] && [ -f "web/package.json" ]; then
         print_warning "web/ directory not found, skipping npm setup"
         return
     fi
@@ -174,8 +174,8 @@ main() {
     echo ""
     echo "Next steps:"
     echo "  1. Copy config.example.yaml to config.yaml and customize"
-    echo "  2. Run: make dev"
-    echo "  3. Or run tests: make test"
+    echo "  2. Run: go run ./cmd/nothingdns"
+    echo "  3. Or run tests: go test -short ./..."
     echo ""
 }
 

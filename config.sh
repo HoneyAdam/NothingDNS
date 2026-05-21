@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# NothingDNS Config Management Script
+# NothingDNS Config Management Script v1.1
 # Validates, edits, and manages NothingDNS configuration
 #
 
@@ -23,6 +23,11 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 
+# Check if stdin is a terminal
+is_interactive() {
+    [ -t 0 ]
+}
+
 # Check if config exists
 check_config() {
     if [ ! -f "${CONFIG_FILE}" ]; then
@@ -36,17 +41,27 @@ check_config() {
 validate_yaml() {
     section "Validating Configuration"
 
-    if ! command -v python3 &> /dev/null; then
-        warn "python3 not found, skipping YAML validation"
+    if ! command -v python3 &> /dev/null && ! command -v ruby &> /dev/null; then
+        warn "python3 or ruby not found, skipping YAML validation"
         return 0
     fi
 
-    if python3 -c "import yaml; yaml.safe_load(open('${CONFIG_FILE}'))" 2>/dev/null; then
-        info "YAML syntax is valid"
-        return 0
-    else
-        error "YAML syntax error in config file"
-        return 1
+    if command -v python3 &> /dev/null; then
+        if python3 -c "import yaml; yaml.safe_load(open('${CONFIG_FILE}'))" 2>/dev/null; then
+            info "YAML syntax is valid"
+            return 0
+        else
+            error "YAML syntax error in config file"
+            return 1
+        fi
+    elif command -v ruby &> /dev/null; then
+        if ruby -ryaml -e "YAML.load_file('${CONFIG_FILE}')" 2>/dev/null; then
+            info "YAML syntax is valid"
+            return 0
+        else
+            error "YAML syntax error in config file"
+            return 1
+        fi
     fi
 }
 
@@ -54,14 +69,16 @@ validate_yaml() {
 validate_config() {
     section "Validating with NothingDNS"
 
-    if ! command -v "${BINARY_NAME}" &> /dev/null; then
+    local binary="${BINARY_NAME}"
+    if ! command -v "${binary}" &> /dev/null; then
         if [ ! -f "/usr/local/bin/${BINARY_NAME}" ]; then
             warn "nothingdns not found, skipping binary validation"
             return 0
         fi
+        binary="/usr/local/bin/${BINARY_NAME}"
     fi
 
-    if /usr/local/bin/${BINARY_NAME} --config "${CONFIG_FILE}" --validate 2>/dev/null; then
+    if ${binary} --config "${CONFIG_FILE}" --validate 2>/dev/null; then
         info "Config is valid"
         return 0
     else
@@ -193,12 +210,9 @@ EOF
 
     # Add to config
     if grep -q "zones:" "${CONFIG_FILE}"; then
-        if grep -q "^zones: \[\]$\|^- name:" "${CONFIG_FILE}"; then
-            # zones array is empty or has entries - need to modify
+        if grep -q "^zones: \[\]$\|^- name:\|^- .*\.zone" "${CONFIG_FILE}"; then
             info "Zone file created. Manually add to config zones section:"
-            echo "  - name: \"${zone_name}\""
-            echo "    type: \"primary\""
-            echo "    file: \"${zone_file}\""
+            echo "  - ${zone_file}"
         fi
     fi
 }
@@ -232,7 +246,7 @@ show_status() {
     echo ""
     if curl -s http://127.0.0.1:8080/health > /dev/null 2>&1; then
         info "HTTP API is responding"
-        curl -s http://127.0.0.1:8080/api/v1/status | python3 -m json.tool 2>/dev/null || curl -s http://127.0.0.1:8080/api/v1/status
+        curl -s http://127.0.0.1:8080/api/v1/status 2>/dev/null | python3 -m json.tool 2>/dev/null || curl -s http://127.0.0.1:8080/api/v1/status
     else
         warn "HTTP API not responding"
     fi
@@ -241,7 +255,7 @@ show_status() {
 # Usage
 usage() {
     cat << EOF
-NothingDNS Config Management
+NothingDNS Config Management v1.1
 
 Usage: $(basename "$0") <command>
 

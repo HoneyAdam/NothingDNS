@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 $REPO = "NothingDNS/NothingDNS"
 $BINARY_NAME = "nothingdns"
+$DNSCTL_NAME = "dnsctl"
 
 # Colors
 function Write-Info($message) { Write-Host "[INFO] $message" -ForegroundColor Green }
@@ -18,7 +19,7 @@ function Write-Err($message) { Write-Host "[ERROR] $message" -ForegroundColor Re
 
 Write-Host ""
 Write-Host "======================================" -ForegroundColor Cyan
-Write-Host "  NothingDNS Install Script v1.0" -ForegroundColor Cyan
+Write-Host "  NothingDNS Install Script v1.1" -ForegroundColor Cyan
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -58,10 +59,10 @@ Invoke-WebRequest -Uri $BINARY_URL -OutFile $BINARY_PATH -UseBasicParsing | Out-
 Write-Info "Downloaded to $BINARY_PATH"
 
 # Download dnsctl
-$DNSCTL_URL = $ASSETS | Where-Object { $_.name -eq "dnsctl-$PLATFORM.exe" } | Select-Object -First 1 -ExpandProperty browser_download_url
+$DNSCTL_URL = $ASSETS | Where-Object { $_.name -eq "$DNSCTL_NAME-$PLATFORM.exe" } | Select-Object -First 1 -ExpandProperty browser_download_url
 if ($DNSCTL_URL) {
     Write-Info "Downloading dnsctl..."
-    $DNSCTL_PATH = "$InstallPath\dnsctl.exe"
+    $DNSCTL_PATH = "$InstallPath\$DNSCTL_NAME.exe"
     Invoke-WebRequest -Uri $DNSCTL_URL -OutFile $DNSCTL_PATH -UseBasicParsing | Out-Null
     Write-Info "Downloaded to $DNSCTL_PATH"
 }
@@ -86,49 +87,74 @@ function Create-DefaultConfig {
 
     Write-Info "Creating default config at $Path..."
 
+    # Generate a random auth secret
+    $AUTH_SECRET = [System.Convert]::ToBase64String([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+
     $CONFIG = @"
 # NothingDNS Configuration
 # https://github.com/NothingDNS/NothingDNS
+# Generated: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
 
-# Server listen address (UDP/TCP DNS)
-listen: "0.0.0.0:53"
+server:
+  port: 53
+  bind:
+    - 0.0.0.0
+    - "::"
+  http:
+    enabled: true
+    bind: "0.0.0.0:8080"
+    dashboard: true
+    auth_secret: "${AUTH_SECRET}"
 
-# HTTP API/Dashboard address
-http_addr: "0.0.0.0:8080"
-
-# Data directory
-data_dir: "./data"
-
-# Authentication secret (change this!)
-# Generate with: [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32) | ForEach-Object { [System.Convert]::ToBase64String($_) }
-auth_secret: "CHANGE_ME_generate_with_openssl_rand_base64_32"
-
-# Zones (authoritative)
-zones: []
-
-# Upstream resolvers (for recursion)
 upstream:
-  - "8.8.8.8:53"
-  - "8.8.4.4:53"
-  - "1.1.1.1:53"
+  strategy: round_robin
+  servers:
+    - 1.1.1.1:53
+    - 8.8.8.8:53
+    - 8.8.4.4:53
+  timeout: 5s
+  health_check: 30s
 
-# DNSSEC validation
+cache:
+  enabled: true
+  size: 10000
+  default_ttl: 3600
+  max_ttl: 86400
+  min_ttl: 300
+  negative_ttl: 60
+  prefetch: true
+  prefetch_threshold: 60
+
 dnssec:
   enabled: true
-  validation: "strict"
 
-# Log level (debug, info, warn, error)
-log_level: "info"
+logging:
+  level: info
+  format: text
+  output: stdout
 
-# Cache settings
-cache:
-  size: 10000
-  ttl: 300
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    bind: ":9153"
+    path: /metrics
+
+security:
+  rate_limit:
+    enabled: true
+    rate: 100
+    burst: 200
+
+zones: []
+cluster:
+  enabled: false
 "@
 
     $CONFIG | Out-File -FilePath $Path -Encoding UTF8
     Write-Info "Config created at $Path"
-    Write-Warn "Please edit $Path and set auth_secret!"
+    Write-Warn "Auth secret generated. Save this secret for API access:"
+    Write-Warn "  $AUTH_SECRET"
 }
 
 Create-DefaultConfig -Path $ConfigPath

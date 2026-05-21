@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# NothingDNS Update Script
+# NothingDNS Update Script v1.1
 # Updates NothingDNS to the latest version without losing config
 #
 
@@ -11,6 +11,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nothingdns"
 CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 BINARY_NAME="nothingdns"
+DNSCTL_NAME="dnsctl"
 
 # Colors
 RED='\033[0;31m'
@@ -21,6 +22,11 @@ NC='\033[0m'
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Check if stdin is a terminal
+is_interactive() {
+    [ -t 0 ]
+}
 
 # Detect OS and architecture
 detect_os() {
@@ -92,13 +98,17 @@ download_binary() {
     curl -fsSL -o "${TEMP_FILE}" "${DOWNLOAD_URL}" || error "Download failed"
     chmod +x "${TEMP_FILE}"
 
-    sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${BINARY_NAME}" || error "Failed to install to ${INSTALL_DIR}"
+    if [ -w "${INSTALL_DIR}" ]; then
+        mv "${TEMP_FILE}" "${INSTALL_DIR}/${BINARY_NAME}" || error "Failed to install to ${INSTALL_DIR}"
+    else
+        sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${BINARY_NAME}" || error "Failed to install to ${INSTALL_DIR}"
+    fi
     info "Updated ${INSTALL_DIR}/${BINARY_NAME}"
 }
 
 # Download dnsctl
 download_dnsctl() {
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/dnsctl-${PLATFORM}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/${DNSCTL_NAME}-${PLATFORM}"
     info "Downloading dnsctl..."
 
     TEMP_FILE=$(mktemp)
@@ -108,7 +118,11 @@ download_dnsctl() {
     }
     chmod +x "${TEMP_FILE}"
 
-    sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/dnsctl" 2>/dev/null || warn "Failed to update dnsctl"
+    if [ -w "${INSTALL_DIR}" ]; then
+        mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}" 2>/dev/null || sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}"
+    else
+        sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}" 2>/dev/null || warn "Failed to update dnsctl"
+    fi
     info "Updated dnsctl"
 }
 
@@ -168,22 +182,17 @@ show_summary() {
     echo "======================================"
 }
 
-# Check if stdin is a terminal
-is_interactive() {
-    [ -t 0 ]
-}
-
 # Main update
 main() {
     echo ""
     echo "======================================"
-    echo "  NothingDNS Update Script v1.0"
+    echo "  NothingDNS Update Script v1.1"
     echo "======================================"
     echo ""
 
     # Check if installed
     if [ ! -f "${INSTALL_DIR}/${BINARY_NAME}" ]; then
-        error "NothingDNS is not installed. Use install.sh instead."
+        error "NothingDNS is not installed. Use install.sh or setup.sh instead."
     fi
 
     detect_os

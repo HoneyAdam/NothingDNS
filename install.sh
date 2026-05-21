@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# NothingDNS Install Script
+# NothingDNS Install Script v1.1
 # Downloads latest release, creates config, and sets up the server
 #
 
@@ -11,6 +11,7 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nothingdns"
 CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 BINARY_NAME="nothingdns"
+DNSCTL_NAME="dnsctl"
 SKIP_DOWNLOAD=false
 BOOTSTRAP_USER="admin"
 BOOTSTRAP_PASS=""
@@ -20,11 +21,16 @@ USE_PORT_5353=false
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 info() { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# Check if stdin is a terminal
+is_interactive() {
+    [ -t 0 ]
+}
 
 # Check if port 53 is in use and find what's using it
 check_port_53() {
@@ -115,7 +121,6 @@ stop_existing_dns() {
 
     # NetworkManager
     if systemctl is-active --quiet NetworkManager 2>/dev/null; then
-        # Disable DNSSEC in NetworkManager if available
         sudo systemctl restart NetworkManager 2>/dev/null || true
     fi
 
@@ -154,7 +159,6 @@ get_latest_version() {
 # Check if NothingDNS is already installed
 check_existing_install() {
     if [ -f "${INSTALL_DIR}/${BINARY_NAME}" ]; then
-        # Extract version number from output like "NothingDNS version 0.1.0" or "v0.1.0"
         local current_version=$("${INSTALL_DIR}/${BINARY_NAME}" --version 2>/dev/null | grep -oP 'v?\d+\.\d+\.\d+' | head -1 || echo "unknown")
         info "NothingDNS already installed: ${current_version}"
         info "Latest release: ${LATEST_VERSION}"
@@ -214,7 +218,7 @@ download_binary() {
     curl -fsSL -o "${TEMP_FILE}" "${DOWNLOAD_URL}" || error "Download failed"
     chmod +x "${TEMP_FILE}"
 
-    if [ -d "${INSTALL_DIR}" ]; then
+    if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
         mv "${TEMP_FILE}" "${INSTALL_DIR}/${BINARY_NAME}" || error "Failed to install to ${INSTALL_DIR}"
         info "Installed to ${INSTALL_DIR}/${BINARY_NAME}"
     else
@@ -241,7 +245,7 @@ download_dnsctl() {
         return
     fi
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/dnsctl-${PLATFORM}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/${DNSCTL_NAME}-${PLATFORM}"
     info "Downloading dnsctl..."
 
     TEMP_FILE=$(mktemp)
@@ -251,12 +255,12 @@ download_dnsctl() {
     }
     chmod +x "${TEMP_FILE}"
 
-    if [ -d "${INSTALL_DIR}" ]; then
-        mv "${TEMP_FILE}" "${INSTALL_DIR}/dnsctl" 2>/dev/null || sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/dnsctl"
-        info "Installed dnsctl to ${INSTALL_DIR}/dnsctl"
+    if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
+        mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}" 2>/dev/null || sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}"
+        info "Installed dnsctl to ${INSTALL_DIR}/${DNSCTL_NAME}"
     else
-        sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/dnsctl" 2>/dev/null || mv "${TEMP_FILE}" "${INSTALL_DIR}/dnsctl"
-        info "Installed dnsctl to ${INSTALL_DIR}/dnsctl"
+        sudo mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}" 2>/dev/null || mv "${TEMP_FILE}" "${INSTALL_DIR}/${DNSCTL_NAME}"
+        info "Installed dnsctl to ${INSTALL_DIR}/${DNSCTL_NAME}"
     fi
 }
 
@@ -270,7 +274,6 @@ create_config() {
             read -p "Overwrite config? (y/N): " -n 1 -r; echo
             if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                 info "Keeping existing config"
-                # Still apply port change if needed
                 if [ "$port" != "53" ]; then
                     info "Applying port change to ${port}..."
                     sed -i "s/port: 53/port: ${port}/" "${CONFIG_FILE}" 2>/dev/null || true
@@ -279,7 +282,6 @@ create_config() {
             fi
         else
             info "Non-interactive: keeping existing config"
-            # Still apply port change if needed
             if [ "$port" != "53" ]; then
                 info "Applying port change to ${port}..."
                 sed -i "s/port: 53/port: ${port}/" "${CONFIG_FILE}" 2>/dev/null || true
@@ -291,6 +293,8 @@ create_config() {
     info "Creating default config at ${CONFIG_FILE}..."
 
     sudo mkdir -p "${CONFIG_DIR}"
+    sudo mkdir -p "${CONFIG_DIR}/tls"
+    sudo mkdir -p "${CONFIG_DIR}/zones"
 
     # Generate a random auth secret
     AUTH_SECRET=$(openssl rand -base64 32 2>/dev/null || head -c 32 /dev/urandom | base64)
@@ -299,76 +303,75 @@ create_config() {
 # NothingDNS Configuration
 # https://github.com/NothingDNS/NothingDNS
 # Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+# Version: ${LATEST_VERSION}
 
 server:
+  port: ${port}
   bind:
     - 0.0.0.0
     - "::"
-  port: ${port}
   udp_workers: 0
   tcp_workers: 0
 
-  tls:
-    enabled: false
-    cert_file: /etc/nothingdns/tls/server.crt
-    key_file: /etc/nothingdns/tls/server.key
-    bind: ":853"
-
-  xot:
-    enabled: false
-    cert_file: /etc/nothingdns/tls/server.crt
-    key_file: /etc/nothingdns/tls/server.key
-    bind: ":853"
-
   http:
     enabled: true
-    bind: ":8080"
+    bind: "0.0.0.0:8080"
     auth_secret: "${AUTH_SECRET}"
-    doh_enabled: true
-    doh_path: /dns-query
-    dows_enabled: true
-    dows_path: /dns-ws
+    dashboard: true
 
-resolution:
-  recursive: true
-  max_depth: 10
-  timeout: 5s
-  edns0_buffer_size: 4096
+  # TLS/DoT (optional)
+  # tls:
+  #   enabled: true
+  #   cert_file: /etc/nothingdns/tls/server.crt
+  #   key_file: /etc/nothingdns/tls/server.key
+  #   bind: ":853"
 
 upstream:
+  strategy: round_robin
   servers:
+    - 1.1.1.1:53
     - 8.8.8.8:53
     - 8.8.4.4:53
-    - 1.1.1.1:53
-    - 9.9.9.9:53
-  strategy: random
+  timeout: 5s
   health_check: 30s
   failover_timeout: 5s
 
 cache:
   enabled: true
   size: 10000
-  default_ttl: 300
+  default_ttl: 3600
   max_ttl: 86400
-  min_ttl: 5
+  min_ttl: 300
   negative_ttl: 60
   prefetch: true
   prefetch_threshold: 60
-
-logging:
-  level: info
-  format: text
-  output: stdout
-  query_log: true
-  query_log_file: /var/log/nothingdns/query.log
-
-metrics:
-  enabled: true
-  bind: ":9153"
-  path: /metrics
+  serve_stale: true
 
 dnssec:
   enabled: true
+
+security:
+  rate_limit:
+    enabled: true
+    rate: 100
+    burst: 200
+  cookies:
+    enabled: true
+
+logging:
+  level: info
+  format: json
+  output: stdout
+  query_log:
+    enabled: false
+    file: /var/log/nothingdns/query.log
+
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    bind: ":9153"
+    path: /metrics
 
 cluster:
   enabled: false
@@ -376,16 +379,13 @@ cluster:
   weight: 100
   cache_sync: true
 
+zones: []
+slave_zones: []
 blocklist:
   enabled: false
-  files: []
-  urls: []
-
-zones: []
-acl: []
-slave_zones: []
 EOF
 
+    sudo chmod 600 "${CONFIG_FILE}"
     info "Config created at ${CONFIG_FILE}"
     info "Auth secret generated. Save this secret for API access:"
     info "  ${AUTH_SECRET}"
@@ -393,10 +393,8 @@ EOF
 
 # Create bootstrap user via API
 create_bootstrap_user() {
-    # Generate random password
     BOOTSTRAP_PASS=$(openssl rand -base64 12 2>/dev/null | tr -d '/+=' | head -c 12)
 
-    # Wait for server to be ready
     local max_attempts=15
     local attempt=0
 
@@ -417,7 +415,6 @@ create_bootstrap_user() {
         return
     fi
 
-    # Check if users already exist
     local bootstrap_needed=true
     local users_response
     users_response=$(curl -s -X GET http://localhost:8080/api/v1/auth/users \
@@ -429,7 +426,6 @@ create_bootstrap_user() {
     fi
 
     if [ "$bootstrap_needed" = true ]; then
-        # Create bootstrap user
         local response
         response=$(curl -s -X POST http://localhost:8080/api/v1/auth/bootstrap \
             -H "Content-Type: application/json" \
@@ -447,11 +443,9 @@ create_bootstrap_user() {
 
 # Setup service (systemd)
 setup_service() {
-    # Create necessary directories
     sudo mkdir -p /etc/nothingdns/tls
     sudo mkdir -p /var/log/nothingdns
     sudo mkdir -p /var/lib/nothingdns/zones
-    sudo mkdir -p /etc/nothingdns/zones
 
     if command -v systemctl &> /dev/null; then
         info "Setting up systemd service..."
@@ -523,16 +517,11 @@ EOF
     fi
 }
 
-# Check if stdin is a terminal
-is_interactive() {
-    [ -t 0 ]
-}
-
 # Main installation
 main() {
     echo ""
     echo "======================================"
-    echo "  NothingDNS Install Script v1.0"
+    echo "  NothingDNS Install Script v1.1"
     echo "======================================"
     echo ""
 
@@ -546,7 +535,6 @@ main() {
         read -p "Select [1/2]: " -n 1 -r; echo
         install_mode="$REPLY"
     else
-        # Non-interactive (curl | bash) - default to binary
         info "Running in non-interactive mode, selecting binary installation..."
         install_mode="1"
     fi
@@ -559,16 +547,13 @@ main() {
         exit 0
     fi
 
-    # Check for required commands
     command -v curl &> /dev/null || error "curl is required but not installed"
     command -v gzip &> /dev/null || error "gzip is required but not installed"
 
-    # Detect OS and get version BEFORE stopping DNS services
     detect_os
     get_latest_version
     check_existing_install
 
-    # Check if port 53 is available
     if ! check_port_53; then
         if is_interactive; then
             echo ""
@@ -587,19 +572,15 @@ main() {
                 *) error "Installation cancelled" ;;
             esac
         else
-            # Non-interactive: auto-stop existing DNS services
             info "Auto-stopping existing DNS services..."
             stop_existing_dns
         fi
     fi
 
-    # Stop and remove existing NothingDNS before installing
     stop_existing_nothingdns
-
     download_binary
     download_dnsctl
 
-    # Determine port
     local port=53
     if [ "$USE_PORT_5353" = true ]; then
         port=5353
@@ -610,7 +591,6 @@ main() {
     setup_service
     setup_logrotate
 
-    # Start the server
     info "Starting NothingDNS..."
     if command -v systemctl &> /dev/null; then
         sudo systemctl start nothingdns
@@ -620,7 +600,6 @@ main() {
         sleep 3
     fi
 
-    # Create bootstrap user
     create_bootstrap_user
 
     echo ""

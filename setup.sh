@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# NothingDNS Master Setup Script
+# NothingDNS Master Setup Script v1.1
 # Complete installation, configuration, and management
 #
 
@@ -26,15 +26,15 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error() { echo -e "${RED}[ERROR]${NC} $1"; }
 section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 
+# Check if stdin is a terminal
+is_interactive() {
+    [ -t 0 ]
+}
+
 # Detect OS and architecture
 detect_os() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
-    IS_ROOT=false
-
-    if [ "$(id -u)" -eq 0 ]; then
-        IS_ROOT=true
-    fi
 
     case "$ARCH" in
         x86_64) ARCH="amd64" ;;
@@ -60,9 +60,8 @@ check_prereqs() {
 
     command -v curl &> /dev/null || missing+=("curl")
     command -v gzip &> /dev/null || missing+=("gzip")
-    command -v tar &> /dev/null || missing+=("tar")
 
-    if [ ${#missing[@]} -gt 0 ]; then
+    if [ ${#missing[@} -gt 0 ]; then
         error "Missing required commands: ${missing[*]}"
         info "Install with: sudo apt install ${missing[*]} # Debian/Ubuntu"
         info "         or: sudo yum install ${missing[*]} # RHEL/CentOS"
@@ -130,9 +129,9 @@ create_dirs() {
 
     if [ ! -d "${CONFIG_DIR}" ]; then
         if [ -w "$(dirname ${CONFIG_DIR})" ]; then
-            mkdir -p "${CONFIG_DIR}/zones" "${CONFIG_DIR}/keys" "${CONFIG_DIR}/data"
+            mkdir -p "${CONFIG_DIR}/zones" "${CONFIG_DIR}/keys" "${CONFIG_DIR}/tls"
         else
-            sudo mkdir -p "${CONFIG_DIR}/zones" "${CONFIG_DIR}/keys" "${CONFIG_DIR}/data"
+            sudo mkdir -p "${CONFIG_DIR}/zones" "${CONFIG_DIR}/keys" "${CONFIG_DIR}/tls"
         fi
     fi
 
@@ -143,6 +142,8 @@ create_dirs() {
             sudo mkdir -p "${DATA_DIR}"
         fi
     fi
+
+    sudo mkdir -p /var/log/nothingdns
 
     info "Config directory: ${CONFIG_DIR}"
     info "Data directory: ${DATA_DIR}"
@@ -165,10 +166,12 @@ create_config() {
 
     if [ -f "${config_file}" ]; then
         warn "Config already exists at ${config_file}"
-        read -p "Overwrite? (y/N): " -n 1 -r; echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            info "Keeping existing config"
-            return 0
+        if is_interactive; then
+            read -p "Overwrite? (y/N): " -n 1 -r; echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                info "Keeping existing config"
+                return 0
+            fi
         fi
     fi
 
@@ -178,76 +181,80 @@ create_config() {
 
     cat > "${config_file}" << EOF
 # NothingDNS Configuration
+# https://github.com/NothingDNS/NothingDNS
 # Generated: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Version: ${LATEST_VERSION}
 
-# Server settings
 server:
-  bind: "0.0.0.0:53"
-  http_addr: "127.0.0.1:8080"
-  workers: 4
-
-# Data directories
-data_dir: "${DATA_DIR}"
-zone_dir: "${CONFIG_DIR}/zones"
-
-# Authentication
-auth_secret: "${secret}"
-auth_mode: "token"  # token or basic
-
-# Logging
-log:
-  level: "info"
-  format: "json"
-  output: "stdout"
-
-# Cache settings
-cache:
-  size: 10000
-  min_ttl: 60
-  max_ttl: 86400
-  default_ttl: 3600
-  negative_ttl: 300
-  prefetch: true
-  prefetch_threshold: 28800
-
-# Upstream resolvers
-upstream:
-  strategy: "round_robin"
-  servers:
-    - "1.1.1.1:53"
-    - "8.8.8.8:53"
-    - "8.8.4.4:53"
-  timeout: "5s"
-  health_check:
+  port: 53
+  bind:
+    - 0.0.0.0
+    - "::"
+  udp_workers: 0
+  tcp_workers: 0
+  http:
     enabled: true
-    interval: "30s"
+    bind: "0.0.0.0:8080"
+    dashboard: true
+    auth_secret: "${secret}"
 
-# DNSSEC
+upstream:
+  strategy: round_robin
+  servers:
+    - 1.1.1.1:53
+    - 8.8.8.8:53
+    - 8.8.4.4:53
+  timeout: 5s
+  health_check: 30s
+  failover_timeout: 5s
+
+cache:
+  enabled: true
+  size: 10000
+  default_ttl: 3600
+  max_ttl: 86400
+  min_ttl: 300
+  negative_ttl: 60
+  prefetch: true
+  prefetch_threshold: 60
+  serve_stale: true
+
 dnssec:
   enabled: true
-  validation: "strict"
 
-# Zones (add your zones here)
+security:
+  rate_limit:
+    enabled: true
+    rate: 100
+    burst: 200
+  cookies:
+    enabled: true
+
+logging:
+  level: info
+  format: json
+  output: stdout
+  query_log:
+    enabled: false
+    file: /var/log/nothingdns/query.log
+
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    bind: ":9153"
+    path: /metrics
+
+cluster:
+  enabled: false
+  gossip_port: 7946
+  weight: 100
+  cache_sync: true
+
 zones: []
-
-# TLS (for DoT/DoH)
-# tls:
-#   enabled: false
-#   cert_file: "/etc/nothingdns/certs/server.crt"
-#   key_file: "/etc/nothingdns/certs/server.key"
-
-# Cluster (for HA)
-# cluster:
-#   enabled: false
-#   bind_addr: "0.0.0.0:7946"
-#   gossip_port: 7946
-#   seed_nodes: []
-
-# Monitoring
-# metrics:
-#   enabled: true
-#   addr: "127.0.0.1:9090"
+slave_zones: []
+blocklist:
+  enabled: false
 EOF
 
     if [ ! -w "${config_file}" ]; then
@@ -256,7 +263,7 @@ EOF
     fi
 
     info "Config created at ${config_file}"
-    info "auth_secret has been generated - save this for dashboard login!"
+    info "Auth secret generated - save this for dashboard login!"
 }
 
 # Setup systemd service
@@ -291,7 +298,7 @@ LimitNOFILE=1048576
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/nothingdns /var/lib/nothingdns
+ReadWritePaths=/etc/nothingdns /var/lib/nothingdns /var/log/nothingdns
 PrivateTmp=true
 
 # Logging
@@ -309,12 +316,14 @@ EOF
         info "Service already exists"
     fi
 
-    read -p "Enable and start nothingdns now? (Y/n): " -n 1 -r; echo
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-        sudo systemctl enable nothingdns
-        sudo systemctl restart nothingdns
-        sleep 2
-        sudo systemctl status nothingdns --no-pager || true
+    if is_interactive; then
+        read -p "Enable and start nothingdns now? (Y/n): " -n 1 -r; echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            sudo systemctl enable nothingdns
+            sudo systemctl restart nothingdns
+            sleep 2
+            sudo systemctl status nothingdns --no-pager || true
+        fi
     fi
 }
 
@@ -322,7 +331,7 @@ EOF
 setup_logging() {
     section "Setting Up Log Rotation"
 
-    if command -v systemd-cat &> /dev/null; then
+    if [ -d /etc/logrotate.d ] || [ -w /etc/logrotate.d ]; then
         cat > /tmp/nothingdns.logrotate << 'EOF'
 /var/log/nothingdns/*.log {
     daily
@@ -338,7 +347,11 @@ setup_logging() {
     endscript
 }
 EOF
-        sudo mv /tmp/nothingdns.logrotate /etc/logrotate.d/nothingdns
+        if [ -w /etc/logrotate.d ]; then
+            mv /tmp/nothingdns.logrotate /etc/logrotate.d/nothingdns
+        else
+            sudo mv /tmp/nothingdns.logrotate /etc/logrotate.d/nothingdns
+        fi
         sudo mkdir -p /var/log/nothingdns
         sudo chown nobody:nogroup /var/log/nothingdns
         info "Log rotation configured"
@@ -384,7 +397,7 @@ print_next_steps() {
 main() {
     echo ""
     echo "======================================"
-    echo -e "  ${CYAN}NothingDNS Master Setup${NC} v1.0"
+    echo -e "  ${CYAN}NothingDNS Master Setup${NC} v1.1"
     echo "======================================"
     echo ""
 

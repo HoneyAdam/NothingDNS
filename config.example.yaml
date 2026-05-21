@@ -1,4 +1,5 @@
 # NothingDNS Example Configuration
+# https://github.com/NothingDNS/NothingDNS
 # Copy to /etc/nothingdns/nothingdns.yaml and customize
 
 # =============================================================================
@@ -8,8 +9,12 @@ server:
   # DNS server bind address and port
   port: 53
   bind:
-    - 0.0.0.0          # Listen on all interfaces
-    - ::0              # Listen on IPv6 as well
+    - 0.0.0.0          # Listen on all IPv4 interfaces
+    - "::"              # Listen on IPv6 as well
+
+  # UDP/TCP worker threads (0 = auto-detect)
+  # udp_workers: 0
+  # tcp_workers: 0
 
   # HTTP API server (for REST API, DoH, Dashboard)
   http:
@@ -24,10 +29,17 @@ server:
     # Embedded web dashboard
     dashboard: true
 
-  # Worker pool sizes (auto-detected if not specified)
-  # workers:
-  #   udp: 32
-  #   tcp: 16
+  # DNS over TLS (DoT)
+  # xot:
+  #   enabled: true
+  #   cert_file: /etc/nothingdns/tls/server.crt
+  #   key_file: /etc/nothingdns/tls/server.key
+  #   bind: ":853"
+
+  # DNS over QUIC (DoQ)
+  # quic:
+  #   enabled: true
+  #   bind: ":853"
 
   # PID file path
   # pid_file: /var/run/nothingdns.pid
@@ -82,17 +94,24 @@ zones:
 # UPSTREAM / FORWARDING
 # =============================================================================
 upstream:
-  # Load balancing strategy: round_robin, random, weighted, geo
+  # Load balancing strategy: round_robin, random, fastest
   strategy: round_robin
 
   # Upstream DNS servers for forwarding
   servers:
     - 1.1.1.1:53        # Cloudflare
     - 8.8.8.8:53        # Google
+    - 8.8.4.4:53        # Google Secondary
     # - 9.9.9.9:53      # Quad9
 
-  # Timeout for upstream queries (seconds)
-  timeout: 5
+  # Timeout for upstream queries
+  timeout: 5s
+
+  # Health check interval
+  health_check: 30s
+
+  # Failover timeout
+  failover_timeout: 5s
 
   # HTTP/3 (DoQ) upstream (optional)
   # quic:
@@ -104,10 +123,13 @@ upstream:
 # CACHE CONFIGURATION
 # =============================================================================
 cache:
+  # Enable caching
+  enabled: true
+
   # Maximum number of entries
   size: 10000
 
-  # TTL ranges (seconds)
+  # TTL ranges
   min_ttl: 300           # 5 minutes
   max_ttl: 86400         # 24 hours
   default_ttl: 3600      # 1 hour
@@ -115,7 +137,7 @@ cache:
 
   # Prefetch popular domains nearing expiration
   prefetch: true
-  prefetch_threshold: 28800  # Trigger prefetch 8 hours before expiry
+  prefetch_threshold: 60  # Trigger prefetch when TTL remaining < threshold (seconds)
 
   # Serve stale cache when upstream is unavailable (RFC 8767)
   serve_stale: true
@@ -144,10 +166,10 @@ resolver:
   max_cname_depth: 10
 
   # Query timeout
-  timeout: 10
+  timeout: 5s
 
   # EDNS0 buffer size
-  edns0_buf_size: 1232
+  edns0_buffer_size: 4096
 
   # Qname minimization (RFC 7816) - enhances privacy
   qname_minimization: true
@@ -204,31 +226,31 @@ security:
 
     rules:
       # Allow only specific IP ranges
-      - action: allow
-        cidr: "10.0.0.0/8"
-      - action: allow
-        cidr: "172.16.0.0/12"
-      - action: allow
-        cidr: "192.168.0.0/16"
+      - name: allow-private-networks
+        action: allow
+        networks:
+          - 10.0.0.0/8
+          - 172.16.0.0/12
+          - 192.168.0.0/16
 
       # Deny specific IPs
-      # - action: deny
-      #   cidr: "192.0.2.0/24"
+      # - name: deny-test-net
+      #   action: deny
+      #   networks:
+      #     - 192.0.2.0/24
 
   # Rate limiting (queries per second per IP)
   rate_limit:
     enabled: true
-    queries_per_second: 100
-    burst: 200
+    rate: 100              # queries per second per client
+    burst: 200             # burst capacity
 
   # Response Rate Limiting (RRL) for amplification prevention
   rrl:
     enabled: true
     window: 5                    # seconds
     rate_limit: 100              # responses per second
-    # responses per window before rate limiting kicks in
     responses_per_window: 100
-    # Truncate responses larger than this (bytes)
     max_table_size: 10000
 
   # DNS Cookies (RFC 7873)
@@ -322,7 +344,7 @@ transfer:
     bind: "0.0.0.0:53"          # Usually same as main server
 
   # XoT (DNS over TLS, RFC 9103)
-  xfr:
+  xot:
     enabled: true
     bind: "0.0.0.0:853"         # TLS port
 
@@ -371,7 +393,7 @@ auth:
 
   # JWT configuration
   jwt:
-    secret: "YOUR_JWT_SECRET_HERE"  # Minimum 32 bytes
+    secret: "YOUR_JWT_SECRET_HERE"  # Minimum 32 bytes, Generate with: openssl rand -base64 32
     expiry: 86400                # Token expiry in seconds (24 hours)
 
   # Legacy token authentication
@@ -424,6 +446,7 @@ metrics:
   # Prometheus metrics endpoint
   prometheus:
     enabled: true
+    bind: ":9153"
     path: /metrics
 
   # OpenTelemetry tracing
@@ -449,7 +472,7 @@ logging:
   # Query logging (for audit)
   query_log:
     enabled: false
-    path: /var/log/nothingdns/query.log
+    file: /var/log/nothingdns/query.log
     # Rotate when file reaches this size
     max_size: 100     # MB
     max_backups: 10
@@ -458,7 +481,7 @@ logging:
   # Reload logging
   reload_log:
     enabled: true
-    path: /var/log/nothingdns/reload.log
+    file: /var/log/nothingdns/reload.log
 
 # =============================================================================
 # IDNA (Internationalized Domain Names)
@@ -507,3 +530,17 @@ odoh:
   target:
     enabled: false
     # listen: "127.0.0.1:8081"
+
+# =============================================================================
+# SLAVE ZONES (AXFR/IXFR)
+# =============================================================================
+slave_zones: []
+# Example:
+# - name: example.com
+#   type: slave
+#   masters:
+#     - 192.0.2.1:53
+#   # tsig:
+#   #   key_name: "transfer-key"
+#   #   algorithm: hmac-sha256
+#   #   secret: "YOUR_TSIG_SECRET_HERE"
