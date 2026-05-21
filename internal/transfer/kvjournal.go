@@ -88,8 +88,32 @@ func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) err
 		return fmt.Errorf("close file: %w", err)
 	}
 
-	s.trimJournalLocked(zoneName)
+	s.trimAfterWriteLocked(zoneName)
 	return nil
+}
+
+// trimAfterWriteLocked trims old journal entries after a write.
+// Caller must hold s.mu.
+func (s *KVJournalStore) trimAfterWriteLocked(zoneName string) {
+	dir := s.zoneDir(zoneName)
+	entries, err := loadEntriesFromDir(dir, s.hmacKey)
+	if err != nil {
+		return
+	}
+
+	if len(entries) <= s.maxJournalSize {
+		return
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Serial > entries[j].Serial
+	})
+
+	toRemove := entries[s.maxJournalSize:]
+	for _, entry := range toRemove {
+		filename := filepath.Join(dir, fmt.Sprintf("%d.journal", entry.Serial))
+		os.Remove(filename)
+	}
 }
 
 // writeEntry writes a single journal entry in TLV+HMAC format.
@@ -144,7 +168,7 @@ func (s *KVJournalStore) trimJournalLocked(zoneName string) error {
 	dir := s.zoneDir(zoneName)
 	entries, err := loadEntriesFromDir(dir, s.hmacKey)
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if len(entries) <= s.maxJournalSize {
@@ -188,18 +212,20 @@ func loadEntriesFromDir(dir string, hmacKey []byte) ([]*IXFRJournalEntry, error)
 
 		var entry IXFRJournalEntry
 		func() {
-			defer file.Close()
 			if hmacKey != nil {
 				if err := readEntryHMAC(file, &entry, hmacKey); err != nil {
+					file.Close()
 					os.Remove(filename)
 					return
 				}
 			} else {
 				if err := json.NewDecoder(file).Decode(&entry); err != nil {
+					file.Close()
 					os.Remove(filename)
 					return
 				}
 			}
+			file.Close()
 			entries = append(entries, &entry)
 		}()
 	}
@@ -231,7 +257,9 @@ func readEntryHMAC(f *os.File, entry *IXFRJournalEntry, key []byte) error {
 	storedHMAC := record[payloadLen:]
 	payload := record[:payloadLen]
 
-	expectedHMAC := hmac.New(sha256.New, key).Sum(payload)
+	hm := hmac.New(sha256.New, key)
+	hm.Write(payload)
+	expectedHMAC := hm.Sum(nil)
 	if subtle.ConstantTimeCompare(storedHMAC, expectedHMAC) != 1 {
 		return fmt.Errorf("integrity check failed")
 	}
@@ -244,7 +272,7 @@ func sanitizeFilename(name string) string {
 	result := make([]byte, 0, len(name))
 	for i := 0; i < len(name); i++ {
 		c := name[i]
-		if c == '/' || c == '\\' || c == ':' || c == 0 {
+		if c == '/' || c == '\\' || c == ':' || c == 0 || c == '.' {
 			c = '_'
 		}
 		result = append(result, c)

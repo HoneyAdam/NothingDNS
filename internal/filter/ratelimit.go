@@ -132,6 +132,23 @@ func (rl *RateLimiter) SetEnabled(enabled bool) {
 	rl.enabled = enabled
 }
 
+// Reload updates rate limiter settings from config.
+func (rl *RateLimiter) Reload(cfg config.RRLConfig) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	if cfg.Rate > 0 {
+		rl.rate = float64(cfg.Rate)
+	}
+	if cfg.Burst > 0 {
+		rl.burst = cfg.Burst
+	}
+	if cfg.MaxBuckets > 0 {
+		rl.maxBuckets = cfg.MaxBuckets
+	}
+	rl.enabled = cfg.Enabled
+}
+
 // cleanup periodically removes stale buckets.
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(60 * time.Second)

@@ -255,8 +255,8 @@ tags:
 	}
 
 	// Test GetInt
-	if port := serverNode.GetInt("port"); port != 53 {
-		t.Errorf("expected port 53, got %d", port)
+	if port, err := serverNode.GetInt("port"); err != nil || port != 53 {
+		t.Errorf("expected port 53, got %d, err=%v", port, err)
 	}
 
 	// Test GetBool
@@ -781,8 +781,9 @@ func TestParserBlockSequenceInlineMappingNumberValue(t *testing.T) {
 	if child.Type != NodeMapping {
 		t.Fatalf("expected Mapping, got %v", child.Type)
 	}
-	if child.GetInt("count") != 42 {
-		t.Errorf("expected count 42, got %d", child.GetInt("count"))
+	count, err := child.GetInt("count")
+	if err != nil || count != 42 {
+		t.Errorf("expected count 42, got %d, err=%v", count, err)
 	}
 }
 

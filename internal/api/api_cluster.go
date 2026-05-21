@@ -109,7 +109,9 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if s.requireOperator(w, r) {
+	// Cluster join/leave are infrastructure-level operations that change
+	// cluster topology and query routing for all clients. Require admin.
+	if s.requireAdmin(w, r) {
 		return
 	}
 	if s.cluster == nil {
@@ -148,7 +150,7 @@ func (s *Server) handleClusterLeave(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if s.requireOperator(w, r) {
+	if s.requireAdmin(w, r) {
 		return
 	}
 	if s.cluster == nil {

@@ -378,7 +378,7 @@ func TestSanitizeFilename_CovExtra(t *testing.T) {
 	cases := []struct {
 		input, want string
 	}{
-		{"example.com.", "example.com."},
+		{"example.com.", "example_com_"},
 		{"a/b\\c:d", "a_b_c_d"},
 		{"normal", "normal"},
 	}
@@ -1777,3 +1777,135 @@ func TestFormatTKEYTime_Zero_CovExtra(t *testing.T) {
 
 // This is a compile-time check that fmt is imported
 var _ = fmt.Sprintf
+
+// ---------------------------------------------------------------------------
+// XoTServer changeToRR tests
+// ---------------------------------------------------------------------------
+
+func TestXoTServer_changeToRR_A_Valid_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	change := zone.RecordChange{
+		Name: "test.example.com.",
+		Type: protocol.TypeA,
+		TTL:  300,
+		RData: "192.0.2.1",
+	}
+	rr, err := srv.changeToRR(change)
+	if err != nil {
+		t.Fatalf("changeToRR() error: %v", err)
+	}
+	if rr.Name.String() != "test.example.com." {
+		t.Errorf("Name = %q, want test.example.com.", rr.Name.String())
+	}
+	if rr.Type != protocol.TypeA {
+		t.Errorf("Type = %d, want TypeA", rr.Type)
+	}
+	if rr.TTL != 300 {
+		t.Errorf("TTL = %d, want 300", rr.TTL)
+	}
+}
+
+func TestXoTServer_changeToRR_AAAA_Valid_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	change := zone.RecordChange{
+		Name: "test.example.com.",
+		Type: protocol.TypeAAAA,
+		TTL:  300,
+		RData: "2001:db8::1",
+	}
+	rr, err := srv.changeToRR(change)
+	if err != nil {
+		t.Fatalf("changeToRR() error: %v", err)
+	}
+	if rr.Type != protocol.TypeAAAA {
+		t.Errorf("Type = %d, want TypeAAAA", rr.Type)
+	}
+}
+
+func TestXoTServer_changeToRR_MX_Valid_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	change := zone.RecordChange{
+		Name: "example.com.",
+		Type: protocol.TypeMX,
+		TTL:  300,
+		RData: "10 mail.example.com.",
+	}
+	rr, err := srv.changeToRR(change)
+	if err != nil {
+		t.Fatalf("changeToRR() error: %v", err)
+	}
+	if rr.Type != protocol.TypeMX {
+		t.Errorf("Type = %d, want TypeMX", rr.Type)
+	}
+}
+
+func TestXoTServer_changeToRR_InvalidName_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	change := zone.RecordChange{
+		Name:  "invalid\x00name",
+		Type:  protocol.TypeA,
+		TTL:   300,
+		RData: "192.0.2.1",
+	}
+	_, err := srv.changeToRR(change)
+	if err == nil {
+		t.Error("expected error for invalid name")
+	}
+}
+
+func TestXoTServer_changeToRR_InvalidRData_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	change := zone.RecordChange{
+		Name:  "test.example.com.",
+		Type:  protocol.TypeA,
+		TTL:   300,
+		RData: "not-an-ip",
+	}
+	_, err := srv.changeToRR(change)
+	if err == nil {
+		t.Error("expected error for invalid RData")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XoTServer SetJournalStore test
+// ---------------------------------------------------------------------------
+
+func TestXoTServer_SetJournalStore_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	if srv.journalStore != nil {
+		t.Error("expected nil journalStore initially")
+	}
+
+	store := NewKVJournalStore(t.TempDir())
+	srv.SetJournalStore(store)
+
+	if srv.journalStore != store {
+		t.Error("journalStore not set correctly")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XoTServer sortRecordsCanonically with empty and single records
+// ---------------------------------------------------------------------------
+
+func TestXoTServer_sortRecordsCanonically_Empty_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	records := []*protocol.ResourceRecord{}
+	srv.sortRecordsCanonically(records)
+	if len(records) != 0 {
+		t.Errorf("expected 0 records, got %d", len(records))
+	}
+}
+
+func TestXoTServer_sortRecordsCanonically_Single_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+	name, _ := protocol.ParseName("test.example.com.")
+	records := []*protocol.ResourceRecord{
+		{Name: name, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300},
+	}
+	srv.sortRecordsCanonically(records)
+	if len(records) != 1 {
+		t.Errorf("expected 1 record, got %d", len(records))
+	}
+}

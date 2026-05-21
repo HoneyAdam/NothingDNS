@@ -107,14 +107,14 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	s.bootstrapMu.Lock()
 	defer s.bootstrapMu.Unlock()
 
+	// Get client IP for localhost check — inside lock to ensure atomic check
+	ip := getClientIP(r)
+	isLocalhost := ip == "127.0.0.1" || ip == "::1"
+
 	if s.authStore == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Auth not configured")
 		return
 	}
-
-	// Get client IP for localhost check
-	ip := getClientIP(r)
-	isLocalhost := ip == "127.0.0.1" || ip == "::1"
 
 	users := s.authStore.ListUsers()
 

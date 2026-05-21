@@ -235,10 +235,25 @@ func (s *KVStore) readTLV(r io.Reader) error {
 	return nil
 }
 
-// readGOB reads legacy GOB format (deprecated).
+// readGOB reads legacy GOB format (deprecated — migrations should convert to JSON/TLV).
+// SECURITY: Decodes into fixed *bucketData type (not interface{}). The decoder can
+// instantiate nested map entries but cannot instantiate arbitrary types since the
+// destination type is pinned to the known struct at compile time. We add a post-decode
+// sanity check to catch malformed data.
 func (s *KVStore) readGOB(f *os.File) error {
-	if err := gob.NewDecoder(f).Decode(&s.root); err != nil {
-		return err
+	// Limit reader to prevent memory exhaustion from large GOB streams
+	lr := io.LimitReader(f, 1<<20) // 1MB max
+	if err := gob.NewDecoder(lr).Decode(&s.root); err != nil {
+		return fmt.Errorf("gob decode: %w", err)
+	}
+	if s.root == nil {
+		return fmt.Errorf("gob decoded nil root")
+	}
+	if s.root.Entries == nil {
+		s.root.Entries = make(map[string][]byte)
+	}
+	if s.root.Buckets == nil {
+		s.root.Buckets = make(map[string]*bucketData)
 	}
 	return nil
 }

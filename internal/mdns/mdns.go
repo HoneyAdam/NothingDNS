@@ -3,6 +3,8 @@
 package mdns
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"strings"
@@ -292,14 +294,12 @@ func (r *Responder) receiveLoop() {
 // handlePacket processes an mDNS packet.
 func (r *Responder) handlePacket(data []byte, src *net.UDPAddr) {
 	// Parse DNS message
-	// Note: We'd need to implement full parsing here
-	// For now, use raw packet inspection
 	if len(data) < 12 {
 		return
 	}
 
-	// Check if query or response
-	flags := uint16(data[2])<<8 | uint16(data[3])
+	// Check if query or response using header flags
+	flags := binary.BigEndian.Uint16(data[2:4])
 	isResponse := (flags & 0x8000) != 0
 
 	if isResponse && r.config.Browser {
@@ -314,8 +314,6 @@ func (r *Responder) handlePacket(data []byte, src *net.UDPAddr) {
 // handleQuery processes an mDNS query and sends a response if applicable.
 func (r *Responder) handleQuery(data []byte, src *net.UDPAddr) {
 	// Parse questions and determine if we have answers
-	// This is a simplified implementation
-
 	// Check for hostname queries
 	r.hostnamesMu.RLock()
 	for hostname, ip := range r.hostnames {
@@ -352,7 +350,6 @@ func (r *Responder) handleResponse(data []byte, src *net.UDPAddr) {
 
 // queryMatches checks if a query matches a hostname.
 func (r *Responder) queryMatches(data []byte, hostname string) bool {
-	// Simplified: search for hostname in raw packet
 	return strings.Contains(string(data), hostname)
 }
 
@@ -365,10 +362,12 @@ func (r *Responder) queryMatchesService(data []byte, svc *Service) bool {
 
 // sendHostnameResponse sends an A/AAAA record response for a hostname query.
 func (r *Responder) sendHostnameResponse(hostname string, ip net.IP, dst *net.UDPAddr) {
-	// Build mDNS response packet
 	// For IPv4, send A record
 	if ip4 := ip.To4(); ip4 != nil {
 		r.sendARecord(hostname, ip4, dst)
+	} else {
+		// For IPv6, send AAAA record
+		r.sendAAAARecord(hostname, ip, dst)
 	}
 }
 
@@ -381,28 +380,223 @@ func (r *Responder) sendServiceResponse(svc *Service, dst *net.UDPAddr) {
 
 // sendARecord sends an A record response.
 func (r *Responder) sendARecord(name string, ip net.IP, dst *net.UDPAddr) {
-	// Build and send A record response
-	// Implementation would build proper DNS packet
+	// Build DNS response message
+	msg := protocol.NewMessage(protocol.Header{
+		ID:     r.generateTransactionID(),
+		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		QDCount: 0,
+		ANCount: 1,
+	})
+
+	// Create A record data
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return // Not an IPv4 address
+	}
+
+	// Copy IPv4 bytes to [4]byte
+	var addr4 [4]byte
+	copy(addr4[:], ip4)
+
+	rdata := &protocol.RDataA{Address: addr4}
+	rr, err := protocol.NewResourceRecord(name, protocol.TypeA, protocol.ClassIN, DefaultTTL, rdata)
+	if err != nil {
+		return
+	}
+	msg.Answers = append(msg.Answers, rr)
+
+	// Send the response
+	r.sendMulticast(msg, dst)
+}
+
+// sendAAAARecord sends an AAAA record response.
+func (r *Responder) sendAAAARecord(name string, ip net.IP, dst *net.UDPAddr) {
+	// Build DNS response message
+	msg := protocol.NewMessage(protocol.Header{
+		ID:     r.generateTransactionID(),
+		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		QDCount: 0,
+		ANCount: 1,
+	})
+
+	// Create AAAA record data
+	var addr16 [16]byte
+	copy(addr16[:], ip)
+
+	rdata := &protocol.RDataAAAA{Address: addr16}
+	rr, err := protocol.NewResourceRecord(name, protocol.TypeAAAA, protocol.ClassIN, DefaultTTL, rdata)
+	if err != nil {
+		return
+	}
+	msg.Answers = append(msg.Answers, rr)
+
+	// Send the response
+	r.sendMulticast(msg, dst)
 }
 
 // sendSRVRecord sends an SRV record response.
 func (r *Responder) sendSRVRecord(svc *Service, dst *net.UDPAddr) {
-	// Build and send SRV record
+	// Build DNS response message
+	msg := protocol.NewMessage(protocol.Header{
+		ID:     r.generateTransactionID(),
+		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		QDCount: 0,
+		ANCount: 1,
+	})
+
+	// Parse target hostname
+	targetName, err := protocol.ParseName(svc.HostName)
+	if err != nil {
+		return
+	}
+
+	// Create SRV record data (RFC 2782)
+	rdata := &protocol.RDataSRV{
+		Priority: 0,
+		Weight:   0,
+		Port:     uint16(svc.Port),
+		Target:   targetName,
+	}
+	rr, err := protocol.NewResourceRecord(svc.FullServiceName(), protocol.TypeSRV, protocol.ClassIN, svc.TTL, rdata)
+	if err != nil {
+		return
+	}
+	msg.Answers = append(msg.Answers, rr)
+
+	// Send the response
+	r.sendMulticast(msg, dst)
 }
 
 // sendTXTRecord sends a TXT record response.
 func (r *Responder) sendTXTRecord(svc *Service, dst *net.UDPAddr) {
-	// Build and send TXT record
+	// Build DNS response message
+	msg := protocol.NewMessage(protocol.Header{
+		ID:     r.generateTransactionID(),
+		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		QDCount: 0,
+		ANCount: 1,
+	})
+
+	// Create TXT record data from service TXT map
+	var txtStrings []string
+	for k, v := range svc.TXT {
+		txtStrings = append(txtStrings, k+"="+v)
+	}
+	// Ensure non-empty TXT (RFC 6763 requires at least one string)
+	if len(txtStrings) == 0 {
+		txtStrings = []string{""}
+	}
+
+	rdata := &protocol.RDataTXT{Strings: txtStrings}
+	rr, err := protocol.NewResourceRecord(svc.FullServiceName(), protocol.TypeTXT, protocol.ClassIN, svc.TTL, rdata)
+	if err != nil {
+		return
+	}
+	msg.Answers = append(msg.Answers, rr)
+
+	// Send the response
+	r.sendMulticast(msg, dst)
 }
 
 // sendQuery sends an mDNS query.
 func (r *Responder) sendQuery(name string, qtype uint16) {
-	// Build and send query packet
+	// Build mDNS query message
+	q, err := protocol.NewQuestion(name, qtype, protocol.ClassIN)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Debugf("mDNS: failed to create question for %s: %v", name, err)
+		}
+		return
+	}
+
+	msg := protocol.NewMessage(protocol.Header{
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewQueryFlags(),
+		QDCount: 1,
+	})
+	msg.Questions = append(msg.Questions, q)
+
+	// Send to multicast address
+	multicastAddr := &net.UDPAddr{
+		IP:   net.ParseIP(r.config.MulticastIP),
+		Port: r.config.Port,
+	}
+	r.sendMulticast(msg, multicastAddr)
 }
 
-// announceService sends service announcement ( unsolicited response).
+// sendGoodbye sends a goodbye packet (TTL=0) for a service.
+func (r *Responder) sendGoodbye(fullName string) {
+	// Build DNS response message with TTL=0 to indicate removal
+	msg := protocol.NewMessage(protocol.Header{
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
+		QDCount: 0,
+		ANCount: 2, // SRV and TXT
+	})
+
+	// Parse empty target for SRV
+	emptyName, _ := protocol.ParseName("")
+
+	// Add SRV record with TTL=0 (RFC 6762 Section 7.1)
+	srvRR, err := protocol.NewResourceRecord(fullName, protocol.TypeSRV, protocol.ClassIN, 0,
+		&protocol.RDataSRV{Priority: 0, Weight: 0, Port: 0, Target: emptyName})
+	if err == nil {
+		msg.Answers = append(msg.Answers, srvRR)
+	}
+
+	// Add TXT record with TTL=0
+	txtRR, err := protocol.NewResourceRecord(fullName, protocol.TypeTXT, protocol.ClassIN, 0,
+		&protocol.RDataTXT{Strings: []string{""}})
+	if err == nil {
+		msg.Answers = append(msg.Answers, txtRR)
+	}
+
+	// Send to multicast address
+	multicastAddr := &net.UDPAddr{
+		IP:   net.ParseIP(r.config.MulticastIP),
+		Port: r.config.Port,
+	}
+	r.sendMulticast(msg, multicastAddr)
+}
+
+// sendMulticast sends a DNS message to the specified UDP address.
+func (r *Responder) sendMulticast(msg *protocol.Message, dst *net.UDPAddr) {
+	if r.conn == nil {
+		return
+	}
+
+	// Pack the message to wire format
+	buf := make([]byte, msg.WireLength())
+	n, err := msg.Pack(buf)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Debugf("mDNS: failed to pack message: %v", err)
+		}
+		return
+	}
+
+	// Write to multicast socket
+	_, err = r.conn.WriteToUDP(buf[:n], dst)
+	if err != nil {
+		if r.logger != nil {
+			r.logger.Debugf("mDNS: failed to send multicast: %v", err)
+		}
+	}
+}
+
+// generateTransactionID generates a random transaction ID for mDNS messages.
+// RFC 6762 recommends using random IDs to avoid collisions.
+func (r *Responder) generateTransactionID() uint16 {
+	var b [2]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to time-based if crypto/rand fails
+		return uint16(time.Now().UnixNano() >> 16)
+	}
+	return binary.BigEndian.Uint16(b[:])
+}
+
+// announceService sends service announcement (unsolicited response).
 func (r *Responder) announceService(svc *Service) {
-	// Send multicast announcement
 	multicastAddr := &net.UDPAddr{
 		IP:   net.ParseIP(r.config.MulticastIP),
 		Port: r.config.Port,
@@ -417,11 +611,6 @@ func (r *Responder) announceHostname(hostname string, ip net.IP) {
 		Port: r.config.Port,
 	}
 	r.sendHostnameResponse(hostname, ip, multicastAddr)
-}
-
-// sendGoodbye sends a goodbye packet (TTL=0) for a service.
-func (r *Responder) sendGoodbye(fullName string) {
-	// Send packet with TTL=0 to indicate service removal
 }
 
 // probeHostname probes for hostname conflicts (RFC 6762 Section 8.1).

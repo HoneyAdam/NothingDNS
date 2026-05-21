@@ -355,6 +355,12 @@ func run() error {
 		cookieJar:     cookieJar,
 		mdnsResponder: mdnsResponder,
 		dsoManager:    dsoManager,
+		zoneProvider: NewMultiZoneProvider(
+			zones,
+			zoneManagerInstance,
+			kvPersistence,
+			zone.BuildRadixTree(zones),
+		),
 	}
 
 	// Initialize iterative recursive resolver if enabled
@@ -766,7 +772,8 @@ func run() error {
 
 	// Write PID file if configured
 	if cfg.Server.PIDFile != "" {
-		if err := os.WriteFile(cfg.Server.PIDFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644); err != nil {
+		pidStr := fmt.Sprintf("%d\n", os.Getpid())
+		if err := os.WriteFile(cfg.Server.PIDFile, []byte(pidStr), 0644); err != nil {
 			logger.Warnf("Failed to write PID file %s: %v", cfg.Server.PIDFile, err)
 		} else {
 			logger.Infof("Wrote PID to %s", cfg.Server.PIDFile)
@@ -940,6 +947,19 @@ func run() error {
 					stats := rpzEngine.Stats()
 					logger.Infof("Reloaded RPZ with %d rules from %d files", stats.TotalRules, stats.Files)
 				}
+			}
+			// Reload ACL rules
+			if aclChecker != nil {
+				if err := aclChecker.Reload(reloadCfg.ACL); err != nil {
+					logger.Warnf("Failed to reload ACL rules: %v", err)
+				} else {
+					logger.Infof("Reloaded ACL with %d rules", len(reloadCfg.ACL))
+				}
+			}
+			// Reload rate limiter
+			if rateLimiter != nil {
+				rateLimiter.Reload(reloadCfg.RRL)
+				logger.Infof("Reloaded rate limiter: %d qps, burst %d", reloadCfg.RRL.Rate, reloadCfg.RRL.Burst)
 			}
 			// Reload split-horizon views from the new config
 			if len(reloadCfg.Views) > 0 {

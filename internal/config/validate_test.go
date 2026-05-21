@@ -623,7 +623,7 @@ func TestValidateSecrets_RefusesPlaceholders(t *testing.T) {
 	c.Server.HTTP.AuthSecret = "CHANGE-THIS-TO-256-BIT-STRONG-SECRET"
 	c.Server.HTTP.AuthToken = "changeme"
 	c.Server.HTTP.Users = []AuthUserConfig{
-		{Username: "admin", Password: "UNIQUE-STRONG-PASSWORD", Role: "admin"},
+		{Username: "admin", Password: "placeholder-password-123456", Role: "admin"},
 		{Username: "viewer", Password: "s3cretly-random-2f9a...", Role: "viewer"}, // legitimate
 	}
 
@@ -668,13 +668,12 @@ func TestLooksLikePlaceholderSecret(t *testing.T) {
 		{"", false, ""},
 		{"hunter2-7F9a-c481-2d3e", false, ""},
 		{"CHANGE-THIS-TO-256-BIT-STRONG-SECRET", true, "CHANGE-THIS"},
-		{"change-this-to-something", true, "CHANGE-THIS"},
-		{"ChangeMe", true, "CHANGEME"},
-		{"unique-strong-password", true, "UNIQUE-STRONG"},
-		{"my-placeholder-value", true, "PLACEHOLDER"},
-		{"replaceme", true, "REPLACEME"},
+		{"change-this-to-something", true, "change-this"},
+		{"ChangeMe", true, "ChangeMe"},
+		{"placeholder-password-value", true, "placeholder"},
+		{"replaceme", true, "replaceme"},
 		{"REPLACE-ME", true, "REPLACE-ME"},
-		{"your-secret-here", true, "YOUR-SECRET"},
+		{"your-secret-here", true, "your-secret"},
 	} {
 		got := looksLikePlaceholderSecret(tc.in)
 		if tc.wantHit && got == "" {

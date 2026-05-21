@@ -130,6 +130,17 @@ type JointConfigProposal struct {
 	Proposed time.Time // When this was proposed
 }
 
+// StateMachine is the interface for the state machine that applies snapshots.
+// Implemented by ZoneStateMachine.
+type StateMachine interface {
+	// Apply applies a Raft log entry to the state machine.
+	Apply(entry) error
+	// Snapshot returns a serialized snapshot of the current state.
+	Snapshot() ([]byte, error)
+	// Restore restores state from a serialized snapshot.
+	Restore([]byte) error
+}
+
 // EntryType distinguishes different entry types.
 type EntryType uint8
 
@@ -169,6 +180,10 @@ type Node struct {
 	jointConfig       *JointConfig         // Current joint configuration (nil = using simple config)
 	jointConfigIdx    Index                // Index of joint config entry in log
 	pendingConfChange *JointConfigProposal // Pending configuration change proposal
+
+	// State machine for applying snapshots (optional, set by ClusterIntegration)
+	// When set, snapshot install will restore state from snapshot data
+	stateMachine StateMachine
 
 	// Channels
 	voteCh       chan VoteRequest    // Incoming vote requests from RPC
@@ -627,6 +642,7 @@ func (n *Node) HandleAppendRequest(req AppendRequest) AppendResponse {
 }
 
 // HandleSnapshotRequest is the exported RPC handler for snapshot requests.
+// Installs a snapshot from the leader, restoring state machine state.
 func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -641,10 +657,20 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 		n.votedFor = ""
 	}
 
+	// If we have a state machine and snapshot data, restore it
+	if req.Data != nil && len(req.Data) > 0 && n.stateMachine != nil {
+		if err := n.stateMachine.Restore(req.Data); err != nil {
+			// Log error but continue with snapshot install
+			// The snapshot install still updates indices even if state restore fails
+			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+		}
+	}
+
+	// Install snapshot: update indices and clear log
 	n.lastSnapshot = req.LastIndex
 	n.lastApplied = req.LastIndex
 	n.commitIndex = req.LastIndex
-	n.log = make([]entry, 0)
+	n.log = make([]entry, 0) // Discard all log entries before snapshot
 }
 
 // handleAppendResponse handles an AppendEntries response from a peer.
@@ -679,6 +705,7 @@ func (n *Node) handleAppendResponse(resp AppendResponse) {
 }
 
 // handleSnapshotRequest handles a snapshot install request.
+// This is the internal version used for local snapshot installation.
 func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -693,8 +720,14 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 		n.votedFor = ""
 	}
 
-	// Install snapshot
-	// (Simplified — real implementation would stream the snapshot)
+	// If we have a state machine and snapshot data, restore it
+	if req.Data != nil && len(req.Data) > 0 && n.stateMachine != nil {
+		if err := n.stateMachine.Restore(req.Data); err != nil {
+			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+		}
+	}
+
+	// Install snapshot: update indices and clear log
 	n.lastSnapshot = req.LastIndex
 	n.lastApplied = req.LastIndex
 	n.commitIndex = req.LastIndex
@@ -1256,4 +1289,12 @@ func (n *Node) CommitCh() <-chan Commit {
 // ApplyCh returns the apply channel.
 func (n *Node) ApplyCh() <-chan Apply {
 	return n.applyCh
+}
+
+// SetStateMachine sets the state machine for applying snapshots.
+// This should be called before starting the node.
+func (n *Node) SetStateMachine(sm StateMachine) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.stateMachine = sm
 }

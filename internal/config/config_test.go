@@ -3047,7 +3047,11 @@ func TestNodeGetIntNonScalarChild(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := tt.node.GetInt(tt.key)
+			result, err := tt.node.GetInt(tt.key)
+			if err != nil {
+				t.Errorf("GetInt(%q) unexpected error: %v", tt.key, err)
+				return
+			}
 			if result != tt.expected {
 				t.Errorf("GetInt(%q) = %d, want %d", tt.key, result, tt.expected)
 			}

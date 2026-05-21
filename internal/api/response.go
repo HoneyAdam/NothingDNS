@@ -409,3 +409,46 @@ type SlaveZoneResponse struct {
 type SlaveZonesResponse struct {
 	SlaveZones []SlaveZoneResponse `json:"slave_zones"`
 }
+
+// ReverseDNSChange represents a single change in bulk PTR generation.
+type ReverseDNSChange struct {
+	IP        string `json:"ip"`
+	PTRName   string `json:"ptrName"`
+	AName     string `json:"aName,omitempty"`
+	Action    string `json:"action"` // add, override, skip
+	PTRExist  bool   `json:"ptrExist"`
+	AExist    bool   `json:"aExist,omitempty"`
+	OldPTR    string `json:"oldPtr,omitempty"`
+	OldA      string `json:"oldA,omitempty"`
+	RevRecord string `json:"revRecord"`
+}
+
+// ReverseDNSPreviewResponse is returned by bulk PTR preview.
+type ReverseDNSPreviewResponse struct {
+	Preview      bool               `json:"preview"`
+	Total        int                `json:"total"`
+	WillAdd      int                `json:"willAdd"`
+	WillAddA     int                `json:"willAddA"`
+	WillSkip     int                `json:"willSkip"`
+	WillOverride int                `json:"willOverride"`
+	Changes      []ReverseDNSChange `json:"changes"`
+}
+
+// BulkPTRResultResponse is returned after bulk PTR creation.
+type BulkPTRResultResponse struct {
+	Added   int `json:"added"`
+	AddedA  int `json:"addedA"`
+	Exists  int `json:"exists"`
+	ExistsA int `json:"existsA"`
+	Skipped int `json:"skipped"`
+}
+
+// PTRLookupResponse is returned by PTR lookup.
+type PTRLookupResponse struct {
+	IP      string `json:"ip"`
+	PTR     string `json:"ptr"`
+	PTRFQDN string `json:"ptrFQDN"`
+	Target  string `json:"target,omitempty"`
+	TTL     uint32 `json:"ttl,omitempty"`
+	Found   bool   `json:"found"`
+}

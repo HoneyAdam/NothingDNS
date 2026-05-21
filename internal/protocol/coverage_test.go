@@ -969,16 +969,20 @@ func TestCalculateDSDigestSHA1(t *testing.T) {
 	}
 }
 
-func TestCalculateDSDigestGOSTUnsupported(t *testing.T) {
+func TestCalculateDSDigestGOST(t *testing.T) {
 	dnskey := &RDataDNSKEY{
 		Flags:     DNSKEYFlagZone,
 		Protocol:  3,
 		Algorithm: AlgorithmRSASHA256,
 		PublicKey: []byte{0x01, 0x02, 0x03, 0x04},
 	}
-	_, err := CalculateDSDigest("example.com.", dnskey, 3) // GOST - not implemented
-	if err == nil {
-		t.Error("CalculateDSDigest should fail for GOST (not implemented)")
+	digest, err := CalculateDSDigest("example.com.", dnskey, 3) // GOST
+	if err != nil {
+		t.Fatalf("CalculateDSDigest(GOST) failed: %v", err)
+	}
+	// GOST R 34.11-94 produces a 32-byte hash
+	if len(digest) != 32 {
+		t.Errorf("GOST digest length = %d, want 32", len(digest))
 	}
 }
 

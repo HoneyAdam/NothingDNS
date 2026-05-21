@@ -1,5 +1,7 @@
 package config
 
+import "fmt"
+
 // NodeType represents the type of a YAML node.
 type NodeType int
 
@@ -73,10 +75,11 @@ func (n *Node) GetString(key string) string {
 }
 
 // GetInt returns an int value for the given key, or 0 if not found.
-func (n *Node) GetInt(key string) int {
+// GetInt returns an int value for the given key, or 0 with an error on overflow.
+func (n *Node) GetInt(key string) (int, error) {
 	child := n.Get(key)
 	if child == nil || child.Type != NodeScalar {
-		return 0
+		return 0, nil
 	}
 	var val int
 	// Basic parsing with overflow protection
@@ -85,12 +88,12 @@ func (n *Node) GetInt(key string) int {
 			digit := int(c - '0')
 			// Check for overflow before multiplying and adding
 			if val > (1<<31-1-digit)/10 {
-				return 0 // Overflow, return zero
+				return 0, fmt.Errorf("integer overflow for key %q", key)
 			}
 			val = val*10 + digit
 		}
 	}
-	return val
+	return val, nil
 }
 
 // GetBool returns a bool value for the given key, or false if not found.

@@ -168,6 +168,7 @@ func (p *Parser) parseMapping(indent int) (*Node, error) {
 		return nil, fmt.Errorf("yaml nesting depth exceeds maximum (%d levels) at line %d", maxYAMLDepth, p.current.Line)
 	}
 	p.depth++
+	defer func() { p.depth-- }()
 	node := &Node{
 		Type: NodeMapping,
 		Line: p.current.Line,
@@ -304,6 +305,7 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 		return nil, fmt.Errorf("yaml nesting depth exceeds maximum (%d levels) at line %d", maxYAMLDepth, p.current.Line)
 	}
 	p.depth++
+	defer func() { p.depth-- }()
 	node := &Node{
 		Type: NodeSequence,
 		Line: p.current.Line,
@@ -634,6 +636,7 @@ func (p *Parser) parseFlowMapping() (*Node, error) {
 		return nil, fmt.Errorf("yaml nesting depth exceeds maximum (%d levels) at line %d", maxYAMLDepth, p.current.Line)
 	}
 	p.depth++
+	defer func() { p.depth-- }()
 	node := &Node{
 		Type: NodeMapping,
 		Line: p.current.Line,
@@ -700,6 +703,7 @@ func (p *Parser) parseFlowSequence() (*Node, error) {
 		return nil, fmt.Errorf("yaml nesting depth exceeds maximum (%d levels) at line %d", maxYAMLDepth, p.current.Line)
 	}
 	p.depth++
+	defer func() { p.depth-- }()
 	node := &Node{
 		Type: NodeSequence,
 		Line: p.current.Line,

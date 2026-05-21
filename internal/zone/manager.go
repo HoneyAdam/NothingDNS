@@ -112,8 +112,27 @@ func (m *Manager) SetZoneDir(dir string) {
 
 // Load loads a zone from a file.
 func (m *Manager) Load(name, path string) error {
+	// Canonicalize and validate path to prevent traversal attacks
+	cleanPath := filepath.Clean(path)
+	if strings.Contains(cleanPath, "..") {
+		return fmt.Errorf("zone path traversal attempt blocked: %s", path)
+	}
+	if m.zoneDir != "" {
+		absPath, err := filepath.Abs(cleanPath)
+		if err != nil {
+			return fmt.Errorf("zone path: %w", err)
+		}
+		absDir, err := filepath.Abs(m.zoneDir)
+		if err != nil {
+			return fmt.Errorf("zone dir: %w", err)
+		}
+		if !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
+			return fmt.Errorf("zone path %q is outside zone_dir %q", path, m.zoneDir)
+		}
+	}
+
 	// Check for symlinks to prevent path disclosure attacks
-	info, err := os.Lstat(path)
+	info, err := os.Lstat(cleanPath)
 	if err != nil {
 		return err
 	}
@@ -121,7 +140,7 @@ func (m *Manager) Load(name, path string) error {
 		return fmt.Errorf("zone file %s is a symlink: symlinks are not allowed", path)
 	}
 
-	f, err := os.Open(path)
+	f, err := os.Open(cleanPath)
 	if err != nil {
 		return err
 	}

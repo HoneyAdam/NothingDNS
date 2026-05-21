@@ -76,6 +76,9 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 	// Create Raft node.
 	node := NewNode(config, peers, transport)
 
+	// Set state machine so snapshot installs can restore state
+	node.SetStateMachine(NewZoneStateMachine())
+
 	// Create RPC server with AEAD encryption.
 	rpcServer, err := NewRPCServer(addr, node, nil, aead)
 	if err != nil {
@@ -227,6 +230,74 @@ func (ci *ClusterIntegration) GetLeaderID() NodeID {
 	}
 	// In real implementation, would track who we think the leader is
 	return ""
+}
+
+// AddNode proposes adding a new node to the Raft cluster using joint consensus.
+// Returns an error if this node is not the leader or if another config change is pending.
+func (ci *ClusterIntegration) AddNode(nodeID NodeID, addr string) error {
+	if !ci.IsLeader() {
+		return fmt.Errorf("not the leader")
+	}
+
+	return ci.node.AddPeer(nodeID, addr)
+}
+
+// RemoveNode proposes removing a node from the Raft cluster.
+// Returns an error if this node is not the leader or if another config change is pending.
+func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
+	if !ci.IsLeader() {
+		return fmt.Errorf("not the leader")
+	}
+
+	ci.node.mu.Lock()
+	defer ci.node.mu.Unlock()
+
+	if ci.node.pendingConfChange != nil {
+		return fmt.Errorf("cluster is already processing a configuration change")
+	}
+
+	// Create the joint config entry
+	oldPeers := make(map[NodeID]*Peer)
+	for pid, p := range ci.node.peers {
+		if pid != nodeID {
+			oldPeers[pid] = p
+		}
+	}
+	if _, ok := oldPeers[nodeID]; !ok {
+		return fmt.Errorf("node %s is not in the cluster", nodeID)
+	}
+
+	newPeers := make(map[NodeID]*Peer)
+	for pid, p := range ci.node.peers {
+		if pid != nodeID {
+			newPeers[pid] = p
+		}
+	}
+
+	jointConfig := NewJointConfig(ci.node.peers, newPeers)
+	jcBytes, err := encodeJointConfig(jointConfig)
+	if err != nil {
+		return fmt.Errorf("encode joint config: %w", err)
+	}
+
+	// Append joint config entry
+	entry := entry{
+		Index:   Index(len(ci.node.log)) + 1,
+		Term:    ci.node.currentTerm,
+		Command: jcBytes,
+		Type:    EntryRemoveNode,
+	}
+	ci.node.log = append(ci.node.log, entry)
+
+	// Store joint config reference
+	ci.node.jointConfig = jointConfig
+	ci.node.jointConfigIdx = entry.Index
+	ci.node.pendingConfChange = &JointConfigProposal{
+		Type:   EntryRemoveNode,
+		PeerID: nodeID,
+	}
+
+	return nil
 }
 
 // Stats returns cluster statistics.

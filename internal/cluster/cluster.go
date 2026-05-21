@@ -710,12 +710,44 @@ func (c *Cluster) handleNodeJoin(node *Node) {
 }
 
 // JoinSeed attempts to join an existing cluster via a seed node.
-// Only supported in SWIM/gossip mode; returns an error for Raft consensus.
+// In SWIM/gossip mode, uses the gossip protocol.
+// In Raft consensus mode, dynamic joining is not supported.
 func (c *Cluster) JoinSeed(seedAddr string) error {
 	if c.consensus == ConsensusRaft {
-		return fmt.Errorf("dynamic node joining not supported in Raft consensus mode")
+		return fmt.Errorf("dynamic node joining not supported in Raft consensus mode; use static cluster configuration")
 	}
 	return c.gossip.Join(seedAddr)
+}
+
+// AddNodeViaLeader proposes adding a node to the Raft cluster via the current leader.
+// Only works in Raft consensus mode.
+func (c *Cluster) AddNodeViaLeader(nodeID raft.NodeID, addr string) error {
+	if c.consensus != ConsensusRaft || c.raft == nil {
+		return fmt.Errorf("not using Raft consensus")
+	}
+
+	// If we're the leader, propose directly
+	if c.raft.IsLeader() {
+		return c.raft.AddNode(nodeID, addr)
+	}
+
+	// In a full implementation, we would forward to the leader
+	return fmt.Errorf("not the leader; forward to leader not yet implemented")
+}
+
+// RemoveNodeViaLeader proposes removing a node from the Raft cluster via the current leader.
+// Only works in Raft consensus mode.
+func (c *Cluster) RemoveNodeViaLeader(nodeID raft.NodeID) error {
+	if c.consensus != ConsensusRaft || c.raft == nil {
+		return fmt.Errorf("not using Raft consensus")
+	}
+
+	// If we're the leader, propose directly
+	if c.raft.IsLeader() {
+		return c.raft.RemoveNode(nodeID)
+	}
+
+	return fmt.Errorf("not the leader; forward to leader not yet implemented")
 }
 
 // LeaveCluster initiates graceful departure from the cluster.

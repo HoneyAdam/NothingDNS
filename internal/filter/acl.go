@@ -120,6 +120,9 @@ func (a *ACLChecker) IsAllowed(clientIP net.IP, queryType uint16) (bool, string)
 
 // UpdateRules replaces the current ACL rules with new rules.
 func (a *ACLChecker) UpdateRules(rules []config.ACLRule) error {
+	if a == nil {
+		return fmt.Errorf("ACLChecker is nil")
+	}
 	compiled := make([]compiledRule, 0, len(rules))
 	for _, r := range rules {
 		cr := compiledRule{
@@ -158,6 +161,11 @@ func (a *ACLChecker) UpdateRules(rules []config.ACLRule) error {
 	a.mu.Unlock()
 
 	return nil
+}
+
+// Reload reloads ACL rules from config.
+func (a *ACLChecker) Reload(rules []config.ACLRule) error {
+	return a.UpdateRules(rules)
 }
 
 // GetRules returns the current ACL rules in config format.

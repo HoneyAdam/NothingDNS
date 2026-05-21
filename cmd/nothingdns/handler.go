@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -76,6 +75,8 @@ type integratedHandler struct {
 	idnaEnabled   bool // RFC 5891 IDNA validation enabled
 	mdnsResponder *mdns.Responder
 	dsoManager    *dso.Manager
+
+	zoneProvider  ZoneProvider // unified zone lookup
 
 	notifyOnce sync.Once
 	updateOnce sync.Once
@@ -375,71 +376,22 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		}
 	}
 
-	// Check authoritative zones — try direct lookup first.
+	// Check authoritative zones — try ZoneProvider for unified O(log n) lookup.
 	// If no zone has a direct record, attempt CNAME chasing across zones,
 	// then cache, then upstream.
-	// Collect matching zones under the read lock, then release before processing
-	// to avoid blocking reload writers (zonesMu.Lock()) for extended periods.
 	h.zonesMu.RLock()
-	tree := h.zoneTree
 	var matchedZones []struct {
 		name string
 		z    *zone.Zone
 	}
-	seenZones := make(map[string]struct{})
-	// Fast path: use radix tree for O(log n) best-match lookup
-	if tree != nil {
-		if best := tree.Find(qname); best != nil {
+	if h.zoneProvider != nil {
+		for _, match := range h.zoneProvider.FindZones(qname) {
 			matchedZones = append(matchedZones, struct {
 				name string
 				z    *zone.Zone
-			}{best.Origin, best})
-			seenZones[best.Origin] = struct{}{}
+			}{match.Origin, match.Zone})
 		}
 	}
-	// Include zones from the static map and runtime zone manager.
-	// Runtime-created zones (API, DDNS) may not be in the radix tree.
-	for origin, z := range h.zones {
-		if isSubdomain(qname, origin) {
-			if _, seen := seenZones[origin]; !seen {
-				matchedZones = append(matchedZones, struct {
-					name string
-					z    *zone.Zone
-				}{origin, z})
-				seenZones[origin] = struct{}{}
-			}
-		}
-	}
-	if h.kvPersistence != nil {
-		for name, z := range h.kvPersistence.Manager().List() {
-			if isSubdomain(qname, name) {
-				if _, seen := seenZones[name]; !seen {
-					matchedZones = append(matchedZones, struct {
-						name string
-						z    *zone.Zone
-					}{name, z})
-					seenZones[name] = struct{}{}
-				}
-			}
-		}
-	}
-	if h.zoneManager != nil {
-		for name, z := range h.zoneManager.List() {
-			if isSubdomain(qname, name) {
-				if _, seen := seenZones[name]; !seen {
-					matchedZones = append(matchedZones, struct {
-						name string
-						z    *zone.Zone
-					}{name, z})
-					seenZones[name] = struct{}{}
-				}
-			}
-		}
-	}
-	// Sort by origin length descending so the most specific zone is checked first
-	sort.Slice(matchedZones, func(i, j int) bool {
-		return len(matchedZones[i].name) > len(matchedZones[j].name)
-	})
 	h.zonesMu.RUnlock()
 
 	var matchedZone bool
@@ -1396,6 +1348,14 @@ func (h *integratedHandler) RebuildZoneTree() {
 		}
 	}
 	h.zoneTree = zone.BuildRadixTree(merged)
+
+	// Rebuild the unified zone provider
+	h.zoneProvider = NewMultiZoneProvider(
+		h.zones,
+		h.zoneManager,
+		h.kvPersistence,
+		h.zoneTree,
+	)
 }
 
 // ReloadViews reloads split-horizon view configuration and zone files.

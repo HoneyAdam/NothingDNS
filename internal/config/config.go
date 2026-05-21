@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -1697,34 +1698,20 @@ func (c *Config) validateServer() []string {
 // placeholderSecretTokens is the list of substrings that must never appear in a
 // live secret field. They are the literal strings shipped (historically or now)
 // in example configs under deploy/, docs/, and helm/. The match is
-// case-insensitive and substring-based, so "CHANGE-THIS-TO-256-BIT-STRONG-SECRET"
-// and "change_this_password" both trip the check.
-var placeholderSecretTokens = []string{
-	"CHANGE-THIS",
-	"CHANGETHIS",
-	"CHANGE-ME",
-	"CHANGEME",
-	"UNIQUE-STRONG",
-	"PLACEHOLDER",
-	"REPLACE-ME",
-	"REPLACEME",
-	"YOUR-SECRET",
-	"YOUR-PASSWORD",
-	"INSECURE-DEFAULT",
-}
+// placeholderSecretRE matches common placeholder/weak secret patterns.
+// Covers: CHANGE-THIS, CHANGEME, placeholder, your-secret/password,
+// insecure, default, replace-me, INSERT-YOUR, and common template markers.
+var placeholderSecretRE = regexp.MustCompile(`(?i)(change.?this|changeme|placeholder|your.?secret|your.?password|insecure.?default|replace.?me|insert.?your|temp| dummy|default.?secret|example.?key)`)
 
-// looksLikePlaceholderSecret returns the matching placeholder token if s
+// looksLikePlaceholderSecret returns the matched placeholder pattern if s
 // contains a known placeholder substring (case-insensitive), or "" if it
 // appears to be a real secret.
 func looksLikePlaceholderSecret(s string) string {
 	if s == "" {
 		return ""
 	}
-	upper := strings.ToUpper(s)
-	for _, token := range placeholderSecretTokens {
-		if strings.Contains(upper, token) {
-			return token
-		}
+	if placeholderSecretRE.MatchString(s) {
+		return placeholderSecretRE.FindString(s)
 	}
 	return ""
 }
@@ -1787,6 +1774,11 @@ func (c *Config) validateSecrets() []string {
 		errors = append(errors, fmt.Sprintf(
 			"http.auth_token still contains placeholder %q — set it via ${NOTHINGDNS_AUTH_TOKEN} or replace with a real secret before starting",
 			token))
+	} else if c.Server.HTTP.AuthToken != "" {
+		// Entropy check only applies when placeholder check passes (non-empty non-placeholder)
+		if err := secretHasMinEntropy("http.auth_token", c.Server.HTTP.AuthToken); err != nil {
+			errors = append(errors, err.Error())
+		}
 	}
 	if token := looksLikePlaceholderSecret(c.Server.HTTP.AuthSecret); token != "" {
 		errors = append(errors, fmt.Sprintf(

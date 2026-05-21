@@ -501,19 +501,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 	existingA := z.Records["A"]
 	z.RUnlock()
 
-	type change struct {
-		IP        string `json:"ip"`
-		PTRName   string `json:"ptrName"`
-		AName     string `json:"aName,omitempty"`
-		Action    string `json:"action"` // add, override, skip
-		PTRExist  bool   `json:"ptrExist"`
-		AExist    bool   `json:"aExist,omitempty"`
-		OldPTR    string `json:"oldPtr,omitempty"`
-		OldA      string `json:"oldA,omitempty"`
-		RevRecord string `json:"revRecord"` // the relative PTR record name
-	}
-
-	changes := make([]change, 0, numIPs)
+	changes := make([]ReverseDNSChange, 0, numIPs)
 	add, addA, skip, override, overrideA := 0, 0, 0, 0, 0
 
 	for i := 0; i < numIPs; i++ {
@@ -557,7 +545,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 			}
 		}
 
-		ch := change{
+		ch := ReverseDNSChange{
 			IP:        ip.String(),
 			PTRName:   ptrName,
 			Action:    "add",
@@ -598,14 +586,14 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 	// If preview, return just the analysis
 	if req.Preview {
-		s.writeJSON(w, http.StatusOK, map[string]interface{}{
-			"preview":      true,
-			"total":        numIPs,
-			"willAdd":      add,
-			"willAddA":     addA,
-			"willSkip":     skip,
-			"willOverride": override + overrideA,
-			"changes":      changes,
+		s.writeJSON(w, http.StatusOK, ReverseDNSPreviewResponse{
+			Preview:      true,
+			Total:        numIPs,
+			WillAdd:      add,
+			WillAddA:     addA,
+			WillSkip:     skip,
+			WillOverride: override + overrideA,
+			Changes:      changes,
 		})
 		return
 	}
@@ -661,12 +649,12 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 	util.Infof("bulk-ptr: zone=%s cidr=%s pattern=%s override=%v addA=%v added=%d addedA=%d skipped=%d exists=%d",
 		zoneName, req.CIDR, req.Pattern, req.Override, req.AddA, added, addedA, skipped, exists)
 
-	s.writeJSON(w, http.StatusOK, map[string]int{
-		"added":   added,
-		"addedA":  addedA,
-		"exists":  exists,
-		"existsA": existsA,
-		"skipped": skipped,
+	s.writeJSON(w, http.StatusOK, BulkPTRResultResponse{
+		Added:   added,
+		AddedA:  addedA,
+		Exists:  exists,
+		ExistsA: existsA,
+		Skipped: skipped,
 	})
 }
 
@@ -716,24 +704,24 @@ func (s *Server) handlePtr6Lookup(w http.ResponseWriter, r *http.Request, zoneNa
 		}
 		target := ptrName + "."
 		if fqdn == target || rec.Name == ptrName {
-			s.writeJSON(w, http.StatusOK, map[string]interface{}{
-				"ip":      ipStr,
-				"ptr":     ptrName,
-				"ptrFQDN": target,
-				"target":  rec.RData,
-				"ttl":     rec.TTL,
-				"found":   true,
+			s.writeJSON(w, http.StatusOK, PTRLookupResponse{
+				IP:      ipStr,
+				PTR:     ptrName,
+				PTRFQDN: target,
+				Target:  rec.RData,
+				TTL:     rec.TTL,
+				Found:   true,
 			})
 			return
 		}
 	}
 
 	// Not found
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ip":      ipStr,
-		"ptr":     ptrName,
-		"ptrFQDN": ptrName + ".",
-		"found":   false,
+	s.writeJSON(w, http.StatusOK, PTRLookupResponse{
+		IP:      ipStr,
+		PTR:     ptrName,
+		PTRFQDN: ptrName + ".",
+		Found:   false,
 	})
 }
 

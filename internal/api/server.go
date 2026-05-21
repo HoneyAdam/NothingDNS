@@ -534,9 +534,11 @@ func (s *Server) Start() error {
 
 	// ODoH endpoint (RFC 9230 - Oblivious DNS over HTTPS) - no auth required
 	if s.config.ODoHEnabled {
+		// Register /.well-known/odoh-config whenever ODoH is enabled, even if target isn't ready
+		// (handleODoHConfig returns 503 if target is nil, signaling misconfiguration)
+		mux.HandleFunc("/.well-known/odoh-config", s.handleODoHConfig)
 		if s.odohTarget != nil {
 			mux.Handle(s.config.ODoHPath, s.odohTarget)
-			mux.HandleFunc("/.well-known/odoh-config", s.handleODoHConfig)
 		} else if s.odohProxy != nil {
 			mux.Handle(s.config.ODoHPath, s.odohProxy)
 		}
@@ -764,7 +766,14 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 			}
 		}
 		if allowAllOrigins {
-			allowOrigin = "*"
+			// If a Origin header is present, use it instead of "*" so that
+			// browsers send credentials (Authorization header) properly.
+			// Wildcard "*" with credentials is a CORS misconfiguration.
+			if origin != "" {
+				allowOrigin = origin
+			} else {
+				allowOrigin = "*"
+			}
 		} else if origin != "" && isOriginAllowed(origin, allowedOrigins) {
 			allowOrigin = origin
 		}
@@ -833,6 +842,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if s.config.DoWSEnabled && s.config.DoWSPath != "" && r.URL.Path == s.config.DoWSPath {
+			// Rate limit WebSocket connections to prevent connection exhaustion
+			ip := getClientIP(r)
+			if s.apiRateLimiter.checkRateLimit(ip) {
+				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -64,11 +64,12 @@ func newCaptureWriter(ip string, proto string) *captureWriter {
 
 func newTestHandler() *integratedHandler {
 	return &integratedHandler{
-		config:  config.DefaultConfig(),
-		logger:  util.NewLogger(util.ERROR, util.TextFormat, nil),
-		cache:   cache.New(cache.Config{Capacity: 100, DefaultTTL: 60 * time.Second, MinTTL: time.Second, MaxTTL: 300 * time.Second}),
-		metrics: metrics.New(metrics.Config{Enabled: true}),
-		zones:   make(map[string]*zone.Zone),
+		config:      config.DefaultConfig(),
+		logger:      util.NewLogger(util.ERROR, util.TextFormat, nil),
+		cache:       cache.New(cache.Config{Capacity: 100, DefaultTTL: 60 * time.Second, MinTTL: time.Second, MaxTTL: 300 * time.Second}),
+		metrics:     metrics.New(metrics.Config{Enabled: true}),
+		zones:       make(map[string]*zone.Zone),
+		zoneProvider: NewMultiZoneProvider(make(map[string]*zone.Zone), nil, nil, nil),
 	}
 }
 
@@ -112,6 +113,7 @@ func addZoneRecords(t *testing.T, h *integratedHandler, origin string, records [
 		z.Records[rec.Name] = append(z.Records[rec.Name], rec)
 	}
 	h.zones[origin] = z
+	h.RebuildZoneTree()
 }
 
 // startTestUpstream starts a UDP listener that responds with a minimal NOERROR response.
