@@ -800,20 +800,26 @@ func (lb *LoadBalancer) healthCheckLoop(ctx context.Context) {
 }
 
 // checkHealth performs health checks on all servers and anycast backends.
+// Each per-probe goroutine builds its own Message with a fresh
+// RandomTXID() — see the matching fix on Client.checkHealth for the
+// rationale (predictable IDs across all probes make every health
+// response trivially spoofable for any in-path attacker that saw one).
 func (lb *LoadBalancer) checkHealth() {
-	// Create a simple health check query
-	msg := &protocol.Message{
-		Header: protocol.Header{
-			ID:      0,
-			Flags:   protocol.Flags{RD: true},
-			QDCount: 1,
-		},
-	}
-	msg.Questions = append(msg.Questions, &protocol.Question{
+	rootQuestion := &protocol.Question{
 		Name:   &protocol.Name{Labels: []string{}, FQDN: true},
 		QType:  protocol.TypeNS,
 		QClass: protocol.ClassIN,
-	})
+	}
+	newQuery := func() *protocol.Message {
+		return &protocol.Message{
+			Header: protocol.Header{
+				ID:      RandomTXID(),
+				Flags:   protocol.Flags{RD: true},
+				QDCount: 1,
+			},
+			Questions: []*protocol.Question{rootQuestion},
+		}
+	}
 
 	// Check standalone servers — snapshot under lock
 	lb.mu.RLock()
@@ -827,11 +833,11 @@ func (lb *LoadBalancer) checkHealth() {
 		healthWg.Add(1)
 		go func(s *Server) {
 			defer healthWg.Done()
-			query := *msg // copy to avoid data race on Pack
-			_, err := lb.queryUDP(s.Address, &query)
+			query := newQuery()
+			_, err := lb.queryUDP(s.Address, query)
 			if err != nil {
 				util.Warnf("health check UDP failed for %s: %v, trying TCP", s.Address, err)
-				if _, tcpErr := lb.queryTCP(s.Address, &query); tcpErr != nil {
+				if _, tcpErr := lb.queryTCP(s.Address, query); tcpErr != nil {
 					util.Debugf("health check TCP failed for %s: %v", s.Address, tcpErr)
 				}
 			}
@@ -850,11 +856,11 @@ func (lb *LoadBalancer) checkHealth() {
 			healthWg.Add(1)
 			go func(b *AnycastBackend) {
 				defer healthWg.Done()
-				query := *msg // copy to avoid data race on Pack
-				_, err := lb.queryUDP(b.Address(), &query)
+				query := newQuery()
+				_, err := lb.queryUDP(b.Address(), query)
 				if err != nil {
 					util.Warnf("health check UDP failed for anycast %s: %v, trying TCP", b.Address(), err)
-					_, err = lb.queryTCP(b.Address(), &query)
+					_, err = lb.queryTCP(b.Address(), query)
 				}
 				if err != nil {
 					b.markFailure()
