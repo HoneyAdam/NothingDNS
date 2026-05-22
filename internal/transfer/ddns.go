@@ -83,8 +83,9 @@ type DynamicDNSHandler struct {
 	acl        map[string][]*net.IPNet // zone -> allowed networks
 	aclMu      sync.RWMutex
 	updateChan chan *UpdateRequest
-	closed     bool
-	closeMu    sync.Once
+	// closeMu ensures Close runs once; the closed signal IS the channel
+	// being closed (range/recv stops). No separate bool needed.
+	closeMu sync.Once
 }
 
 // NewDynamicDNSHandler creates a new Dynamic DNS handler
@@ -107,7 +108,6 @@ func (h *DynamicDNSHandler) SetZonesMu(mu *sync.RWMutex) {
 // Close shuts down the handler, closing the update channel.
 func (h *DynamicDNSHandler) Close() {
 	h.closeMu.Do(func() {
-		h.closed = true
 		close(h.updateChan)
 	})
 }
