@@ -70,9 +70,26 @@ func (r *rateLimiter) Allow(ip string) bool {
 	now := time.Now()
 	e, ok := r.entries[ip]
 	if !ok || now.Sub(e.windowStart) > r.window {
-		// Cap map size to prevent memory exhaustion from spoofed sources
+		// Cap map size to prevent memory exhaustion from spoofed sources.
+		// Pre-fix this just returned false once the cap was hit, so any
+		// genuine new client (or peer rotating through new source ports
+		// behind a NAT) was refused until the periodic 10s Prune ran.
+		// Opportunistically reap any already-expired entries in-place
+		// before refusing; the lock is held anyway so the scan cost
+		// only fires on cap-hit, and it lets honest clients in
+		// immediately during a spoofed flood without waiting on the
+		// tick.
 		if !ok && len(r.entries) >= r.maxEntries {
-			return false
+			for k, v := range r.entries {
+				if now.Sub(v.windowStart) > r.window {
+					delete(r.entries, k)
+				}
+			}
+			if len(r.entries) >= r.maxEntries {
+				// Still full after pruning — every tracked source is
+				// actively in-window. Reject defensively.
+				return false
+			}
 		}
 		r.entries[ip] = &rateEntry{count: 1, windowStart: now}
 		return true
