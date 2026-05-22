@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"hash/maphash"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -655,6 +656,91 @@ func TestCacheSetPrefetchFunc(t *testing.T) {
 	c.Set("test.com:1", nil, 300)
 	// The prefetch function would be called in a background goroutine
 	_ = called
+}
+
+// mustParseName builds a protocol.Name or fails the test.
+func mustParseName(t *testing.T, s string) *protocol.Name {
+	t.Helper()
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		t.Fatalf("ParseName(%q): %v", s, err)
+	}
+	return n
+}
+
+// TestCachePrefetch_FiresOnceOnHit verifies that once an entry crosses
+// its PrefetchDue point, the registered prefetch callback is invoked
+// asynchronously on the next Get — and exactly once, no matter how
+// many subsequent hits arrive in the prefetch window. Pre-fix the
+// callback was registered but never wired into Get, so the prefetch
+// feature was a no-op for years.
+func TestCachePrefetch_FiresOnceOnHit(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Capacity = 16
+	cfg.PrefetchEnabled = true
+	// Generous prefetch threshold so even a 1s TTL crosses PrefetchDue
+	// the moment we Get. minTTL=0 lets us use a short TTL.
+	cfg.PrefetchThreshold = 10 * time.Second
+	cfg.MinTTL = 0
+	c := New(cfg)
+
+	msg := &protocol.Message{
+		Questions: []*protocol.Question{
+			{
+				Name:   mustParseName(t, "prefetch.example."),
+				QType:  protocol.TypeA,
+				QClass: protocol.ClassIN,
+			},
+		},
+	}
+
+	var calls atomic.Uint32
+	gotKey := make(chan string, 4)
+	c.SetPrefetchFunc(func(key string, qtype uint16) {
+		calls.Add(1)
+		select {
+		case gotKey <- key:
+		default:
+		}
+		if qtype != protocol.TypeA {
+			t.Errorf("prefetch qtype: got %d, want %d", qtype, protocol.TypeA)
+		}
+	})
+
+	// Set with TTL=1s; PrefetchThreshold=10s ensures CanPrefetch=false
+	// at construction because duration <= prefetchOffset. Use TTL larger
+	// than the threshold but tweak PrefetchDue to "now" via re-Set.
+	c.Set("prefetch.example.:1", msg, 30)
+
+	// Force PrefetchDue into the past so the next Get fires the callback.
+	// (Easier than waiting in the test.)
+	entry := c.Get("prefetch.example.:1")
+	if entry == nil {
+		t.Fatal("expected entry to exist after Set")
+	}
+	entry.PrefetchDue = time.Now().Add(-1 * time.Second)
+	// Clear the prefetchFired flag the Get above may have set when
+	// PrefetchDue was in the future (it wouldn't have, but be safe).
+	atomic.StoreUint32(&entry.prefetchFired, 0)
+
+	// Multiple Gets in the prefetch window should fire prefetch exactly once.
+	for i := 0; i < 5; i++ {
+		_ = c.Get("prefetch.example.:1")
+	}
+
+	// Give the goroutine a moment to run.
+	select {
+	case key := <-gotKey:
+		if key != "prefetch.example.:1" {
+			t.Errorf("prefetch key: got %q, want %q", key, "prefetch.example.:1")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("prefetch callback never fired")
+	}
+
+	if got := calls.Load(); got != 1 {
+		t.Errorf("prefetch fired %d times, want exactly 1 (dedup broken)", got)
+	}
 }
 
 func TestCacheOnPrefetchComplete(t *testing.T) {

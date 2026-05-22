@@ -40,6 +40,12 @@ type Entry struct {
 	// probabilistic promotion (see Cache.Get).
 	touched uint32
 
+	// prefetchFired is flipped to 1 by Get the first time it triggers an
+	// async prefetch for this entry (RFC-style cache refresh). Keeps us
+	// from firing the same prefetch multiple times per entry as hits
+	// continue to arrive in the PrefetchDue → ExpireTime window.
+	prefetchFired uint32
+
 	// Intrusive LRU list pointers (front = most recent, back = least recent)
 	prev *Entry
 	next *Entry
@@ -318,6 +324,26 @@ func (c *Cache) Get(key string) *Entry {
 	// before sampling applies.
 	s.mu.RUnlock()
 	hits := atomic.AddUint64(&s.hits, 1)
+
+	// Fire async prefetch once per entry when we cross PrefetchDue.
+	// SetPrefetchFunc has been wired since forever but nothing was
+	// actually invoking it, so the prefetch feature was dead. The check
+	// has to happen *before* the LRU-promotion early-return below,
+	// otherwise probabilistic promotion (`hits & lruPromoteMask`) would
+	// drop us back to the caller without ever firing prefetch on a hot
+	// entry. We extract qtype from the cached message's question section
+	// so the callback can re-resolve without re-parsing the key encoding.
+	if c.prefetchFunc != nil && entry.ShouldPrefetch(now) {
+		if atomic.CompareAndSwapUint32(&entry.prefetchFired, 0, 1) {
+			qtype := uint16(0)
+			if entry.Message != nil && len(entry.Message.Questions) > 0 {
+				qtype = entry.Message.Questions[0].QType
+			}
+			fn := c.prefetchFunc
+			go fn(key, qtype)
+		}
+	}
+
 	firstTouch := atomic.CompareAndSwapUint32(&entry.touched, 0, 1)
 	if !firstTouch && hits&lruPromoteMask != 0 {
 		return entry
