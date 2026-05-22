@@ -4090,9 +4090,14 @@ func TestLoadConfig_NonExistent(t *testing.T) {
 }
 
 func TestValidateConfigOnly(t *testing.T) {
+	// validateConfigOnly must NOT silently accept a missing file —
+	// the operator is explicitly trying to validate this path; if it
+	// can't be read, that's the error to surface (otherwise a typo'd
+	// `nothingdns -config /typo -validate-config` would print "is
+	// valid" while the real config never gets considered).
 	err := validateConfigOnly("/nonexistent/path/config.yaml")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for missing config file, got nil")
 	}
 }
 

@@ -1086,7 +1086,17 @@ func loadZoneSigner(z *zone.Zone, signingCfg config.SigningConfig) (*dnssec.Sign
 }
 
 // validateConfigOnly loads and validates a configuration file without starting the server.
+//
+// Unlike loadConfig (which falls back to defaults when the path doesn't
+// exist — handy at server start, but wrong here), this explicitly
+// requires the file to be present. Otherwise `nothingdns -config
+// /typo'd/path -validate-config` used to print "is valid" — the
+// operator would think their config worked when the file isn't even
+// being read.
 func validateConfigOnly(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("config file %s not accessible: %w", path, err)
+	}
 	cfg, err := loadConfig(path)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
