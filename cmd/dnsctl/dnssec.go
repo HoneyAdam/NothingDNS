@@ -3,6 +3,7 @@ package main
 import (
 	"crypto"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -50,7 +51,7 @@ func cmdDNSSEC(args []string) error {
 
 func cmdDNSSECGenerateKey(args []string) error {
 	fs := flag.NewFlagSet("generate-key", flag.ExitOnError)
-	algorithm := fs.Int("algorithm", 13, "DNSSEC algorithm (8=RSASHA256, 10=RSASHA512, 13=ECDSAP256SHA256, 14=ECDSAP384SHA384)")
+	algorithm := fs.Int("algorithm", 13, "DNSSEC algorithm (8=RSASHA256, 10=RSASHA512, 13=ECDSAP256SHA256, 14=ECDSAP384SHA384, 15=ED25519)")
 	keyType := fs.String("type", "ZSK", "Key type (KSK or ZSK)")
 	zone := fs.String("zone", "", "Zone name (required)")
 	outputDir := fs.String("output", ".", "Output directory for key files")
@@ -459,6 +460,15 @@ func generateKeyPair(algorithm uint8, isKSK bool, keySize int) (*dnssec.SigningK
 		}
 		privKey = ecKey
 		pubKey = &ecKey.PublicKey
+
+	case protocol.AlgorithmED25519:
+		// Ed25519 keys are 32-byte fixed; keySize is ignored.
+		pub, priv, edErr := ed25519.GenerateKey(rand.Reader)
+		if edErr != nil {
+			return nil, edErr
+		}
+		privKey = priv
+		pubKey = pub
 
 	default:
 		return nil, fmt.Errorf("unsupported algorithm: %d", algorithm)
