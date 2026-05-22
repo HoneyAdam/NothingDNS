@@ -66,15 +66,15 @@ func cmdCluster(args []string) error {
 		}
 
 	case "leave":
-		if len(args) < 2 {
-			return fmt.Errorf("node ID required: dnsctl cluster leave <node-id>")
-		}
-		nodeID := args[1]
-		body := map[string]interface{}{
-			"node_id": nodeID,
-		}
-		b, _ := json.Marshal(body)
-		result, err := apiDelete("/api/v1/cluster/leave", string(b))
+		// The server-side /api/v1/cluster/leave removes the *local*
+		// node from the cluster — it does not accept a target node-id.
+		// Previously this CLI demanded one and silently shipped it in
+		// the body where it was discarded, which was a confusing
+		// contract mismatch ("dnsctl cluster leave abc" looked like it
+		// would evict node abc, but evicted whatever node the API was
+		// talking to). Accept an optional arg for forward compatibility
+		// but neither require it nor send it.
+		result, err := apiDelete("/api/v1/cluster/leave", "{}")
 		if err != nil {
 			return err
 		}
