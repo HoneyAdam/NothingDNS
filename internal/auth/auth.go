@@ -37,6 +37,12 @@ type User struct {
 	Role      Role   `json:"role"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
+	// IsAutoCreated is true for the synthetic default-admin that the
+	// auth store creates when no users are configured. Bootstrap from
+	// localhost is allowed to replace such accounts without supplying
+	// the (unknowable, randomly-generated) old password — otherwise the
+	// daemon ships in a permanently unbootstrappable state.
+	IsAutoCreated bool `json:"is_auto_created,omitempty"`
 }
 
 // Token represents an active authentication token.
@@ -148,11 +154,12 @@ func NewStore(cfg *Config) (*Store, error) {
 			return nil, fmt.Errorf("auth: crypto/rand unavailable for password generation: %w", err)
 		}
 		s.users["admin"] = &User{
-			Username:  "admin",
-			Hash:      HashPassword(defaultPassword, nil),
-			Role:      RoleAdmin,
-			CreatedAt: time.Now().UTC().Format(time.RFC3339),
-			UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+			Username:      "admin",
+			Hash:          HashPassword(defaultPassword, nil),
+			Role:          RoleAdmin,
+			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
+			IsAutoCreated: true,
 		}
 		// SECURITY (LOW-012): The generated password is NEVER logged. It exists only
 		// in memory during this function. Operators must use the localhost-only
@@ -500,10 +507,11 @@ func (s *Store) ListUsers() []*User {
 	users := make([]*User, 0, len(s.users))
 	for _, u := range s.users {
 		users = append(users, &User{
-			Username:  u.Username,
-			Role:      u.Role,
-			CreatedAt: u.CreatedAt,
-			UpdatedAt: u.UpdatedAt,
+			Username:      u.Username,
+			Role:          u.Role,
+			CreatedAt:     u.CreatedAt,
+			UpdatedAt:     u.UpdatedAt,
+			IsAutoCreated: u.IsAutoCreated,
 		})
 	}
 	return users

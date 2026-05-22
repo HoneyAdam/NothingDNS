@@ -155,7 +155,25 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	var user *auth.User
 	var err error
 
-	if len(users) > 0 {
+	// Special case: the only existing user is the auto-created default
+	// admin (random unknowable password). The bootstrap warning at startup
+	// promises an admin can be set "via the dashboard or API," but the
+	// usual password-reset flow demands OldPassword, which by construction
+	// no one knows. Detect this state and let localhost take over without
+	// the impossible OldPassword check. The localhost gate above is
+	// already the strong authority for this path.
+	if len(users) == 1 && users[0].Username == "admin" && users[0].IsAutoCreated {
+		// Remove the synthetic admin and create the operator's chosen
+		// account fresh. Using CreateUser (not UpdateUser) means the
+		// new account loses the IsAutoCreated marker and behaves like
+		// any normally-provisioned user from here on out.
+		s.authStore.DeleteUser("admin")
+		user, err = s.authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
+		if err != nil {
+			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
+			return
+		}
+	} else if len(users) > 0 {
 		// Users exist (from localhost) - require old password for password reset
 		if req.OldPassword == "" {
 			s.writeError(w, http.StatusBadRequest, "Old password required")

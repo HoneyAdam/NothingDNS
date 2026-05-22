@@ -332,6 +332,66 @@ func TestHandleBootstrap_CreatesFirstAdmin(t *testing.T) {
 	}
 }
 
+// TestHandleBootstrap_TakesOverAutoCreatedDefault verifies the
+// unbootstrappable-default-admin escape hatch: when the only user
+// in the store is the auto-created "admin" (IsAutoCreated=true,
+// random unknowable password), a localhost bootstrap request must
+// succeed without supplying OldPassword. Without this branch, the
+// daemon ships in a permanently locked state: the startup warning
+// promises "set password via dashboard or API," but the password-
+// reset path required an OldPassword that, by construction, nobody
+// can know.
+func TestHandleBootstrap_TakesOverAutoCreatedDefault(t *testing.T) {
+	// Fresh store with no configured users → auto-creates admin.
+	store, _ := auth.NewStore(&auth.Config{Secret: "test-secret-12345"})
+	users := store.ListUsers()
+	if len(users) != 1 || users[0].Username != "admin" || !users[0].IsAutoCreated {
+		t.Fatalf("expected single auto-created admin, got %+v", users)
+	}
+
+	s := newServerWithAuth(store)
+
+	// No OldPassword supplied — must still succeed because the existing
+	// user is the synthetic default.
+	body, _ := json.Marshal(BootstrapRequest{
+		Username: "operator",
+		Password: "operatorpass123",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+	s.handleBootstrap(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap takeover: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// New user replaces the auto-created admin.
+	users = store.ListUsers()
+	if len(users) != 1 {
+		t.Fatalf("expected 1 user after takeover, got %d", len(users))
+	}
+	if users[0].Username != "operator" {
+		t.Errorf("expected operator, got %s", users[0].Username)
+	}
+	if users[0].IsAutoCreated {
+		t.Error("post-bootstrap user must not carry IsAutoCreated flag")
+	}
+
+	// Subsequent bootstrap on the now-real user must require OldPassword.
+	body2, _ := json.Marshal(BootstrapRequest{
+		Username: "operator",
+		Password: "differentpass456",
+	})
+	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap", bytes.NewReader(body2))
+	req2.RemoteAddr = "127.0.0.1:12345"
+	rec2 := httptest.NewRecorder()
+	s.handleBootstrap(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("second bootstrap without OldPassword: expected 400, got %d", rec2.Code)
+	}
+}
+
 // --- handleUsers tests ---
 
 func TestHandleUsers_ListUsers(t *testing.T) {
