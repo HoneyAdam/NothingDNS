@@ -1206,27 +1206,32 @@ func TestDecodeTLVValueTooLarge(t *testing.T) {
 // the source. Instead, we test that Close() with only read transactions works.
 
 func TestKVStoreCloseWithActiveReadTransactions(t *testing.T) {
-	t.Run("close with active read transactions marks them closed", func(t *testing.T) {
+	// F060: Begin holds the store lock for the entire transaction; calling
+	// Close while a transaction is open would deadlock on the exclusive
+	// lock. The canonical pattern is to finish all transactions BEFORE
+	// closing the store. The previous test exercised a now-removed code
+	// path that mutated tx.closed under Close's lock — that path doesn't
+	// exist any more, but the contract still allows Close after a clean
+	// Rollback.
+	t.Run("close after read tx rollback succeeds", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "test.db")
 		store, err := OpenKVStore(path)
 		if err != nil {
 			t.Fatalf("OpenKVStore failed: %v", err)
 		}
 
-		// Start a read-only transaction
 		tx, err := store.Begin(false)
 		if err != nil {
 			t.Fatalf("Begin failed: %v", err)
 		}
-
-		// Close store with active read tx - exercises line 214-216
+		if err := tx.Rollback(); err != nil {
+			t.Fatalf("Rollback failed: %v", err)
+		}
 		if err := store.Close(); err != nil {
 			t.Fatalf("Close failed: %v", err)
 		}
-
-		// Transaction should be closed
 		if !tx.closed {
-			t.Error("Expected transaction to be closed after store close")
+			t.Error("Expected transaction to be closed after rollback")
 		}
 	})
 }

@@ -126,22 +126,22 @@ func TestEvictOldest_NilElement(t *testing.T) {
 }
 
 // TestExtractQueryInfo_InvalidType covers the Sscanf error branch
-// in ExtractQueryInfo where the part after the colon is not a number.
+// in ExtractQueryInfo where the part between separators is not a number.
 func TestExtractQueryInfo_InvalidType(t *testing.T) {
 	// Key with non-numeric type portion.
-	name, qtype := ExtractQueryInfo("example.com:abc")
+	name, qtype := ExtractQueryInfo("example.com|abc|0")
 	if name != "" || qtype != 0 {
 		t.Errorf("expected ('', 0) for non-numeric type, got (%q, %d)", name, qtype)
 	}
 
 	// Key with empty type portion.
-	name, qtype = ExtractQueryInfo("example.com:")
+	name, qtype = ExtractQueryInfo("example.com||0")
 	if name != "" || qtype != 0 {
 		t.Errorf("expected ('', 0) for empty type, got (%q, %d)", name, qtype)
 	}
 
 	// Key with valid type still works.
-	name, qtype = ExtractQueryInfo("valid.com:1")
+	name, qtype = ExtractQueryInfo("valid.com|1|0")
 	if name != "valid.com" || qtype != 1 {
 		t.Errorf("expected ('valid.com', 1), got (%q, %d)", name, qtype)
 	}

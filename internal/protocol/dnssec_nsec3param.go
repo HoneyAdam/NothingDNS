@@ -87,11 +87,13 @@ func (r *RDataNSEC3PARAM) Unpack(buf []byte, offset int, rdlength uint16) (int, 
 	r.Flags = buf[offset]
 	offset++
 
-	// Iterations
+	// Iterations. RFC 9276 only recommends iterations==0 and lets validators
+	// treat high-iteration responses as insecure at the policy layer; the
+	// wire decoder must NOT reject the record outright, since doing so turns
+	// any high-iter NSEC3PARAM into a remote DoS via parse failure and also
+	// breaks transit/legacy interop. MaxIterations is enforced by callers
+	// (e.g. dnssec.Validator) where appropriate, not here.
 	r.Iterations = Uint16(buf[offset:])
-	if r.Iterations > MaxIterations {
-		return 0, fmt.Errorf("NSEC3PARAM iterations too high: %d (max %d)", r.Iterations, MaxIterations)
-	}
 	offset += 2
 
 	// Salt Length

@@ -19,7 +19,7 @@ import (
 func TestRealUDPServer(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header: protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 
@@ -216,7 +216,7 @@ func TestRealUDPServer(t *testing.T) {
 func TestRealTCPServer(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		if len(req.Questions) > 0 && req.Questions[0].QType == protocol.TypeA {
@@ -294,7 +294,7 @@ func TestRealTCPServerMultipleQueries(t *testing.T) {
 		mu.Unlock()
 
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -357,7 +357,7 @@ func TestConcurrentUDPServer(t *testing.T) {
 		mu.Unlock()
 
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -420,7 +420,7 @@ func TestConcurrentUDPServer(t *testing.T) {
 func TestServerGracefulShutdown(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -500,7 +500,7 @@ func TestServerInvalidQueryHandling(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		callCount++
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -539,7 +539,7 @@ func TestServerInvalidQueryHandling(t *testing.T) {
 func TestDoHWithRealHTTPServer(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		if len(req.Questions) > 0 && req.Questions[0].QType == protocol.TypeA {

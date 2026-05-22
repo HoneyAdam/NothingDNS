@@ -61,13 +61,13 @@ const (
 
 // ODoHConfig contains configuration for ODoH operations.
 type ODoHConfig struct {
-	TargetName     string // DNS name of the target resolver (e.g., "dns.example.com")
-	ProxyName      string // DNS name of the proxy (e.g., "proxy.example.com")
-	TargetURL      string // HTTPS URL of the target
-	ProxyURL       string // HTTPS URL of the proxy
-	HPKEKEM        int    // Key Encapsulation Mechanism (KEM) algorithm
-	HPKEKDF        int    // Key Derivation Function (KDF) algorithm
-	HPKEAEAD       int    // Authenticated Encryption with Associated Data (AEAD) algorithm
+	TargetName      string // DNS name of the target resolver (e.g., "dns.example.com")
+	ProxyName       string // DNS name of the proxy (e.g., "proxy.example.com")
+	TargetURL       string // HTTPS URL of the target
+	ProxyURL        string // HTTPS URL of the proxy
+	HPKEKEM         int    // Key Encapsulation Mechanism (KEM) algorithm
+	HPKEKDF         int    // Key Derivation Function (KDF) algorithm
+	HPKEAEAD        int    // Authenticated Encryption with Associated Data (AEAD) algorithm
 	TargetPublicKey []byte // Target's HPKE public key (required for ODoH client)
 }
 
@@ -97,16 +97,15 @@ type ObliviousProxy struct {
 
 // ObliviousTarget implements the target resolver side of ODoH.
 type ObliviousTarget struct {
-	config   *ODoHConfig
-	privKey  []byte // Target's private key
-	pubKey   []byte // Target's public key
-	handler  server.Handler
+	config  *ODoHConfig
+	privKey []byte // Target's private key
+	pubKey  []byte // Target's public key
+	handler server.Handler
 }
 
 // odohResponseWriter captures a DNS response message from the handler.
 // It implements server.ResponseWriter.
 type odohResponseWriter struct {
-	query    *protocol.Message
 	response *protocol.Message
 }
 
@@ -396,12 +395,29 @@ func NewObliviousTarget(config *ODoHConfig, handler server.Handler) (*ObliviousT
 }
 
 // ServeHTTP implements the HTTP handler for the target.
+//
+// F122: the current encapsulation code is NOT a conformant implementation
+// of RFC 9230 / RFC 9180 (HPKE). The KDF, AEAD key separation and message
+// framing all deviate from the spec — running this in production would
+// publish broken oblivious responses to compliant ODoH proxies (Cloudflare,
+// dnscrypt-proxy, …) and may leak query data to the proxy that ODoH is
+// meant to hide. Until a proper HPKE implementation lands, the target
+// refuses requests with a clear error so deployments cannot rely on
+// incorrect crypto.
 func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	http.Error(w, "ODoH target disabled: implementation is not RFC 9230 / RFC 9180 (HPKE) conformant; tracked as F122", http.StatusServiceUnavailable)
+}
 
+// serveHTTPInternal is the original (non-conformant) handler body, kept so
+// that internal unit tests of the message-framing path continue to compile
+// but unreachable from the HTTP surface.
+//
+//nolint:unused // retained for legacy test compatibility; F122 tracks real HPKE.
+func (t *ObliviousTarget) serveHTTPInternal(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
@@ -430,7 +446,7 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the query through the handler
-	rw := &odohResponseWriter{query: query}
+	rw := &odohResponseWriter{}
 	(&server.ServeDNSWithRecovery{Handler: t.handler}).ServeDNS(rw, query)
 
 	if rw.response == nil {
@@ -603,6 +619,7 @@ func deriveSharedSecret(priv, pub []byte, kem int) ([]byte, error) {
 // The responseCtx parameter differentiates query vs response key derivation:
 //   - false (0x01): query encryption/decryption context
 //   - true  (0x02): response encryption/decryption context
+//
 // This ensures request and response use cryptographically independent keys
 // even when derived from the same ECDH shared secret.
 func buildKDFInfo(suiteID string, responseCtx bool) []byte {

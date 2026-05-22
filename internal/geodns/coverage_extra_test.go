@@ -2,6 +2,7 @@ package geodns
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ func TestParseMMDBMetadataSingleNodeCount(t *testing.T) {
 func TestParseMMDBMetadataMultipleCandidates(t *testing.T) {
 	// Place two valid-looking uint32 values; the first one encountered wins.
 	data := make([]byte, 20)
-	binary.BigEndian.PutUint32(data[0:4], 10) // first candidate
+	binary.BigEndian.PutUint32(data[0:4], 10)  // first candidate
 	binary.BigEndian.PutUint32(data[8:12], 20) // second candidate (ignored)
 	ipv4, _, err := parseMMDBMetadata(data)
 	if err != nil {
@@ -120,38 +121,27 @@ func TestLoadMMDBTruncatedAfterMarker(t *testing.T) {
 }
 
 func TestLoadMMDBValidFile(t *testing.T) {
+	// F138: LoadMMDB now always returns ErrMMDBNotSupported because the
+	// previous "parser" produced random routing decisions. Confirm the
+	// honest-failure behaviour so silent mis-routing cannot return.
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.mmdb")
-
-	// Build a minimal MMDB-like file:
-	//   - some node bytes (padding)
-	//   - metadata marker
-	//   - metadata with a valid node_count
-	nodeCount := uint32(4)
-	treeBytes := nodeCount * 24 // 96 bytes of tree
-
-	buf := make([]byte, 0, int(treeBytes)+len(mmdbMetadataMarker)+8)
-	// Tree section: 96 zero bytes (4 nodes)
-	buf = append(buf, make([]byte, treeBytes)...)
-	// Metadata marker
-	buf = append(buf, mmdbMetadataMarker...)
-	// Metadata: embed node_count as a big-endian uint32
-	meta := make([]byte, 8)
-	binary.BigEndian.PutUint32(meta[0:4], nodeCount)
-	buf = append(buf, meta...)
-
-	if err := os.WriteFile(path, buf, 0644); err != nil {
+	if err := os.WriteFile(path, make([]byte, 200), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	e := NewEngine(Config{Enabled: true})
-	if err := e.LoadMMDB(path); err != nil {
-		t.Fatalf("LoadMMDB failed: %v", err)
+	err := e.LoadMMDB(path)
+	if err == nil {
+		t.Fatal("expected LoadMMDB to fail with ErrMMDBNotSupported (F138)")
+	}
+	if !errors.Is(err, ErrMMDBNotSupported) {
+		t.Errorf("expected ErrMMDBNotSupported, got %v", err)
 	}
 
 	stats := e.Stats()
-	if !stats.MMDBLoaded {
-		t.Error("MMDBLoaded should be true after successful load")
+	if stats.MMDBLoaded {
+		t.Error("MMDBLoaded must remain false when LoadMMDB fails")
 	}
 }
 
@@ -924,9 +914,9 @@ func TestResolveWithMMDBASNMatch(t *testing.T) {
 
 	e.SetRule("cdn.example.com.", "A", &GeoRecord{
 		Records: map[string]string{
-			"AS10":  "10.10.10.10", // ASN match
-			"US":    "1.1.1.1",      // country match (lower priority)
-			"NA":    "2.2.2.2",      // continent match (even lower)
+			"AS10": "10.10.10.10", // ASN match
+			"US":   "1.1.1.1",     // country match (lower priority)
+			"NA":   "2.2.2.2",     // continent match (even lower)
 		},
 		Default: "172.16.0.1",
 	})

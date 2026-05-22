@@ -432,25 +432,31 @@ func TestWALCompact_SyncErrorPath(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestKVStoreClose_WithOpenReadTransactions(t *testing.T) {
+	// F060: Begin holds the store lock for the lifetime of the
+	// transaction. Calling Close while a transaction is open would deadlock
+	// (Close needs the exclusive lock; the open tx still holds a shared
+	// one). Correct usage is: finish all transactions first, then Close.
 	dir := t.TempDir()
 	store, err := OpenKVStore(dir)
 	if err != nil {
 		t.Fatalf("OpenKVStore: %v", err)
 	}
 
-	// Open a read transaction
 	tx, err := store.Begin(false)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
 
-	// Close should mark the read tx as closed (lines 214-216)
-	if err := store.Close(); err != nil {
-		t.Fatalf("Close with open read tx: %v", err)
+	// Finish the read transaction before closing the store.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if !tx.closed {
+		t.Error("Rollback should have marked the read transaction closed")
 	}
 
-	if !tx.closed {
-		t.Error("Expected read transaction to be closed after store.Close()")
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 

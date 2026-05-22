@@ -89,8 +89,8 @@ type Engine struct {
 	enabled atomic.Bool
 
 	// Metrics.
-	matches uint64
-	lookups uint64
+	matches     uint64
+	lookups     uint64
 	parseErrors uint64
 
 	// Logger.
@@ -107,7 +107,7 @@ type Config struct {
 	// Policies maps policy zone names to their priority (lower = higher priority).
 	Policies map[string]int
 	// Logger for diagnostics. If nil, logging is silently discarded.
-	Logger   *util.Logger
+	Logger *util.Logger
 }
 
 // NewEngine creates a new RPZ engine.

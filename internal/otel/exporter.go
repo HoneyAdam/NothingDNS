@@ -12,15 +12,15 @@ import (
 
 // ExporterConfig holds OTLP exporter configuration.
 type ExporterConfig struct {
-	Endpoint   string        // OTLP collector endpoint (e.g., "http://localhost:4318")
-	Protocol   string        // "http/protobuf" or "grpc"
-	BatchSize  int           // Max spans per batch (default 100)
+	Endpoint     string        // OTLP collector endpoint (e.g., "http://localhost:4318")
+	Protocol     string        // "http/protobuf" or "grpc"
+	BatchSize    int           // Max spans per batch (default 100)
 	BatchTimeout time.Duration // Flush interval (default 5s)
 }
 
 // OTLPExporter exports spans to an OTLP collector.
 type OTLPExporter struct {
-	config   ExporterConfig
+	config  ExporterConfig
 	client  *http.Client
 	batch   []*Span
 	batchMu sync.Mutex
@@ -114,12 +114,12 @@ func (e *OTLPExporter) toOTLPRequest(spans []*Span) []byte {
 	scopeSpans := make([]map[string]interface{}, 0, len(spans))
 	for _, span := range spans {
 		otlpSpan := map[string]interface{}{
-			"trace_id": bytesToHex(span.TraceID[:]),
-			"span_id":  bytesToHex(span.SpanID[:]),
-			"name":     span.Name,
+			"trace_id":             bytesToHex(span.TraceID[:]),
+			"span_id":              bytesToHex(span.SpanID[:]),
+			"name":                 span.Name,
 			"start_time_unix_nano": span.StartTime.UnixNano(),
 			"end_time_unix_nano":   span.EndTime.UnixNano(),
-			"attributes":          convertAttrs(span.Attrs),
+			"attributes":           convertAttrs(span.Attrs),
 		}
 
 		if span.ParentID != ([8]byte{}) {

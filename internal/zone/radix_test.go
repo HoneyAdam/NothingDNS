@@ -97,6 +97,37 @@ func TestSplitDomainReversed(t *testing.T) {
 	}
 }
 
+// TestRadixTree_CaseInsensitive verifies RFC 1035 §2.3.3 case-insensitive
+// matching: a zone inserted as "EXAMPLE.COM." must match queries in any case
+// (e.g. "example.com.", "Example.Com.", "EXAMPLE.COM.") and vice versa.
+func TestRadixTree_CaseInsensitive(t *testing.T) {
+	tree := NewRadixTree()
+	upper := &Zone{Origin: "EXAMPLE.COM."}
+	tree.Insert("EXAMPLE.COM.", upper)
+
+	cases := []string{
+		"example.com.",
+		"EXAMPLE.COM.",
+		"Example.Com.",
+		"www.example.com.",
+		"WWW.EXAMPLE.COM.",
+		"WwW.eXaMpLe.CoM.",
+	}
+	for _, q := range cases {
+		if got := tree.Find(q); got != upper {
+			t.Errorf("Find(%q) did not match zone inserted as EXAMPLE.COM. (got %v)", q, got)
+		}
+	}
+
+	// Reverse: zone inserted lowercase must be matched by uppercase query.
+	tree2 := NewRadixTree()
+	lower := &Zone{Origin: "example.net."}
+	tree2.Insert("example.net.", lower)
+	if got := tree2.Find("HOST.EXAMPLE.NET."); got != lower {
+		t.Errorf("Find(HOST.EXAMPLE.NET.) did not match zone inserted as example.net. (got %v)", got)
+	}
+}
+
 func TestRadixTree_Empty(t *testing.T) {
 	tree := NewRadixTree()
 	if got := tree.Find("anything.com."); got != nil {

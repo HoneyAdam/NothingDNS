@@ -16,12 +16,12 @@ func testLogger() *util.Logger {
 }
 
 func TestNewEngine(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 	if !e.IsEnabled() {
 		t.Error("engine should be enabled")
 	}
 
-	e2 := NewEngine(Config{Logger: testLogger(),Enabled: false})
+	e2 := NewEngine(Config{Logger: testLogger(), Enabled: false})
 	if e2.IsEnabled() {
 		t.Error("engine should be disabled")
 	}
@@ -46,7 +46,7 @@ func TestReverseRPZToCIDR(t *testing.T) {
 }
 
 func TestParseAction(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 
 	tests := []struct {
 		rtype, rdata string
@@ -74,7 +74,7 @@ func TestParseAction(t *testing.T) {
 }
 
 func TestParseOwnerName(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 
 	tests := []struct {
 		owner       string
@@ -166,7 +166,7 @@ redirect.example.com.rpz-zone.  IN  CNAME  garden.example.com.
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestQNAMEPolicyWildcard(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestClientIPPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -283,7 +283,7 @@ func TestResponseIPPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -302,7 +302,7 @@ func TestResponseIPPolicy(t *testing.T) {
 }
 
 func TestDisabledEngine(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: false})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: false})
 
 	if rule := e.QNAMEPolicy("bad.example.com."); rule != nil {
 		t.Error("disabled engine should return nil")
@@ -326,7 +326,7 @@ func TestReload(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -370,7 +370,7 @@ func TestStats(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -430,7 +430,7 @@ func TestPriorityPolicyZones(t *testing.T) {
 }
 
 func TestLoadNonexistentFile(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{"/nonexistent/rpz-zone"}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{"/nonexistent/rpz-zone"}})
 	if err := e.Load(); err == nil {
 		t.Error("expected error loading nonexistent file")
 	}
@@ -438,7 +438,7 @@ func TestLoadNonexistentFile(t *testing.T) {
 
 // TestParseOwnerNameEdgeCases tests owner name parsing edge cases
 func TestParseOwnerNameEdgeCases(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 
 	tests := []struct {
 		owner       string
@@ -486,7 +486,7 @@ func TestNSDNAMEPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -510,7 +510,7 @@ func TestNSIPPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -533,7 +533,7 @@ func TestTCPOnlyPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -558,7 +558,7 @@ func TestDropPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -599,7 +599,7 @@ bad.example.com.rpz-zone.  IN  CNAME  .`},
 				t.Fatalf("write: %v", err)
 			}
 
-			e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+			e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 			// Should not panic, may or may not return error depending on content
 			_ = e.Load()
 		})
@@ -620,7 +620,7 @@ UPPERCASE.EXAMPLE.COM.rpz-zone.  IN  CNAME  .
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestClientIPPolicyEdgeCases(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -679,8 +679,8 @@ func TestClientIPPolicyEdgeCases(t *testing.T) {
 		{"127.0.0.0", true},
 		{"10.0.0.255", true},
 		{"172.0.255.255", true},
-		{"192.255.255.255", true},  // In 192.0.0.0/8
-		{"192.254.255.255", true},  // Also in 192.0.0.0/8
+		{"192.255.255.255", true}, // In 192.0.0.0/8
+		{"192.254.255.255", true}, // Also in 192.0.0.0/8
 		{"0.0.0.0", false},
 		{"255.255.255.255", false},
 		{"::1", false}, // IPv6 not in range
@@ -711,7 +711,7 @@ func TestResponseIPPolicyEdgeCases(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -761,7 +761,7 @@ func TestConcurrentEngineAccess(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestConcurrentEngineAccess(t *testing.T) {
 
 // TestEmptyEngine tests behavior of empty/unloaded engine
 func TestEmptyEngine(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 
 	// No files loaded, policies should return nil
 	if rule := e.QNAMEPolicy("anything.example.com."); rule != nil {
@@ -853,7 +853,7 @@ func TestLoadMultipleFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{file1, file2, file3}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{file1, file2, file3}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -887,7 +887,7 @@ func TestIPv6ResponseIPPolicy(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -912,7 +912,7 @@ func TestWildcardMatchingDepth(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -945,12 +945,12 @@ func TestWildcardMatchingDepth(t *testing.T) {
 
 // TestActionStringValidation tests action string parsing
 func TestActionStringValidation(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
 
 	tests := []struct {
-		rtype   string
-		rdata   string
-		want    PolicyAction
+		rtype string
+		rdata string
+		want  PolicyAction
 	}{
 		{"CNAME", ".", ActionNODATA},
 		{"CNAME", "*", ActionNXDOMAIN},
@@ -961,8 +961,8 @@ func TestActionStringValidation(t *testing.T) {
 		{"TXT", `"passthru"`, ActionPassThrough},
 		{"TXT", `"drop"`, ActionDrop},
 		{"TXT", `"tcp-only"`, ActionTCPOnly},
-		{"TXT", `"unknown"`, ActionNXDOMAIN}, // Unknown TXT action = NXDOMAIN
-		{"TXT", ``, ActionNXDOMAIN}, // Empty TXT = NXDOMAIN
+		{"TXT", `"unknown"`, ActionNXDOMAIN},           // Unknown TXT action = NXDOMAIN
+		{"TXT", ``, ActionNXDOMAIN},                    // Empty TXT = NXDOMAIN
 		{"MX", `10 mail.example.com.`, ActionNXDOMAIN}, // Unsupported type = NXDOMAIN
 	}
 
@@ -1016,7 +1016,7 @@ blocked.example.com.rpz-zone.  IN  CNAME  .
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1035,7 +1035,7 @@ blocked.example.com.rpz-zone.  IN  CNAME  .
 
 // TestInvalidFilePath tests loading from non-existent file
 func TestInvalidFilePath(t *testing.T) {
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{"/nonexistent/path/rpz.txt"}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{"/nonexistent/path/rpz.txt"}})
 
 	// Should return error for non-existent file
 	err := e.Load()
@@ -1063,7 +1063,7 @@ another.bad.example.com.rpz-zone.  3600  IN  A  127.0.0.1
 		t.Fatalf("write: %v", err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1096,9 +1096,9 @@ func TestRPZPriorityOrdering(t *testing.T) {
 	}
 
 	e := NewEngine(Config{
-		Logger: testLogger(),
+		Logger:  testLogger(),
 		Enabled: true,
-		Files: []string{file1, file2},
+		Files:   []string{file1, file2},
 		Policies: map[string]int{
 			"file1": 1, // Higher priority (lower number)
 			"file2": 2, // Lower priority
@@ -1126,7 +1126,7 @@ func TestRPZReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1162,7 +1162,7 @@ func TestEmptyRPZFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -1189,7 +1189,7 @@ func TestCommentOnlyRPZFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e := NewEngine(Config{Logger: testLogger(),Enabled: true, Files: []string{rpzFile}})
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
 	if err := e.Load(); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

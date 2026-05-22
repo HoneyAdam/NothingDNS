@@ -32,9 +32,9 @@ import (
 
 // DNSResolver groups recursive resolution dependencies.
 type DNSResolver struct {
-	Upstream      *upstream.Client
-	LoadBalancer  *upstream.LoadBalancer
-	Resolver      *resolver.Resolver
+	Upstream     *upstream.Client
+	LoadBalancer *upstream.LoadBalancer
+	Resolver     *resolver.Resolver
 }
 
 // ZoneStorage groups zone data and persistence dependencies.
@@ -89,9 +89,9 @@ type SpecialFeatures struct {
 // HandlerDeps groups all handler dependencies into logical categories.
 // This reduces the integratedHandler struct from 37 fields to 11 groups.
 type HandlerDeps struct {
-	Config     *config.Config
-	Logger     *util.Logger
-	Cluster    *cluster.Cluster
+	Config  *config.Config
+	Logger  *util.Logger
+	Cluster *cluster.Cluster
 
 	DNSResolver
 	ZoneStorage

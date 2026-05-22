@@ -60,19 +60,19 @@ type Cluster struct {
 
 // Config configures the cluster.
 type Config struct {
-	Enabled              bool
-	NodeID               string
-	BindAddr             string
-	BindPort             int
-	GossipPort           int
-	ConsensusMode        ConsensusMode // "raft" (default) or "swim"
-	Region               string
-	Zone                 string
-	Weight               int
-	SeedNodes            []string
-	CacheSync            bool
-	HTTPAddr             string
-	EncryptionKey        string                         // hex-encoded 32-byte AES-256 key
+	Enabled       bool
+	NodeID        string
+	BindAddr      string
+	BindPort      int
+	GossipPort    int
+	ConsensusMode ConsensusMode // "raft" (default) or "swim"
+	Region        string
+	Zone          string
+	Weight        int
+	SeedNodes     []string
+	CacheSync     bool
+	HTTPAddr      string
+	EncryptionKey string // hex-encoded 32-byte AES-256 key
 	// AllowInsecureCluster, when true, permits cluster startup without an
 	// EncryptionKey. The default is false: gossip messages carry zone updates
 	// and config sync, so plaintext on the cluster plane means a network

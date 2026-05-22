@@ -23,9 +23,9 @@ func TestNew_EmptyBindAddr_CallsGetLocalIP(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "auto-ip-node",
-		BindAddr:   "", // Forces GetLocalIP call
-		GossipPort: 47001,
+		NodeID:               "auto-ip-node",
+		BindAddr:             "", // Forces GetLocalIP call
+		GossipPort:           47001,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -50,9 +50,9 @@ func TestNew_NewGossipProtocolNeverErrors(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "gossip-err-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47002,
+		NodeID:               "gossip-err-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47002,
 	}
 
 	// NewGossipProtocol currently never returns an error, so the error path
@@ -77,10 +77,10 @@ func TestCluster_Stop_GossipStopNeverErrors(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "stop-err-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47003,
-		CacheSync:  true,
+		NodeID:               "stop-err-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47003,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -233,10 +233,10 @@ func TestCluster_CacheSyncLoop_InvalidateWithAliveRemoteNode(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "sync-remote-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47004,
-		CacheSync:  true,
+		NodeID:               "sync-remote-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47004,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -278,10 +278,10 @@ func TestCluster_Stop_WithNilGossipConn(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "nil-conn-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47005,
-		CacheSync:  true,
+		NodeID:               "nil-conn-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47005,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -314,10 +314,10 @@ func TestCluster_Stats_WithCacheSync(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "stats-sync-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47006,
-		CacheSync:  true,
+		NodeID:               "stats-sync-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47006,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -406,10 +406,10 @@ func TestCluster_InvalidateCacheLocal_MultipleKeys(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "multi-inval-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47007,
-		CacheSync:  true,
+		NodeID:               "multi-inval-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47007,
+		CacheSync:            true,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -491,11 +491,11 @@ func TestCluster_Start_EmptySeeds(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "empty-seeds-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 47010,
-		SeedNodes:  []string{},
-		CacheSync:  false,
+		NodeID:               "empty-seeds-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           47010,
+		SeedNodes:            []string{},
+		CacheSync:            false,
 	}
 
 	c, err := New(cfg, logger, dnsCache)

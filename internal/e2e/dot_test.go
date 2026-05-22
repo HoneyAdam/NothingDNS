@@ -75,7 +75,7 @@ func mustMarshalECPrivateKey(key *ecdsa.PrivateKey) []byte {
 func TestDoTWithTLSServer(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		if len(req.Questions) > 0 && req.Questions[0].QType == protocol.TypeA {
@@ -164,7 +164,7 @@ func TestDoTMultipleConnections(t *testing.T) {
 		mu.Unlock()
 
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -220,7 +220,7 @@ func TestDoTMultipleConnections(t *testing.T) {
 func TestDoTTLSHandshakeError(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)
@@ -261,7 +261,7 @@ func TestDoTTLSHandshakeError(t *testing.T) {
 func TestDoTConnectionReuse(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
 		resp := &protocol.Message{
-			Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+			Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: req.Questions,
 		}
 		w.Write(resp)

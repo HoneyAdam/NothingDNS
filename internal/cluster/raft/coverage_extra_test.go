@@ -104,11 +104,11 @@ func TestLastLogInfoNonEmpty(t *testing.T) {
 
 func TestIsLogUpToDate(t *testing.T) {
 	tests := []struct {
-		name            string
-		log             []entry
-		candidateIdx    Index
-		candidateTerm   Term
-		expectUpToDate  bool
+		name           string
+		log            []entry
+		candidateIdx   Index
+		candidateTerm  Term
+		expectUpToDate bool
 	}{
 		{"same_term_longer_candidate", []entry{{Index: 2, Term: 1}}, 3, 1, true},
 		{"same_term_shorter_candidate", []entry{{Index: 5, Term: 1}}, 3, 1, false},
@@ -464,10 +464,10 @@ func TestHandleAppendResponseSuccess(t *testing.T) {
 	n.mu.Unlock()
 
 	n.handleAppendResponse(AppendResponse{
-		Term:        1,
-		Success:     true,
-		From:        "f1",
-		MatchIndex:  2,
+		Term:       1,
+		Success:    true,
+		From:       "f1",
+		MatchIndex: 2,
 	})
 
 	n.mu.Lock()
@@ -1368,9 +1368,9 @@ func TestRPCServerWriteReadSnapshotRequest(t *testing.T) {
 	var buf bytes.Buffer
 
 	req := SnapshotRequest{
-		Term:     1,
-		LeaderID: "leader",
-		Data:     []byte("snap-data"),
+		Term:      1,
+		LeaderID:  "leader",
+		Data:      []byte("snap-data"),
 		LastIndex: 100,
 		LastTerm:  5,
 	}
@@ -1821,8 +1821,8 @@ func TestHandleSnapshotRequestInternal(t *testing.T) {
 	n.mu.Unlock()
 
 	n.handleSnapshotRequest(SnapshotRequest{
-		Term:     2,
-		LeaderID: "leader",
+		Term:      2,
+		LeaderID:  "leader",
 		LastIndex: 10,
 		LastTerm:  2,
 	})
@@ -1836,4 +1836,3 @@ func TestHandleSnapshotRequestInternal(t *testing.T) {
 		t.Errorf("log should be cleared after snapshot install")
 	}
 }
-

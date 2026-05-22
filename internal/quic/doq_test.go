@@ -415,12 +415,16 @@ func TestDoQServerEndToEnd(t *testing.T) {
 	}
 	defer stream.Close()
 
-	// RFC 9250: DNS messages over QUIC are NOT length-prefixed
+	// RFC 9250 §4.2: each DNS message is prefixed by a 2-octet length field.
 	dnsQuery := []byte{0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 		0x07, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x03, 0x63, 0x6f, 0x6d, 0x00,
 		0x00, 0x01, 0x00, 0x01}
+	framed := make([]byte, 2+len(dnsQuery))
+	framed[0] = byte(len(dnsQuery) >> 8)
+	framed[1] = byte(len(dnsQuery))
+	copy(framed[2:], dnsQuery)
 
-	_, err = stream.Write(dnsQuery)
+	_, err = stream.Write(framed)
 	if err != nil {
 		t.Fatalf("stream.Write: %v", err)
 	}

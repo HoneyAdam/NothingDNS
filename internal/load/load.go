@@ -23,18 +23,18 @@ type Config struct {
 
 // Result holds load test results.
 type Result struct {
-	Queries       int64           // Total queries sent
-	Success       int64           // Successful responses
-	Errors        int64           // Errors (network, protocol)
-	Timeouts      int64           // Timeouts
-	TotalDuration time.Duration   // Total test duration
-	LatencyMin    time.Duration   // Min latency
-	LatencyMax    time.Duration   // Max latency
-	LatencyAvg    time.Duration   // Avg latency
-	LatencyP50    time.Duration   // 50th percentile
-	LatencyP95    time.Duration   // 95th percentile
-	LatencyP99    time.Duration   // 99th percentile
-	QPS           float64         // Queries per second
+	Queries       int64            // Total queries sent
+	Success       int64            // Successful responses
+	Errors        int64            // Errors (network, protocol)
+	Timeouts      int64            // Timeouts
+	TotalDuration time.Duration    // Total test duration
+	LatencyMin    time.Duration    // Min latency
+	LatencyMax    time.Duration    // Max latency
+	LatencyAvg    time.Duration    // Avg latency
+	LatencyP50    time.Duration    // 50th percentile
+	LatencyP95    time.Duration    // 95th percentile
+	LatencyP99    time.Duration    // 99th percentile
+	QPS           float64          // Queries per second
 	ErrorsDetail  map[string]int64 // Error type counts
 }
 
@@ -51,7 +51,7 @@ type Runner struct {
 // NewRunner creates a new load test runner.
 func NewRunner(cfg Config) *Runner {
 	return &Runner{
-		cfg:      cfg,
+		cfg:       cfg,
 		latencies: make([]time.Duration, 0, cfg.Queries*cfg.Workers),
 	}
 }
@@ -115,8 +115,8 @@ func (r *Runner) sendQuery(conn net.Conn) {
 
 	msg := &protocol.Message{
 		Header: protocol.Header{
-			ID:     uint16(time.Now().UnixNano() & 0xFFFF),
-			Flags:  protocol.Flags{QR: false, Opcode: protocol.OpcodeQuery, RD: true},
+			ID:      uint16(time.Now().UnixNano() & 0xFFFF),
+			Flags:   protocol.Flags{QR: false, Opcode: protocol.OpcodeQuery, RD: true},
 			QDCount: 1,
 		},
 		Questions: []*protocol.Question{

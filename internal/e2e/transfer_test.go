@@ -242,7 +242,7 @@ func TestIXFRServerWithTCPServer(t *testing.T) {
 		} else {
 			// Regular query
 			resp := &protocol.Message{
-				Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+				Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 				Questions: req.Questions,
 			}
 			w.Write(resp)
@@ -385,7 +385,7 @@ func TestAXFRServerWithTCPServer(t *testing.T) {
 		} else {
 			// Regular query
 			resp := &protocol.Message{
-				Header:  protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+				Header:    protocol.Header{ID: req.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 				Questions: req.Questions,
 			}
 			w.Write(resp)
@@ -582,9 +582,9 @@ func TestAXFRMultipleMessageStreaming(t *testing.T) {
 func TestAXFRDenied(t *testing.T) {
 	z := zone.NewZone("denied.test.")
 	z.SOA = &zone.SOARecord{
-		MName:   "ns.denied.test.",
-		RName:   "admin.denied.test.",
-		Serial:  1,
+		MName:  "ns.denied.test.",
+		RName:  "admin.denied.test.",
+		Serial: 1,
 	}
 	z.Records["denied.test."] = []zone.Record{
 		{Type: "NS", TTL: 3600, RData: "ns.denied.test."},

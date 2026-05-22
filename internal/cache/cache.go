@@ -231,20 +231,32 @@ func MakeKey(name string, qtype uint16, doBit bool) string {
 	const maxKeyNameLen = 128 // Maximum domain name length before hashing
 
 	var b strings.Builder
-	// +1 for :do + 1 for digit (0/1) + 10 for qtype
-	b.Grow(len(name) + 1 + 1 + 10)
+	b.Grow(len(name) + 1 + 6 + 1 + 1)
 
 	if len(name) > maxKeyNameLen {
 		// Hash long domain names to prevent cache flooding
 		h := crc32Hash(name)
-		b.WriteString(strconv.FormatUint(uint64(h), 10))
+		b.WriteString(strconv.FormatUint(h, 10))
 	} else {
-		b.WriteString(name)
+		// RFC 1035 §2.3.3: domain names are case-insensitive. Lower-case here
+		// so that "Example.com" and "example.com" share a single cache entry
+		// and an attacker cannot inflate the working-set with case-randomised
+		// duplicates.
+		for i := 0; i < len(name); i++ {
+			c := name[i]
+			if c >= 'A' && c <= 'Z' {
+				c |= 0x20
+			}
+			b.WriteByte(c)
+		}
 	}
 
-	b.WriteByte(':')
+	// Use '|' as a field separator: DNS names cannot contain it on the wire
+	// or in zone files, so it is unambiguous. This avoids the last-colon
+	// confusion that broke ExtractQueryInfo when the DO-bit suffix was added.
+	b.WriteByte('|')
 	b.WriteString(strconv.FormatUint(uint64(qtype), 10))
-	b.WriteByte(':')
+	b.WriteByte('|')
 	if doBit {
 		b.WriteByte('1')
 	} else {
@@ -389,12 +401,14 @@ func (c *Cache) Set(key string, msg *protocol.Message, ttl uint32) {
 
 // SetNegative adds a negative cache entry (NXDOMAIN or NODATA).
 func (c *Cache) SetNegative(key string, rcode uint8) {
-	// Apply min/max TTL constraints to negative TTL
+	// Apply min/max TTL constraints to negative TTL.
+	// maxTTL == 0 means "no upper bound" — only clamp when a positive ceiling
+	// has been configured (otherwise zero-clamp expires the entry immediately).
 	ttl := c.negativeTTL
 	if ttl < c.minTTL {
 		ttl = c.minTTL
 	}
-	if ttl > c.maxTTL {
+	if c.maxTTL > 0 && ttl > c.maxTTL {
 		ttl = c.maxTTL
 	}
 
@@ -416,12 +430,14 @@ func (c *Cache) SetNegative(key string, rcode uint8) {
 // setInternal adds or updates an entry with the given TTL. Must be called
 // with the shard's mutex held.
 func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, ttl uint32, isPrefetch bool) {
-	// Apply min/max TTL constraints
+	// Apply min/max TTL constraints.
+	// maxTTL == 0 means "no upper bound" — only clamp when a positive ceiling
+	// has been configured (otherwise zero-clamp expires the entry immediately).
 	duration := time.Duration(ttl) * time.Second
 	if duration < c.minTTL {
 		duration = c.minTTL
 	}
-	if duration > c.maxTTL {
+	if c.maxTTL > 0 && duration > c.maxTTL {
 		duration = c.maxTTL
 	}
 
@@ -756,20 +772,28 @@ func (c *Cache) OnPrefetchComplete(key string, msg *protocol.Message, ttl uint32
 // ExtractQueryInfo extracts the query name and type from a cache key.
 // Returns empty values if the key format is unexpected.
 func ExtractQueryInfo(key string) (string, uint16) {
-	// Find the last colon separator
-	for i := len(key) - 1; i >= 0; i-- {
-		if key[i] == ':' {
-			name := key[:i]
-			typeStr := key[i+1:]
-			var qtype uint16
-			// Try to parse the type number
-			if _, err := fmt.Sscanf(typeStr, "%d", &qtype); err != nil {
-				return "", 0
-			}
-			return name, qtype
-		}
+	// Cache keys produced by MakeKey use the form "name|qtype|dobit" with '|'
+	// separators. Split on the first two '|' characters: the first delimits
+	// the name from the qtype, the second separates qtype from the DO bit
+	// (which is discarded here — callers wanting it should parse the key
+	// directly). Legacy ':' keys are no longer supported.
+	first := strings.IndexByte(key, '|')
+	if first < 0 {
+		return "", 0
 	}
-	return "", 0
+	rest := key[first+1:]
+	second := strings.IndexByte(rest, '|')
+	var typeStr string
+	if second < 0 {
+		typeStr = rest
+	} else {
+		typeStr = rest[:second]
+	}
+	var qtype uint16
+	if _, err := fmt.Sscanf(typeStr, "%d", &qtype); err != nil {
+		return "", 0
+	}
+	return key[:first], qtype
 }
 
 // CacheEntryJSON is a JSON-serializable cache entry for persistence.

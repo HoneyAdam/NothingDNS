@@ -18,9 +18,6 @@ type Tokenizer struct {
 	atLineStart   bool
 	pendingTokens []Token // buffered DEDENT tokens for multi-level dedents
 
-	// Depth tracking for nested structures
-	depth int
-
 	// Max string size limit
 	maxStringSize int
 }

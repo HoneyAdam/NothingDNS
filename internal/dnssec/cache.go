@@ -25,8 +25,8 @@ type cacheEntry struct {
 
 // rrsigCacheEntry holds a cached RRSIG for an RRset.
 type rrsigCacheEntry struct {
-	rrsig    *protocol.ResourceRecord
-	dataHash [32]byte // SHA-256 hash of the signed data
+	rrsig     *protocol.ResourceRecord
+	dataHash  [32]byte // SHA-256 hash of the signed data
 	expiresAt time.Time
 }
 
@@ -178,8 +178,8 @@ func (c *RRSIGCache) SetRRSIG(zone string, qtype uint16, data []byte, rrsig *pro
 
 	dataHash := sha256.Sum256(data)
 	c.items[rrsigCacheKey(zone, qtype, dataHash)] = &rrsigCacheEntry{
-		rrsig:    rrsig,
-		dataHash: dataHash,
+		rrsig:     rrsig,
+		dataHash:  dataHash,
 		expiresAt: time.Now().Add(c.ttl),
 	}
 }

@@ -1031,53 +1031,53 @@ func TestLogConsistencyRules(t *testing.T) {
 // TestVoteRequestLogComparison tests that vote requests consider log completeness
 func TestVoteRequestLogComparison(t *testing.T) {
 	tests := []struct {
-		name        string
-		nodeLog     []entry
+		name              string
+		nodeLog           []entry
 		candidateLastIdx  Index
 		candidateLastTerm Term
-		shouldGrant bool
+		shouldGrant       bool
 	}{
 		{
-			name:        "candidate_more_complete",
-			nodeLog:     []entry{{Index: 1, Term: 1}},
+			name:              "candidate_more_complete",
+			nodeLog:           []entry{{Index: 1, Term: 1}},
 			candidateLastIdx:  2,
 			candidateLastTerm: 1,
-			shouldGrant: true,
+			shouldGrant:       true,
 		},
 		{
-			name:        "candidate_less_complete",
-			nodeLog:     []entry{{Index: 3, Term: 2}},
+			name:              "candidate_less_complete",
+			nodeLog:           []entry{{Index: 3, Term: 2}},
 			candidateLastIdx:  1,
 			candidateLastTerm: 1,
-			shouldGrant: false,
+			shouldGrant:       false,
 		},
 		{
-			name:        "equal_logs",
-			nodeLog:     []entry{{Index: 2, Term: 1}},
+			name:              "equal_logs",
+			nodeLog:           []entry{{Index: 2, Term: 1}},
 			candidateLastIdx:  2,
 			candidateLastTerm: 1,
-			shouldGrant: true,
+			shouldGrant:       true,
 		},
 		{
-			name:        "candidate_higher_term",
-			nodeLog:     []entry{{Index: 5, Term: 1}},
+			name:              "candidate_higher_term",
+			nodeLog:           []entry{{Index: 5, Term: 1}},
 			candidateLastIdx:  1,
 			candidateLastTerm: 2,
-			shouldGrant: true,
+			shouldGrant:       true,
 		},
 		{
-			name:        "empty_node_log",
-			nodeLog:     []entry{},
+			name:              "empty_node_log",
+			nodeLog:           []entry{},
 			candidateLastIdx:  1,
 			candidateLastTerm: 1,
-			shouldGrant: true,
+			shouldGrant:       true,
 		},
 		{
-			name:        "candidate_equal_term_longer_log",
-			nodeLog:     []entry{{Index: 1, Term: 2}, {Index: 2, Term: 2}},
+			name:              "candidate_equal_term_longer_log",
+			nodeLog:           []entry{{Index: 1, Term: 2}, {Index: 2, Term: 2}},
 			candidateLastIdx:  3,
 			candidateLastTerm: 2,
-			shouldGrant: true,
+			shouldGrant:       true,
 		},
 	}
 
@@ -1816,9 +1816,9 @@ func TestTransportMockVariations(t *testing.T) {
 			appendResp: &AppendResponse{Term: 1, Success: true, MatchIndex: 1},
 		},
 		{
-			name:       "error_responses",
-			voteErr:    fmt.Errorf("network error"),
-			appendErr:  fmt.Errorf("network error"),
+			name:      "error_responses",
+			voteErr:   fmt.Errorf("network error"),
+			appendErr: fmt.Errorf("network error"),
 		},
 		{
 			name:       "rejected_vote",
@@ -1835,9 +1835,9 @@ func TestTransportMockVariations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			transport := &mockTransport{
-				voteResp:     tt.voteResp,
-				voteRespErr:  tt.voteErr,
-				appendResp:   tt.appendResp,
+				voteResp:      tt.voteResp,
+				voteRespErr:   tt.voteErr,
+				appendResp:    tt.appendResp,
 				appendRespErr: tt.appendErr,
 			}
 

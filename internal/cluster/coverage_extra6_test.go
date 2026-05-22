@@ -21,6 +21,9 @@ func pickFreePort() int {
 // ---------------------------------------------------------------------------
 
 func TestHandleElection_ThisNodeIsProposedLeader(t *testing.T) {
+	// F053 regression test: after the self-coronation fix, receiving an
+	// Election message proposing this node as leader must NOT make us
+	// leader. Quorum-based leader election now goes through the Raft tier.
 	self := &Node{ID: "node-A", State: NodeStateAlive, Addr: "127.0.0.1"}
 	nl := NewNodeList(self)
 	cfg := DefaultGossipConfig()
@@ -35,7 +38,6 @@ func TestHandleElection_ThisNodeIsProposedLeader(t *testing.T) {
 	}
 	defer gp.Stop()
 
-	// Election that proposes this node as leader
 	election := ElectionPayload{
 		ProposedLeader: "node-A",
 		Priority:       1,
@@ -53,17 +55,17 @@ func TestHandleElection_ThisNodeIsProposedLeader(t *testing.T) {
 	gp.leaderMu.RLock()
 	isLeader := gp.isLeader
 	leader := gp.currentLeader
-	term := gp.leaderTerm
+	electionTerm := gp.electionTerm
 	gp.leaderMu.RUnlock()
 
-	if !isLeader {
-		t.Error("expected this node to be the leader")
+	if isLeader {
+		t.Error("a single Election message must NOT make this node leader (F053 self-coronation fix)")
 	}
-	if leader != "node-A" {
-		t.Errorf("expected currentLeader=node-A, got %s", leader)
+	if leader == "node-A" {
+		t.Error("currentLeader must not be set to ourselves by a single Election message")
 	}
-	if term != 5 {
-		t.Errorf("expected leaderTerm=5, got %d", term)
+	if electionTerm < 5 {
+		t.Errorf("expected electionTerm bumped to at least 5, got %d", electionTerm)
 	}
 }
 
@@ -101,9 +103,11 @@ func TestHandleElection_AnotherNodeProposed(t *testing.T) {
 	electionTerm := gp.electionTerm
 	gp.leaderMu.RUnlock()
 
-	// Should have bumped electionTerm above the received term
-	if electionTerm <= 3 {
-		t.Errorf("expected electionTerm > 3, got %d", electionTerm)
+	// F053: handleElection no longer auto-bumps the term above the received
+	// value (which used to chain into go startElection). It now tracks the
+	// highest observed term passively.
+	if electionTerm < 3 {
+		t.Errorf("expected electionTerm at least 3, got %d", electionTerm)
 	}
 }
 
@@ -545,7 +549,6 @@ func TestHandleZoneUpdate_NoLeader_Ignores(t *testing.T) {
 	}
 }
 
-
 func TestHandleZoneUpdate_InvalidPayload(t *testing.T) {
 	self := &Node{ID: "node-A", State: NodeStateAlive, Addr: "127.0.0.1"}
 	nl := NewNodeList(self)
@@ -684,7 +687,6 @@ func TestHandleConfigSync_LeaderIgnores(t *testing.T) {
 		t.Error("leader should ignore config sync messages")
 	}
 }
-
 
 // ---------------------------------------------------------------------------
 // checkLeaderHealth tests

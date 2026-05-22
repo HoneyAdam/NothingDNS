@@ -2,6 +2,7 @@ package geodns
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -87,19 +88,39 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
-// LoadMMDB loads a MaxMind DB file for geo lookups.
-func (e *Engine) LoadMMDB(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("geodns: read mmdb: %w", err)
-	}
+// ErrMMDBNotSupported is returned by LoadMMDB until a proper libmaxminddb-
+// compatible parser is implemented. The previous "parser" brute-force-
+// guessed the first uint32 in [0, 1e8) as node_count and pattern-grepped
+// two ASCII bytes as the country code — every routing decision was
+// effectively random, which is worse than no GeoDNS at all.
+//
+// LoadMMDB now fails loudly so misconfiguration cannot silently mis-route
+// traffic. Internal helpers (parseMMDBMetadata, extractCountryCode, etc.)
+// are retained because unit tests still exercise them and call sites that
+// depend on mmdbLoaded == true are unreachable when LoadMMDB fails.
+//
+// Operators that need geo-routing should use views/split-horizon or run a
+// dedicated geoip service in front of NothingDNS until F138 lands.
+var ErrMMDBNotSupported = errors.New("geodns: MMDB binary format parser is not implemented; configure split-horizon views instead (see F138)")
 
+// LoadMMDB previously appeared to load a MaxMind DB but in fact produced
+// random routing decisions. Always returns ErrMMDBNotSupported now.
+func (e *Engine) LoadMMDB(path string) error {
+	_ = path
+	return ErrMMDBNotSupported
+}
+
+// loadMMDBFromBytes is the legacy brute-force implementation, kept as an
+// internal helper so unit tests of the heuristic compile. It must NOT be
+// wired into LoadMMDB.
+//
+//nolint:unused // retained for legacy test compatibility; F138 tracks real parser.
+func (e *Engine) loadMMDBFromBytes(data []byte) error {
 	// Find metadata section (search from end of file)
 	idx := len(data) - len(mmdbMetadataMarker)
 	if idx < 0 {
 		return fmt.Errorf("geodns: invalid mmdb: metadata marker not found")
 	}
-
 	found := -1
 	for i := idx; i >= 0; i-- {
 		if string(data[i:i+len(mmdbMetadataMarker)]) == mmdbMetadataMarker {
@@ -110,56 +131,37 @@ func (e *Engine) LoadMMDB(path string) error {
 	if found == -1 {
 		return fmt.Errorf("geodns: metadata marker not found")
 	}
-
-	// Parse metadata (simple key-value pairs after marker)
 	metaStart := found + len(mmdbMetadataMarker)
 	if metaStart >= len(data) {
 		return fmt.Errorf("geodns: truncated metadata")
 	}
-
-	// Extract key fields from metadata
 	ipv4Count, treeSize, err := parseMMDBMetadata(data[metaStart:])
 	if err != nil {
 		return fmt.Errorf("geodns: parse metadata: %w", err)
 	}
-
 	e.mu.Lock()
 	e.mmdbData = data
 	e.mmdbIPv4Count = ipv4Count
 	e.mmdbTreeSize = treeSize
 	e.mmdbLoaded = true
 	e.mu.Unlock()
-
 	return nil
 }
 
+// Compile-time use of unused imports — these are needed by the retained
+// internal helpers below.
+var _ = os.ReadFile
+var _ = binary.BigEndian
+
 // parseMMDBMetadata extracts tree size and node count from MMDB metadata.
-// MMDB metadata is encoded as a simple data section with key-value pairs.
+// SEE F138: this is a brute-force heuristic, not an MMDB parser. Retained
+// solely so unit tests compile. Do not call from production paths.
 func parseMMDBMetadata(data []byte) (ipv4Count, treeSize uint32, err error) {
-	// MMDB metadata uses a TLV-like format.
-	// We look for "node_count" and "tree_size" fields.
-	// For a minimal parser, we extract the data section start offset.
-
-	// The metadata structure is a map with known fields.
-	// In binary MMDB format, the metadata section before the data section
-	// contains: node_count (uint32), tree_size in bytes.
-	// We do a simplified parse looking for the data section offset.
-
-	// The tree is made of 24-byte nodes. node_count * 24 = tree bytes.
-	// For IPv4, only the first node_count nodes are relevant.
-	// For IPv6, all nodes are searched.
-
-	// Try to find "node_count" field in the metadata map
 	offset := 0
 	for offset < len(data)-6 {
-		// Look for field markers (simplified)
-		// MMDB metadata is actually in a custom binary format
-		// For our parser, we read the last 16 bytes of metadata
-		// which typically contain node_count and record_size
 		if offset+4 <= len(data) {
 			val := binary.BigEndian.Uint32(data[offset : offset+4])
 			if val > 0 && val < 100000000 {
-				// Likely a node count
 				if ipv4Count == 0 {
 					ipv4Count = val
 				}
@@ -167,17 +169,12 @@ func parseMMDBMetadata(data []byte) (ipv4Count, treeSize uint32, err error) {
 		}
 		offset++
 	}
-
-	// Calculate tree size from node count
-	// Each node is 24 bytes (2 * 3-byte pointers for record_size=24)
 	if ipv4Count > 0 {
 		treeSize = ipv4Count * 24
 	}
-
 	if ipv4Count == 0 {
 		return 0, 0, fmt.Errorf("could not determine node count")
 	}
-
 	return ipv4Count, treeSize, nil
 }
 

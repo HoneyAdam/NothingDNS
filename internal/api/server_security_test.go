@@ -127,15 +127,15 @@ func TestCookieAuthAcceptedOnSafeMethods(t *testing.T) {
 // every legitimate DoH query.
 func TestDoHPathsBypassAuth(t *testing.T) {
 	cfg := config.HTTPConfig{
-		Enabled:      true,
-		Bind:         "127.0.0.1:0",
-		AuthToken:    "shared-secret-token",
-		DoHEnabled:   true,
-		DoHPath:      "/dns-query",
-		DoWSEnabled:  true,
-		DoWSPath:     "/dns-ws",
-		ODoHEnabled:  true,
-		ODoHPath:     "/odoh",
+		Enabled:     true,
+		Bind:        "127.0.0.1:0",
+		AuthToken:   "shared-secret-token",
+		DoHEnabled:  true,
+		DoHPath:     "/dns-query",
+		DoWSEnabled: true,
+		DoWSPath:    "/dns-ws",
+		ODoHEnabled: true,
+		ODoHPath:    "/odoh",
 	}
 	server := NewServer(cfg, nil, nil, nil, nil, nil, nil)
 

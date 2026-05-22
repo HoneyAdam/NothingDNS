@@ -533,7 +533,7 @@ func TestParseRSAPublicKey3ByteExponentLength(t *testing.T) {
 	keyData = append(keyData, exponent...)
 	keyData = append(keyData, modulus...)
 
-	parsedKey, err := parseRSAPublicKey(keyData)
+	parsedKey, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
 	if err != nil {
 		t.Fatalf("Failed to parse RSA key with 3-byte exponent length: %v", err)
 	}
@@ -551,7 +551,7 @@ func TestParseRSAPublicKey3ByteExponentTooShort(t *testing.T) {
 	// Provide key data starting with 0x00 but not enough bytes for 3-byte header
 	keyData := []byte{0x00, 0x01} // only 2 bytes, needs at least 3
 
-	_, err := parseRSAPublicKey(keyData)
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
 	if err == nil {
 		t.Error("Expected error for 3-byte exponent length with insufficient data")
 	}
@@ -561,7 +561,7 @@ func TestParseRSAPublicKeyExponentTooLong(t *testing.T) {
 	// keyData with exponent length pointing beyond data
 	keyData := []byte{0x10, 0x01, 0x00, 0x01} // exponent length = 16, but only 3 bytes of exponent
 
-	_, err := parseRSAPublicKey(keyData)
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
 	if err == nil {
 		t.Error("Expected error for exponent extending beyond key data")
 	}
@@ -571,7 +571,7 @@ func TestParseRSAPublicKeyNoModulus(t *testing.T) {
 	// keyData where offset reaches end after exponent (no modulus)
 	keyData := []byte{0x01, 0x03} // exponent length 1, exponent=3, no room for modulus
 
-	_, err := parseRSAPublicKey(keyData)
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
 	if err == nil {
 		t.Error("Expected error for missing modulus")
 	}

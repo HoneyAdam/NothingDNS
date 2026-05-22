@@ -1024,7 +1024,7 @@ func TestNameEqualEdgeCase(t *testing.T) {
 
 func TestBufferWriteUint8Error(t *testing.T) {
 	buf := NewBuffer(512)
-	buf.SetOffset(int(buf.Capacity()) - 1)
+	buf.SetOffset(buf.Capacity() - 1)
 	buf.length = buf.Capacity()
 	// Fill the buffer up to capacity
 	for i := 0; i < buf.Capacity()-1; i++ {

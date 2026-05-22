@@ -58,6 +58,15 @@ type Config struct {
 	QnameMinimization bool          // RFC 7816 QNAME minimization (default false)
 	Use0x20           bool          // DNS 0x20 encoding for spoofing resistance (default false)
 	Hints             []RootHint    // Custom root hints (if nil, uses IANA defaults)
+
+	// AllowPrivateUpstream disables the SSRF filter that rejects glue and
+	// NS-name resolutions pointing at RFC 1918 / loopback / link-local /
+	// ULA addresses. The filter defends against malicious authoritative
+	// servers redirecting queries to internal IPs (e.g. 169.254.169.254
+	// cloud metadata). Default false (filter active) — only enable for
+	// split-horizon or test scenarios where the operator trusts the
+	// upstream chain.
+	AllowPrivateUpstream bool
 }
 
 func DefaultConfig() Config {
@@ -520,13 +529,19 @@ func (r *Resolver) extractDelegation(resp *protocol.Message, zoneCut string) (*d
 		switch rr.Type {
 		case protocol.TypeA:
 			if a, ok := rr.Data.(*protocol.RDataA); ok {
-				ip := net.IP(a.Address[:]).String()
-				deleg.addrs[owner] = append(deleg.addrs[owner], withPort(ip, "53"))
+				ip := net.IP(a.Address[:])
+				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+					continue
+				}
+				deleg.addrs[owner] = append(deleg.addrs[owner], withPort(ip.String(), "53"))
 			}
 		case protocol.TypeAAAA:
 			if a, ok := rr.Data.(*protocol.RDataAAAA); ok {
-				ip := net.IP(a.Address[:]).String()
-				deleg.addrs[owner] = append(deleg.addrs[owner], withPort(ip, "53"))
+				ip := net.IP(a.Address[:])
+				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+					continue
+				}
+				deleg.addrs[owner] = append(deleg.addrs[owner], withPort(ip.String(), "53"))
 			}
 		}
 	}
@@ -579,7 +594,11 @@ func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []strin
 			for _, rr := range entry.Message.Answers {
 				if rr.Type == protocol.TypeA {
 					if a, ok := rr.Data.(*protocol.RDataA); ok {
-						addrs = append(addrs, withPort(net.IP(a.Address[:]).String(), "53"))
+						ip := net.IP(a.Address[:])
+						if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+							continue
+						}
+						addrs = append(addrs, withPort(ip.String(), "53"))
 					}
 				}
 			}
@@ -592,7 +611,11 @@ func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []strin
 			for _, rr := range entry.Message.Answers {
 				if rr.Type == protocol.TypeAAAA {
 					if a, ok := rr.Data.(*protocol.RDataAAAA); ok {
-						addrs = append(addrs, withPort(net.IP(a.Address[:]).String(), "53"))
+						ip := net.IP(a.Address[:])
+						if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+							continue
+						}
+						addrs = append(addrs, withPort(ip.String(), "53"))
 					}
 				}
 			}
@@ -801,6 +824,43 @@ func withPort(addr, port string) string {
 		return addr
 	}
 	return net.JoinHostPort(addr, port)
+}
+
+// disallowedUpstreamNets enumerates IP ranges that an upstream authoritative
+// server must never redirect us toward via glue or NS-name resolution. A
+// malicious zone could otherwise return e.g. "ns1.attacker.example A
+// 169.254.169.254" and turn this resolver into an SSRF probe of the
+// operator's internal network or cloud metadata endpoints.
+var disallowedUpstreamNets = func() []*net.IPNet {
+	cidrs := []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24",
+		"224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8",
+		"64:ff9b::/96", "2001:db8::/32",
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		if _, n, err := net.ParseCIDR(c); err == nil {
+			nets = append(nets, n)
+		}
+	}
+	return nets
+}()
+
+// isDisallowedUpstreamIP reports whether ip is in a range we refuse to query
+// as an upstream nameserver. Callers must drop such addresses, not fall back.
+func isDisallowedUpstreamIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	for _, n := range disallowedUpstreamNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // StdioTransport sends DNS queries over UDP with TCP fallback.

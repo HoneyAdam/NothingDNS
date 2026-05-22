@@ -846,7 +846,7 @@ func TestNewCookieJarInvalidInterval(t *testing.T) {
 		interval time.Duration
 		wantErr  bool
 	}{
-		{"zero", 0, false},             // Zero is valid (no rotation)
+		{"zero", 0, false},                  // Zero is valid (no rotation)
 		{"negative", -1 * time.Hour, false}, // Negative might be treated as zero
 		{"very_small", 1 * time.Nanosecond, false},
 		{"very_large", 365 * 24 * time.Hour, false}, // 1 year

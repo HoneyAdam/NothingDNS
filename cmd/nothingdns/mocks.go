@@ -9,7 +9,7 @@ import (
 
 // MockZoneProvider is a mock implementation of ZoneProvider for testing.
 type MockZoneProvider struct {
-	Zones     map[string]*zone.Zone
+	Zones         map[string]*zone.Zone
 	FindZonesFunc func(qname string) []ZoneMatch
 }
 

@@ -24,9 +24,9 @@ type IXFRRequest struct {
 
 // IXFRResponse represents an IXFR response
 // Wire format: Difference sequences per RFC 1995:
-//   1. If server serial <= client serial: single SOA (no changes)
-//   2. If server has history: sequences of changes
-//   3. If no history: full AXFR format
+//  1. If server serial <= client serial: single SOA (no changes)
+//  2. If server has history: sequences of changes
+//  3. If no history: full AXFR format
 type IXFRResponse struct {
 	ZoneName  string
 	Records   []*protocol.ResourceRecord
@@ -240,11 +240,12 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 		return nil, ErrNoJournal
 	}
 
-	// Find the starting point in the journal
-	// Linear comparison - entries with serial > clientSerial are newer changes
+	// Find the starting point in the journal. Use RFC 1982 serial-number
+	// comparison rather than plain unsigned '>' so journal lookup behaves
+	// correctly across the 2^32 serial wraparound.
 	startIdx := -1
 	for i, entry := range journal {
-		if entry.Serial > clientSerial {
+		if serialIsNewer(entry.Serial, clientSerial) {
 			startIdx = i
 			break
 		}
@@ -275,12 +276,24 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 	}
 	records = append(records, soaRR)
 
-	// Process each journal entry
+	// Process each journal entry. Per RFC 1995 §4 the IXFR diff body is a
+	// sequence of (old-SOA, deleted-RRs, new-SOA, added-RRs) blocks. The
+	// "old-SOA" carries the serial of the version BEFORE this diff, and the
+	// "new-SOA" carries the serial AFTER the diff. The first diff's old-SOA
+	// uses clientSerial; subsequent diffs use the previous journal entry's
+	// serial as their old-SOA value.
 	for i := startIdx; i < len(journal); i++ {
 		entry := journal[i]
 
-		// Add SOA with previous serial (ending previous version)
-		prevSOA := s.createSOAWithSerial(z.SOA, origin, entry.Serial)
+		var prevSerial uint32
+		if i == startIdx {
+			prevSerial = clientSerial
+		} else {
+			prevSerial = journal[i-1].Serial
+		}
+
+		// Old SOA — opens this diff block.
+		prevSOA := s.createSOAWithSerial(z.SOA, origin, prevSerial)
 		records = append(records, prevSOA)
 
 		// Add deleted records
@@ -293,7 +306,7 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 			records = append(records, rr)
 		}
 
-		// Add SOA with new serial (starting new version)
+		// New SOA — closes this diff block with the post-update serial.
 		newSOA := s.createSOAWithSerial(z.SOA, origin, entry.Serial)
 		records = append(records, newSOA)
 

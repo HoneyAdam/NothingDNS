@@ -48,6 +48,11 @@ go.work
 # Test artifacts
 /coverage/
 /test-results/
+coverage.html
+coverage.out
+
+# Release binaries (built by goreleaser / make release)
+/release/
 
 # Configuration files (keep examples)
 /nothingdns.yaml
@@ -80,7 +85,6 @@ __debug_bin
 
 # Security scan artifacts
 security-report/
-"D\357\200\272CODEBOXPROJECTSNothingDNSsecurity-report/"
 
 # Playwright MCP artifacts
 .playwright-mcp/

@@ -1,9 +1,10 @@
 package resolver
 
 import (
-	"github.com/nothingdns/nothingdns/internal/protocol"
 	"strings"
 	"testing"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 func TestEncode0x20_RandomizesCase(t *testing.T) {

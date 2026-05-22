@@ -53,39 +53,68 @@ func (s *KVJournalStore) zoneDir(zoneName string) string {
 	return filepath.Join(s.dataDir, sanitizeFilename(zoneName))
 }
 
-// SaveEntry persists a journal entry to disk.
+// SaveEntry persists a journal entry to disk using the tmp+fsync+rename
+// idiom so that a power loss between Write and Close cannot leave a
+// half-written file under the canonical name. Each entry is written to a
+// sibling ".tmp" file, fsynced, then atomically renamed into place; the
+// parent directory is fsynced too so the new dirent is durable.
 func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dir := s.zoneDir(zoneName)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	// 0700 — journals carry zone contents and (with HMAC enabled) a MAC. Do
+	// not expose them to other local users.
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("creating zone journal dir: %w", err)
 	}
 
 	filename := filepath.Join(dir, fmt.Sprintf("%d.journal", entry.Serial))
-	f, err := os.Create(filename)
+	tmpName := filename + ".tmp"
+
+	f, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return fmt.Errorf("creating journal file: %w", err)
+		return fmt.Errorf("creating tmp journal file: %w", err)
 	}
 
 	if s.hmacKey != nil {
 		if err := s.writeEntry(f, entry); err != nil {
 			f.Close()
-			os.Remove(filename)
+			os.Remove(tmpName)
 			return fmt.Errorf("write entry: %w", err)
 		}
 	} else {
 		enc := json.NewEncoder(f)
 		if err := enc.Encode(entry); err != nil {
 			f.Close()
-			os.Remove(filename)
+			os.Remove(tmpName)
 			return fmt.Errorf("encoding journal entry: %w", err)
 		}
 	}
 
+	// fsync the file before rename. Without this, the OS may reorder writes
+	// and the rename may publish a name whose contents haven't reached disk.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("fsync tmp journal: %w", err)
+	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close file: %w", err)
+		os.Remove(tmpName)
+		return fmt.Errorf("close tmp journal: %w", err)
+	}
+
+	if err := os.Rename(tmpName, filename); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("rename tmp journal: %w", err)
+	}
+
+	// Best-effort fsync of the parent directory so the rename's dirent is
+	// durable. Some filesystems (e.g. tmpfs) don't support this; ignore that
+	// specific error rather than failing the whole write.
+	if dirFd, err := os.Open(dir); err == nil {
+		_ = dirFd.Sync()
+		_ = dirFd.Close()
 	}
 
 	s.trimAfterWriteLocked(zoneName)
@@ -126,7 +155,7 @@ func (s *KVJournalStore) writeEntry(f *os.File, entry *IXFRJournalEntry) error {
 	// Frame: magic(1) + version(2) + payloadLen(4) + payload(n) + hmac(32)
 	frameLen := 1 + 2 + 4 + len(payload) + 32
 	frame := make([]byte, frameLen)
-	frame[0] = 0xDB // magic
+	frame[0] = 0xDB                           // magic
 	binary.BigEndian.PutUint16(frame[1:3], 1) // version
 	binary.BigEndian.PutUint32(frame[3:7], uint32(len(payload)))
 	copy(frame[7:], payload)
@@ -247,6 +276,14 @@ func readEntryHMAC(f *os.File, entry *IXFRJournalEntry, key []byte) error {
 		return fmt.Errorf("unsupported version: %d", version)
 	}
 	payloadLen := binary.BigEndian.Uint32(hdr[3:7])
+	// Defence against a corrupt / attacker-controlled file: cap the payload
+	// length we will allocate. 16 MiB is well above any plausible journal
+	// entry but well below the 4 GiB ceiling of uint32, so a malformed
+	// header cannot drive an out-of-memory allocation here.
+	const maxJournalPayload = 16 << 20
+	if payloadLen > maxJournalPayload {
+		return fmt.Errorf("journal payload too large: %d (max %d)", payloadLen, maxJournalPayload)
+	}
 
 	recordLen := int(payloadLen) + 32
 	record := make([]byte, recordLen)

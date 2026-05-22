@@ -80,6 +80,7 @@ func (h *integratedHandler) handleAXFR(w server.ResponseWriter, r *protocol.Mess
 			Questions: r.Questions,
 			Answers:   []*protocol.ResourceRecord{rr},
 		}
+		resp.Header.Flags.AA = true // AXFR responses are authoritative (RFC 5936)
 
 		// Sign first and last messages per RFC 2845
 		if tsigKey != nil && (i == 0 || i == len(records)-1) {
@@ -203,6 +204,7 @@ func (h *integratedHandler) handleIXFR(w server.ResponseWriter, r *protocol.Mess
 			Questions: r.Questions,
 			Answers:   []*protocol.ResourceRecord{rr},
 		}
+		resp.Header.Flags.AA = true // IXFR responses are authoritative (RFC 1995)
 
 		if _, err := w.Write(resp); err != nil {
 			h.logger.Warnf("[%s] Failed to write IXFR response: %v", reqID, err)
@@ -370,7 +372,7 @@ func (h *integratedHandler) handleUPDATE(w server.ResponseWriter, r *protocol.Me
 		return
 	}
 
-	action := "failure"
+	var action string
 	if resp.Header.Flags.RCODE == protocol.RcodeSuccess {
 		h.logger.Infof("[%s] UPDATE successful for %s", reqID, zoneName)
 		action = "success"

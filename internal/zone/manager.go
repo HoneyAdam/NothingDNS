@@ -43,28 +43,32 @@ var reservedZoneNames = map[string]bool{
 	"tr.": true,
 }
 
-// SerialIsNewer returns true if s1 is considered newer than s2 per RFC 1982.
-// Serial numbers are 32-bit unsigned integers with special comparison rules
-// to handle wrap-around.
+// SerialIsNewer returns true if s1 is considered newer than s2 per RFC 1982 §3.2.
+//
+// Serial numbers are 32-bit unsigned integers with wrap-around semantics:
+//
+//	s1 is newer than s2 iff
+//	  (s1 > s2 AND s1 - s2 < 2^31)   // direct ordering within half-range
+//	  OR
+//	  (s1 < s2 AND s2 - s1 > 2^31)   // wrap-around: s1 is past the top
+//
+// Equal serials and the s2-s1 == 2^31 boundary case are defined as "not newer"
+// (RFC 1982 leaves the exact-half-range case undefined; we return false).
 func SerialIsNewer(s1, s2 uint32) bool {
-	diff := int64(s1) - int64(s2)
-	if diff > 0 {
-		// s1 > s2 and within half range
-		return diff < int64(SerialHalfRange)
+	if s1 == s2 {
+		return false
 	}
-	// s1 <= s2
-	if diff < 0 {
-		// s1 < s2 but wrapped around
-		return diff > -int64(SerialHalfRange)
+	if s1 > s2 {
+		return s1-s2 < SerialHalfRange
 	}
-	return false // s1 == s2
+	// s1 < s2
+	return s2-s1 > SerialHalfRange
 }
 
-// SerialIncrement increments a serial number per RFC 1982.
+// SerialIncrement returns s + 1 with RFC 1982 §3.1 wrap-around semantics.
+// The serial space is the full 32-bit unsigned range; arithmetic is mod 2^32,
+// which Go's uint32 provides natively. Only the true 2^32-1 → 0 boundary wraps.
 func SerialIncrement(s uint32) uint32 {
-	if s >= SerialHalfRange-1 {
-		return 0
-	}
 	return s + 1
 }
 

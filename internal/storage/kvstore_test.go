@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestKVStoreOpen(t *testing.T) {
@@ -469,22 +470,49 @@ func TestKVStoreConcurrentWriteTransaction(t *testing.T) {
 	}
 	defer store.Close()
 
-	// Start a write transaction
+	// F060: Begin(true) holds the exclusive lock for the lifetime of the
+	// transaction. A concurrent Begin(true) from another goroutine MUST
+	// block until the first transaction completes, not race past it. We
+	// verify the blocking semantics by attempting a second Begin in a
+	// separate goroutine and asserting it only succeeds after the first
+	// transaction has been rolled back.
 	tx1, err := store.Begin(true)
 	if err != nil {
 		t.Fatalf("Begin failed: %v", err)
 	}
 
-	// Try to start another write transaction (should fail)
-	_, err = store.Begin(true)
-	if err == nil {
-		t.Error("Expected error when starting concurrent write transaction")
-		tx1.Rollback()
-	} else if err.Error() != "transaction already in progress" {
-		t.Errorf("Expected 'transaction already in progress' error, got %v", err)
+	type res struct {
+		tx  *Tx
+		err error
+	}
+	done := make(chan res, 1)
+	go func() {
+		tx2, err := store.Begin(true)
+		done <- res{tx2, err}
+	}()
+
+	// The second writer must NOT succeed while tx1 is still open.
+	select {
+	case r := <-done:
+		t.Errorf("second Begin(true) should have blocked on tx1; got tx=%v err=%v", r.tx, r.err)
+	case <-time.After(100 * time.Millisecond):
+		// expected: still blocked.
 	}
 
-	tx1.Rollback()
+	// Releasing tx1 must let the second writer proceed.
+	if err := tx1.Rollback(); err != nil {
+		t.Fatalf("Rollback tx1: %v", err)
+	}
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Errorf("second Begin(true) failed after tx1 rollback: %v", r.err)
+		} else {
+			_ = r.tx.Rollback()
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Begin(true) did not unblock after tx1 rollback")
+	}
 }
 
 func TestKVStoreCommitReadOnlyTransaction(t *testing.T) {

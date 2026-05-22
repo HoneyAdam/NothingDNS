@@ -563,7 +563,7 @@ func TestValidateDelegation_WrongDSType(t *testing.T) {
 
 func TestParseRSAPublicKey_ThreeByteExpLenTooShort(t *testing.T) {
 	// keyData[0] == 0 means 3-byte exponent length, but data is only 3 bytes
-	_, err := parseRSAPublicKey([]byte{0x00, 0x00, 0x01})
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, []byte{0x00, 0x00, 0x01})
 	if err == nil {
 		t.Error("expected error for 3-byte exponent length with too-short data")
 	}
@@ -580,7 +580,7 @@ func TestParseRSAPublicKey_NoModulus(t *testing.T) {
 	// keyData[0]=2 means expLen=2, offset=1.
 	// Then offset+expLen=3 == len(keyData), so exponent read succeeds.
 	// Then offset=3, and offset >= len(keyData)=3, triggering "missing modulus".
-	_, err := parseRSAPublicKey([]byte{0x02, 0x01, 0x03})
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, []byte{0x02, 0x01, 0x03})
 	if err == nil {
 		t.Error("expected error for RSA key missing modulus")
 	}

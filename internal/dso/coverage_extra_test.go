@@ -330,6 +330,7 @@ func TestSession_IsExpired_ConcurrentAccess(t *testing.T) {
 
 func TestNewManager_ZeroConfigDefaults(t *testing.T) {
 	cfg := Config{} // All zero values
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	if m.inactivityTimeout != DefaultInactivityTimeout {
@@ -345,6 +346,8 @@ func TestNewManager_ZeroConfigDefaults(t *testing.T) {
 
 func TestNewManager_NilLogger(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 	if m == nil {
 		t.Fatal("NewManager with nil logger returned nil")
@@ -355,6 +358,8 @@ func TestNewManager_NilLogger(t *testing.T) {
 
 func TestManager_Start_Idempotent(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	m.Start()
@@ -370,6 +375,8 @@ func TestManager_Start_Idempotent(t *testing.T) {
 func TestManager_Stop_WithActiveSessions(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -428,6 +435,8 @@ func TestManager_Stop_WithActiveSessions(t *testing.T) {
 func TestManager_CreateSession(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -495,6 +504,7 @@ func TestManager_CreateSession_MaxReached(t *testing.T) {
 		MaxSessions:       1,
 		MaxPayloadSize:    DefaultMaxPayloadSize,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -528,6 +538,7 @@ func TestManager_CreateSession_MaxReached(t *testing.T) {
 
 func TestManager_CreateSession_IncrementingIDs(t *testing.T) {
 	cfg := Config{MaxSessions: 10}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -546,17 +557,22 @@ func TestManager_CreateSession_IncrementingIDs(t *testing.T) {
 		}
 	}()
 
-	var lastID uint64
+	// RFC 8490 §6.6.1.2: session IDs must be unpredictable, not sequential.
+	// Verify uniqueness (no collisions) rather than monotonic ordering.
+	seen := make(map[uint64]bool)
 	for i := 0; i < 5; i++ {
 		conn, _ := net.Dial("tcp", ln.Addr().String())
 		s, err := m.CreateSession(conn)
 		if err != nil {
 			t.Fatalf("CreateSession %d failed: %v", i, err)
 		}
-		if s.ID <= lastID {
-			t.Errorf("session ID %d should be > previous %d", s.ID, lastID)
+		if s.ID == 0 {
+			t.Errorf("session ID must not be 0 (reserved sentinel)")
 		}
-		lastID = s.ID
+		if seen[s.ID] {
+			t.Errorf("session ID %d collided with a prior session", s.ID)
+		}
+		seen[s.ID] = true
 	}
 }
 
@@ -564,6 +580,8 @@ func TestManager_CreateSession_IncrementingIDs(t *testing.T) {
 
 func TestManager_GetSession_Existing(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -593,6 +611,8 @@ func TestManager_GetSession_Existing(t *testing.T) {
 
 func TestManager_GetSession_NonExistent(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	got := m.GetSession(99999)
@@ -605,6 +625,8 @@ func TestManager_GetSession_NonExistent(t *testing.T) {
 
 func TestManager_GenerateSessionID_Sequential(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ids := make(map[uint64]bool)
@@ -621,6 +643,8 @@ func TestManager_GenerateSessionID_Sequential(t *testing.T) {
 
 func TestManager_RemoveSession_NonExistent(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	// Should not panic
@@ -633,6 +657,7 @@ func TestManager_CleanupExpiredSessions_AllExpired(t *testing.T) {
 	cfg := Config{
 		InactivityTimeout: 100 * time.Millisecond,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	for i := 0; i < 5; i++ {
@@ -657,6 +682,7 @@ func TestManager_CleanupExpiredSessions_NoneExpired(t *testing.T) {
 	cfg := Config{
 		InactivityTimeout: 10 * time.Second,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	for i := 0; i < 5; i++ {
@@ -680,8 +706,13 @@ func TestManager_CleanupExpiredSessions_NoneExpired(t *testing.T) {
 // --- Manager.HandleDSORequest ---
 
 func TestManager_HandleDSORequest_EmptyTLVs(t *testing.T) {
+	// F127: extractTLVs now reports its unimplemented state instead of
+	// silently returning nil — HandleDSORequest therefore must return an
+	// error rather than fabricating an empty-response success.
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	session := &Session{
@@ -700,18 +731,9 @@ func TestManager_HandleDSORequest_EmptyTLVs(t *testing.T) {
 		},
 	}
 
-	resp, err := m.HandleDSORequest(session, msg)
-	if err != nil {
-		t.Fatalf("HandleDSORequest failed: %v", err)
-	}
-	if resp == nil {
-		t.Fatal("response should not be nil")
-	}
-	if !resp.Header.Flags.QR {
-		t.Error("response QR should be true")
-	}
-	if resp.Header.ARCount != 0 {
-		t.Errorf("ARCount = %d, want 0 for empty TLV input", resp.Header.ARCount)
+	_, err := m.HandleDSORequest(session, msg)
+	if err == nil {
+		t.Fatal("expected error from HandleDSORequest while extractTLVs is unimplemented (F127)")
 	}
 }
 
@@ -734,17 +756,17 @@ func TestManager_HandleDSORequest_KeepaliveTLV(t *testing.T) {
 // --- Manager.extractTLVs ---
 
 func TestManager_ExtractTLVs(t *testing.T) {
+	// F127: extractTLVs is intentionally honest-fail until DSO wire-format
+	// parsing is implemented end-to-end. Confirm the failure mode so silent
+	// no-op handling cannot return.
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	msg := &protocol.Message{}
-
-	data, err := m.extractTLVs(msg)
-	if err != nil {
-		t.Errorf("extractTLVs failed: %v", err)
-	}
-	if data != nil {
-		t.Errorf("extractTLVs returned %v, want nil", data)
+	if _, err := m.extractTLVs(msg); err == nil {
+		t.Error("expected extractTLVs to return error while DSO TLV parsing is unimplemented (F127)")
 	}
 }
 
@@ -752,6 +774,8 @@ func TestManager_ExtractTLVs(t *testing.T) {
 
 func TestManager_BuildDSOResponse(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	req := &protocol.Message{
@@ -783,6 +807,8 @@ func TestManager_BuildDSOResponse(t *testing.T) {
 
 func TestManager_BuildDSOResponse_EmptyTLVs(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	req := &protocol.Message{
@@ -807,6 +833,8 @@ func TestManager_BuildDSOResponse_EmptyTLVs(t *testing.T) {
 func TestManager_SendKeepalive_ActiveSession(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -828,14 +856,18 @@ func TestManager_SendKeepalive_ActiveSession(t *testing.T) {
 	conn, _ := net.Dial("tcp", ln.Addr().String())
 	session, _ := m.CreateSession(conn)
 
+	// F129: see TestManager_SendKeepalive_NilLogger comment. Active-session
+	// path also fails until serialiser lands.
 	err = m.SendKeepalive(session)
-	if err != nil {
-		t.Errorf("SendKeepalive failed: %v", err)
+	if err == nil {
+		t.Error("expected SendKeepalive to return error while DSO serialiser is unimplemented (F129)")
 	}
 }
 
 func TestManager_SendKeepalive_ClosedSession(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	session := &Session{
@@ -854,6 +886,8 @@ func TestManager_SendKeepalive_ClosedSession(t *testing.T) {
 
 func TestManager_SendKeepalive_NilLogger(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -875,9 +909,10 @@ func TestManager_SendKeepalive_NilLogger(t *testing.T) {
 	conn, _ := net.Dial("tcp", ln.Addr().String())
 	session, _ := m.CreateSession(conn)
 
+	// F129: SendKeepalive is honest-fail until DSO serialiser lands.
 	err = m.SendKeepalive(session)
-	if err != nil {
-		t.Errorf("SendKeepalive with nil logger failed: %v", err)
+	if err == nil {
+		t.Error("expected SendKeepalive to return error while DSO serialiser is unimplemented (F129)")
 	}
 }
 
@@ -1038,9 +1073,9 @@ func TestCreateDSOMessage_MultipleTLVs(t *testing.T) {
 
 func TestIsDSOMessage_Table(t *testing.T) {
 	tests := []struct {
-		name    string
-		opcode  uint8
-		isDSO   bool
+		name   string
+		opcode uint8
+		isDSO  bool
 	}{
 		{"standard query", 0, false},
 		{"inverse query", 1, false},
@@ -1163,6 +1198,7 @@ func TestManager_FullLifecycle(t *testing.T) {
 		MaxSessions:       10,
 		MaxPayloadSize:    4096,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	m.Start()
@@ -1237,6 +1273,7 @@ func TestManager_CustomConfig(t *testing.T) {
 		MaxSessions:       500,
 		MaxPayloadSize:    8192,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	if m.inactivityTimeout != 30*time.Second {
@@ -1257,6 +1294,7 @@ func TestManager_CreateSession_FieldsInitialized(t *testing.T) {
 		InactivityTimeout: 30 * time.Second,
 		MaxPayloadSize:    8192,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1294,6 +1332,7 @@ func TestManager_CreateSession_FieldsInitialized(t *testing.T) {
 
 func TestDefaultConfig_Values(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
 	if cfg.Enabled {
 		t.Error("default Enabled should be false")
 	}
@@ -1329,6 +1368,7 @@ func TestManager_CleanupLoop_Triggers(t *testing.T) {
 	cfg := Config{
 		InactivityTimeout: 50 * time.Millisecond,
 	}
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	// Add an expired session directly

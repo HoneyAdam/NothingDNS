@@ -86,28 +86,40 @@ func ComputeZoneMD(z *Zone, algo ZONEMDAlgorithm) (*ZONEMD, error) {
 	}, nil
 }
 
-// collectZoneRRsets collects all RRsets from a zone.
-// RFC 8976 Section 4: The digest is computed over:
-// 1. SOA rdata (first element)
-// 2. All other RRsets in canonical order
+// collectZoneRRsets collects all RRsets from a zone per RFC 8976 §3.1.1.
+// Every RR in the zone is included in the digest EXCEPT:
+//
+//	the ZONEMD RR(s) themselves; and
+//	any RRSIG RR whose Type Covered field is ZONEMD.
+//
+// SOA, apex NS/DNSKEY/etc. are included like any other RRset. Each RR is
+// emitted in its full canonical wire form (owner|type|class|ttl|rdlen|rdata)
+// per §3.3.2; concatenating only the RDATA, as an earlier version of this
+// file did, produces a digest that does not match any RFC-compliant peer.
 func collectZoneRRsets(z *Zone) ([][]byte, error) {
 	var rrsets [][]byte
 
-	// Add SOA as first element
+	const typeSOA uint16 = 6
+	const typeRRSIG uint16 = 46
+	const typeZONEMD uint16 = 63
+
+	// Emit the apex SOA as a canonical RRset of its own. This replaces the
+	// previous "bare RDATA" path.
 	if z.SOA != nil {
 		soaRdata := serializeSOA(z.SOA)
-		rrsets = append(rrsets, soaRdata)
+		soaTTL := z.SOA.TTL
+		if soaTTL == 0 {
+			soaTTL = z.DefaultTTL
+		}
+		rrsets = append(rrsets, buildCanonicalRRset(z.Origin, typeSOA, soaTTL, [][]byte{soaRdata}))
 	}
 
-	// Collect all other records
+	// Collect every other RR in the zone, grouped into RRsets by (name,type).
 	for name, records := range z.Records {
-		// Skip the zone apex records that are already included via SOA
-		if name == z.Origin || name == z.Origin+"." {
-			continue
-		}
-
-		// Group records by type (RRset)
+		// Group records by type (RRset). All RRs in an RRset share a TTL
+		// (RFC 1035 §3.2.1); we use the TTL of the first encountered RR.
 		rrsetMap := make(map[uint16][][]byte)
+		rrsetTTL := make(map[uint16]uint32)
 
 		for _, rec := range records {
 			rtype, err := parseRecordType(rec.Type)
@@ -115,14 +127,39 @@ func collectZoneRRsets(z *Zone) ([][]byte, error) {
 				continue
 			}
 
+			// Skip the apex SOA here (emitted above from z.SOA).
+			if rtype == typeSOA && (name == z.Origin || name == z.Origin+".") {
+				continue
+			}
+
+			// RFC 8976 §3.1.1: exclude the ZONEMD RR itself.
+			if rtype == typeZONEMD {
+				continue
+			}
+
+			// And exclude RRSIGs that cover the ZONEMD RR. RRSIG RDATA
+			// begins with a uint16 "Type Covered" field; we parse just
+			// that to decide whether to skip.
+			if rtype == typeRRSIG {
+				rdata := serializeRecordData(rec)
+				if len(rdata) >= 2 {
+					covered := uint16(rdata[0])<<8 | uint16(rdata[1])
+					if covered == typeZONEMD {
+						continue
+					}
+				}
+			}
+
 			rdata := serializeRecordData(rec)
 			rrsetMap[rtype] = append(rrsetMap[rtype], rdata)
+			if _, ok := rrsetTTL[rtype]; !ok {
+				rrsetTTL[rtype] = rec.TTL
+			}
 		}
 
-		// Add each RRset to the collection
+		// Emit each RRset in canonical RR-by-RR form.
 		for rtype, rdataList := range rrsetMap {
-			// Create canonical RRset representation
-			rrset := buildCanonicalRRset(name, rtype, rdataList)
+			rrset := buildCanonicalRRset(name, rtype, rrsetTTL[rtype], rdataList)
 			rrsets = append(rrsets, rrset)
 		}
 	}
@@ -138,24 +175,37 @@ func sortRRsets(rrsets [][]byte) {
 	})
 }
 
-// buildCanonicalRRset builds the canonical wire format of an RRset.
-func buildCanonicalRRset(name string, rtype uint16, rdataList [][]byte) []byte {
-	// RFC 8976: Canonical format is:
-	// owner name | type | rdatas in canonical order
+// buildCanonicalRRset emits an RRset in RFC 8976 §3.3.2 canonical wire form:
+// each constituent RR is written as
+//
+//	owner name (canonical wire) | type (uint16 BE) |
+//	class (uint16 BE = IN) | ttl (uint32 BE) |
+//	rdlength (uint16 BE) | rdata
+//
+// and the RRs are concatenated in canonical-order. All zones served by this
+// implementation use class IN; if multi-class zones become supported, this
+// helper will need a class parameter as well.
+func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]byte) []byte {
+	const classIN uint16 = 1
+
+	nameWire := canonicalName(name)
+
+	// Canonical RR ordering within the set: sort by RDATA bytewise per
+	// RFC 4034 §6.3 (used here for ZONEMD canonicalisation per RFC 8976).
+	sorted := make([][]byte, len(rdataList))
+	copy(sorted, rdataList)
+	sort.Slice(sorted, func(i, j int) bool { return string(sorted[i]) < string(sorted[j]) })
 
 	var result []byte
-
-	// Owner name in wire format (lowercase, no compression)
-	result = append(result, canonicalName(name)...)
-
-	// Type (2 bytes, network order)
-	result = append(result, byte(rtype>>8), byte(rtype&0xff))
-
-	// RDatas in canonical order
-	for _, rdata := range rdataList {
+	for _, rdata := range sorted {
+		result = append(result, nameWire...)
+		result = append(result, byte(rtype>>8), byte(rtype&0xff))
+		result = append(result, byte(classIN>>8), byte(classIN&0xff))
+		result = append(result, byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl&0xff))
+		rdlen := uint16(len(rdata))
+		result = append(result, byte(rdlen>>8), byte(rdlen&0xff))
 		result = append(result, rdata...)
 	}
-
 	return result
 }
 

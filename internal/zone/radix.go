@@ -65,7 +65,10 @@ func splitDomainReversed(name string) []string {
 	if name == "" {
 		return []string{""}
 	}
-	name = strings.TrimSuffix(name, ".") // trim trailing dot
+	// RFC 1035 §2.3.3: domain names are case-insensitive. Normalise both Insert
+	// and Find inputs to lowercase here so a zone inserted as "EXAMPLE.COM."
+	// matches a query for "example.com." and vice versa.
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
 	if name == "" {
 		return []string{"."}
 	}

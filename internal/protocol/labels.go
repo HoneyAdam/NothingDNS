@@ -423,15 +423,6 @@ func CanonicalWireName(name string) []byte {
 	return wire
 }
 
-// toLowerLabel performs ASCII-only lowercasing of a label string.
-func toLowerLabel(s string) []byte {
-	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
-		b[i] = toLower(s[i])
-	}
-	return b
-}
-
 // WireNameLength returns the length of a domain name at the given offset.
 // This is useful for skipping over names without fully parsing them.
 func WireNameLength(buf []byte, offset int) (int, error) {

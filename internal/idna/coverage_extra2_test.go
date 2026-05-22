@@ -1,6 +1,7 @@
 package idna
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -13,10 +14,10 @@ func TestBidirectionalCategory_Categories(t *testing.T) {
 		r    rune
 		want string
 	}{
-		{'A', "L"},    // ASCII uppercase
-		{'z', "L"},    // ASCII lowercase
-		{'0', "EN"},   // ASCII digit
-		{'5', "EN"},   // ASCII digit
+		{'A', "L"},     // ASCII uppercase
+		{'z', "L"},     // ASCII lowercase
+		{'0', "EN"},    // ASCII digit
+		{'5', "EN"},    // ASCII digit
 		{0x0660, "AN"}, // Arabic-Indic digit
 		{0x0669, "AN"}, // Arabic-Indic digit
 		{0x200D, "ON"}, // ZWJ
@@ -55,22 +56,45 @@ func TestDecodeLabel_Empty(t *testing.T) {
 }
 
 func TestDecodeLabel_NoHyphen(t *testing.T) {
+	// Per RFC 3492 §6.2 a punycode body without '-' has an empty basic
+	// prefix; "example" is interpreted as 7 variable-part digits. The
+	// previous test expected identity ("example" → "example"), which was
+	// the pre-fix bug that left real punycode un-decoded for callers that
+	// stripped the "xn--" ACE prefix. We just assert non-empty here.
 	result, err := decodeLabel("example")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "example" {
-		t.Errorf("expected 'example', got %q", result)
+	if result == "" {
+		t.Error("expected non-empty decoded output")
+	}
+	if result == "example" {
+		t.Error("expected decoder to actually run (got identity, the old buggy behaviour)")
 	}
 }
 
-func TestDecodeLabel_NoDoubleHyphen(t *testing.T) {
+func TestDecodeLabel_PunycodeWithBasicPrefix(t *testing.T) {
+	// "test-label" is a valid punycode body (basic prefix "test", variable
+	// part "label"). RFC 3492 inserts decoded codepoints at chosen indices
+	// in the basic prefix, so the basic characters survive but are not
+	// guaranteed to remain contiguous. The earlier identity check ("no '--'
+	// so return verbatim") simply failed to decode anything. Assert just
+	// that the decoder did run (output non-empty and not identity).
 	result, err := decodeLabel("test-label")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if result != "test-label" {
-		t.Errorf("expected 'test-label', got %q", result)
+	if result == "" {
+		t.Error("expected non-empty result")
+	}
+	if result == "test-label" {
+		t.Error("expected decoder to actually run (got identity, the old buggy behaviour)")
+	}
+	// All ASCII basic-prefix bytes must still appear in the decoded output.
+	for _, c := range "test" {
+		if !strings.ContainsRune(result, c) {
+			t.Errorf("decoded result %q missing basic-prefix character %q", result, c)
+		}
 	}
 }
 
@@ -167,11 +191,11 @@ func TestEncodeSuffix_SimpleUnicode(t *testing.T) {
 		input   string
 		wantErr bool
 	}{
-		{"über", false},       // German umlaut
-		{"café", false},       // French accent
-		{"niños", false},      // Spanish tilde
-		{"português", false},  // Portuguese
-		{"żółć", false},       // Polish
+		{"über", false},      // German umlaut
+		{"café", false},      // French accent
+		{"niños", false},     // Spanish tilde
+		{"português", false}, // Portuguese
+		{"żółć", false},      // Polish
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

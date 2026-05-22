@@ -17,16 +17,16 @@ import (
 
 // Server implements the web dashboard server
 type Server struct {
-	mu              sync.RWMutex
-	clients         map[*Client]struct{}
-	broadcastChan   chan *QueryEvent
-	stats           *DashboardStats
-	enabled         bool
-	wg              sync.WaitGroup
-	allowedOrigins  []string // Allowed CORS origins for WebSocket
-	authStore       *auth.Store
-	authToken       string    // Legacy token-only auth fallback
-	zoneManager     *zone.Manager
+	mu             sync.RWMutex
+	clients        map[*Client]struct{}
+	broadcastChan  chan *QueryEvent
+	stats          *DashboardStats
+	enabled        bool
+	wg             sync.WaitGroup
+	allowedOrigins []string // Allowed CORS origins for WebSocket
+	authStore      *auth.Store
+	authToken      string // Legacy token-only auth fallback
+	zoneManager    *zone.Manager
 }
 
 // secureCompare performs constant-time comparison to prevent timing attacks

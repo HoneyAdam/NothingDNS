@@ -91,9 +91,9 @@ type TSIGRecord struct {
 // seamless transitions without downtime.
 type KeyStore struct {
 	keys        map[string]*TSIGKey // keyed by key name
-	previous    *TSIGKey           // previous key for rotation grace period
-	rotatedAt   time.Time          // when the last rotation occurred
-	gracePeriod time.Duration      // how long the previous key remains valid after rotation
+	previous    *TSIGKey            // previous key for rotation grace period
+	rotatedAt   time.Time           // when the last rotation occurred
+	gracePeriod time.Duration       // how long the previous key remains valid after rotation
 	mu          sync.RWMutex
 }
 
@@ -376,7 +376,7 @@ func SignMessage(msg *protocol.Message, key *TSIGKey, fudge uint16) (*protocol.R
 	// Build the message to sign (RFC 2845)
 	// The message is signed without the TSIG record itself
 	// Format: request MAC (if any) + message (before TSIG) + TSIG variables
-	signedData, err := buildSignedData(msg, nil, key.Algorithm, timeSigned, fudge, msg.Header.ID)
+	signedData, err := buildSignedData(msg, key.Name, nil, key.Algorithm, timeSigned, fudge, msg.Header.ID)
 	if err != nil {
 		return nil, fmt.Errorf("building signed data: %w", err)
 	}
@@ -448,6 +448,53 @@ func VerifyMessageWithPrevious(msg *protocol.Message, key *TSIGKey, previousKey 
 	return fmt.Errorf("TSIG verification failed with current and previous keys")
 }
 
+// tsigReplayWindow tracks the highest time_signed value ever accepted for
+// each TSIG key name. The check below rejects time_signed values that fall
+// further than one fudge window BEFORE the recorded high-water mark — i.e.
+// strict replays of stale captures, including those within the current
+// fudge window of "now". Concurrent multi-message AXFR streams remain
+// usable because successive messages always carry a non-decreasing
+// time_signed.
+//
+// Memory bound: an attacker could probe with an unbounded set of key
+// names. We cap the map at a generous limit and evict in FIFO order on
+// overflow (an attacker who manages to evict legitimate state has only
+// regained the pre-fix behaviour — replay still requires a captured valid
+// signed message).
+var (
+	tsigReplayMu        sync.Mutex
+	tsigReplayHighWater = make(map[string]time.Time)
+)
+
+const tsigReplayKeyCap = 10000
+
+// checkReplay returns an error if timeSigned is more than one fudge before
+// the recorded high-water mark for keyName. On accept, updates the mark.
+func checkReplay(keyName string, timeSigned time.Time, fudge time.Duration) error {
+	tsigReplayMu.Lock()
+	defer tsigReplayMu.Unlock()
+	if prev, ok := tsigReplayHighWater[keyName]; ok {
+		if timeSigned.Before(prev.Add(-fudge)) {
+			return fmt.Errorf("TSIG replay: time_signed %s is more than fudge=%s before last-accepted %s for key %q",
+				timeSigned.UTC().Format(time.RFC3339Nano), fudge, prev.UTC().Format(time.RFC3339Nano), keyName)
+		}
+		if timeSigned.After(prev) {
+			tsigReplayHighWater[keyName] = timeSigned
+		}
+	} else {
+		if len(tsigReplayHighWater) >= tsigReplayKeyCap {
+			// FIFO eviction: drop a single arbitrary entry. Sets in Go
+			// iterate in random order so this is effectively random eviction.
+			for k := range tsigReplayHighWater {
+				delete(tsigReplayHighWater, k)
+				break
+			}
+		}
+		tsigReplayHighWater[keyName] = timeSigned
+	}
+	return nil
+}
+
 // verifyWithKey performs the actual TSIG verification with a given key
 func verifyWithKey(msg *protocol.Message, key *TSIGKey, previousMAC []byte) error {
 	// Find TSIG record in additional section
@@ -480,7 +527,7 @@ func verifyWithKey(msg *protocol.Message, key *TSIGKey, previousMAC []byte) erro
 	}
 
 	// Build signed data
-	signedData, err := buildSignedData(msg, previousMAC, key.Algorithm, tsigs.TimeSigned, tsigs.Fudge, tsigs.OriginalID)
+	signedData, err := buildSignedData(msg, key.Name, previousMAC, key.Algorithm, tsigs.TimeSigned, tsigs.Fudge, tsigs.OriginalID)
 	if err != nil {
 		return fmt.Errorf("building signed data: %w", err)
 	}
@@ -494,6 +541,14 @@ func verifyWithKey(msg *protocol.Message, key *TSIGKey, previousMAC []byte) erro
 	// Compare MACs
 	if !hmac.Equal(tsigs.MAC, expectedMAC) {
 		return fmt.Errorf("MAC verification failed")
+	}
+
+	// RFC 8945 anti-replay: now that the MAC has authenticated the message,
+	// check the time_signed against the per-key high-water mark. Stale
+	// captured-and-replayed messages are rejected here even if they fall
+	// within the fudge window of "now".
+	if err := checkReplay(key.Name, tsigs.TimeSigned, fudge); err != nil {
+		return err
 	}
 
 	return nil
@@ -531,17 +586,41 @@ func calculateMAC(key, data []byte, algorithm string) ([]byte, error) {
 	return mac, nil
 }
 
-// buildSignedData builds the data to be signed according to RFC 2845
-func buildSignedData(msg *protocol.Message, previousMAC []byte, algorithm string, timeSigned time.Time, fudge uint16, originalID uint16) ([]byte, error) {
+// buildSignedData builds the data to be digested by HMAC per RFC 8945 §5.3.2.
+//
+// Layout (concatenated, network byte order):
+//
+//	(optional) previous-message MAC, length-prefixed per §5.3.2.1 for multi-
+//	    message transfers (TCP AXFR). For single messages or the first message
+//	    of a chain, pass nil/empty.
+//	DNS message (with the TSIG RR removed AND ARCOUNT decremented).
+//	TSIG RR variables:
+//	    KEY_NAME (canonical wire form, lowercased, no compression)
+//	    CLASS    (uint16 = 255, ANY)
+//	    TTL      (uint32 = 0)
+//	    ALGORITHM (canonical wire form, lowercased, no compression)
+//	    TIME_SIGNED (uint48)
+//	    FUDGE       (uint16)
+//	    ERROR       (uint16)
+//	    OTHER_LEN   (uint16)
+//	    OTHER_DATA  (OTHER_LEN bytes)
+//
+// keyName must be the same on-wire owner name that appears on the TSIG RR;
+// both signer and verifier must lowercase it identically for the MAC to match
+// across implementations (BIND/Knot/NSD).
+func buildSignedData(msg *protocol.Message, keyName string, previousMAC []byte, algorithm string, timeSigned time.Time, fudge uint16, originalID uint16) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// If there's a previous MAC (multi-message transfer), include it
+	// Previous MAC (multi-message TCP AXFR sequence per RFC 8945 §5.3.2.1).
+	// Length-prefixed: uint16 length followed by the MAC bytes.
 	if len(previousMAC) > 0 {
+		buf.WriteByte(byte(len(previousMAC) >> 8))
+		buf.WriteByte(byte(len(previousMAC)))
 		buf.Write(previousMAC)
 	}
 
-	// Write message (excluding TSIG record)
-	// Clone message without TSIG
+	// Message bytes with the TSIG RR removed and ARCOUNT adjusted to match
+	// the now-shorter Additionals slice (handled by cloneMessageWithoutTSIG).
 	msgCopy := cloneMessageWithoutTSIG(msg)
 	msgBytes := make([]byte, 65535)
 	n, err := msgCopy.Pack(msgBytes)
@@ -550,8 +629,29 @@ func buildSignedData(msg *protocol.Message, previousMAC []byte, algorithm string
 	}
 	buf.Write(msgBytes[:n])
 
-	// Write TSIG variables
-	// Algorithm name (wire format)
+	// TSIG RR variables: KEY_NAME (canonical wire form, no compression).
+	keyNameParsed, err := protocol.ParseName(keyName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TSIG key name %q: %w", keyName, err)
+	}
+	keyNameBytes := make([]byte, 256)
+	keyNameLen, err := protocol.PackName(keyNameParsed, keyNameBytes, 0, nil)
+	if err != nil {
+		return nil, fmt.Errorf("packing TSIG key name: %w", err)
+	}
+	buf.Write(keyNameBytes[:keyNameLen])
+
+	// CLASS (uint16 = ClassANY)
+	buf.WriteByte(byte(protocol.ClassANY >> 8))
+	buf.WriteByte(byte(protocol.ClassANY))
+
+	// TTL (uint32 = 0)
+	buf.WriteByte(0)
+	buf.WriteByte(0)
+	buf.WriteByte(0)
+	buf.WriteByte(0)
+
+	// Algorithm name (canonical wire form, no compression).
 	algoName, err := protocol.ParseName(algorithm)
 	if err != nil {
 		return nil, fmt.Errorf("invalid TSIG algorithm name %q: %w", algorithm, err)
@@ -563,7 +663,7 @@ func buildSignedData(msg *protocol.Message, previousMAC []byte, algorithm string
 	}
 	buf.Write(algoBytes[:algoLen])
 
-	// Time signed (48 bits)
+	// Time signed (48 bits, big-endian)
 	timeUnix := uint64(timeSigned.Unix())
 	buf.WriteByte(byte(timeUnix >> 40))
 	buf.WriteByte(byte(timeUnix >> 32))
@@ -572,15 +672,15 @@ func buildSignedData(msg *protocol.Message, previousMAC []byte, algorithm string
 	buf.WriteByte(byte(timeUnix >> 8))
 	buf.WriteByte(byte(timeUnix))
 
-	// Fudge
+	// Fudge (uint16)
 	buf.WriteByte(byte(fudge >> 8))
 	buf.WriteByte(byte(fudge))
 
-	// Error (0 for requests)
+	// Error (uint16 = 0 for non-error)
 	buf.WriteByte(0)
 	buf.WriteByte(0)
 
-	// Other length (0 for requests)
+	// Other length (uint16 = 0) + Other data (empty)
 	buf.WriteByte(0)
 	buf.WriteByte(0)
 
@@ -597,10 +697,14 @@ func findTSIGRecord(msg *protocol.Message) (*protocol.ResourceRecord, error) {
 	return nil, fmt.Errorf("no TSIG record found")
 }
 
-// cloneMessageWithoutTSIG creates a copy of the message without TSIG records
+// cloneMessageWithoutTSIG creates a copy of the message with TSIG records
+// removed AND the header's ARCOUNT updated to reflect the new additionals
+// section length. RFC 8945 §5.3.2 requires the digested message to have
+// ARCOUNT decremented when the TSIG RR is stripped — leaving the original
+// value would produce a wrong MAC and break interop with BIND/Knot/NSD.
 func cloneMessageWithoutTSIG(msg *protocol.Message) *protocol.Message {
 	clone := &protocol.Message{
-		Header:      msg.Header,
+		Header:      msg.Header, // value copy, safe to mutate ARCount below
 		Questions:   msg.Questions,
 		Answers:     msg.Answers,
 		Authorities: msg.Authorities,
@@ -612,6 +716,12 @@ func cloneMessageWithoutTSIG(msg *protocol.Message) *protocol.Message {
 			clone.Additionals = append(clone.Additionals, rr)
 		}
 	}
+
+	// Header.ARCount is the wire-format count for the additional section; it
+	// must match len(clone.Additionals) after stripping TSIG, otherwise the
+	// packed bytes have an inconsistent count and the digest is computed
+	// against malformed input.
+	clone.Header.ARCount = uint16(len(clone.Additionals))
 
 	return clone
 }

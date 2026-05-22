@@ -31,8 +31,8 @@ func newMockBucket() *mockBucket {
 }
 
 func (b *mockBucket) Get(key []byte) []byte       { return b.data[string(key)] }
-func (b *mockBucket) Put(key, value []byte) error  { b.data[string(key)] = value; return nil }
-func (b *mockBucket) Delete(key []byte) error      { delete(b.data, string(key)); return nil }
+func (b *mockBucket) Put(key, value []byte) error { b.data[string(key)] = value; return nil }
+func (b *mockBucket) Delete(key []byte) error     { delete(b.data, string(key)); return nil }
 func (b *mockBucket) ForEach(fn func(k, v []byte) error) error {
 	for k, v := range b.data {
 		if err := fn([]byte(k), v); err != nil {
@@ -67,7 +67,7 @@ type mockTx struct {
 	root *mockBucket
 }
 
-func (tx *mockTx) Bucket(name []byte) KeyStoreBucket        { return tx.root.Bucket(name) }
+func (tx *mockTx) Bucket(name []byte) KeyStoreBucket { return tx.root.Bucket(name) }
 func (tx *mockTx) CreateBucketIfNotExists(name []byte) (KeyStoreBucket, error) {
 	return tx.root.CreateBucketIfNotExists(name)
 }

@@ -121,8 +121,8 @@ func TestIsAnswer(t *testing.T) {
 		{
 			name: "success with answers",
 			msg: &protocol.Message{
-				Header:   protocol.Header{Flags: protocol.Flags{RCODE: protocol.RcodeSuccess}},
-				Answers:  []*protocol.ResourceRecord{makeARR("example.com.", "1.2.3.4")},
+				Header:  protocol.Header{Flags: protocol.Flags{RCODE: protocol.RcodeSuccess}},
+				Answers: []*protocol.ResourceRecord{makeARR("example.com.", "1.2.3.4")},
 			},
 			want: true,
 		},
@@ -443,7 +443,9 @@ func TestResolver_DNAMESynthesis(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "www.example.com.", protocol.TypeA)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -483,7 +485,9 @@ func TestResolver_DNAMESynthesis(t *testing.T) {
 // ============================================================================
 
 func TestExtractDelegation_NoNS(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			makeARR("example.com.", "1.2.3.4"), // Not an NS record
@@ -496,7 +500,9 @@ func TestExtractDelegation_NoNS(t *testing.T) {
 }
 
 func TestExtractDelegation_WithGlue(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			makeNSRR("example.com.", "ns1.example.com."),
@@ -526,7 +532,9 @@ func TestExtractDelegation_WithGlue(t *testing.T) {
 }
 
 func TestExtractDelegation_DuplicateNS(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			makeNSRR("example.com.", "ns1.example.com."),
@@ -540,7 +548,9 @@ func TestExtractDelegation_DuplicateNS(t *testing.T) {
 }
 
 func TestExtractDelegation_AdditionalNonMatch(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			makeNSRR("example.com.", "ns1.example.com."),
@@ -577,7 +587,9 @@ func TestLookupNSAddresses_CacheHit(t *testing.T) {
 	aMsg.AddAnswer(makeARR("ns1.example.com.", "10.0.0.1"))
 	cache.Set("ns1.example.com.:1", aMsg, 300)
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 1 {
 		t.Fatalf("lookupNSAddresses len = %d, want 1", len(addrs))
@@ -601,7 +613,9 @@ func TestLookupNSAddresses_CacheHitAAAA(t *testing.T) {
 	})
 	cache.Set("ns1.example.com.:28", aaaaMsg, 300)
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 1 {
 		t.Fatalf("lookupNSAddresses len = %d, want 1", len(addrs))
@@ -613,7 +627,9 @@ func TestLookupNSAddresses_CacheNegative(t *testing.T) {
 	// Set negative entry
 	cache.SetNegative("ns1.example.com.:1", protocol.RcodeNameError)
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 0 {
 		t.Errorf("lookupNSAddresses with negative cache = %d addrs, want 0", len(addrs))
@@ -621,7 +637,9 @@ func TestLookupNSAddresses_CacheNegative(t *testing.T) {
 }
 
 func TestLookupNSAddresses_NilCache(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 0 {
 		t.Errorf("lookupNSAddresses with nil cache = %d addrs, want 0", len(addrs))
@@ -637,7 +655,9 @@ func TestLookupNSAddresses_CacheHitButWrongType(t *testing.T) {
 	cnameMsg.AddAnswer(makeCNAMERR("ns1.example.com.", "alias.example.com."))
 	cache.Set("ns1.example.com.:1", cnameMsg, 300)
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 0 {
 		t.Errorf("lookupNSAddresses with CNAME-only cache = %d addrs, want 0", len(addrs))
@@ -649,7 +669,9 @@ func TestLookupNSAddresses_CacheNilMessage(t *testing.T) {
 	// Manually insert entry with nil message (edge case)
 	cache.entries["ns1.example.com.:1"] = &CacheEntry{Message: nil, IsNegative: false}
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 0 {
 		t.Errorf("lookupNSAddresses with nil message = %d addrs, want 0", len(addrs))
@@ -662,7 +684,9 @@ func TestLookupNSAddresses_CacheNilMessage(t *testing.T) {
 
 func TestResolveNSAddresses_WithGlue(t *testing.T) {
 	transport := newMockTransport()
-	r := NewResolver(DefaultConfig(), nil, transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, transport)
 	deleg := &delegation{
 		nsNames: []string{"ns1.example.com."},
 		addrs: map[string][]string{
@@ -684,7 +708,9 @@ func TestResolveNSAddresses_NoGlueWithCache(t *testing.T) {
 	aMsg.AddAnswer(makeARR("ns2.example.org.", "10.0.0.2"))
 	cache.Set("ns2.example.org.:1", aMsg, 300)
 
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 	deleg := &delegation{
 		nsNames: []string{"ns2.example.org."},
 		addrs:   map[string][]string{},
@@ -696,7 +722,9 @@ func TestResolveNSAddresses_NoGlueWithCache(t *testing.T) {
 }
 
 func TestResolveNSAddresses_NoGlueNoCache(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	deleg := &delegation{
 		nsNames: []string{"ns3.example.net."},
 		addrs:   map[string][]string{},
@@ -712,7 +740,9 @@ func TestResolveNSAddresses_NoGlueNoCache(t *testing.T) {
 // ============================================================================
 
 func TestCacheResponse_NilCache(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	// Should not panic
 	r.cacheResponse("example.com.", protocol.TypeA, &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
@@ -724,7 +754,9 @@ func TestCacheResponse_NilCache(t *testing.T) {
 
 func TestCacheResponse_ZeroTTL(t *testing.T) {
 	cache := newMockCache()
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 
 	resp := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
@@ -743,7 +775,9 @@ func TestCacheResponse_ZeroTTL(t *testing.T) {
 
 func TestCacheResponse_WithAAAARecord(t *testing.T) {
 	cache := newMockCache()
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 
 	resp := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
@@ -763,7 +797,9 @@ func TestCacheResponse_WithAAAARecord(t *testing.T) {
 }
 
 func TestCacheNegative_NilCache(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	// Should not panic
 	r.cacheNegative("example.com.", protocol.TypeA, protocol.RcodeNameError)
 }
@@ -773,7 +809,9 @@ func TestCacheNegative_NilCache(t *testing.T) {
 // ============================================================================
 
 func TestSendQuery_InvalidName(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	// Use a name with a label exceeding 63 bytes, which should fail in ParseName
 	longLabel := make([]byte, 70)
 	for i := range longLabel {
@@ -837,7 +875,9 @@ func TestQueryDelegation_NilResponse(t *testing.T) {
 		return nil
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	deleg := &delegation{
 		nsNames: []string{"a.root-servers.net."},
 		addrs: map[string][]string{
@@ -1124,13 +1164,13 @@ func TestParseExtendedRESPInfo_TruncatedUpstreamIPv4(t *testing.T) {
 	// Build extended data manually with truncated IPv4 upstream
 	data := []byte{
 		4, 't', 'e', 's', 't', // ID
-		1, 'v',                   // Version
-		1,                        // DNSSEC
-		0,                        // Filtering
-		0, 0, 0, 100,             // Cache size
-		1,                        // 1 upstream
-		4,                        // IPv4 marker
-		1, 2,                     // Truncated (only 2 of 4 bytes)
+		1, 'v', // Version
+		1,            // DNSSEC
+		0,            // Filtering
+		0, 0, 0, 100, // Cache size
+		1,    // 1 upstream
+		4,    // IPv4 marker
+		1, 2, // Truncated (only 2 of 4 bytes)
 	}
 	// Pad to minimum length
 	for len(data) < 4 {
@@ -1153,13 +1193,13 @@ func TestParseExtendedRESPInfo_TruncatedUpstreamIPv6(t *testing.T) {
 	// Build extended data with truncated IPv6 upstream
 	data := []byte{
 		4, 't', 'e', 's', 't', // ID
-		1, 'v',                   // Version
-		1,                        // DNSSEC
-		0,                        // Filtering
-		0, 0, 0, 100,             // Cache size
-		1,                        // 1 upstream
-		6,                        // IPv6 marker
-		0x20, 0x01, 0x0d, 0xb8,   // Only 4 of 16 bytes
+		1, 'v', // Version
+		1,            // DNSSEC
+		0,            // Filtering
+		0, 0, 0, 100, // Cache size
+		1,                      // 1 upstream
+		6,                      // IPv6 marker
+		0x20, 0x01, 0x0d, 0xb8, // Only 4 of 16 bytes
 	}
 	for len(data) < 4 {
 		data = append(data, 0)
@@ -1175,13 +1215,13 @@ func TestParseExtendedRESPInfo_TruncatedUpstreamIPv6(t *testing.T) {
 func TestParseExtendedRESPInfo_TruncatedHostname(t *testing.T) {
 	data := []byte{
 		4, 't', 'e', 's', 't', // ID
-		1, 'v',                   // Version
-		0,                        // DNSSEC
-		1,                        // Filtering
-		0, 0, 0, 50,              // Cache size
-		1,                        // 1 upstream
-		10,                       // Hostname length marker = 10
-		'h', 'o', 's', 't',       // Only 4 of 10 bytes
+		1, 'v', // Version
+		0,           // DNSSEC
+		1,           // Filtering
+		0, 0, 0, 50, // Cache size
+		1,                  // 1 upstream
+		10,                 // Hostname length marker = 10
+		'h', 'o', 's', 't', // Only 4 of 10 bytes
 	}
 	for len(data) < 4 {
 		data = append(data, 0)
@@ -1280,8 +1320,8 @@ func TestParseBasicRESPInfo_Valid(t *testing.T) {
 
 func TestParseBasicRESPInfo_EmptyStrings(t *testing.T) {
 	data := []byte{
-		0,   // Empty ID
-		0,   // Empty version
+		0, // Empty ID
+		0, // Empty version
 	}
 	// Minimum length is 2 (just the two length bytes)
 	parsed, err := parseBasicRESPInfo(data)
@@ -1493,7 +1533,9 @@ func TestResolver_ReferralNoNS(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "example.com.", protocol.TypeA)
 	if err != nil {
 		t.Fatalf("Resolve error: %v", err)
@@ -1541,7 +1583,9 @@ func TestResolver_ReferralNSNoGlue(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), cache, transport)
+	cfg := DefaultConfig()
+	cfg.AllowPrivateUpstream = true // test uses 10.0.0.5 as a mock NS addr
+	r := NewResolver(cfg, cache, transport)
 	resp, err := r.Resolve(context.Background(), "example.com.", protocol.TypeA)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -1573,7 +1617,9 @@ func TestResolver_DirectAnswerFromRoot(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "root.example.com.", protocol.TypeA)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -1598,7 +1644,9 @@ func TestResolver_QueryCNAMEType(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "alias.example.com.", protocol.TypeCNAME)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -1647,7 +1695,9 @@ func TestResolver_DNAMESynthesis_TargetUnreachable(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "www.example.com.", protocol.TypeA)
 	if err != nil {
 		t.Fatalf("Resolve error: %v", err)
@@ -1705,7 +1755,9 @@ func TestResolver_TCBitResponse(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	// sendQuery should return the TC response (transport handles fallback)
 	resp, err := r.sendQuery(context.Background(), "example.com.", protocol.TypeA, "198.41.0.4:53")
 	if err != nil {
@@ -1847,7 +1899,9 @@ func TestResolver_AAAAQuery(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 	resp, err := r.Resolve(context.Background(), "example.com.", protocol.TypeAAAA)
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
@@ -1893,7 +1947,9 @@ func TestResolver_Use0x20Success(t *testing.T) {
 // ============================================================================
 
 func TestExtractDelegation_NSWithWrongData(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			{
@@ -1912,7 +1968,9 @@ func TestExtractDelegation_NSWithWrongData(t *testing.T) {
 }
 
 func TestExtractDelegation_AdditionalWithWrongData(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 	resp := &protocol.Message{
 		Additionals: []*protocol.ResourceRecord{
 			{
@@ -1946,7 +2004,9 @@ func TestResolver_ConcurrentResolve(t *testing.T) {
 		return resp
 	})
 
-	r := NewResolver(DefaultConfig(), newMockCache(), transport)
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, newMockCache(), transport)
 
 	var wg sync.WaitGroup
 	errors := make(chan error, 10)
@@ -2026,7 +2086,9 @@ func TestInBailiwick(t *testing.T) {
 // names must not poison the cache under those names' keys.
 func TestCacheResponse_SideRecord_OutOfBailiwickRejected(t *testing.T) {
 	cache := newMockCache()
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 
 	// Simulate: we queried ns.attacker.com (authoritative for attacker.com)
 	// for the name attacker.com/A. The evil response answers attacker.com
@@ -2034,8 +2096,8 @@ func TestCacheResponse_SideRecord_OutOfBailiwickRejected(t *testing.T) {
 	resp := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
 	}
-	resp.AddAnswer(makeARR("attacker.com.", "1.2.3.4"))           // in-bailiwick: legit
-	resp.AddAnswer(makeARR("www.victim-bank.com.", "6.6.6.6"))    // out-of-bailiwick: poison
+	resp.AddAnswer(makeARR("attacker.com.", "1.2.3.4"))        // in-bailiwick: legit
+	resp.AddAnswer(makeARR("www.victim-bank.com.", "6.6.6.6")) // out-of-bailiwick: poison
 
 	r.cacheResponse("attacker.com.", protocol.TypeA, resp, "attacker.com.")
 
@@ -2066,7 +2128,9 @@ func TestCacheResponse_SideRecord_OutOfBailiwickRejected(t *testing.T) {
 // the resolution-speed optimization for legitimate cases.
 func TestCacheResponse_SideRecord_InBailiwickAccepted(t *testing.T) {
 	cache := newMockCache()
-	r := NewResolver(DefaultConfig(), cache, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
 
 	resp := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
@@ -2092,7 +2156,9 @@ func TestCacheResponse_SideRecord_InBailiwickAccepted(t *testing.T) {
 // extractDelegation must reject NS records whose owner is not in bailiwick of
 // the querier's current zone cut — a .com server cannot delegate .net.
 func TestExtractDelegation_RejectsOutOfBailiwickNS(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 
 	// Querier believes it is at a .com server (zoneCut = "com.").
 	// An evil referral tries to redirect resolution of evil.net.
@@ -2130,15 +2196,17 @@ func TestExtractDelegation_RejectsOutOfBailiwickNS(t *testing.T) {
 // extractDelegation must also reject Additional records whose owner is in
 // bailiwick but is NOT actually a listed NS target (drive-by records).
 func TestExtractDelegation_RejectsNonNSTargetAdditional(t *testing.T) {
-	r := NewResolver(DefaultConfig(), nil, newMockTransport())
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
 
 	resp := &protocol.Message{
 		Authorities: []*protocol.ResourceRecord{
 			makeNSRR("example.com.", "ns1.example.com."),
 		},
 		Additionals: []*protocol.ResourceRecord{
-			makeARR("ns1.example.com.", "1.2.3.4"),        // legit glue
-			makeARR("www.example.com.", "6.6.6.6"),        // in-bailiwick, but not an NS target: drive-by
+			makeARR("ns1.example.com.", "1.2.3.4"), // legit glue
+			makeARR("www.example.com.", "6.6.6.6"), // in-bailiwick, but not an NS target: drive-by
 		},
 	}
 

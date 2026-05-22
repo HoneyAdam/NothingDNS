@@ -21,8 +21,8 @@ type compiledRule struct {
 
 // ACLChecker evaluates ACL rules against client IPs and query types.
 type ACLChecker struct {
-	mu           sync.RWMutex
-	rules        []compiledRule
+	mu            sync.RWMutex
+	rules         []compiledRule
 	denyByDefault bool
 }
 

@@ -103,11 +103,13 @@ func TestToUnicode(t *testing.T) {
 			wantErr: nil,
 		},
 
-		// Punycode - current implementation returns modified output
+		// Punycode — RFC 3492-compliant decoder produces the original
+		// Unicode form. The earlier test pinned the broken behaviour where
+		// the decoder returned the punycode body verbatim.
 		{
 			name:    "simple punycode",
 			input:   "xn--mnchen-3ya.de",
-			want:    "mnchen-3ya.de", // Current decoder behavior
+			want:    "münchen.de",
 			wantErr: nil,
 		},
 
@@ -474,13 +476,18 @@ func TestValidateContext(t *testing.T) {
 }
 
 func TestDecodeLabel(t *testing.T) {
+	// decodeLabel is called by ToUnicode after the "xn--" ACE prefix has
+	// been stripped, so the input here is the punycode body to decode per
+	// RFC 3492. Valid punycode inputs that happen to look like ASCII still
+	// get decoded — caller should not pass non-punycode strings through.
 	tests := []struct {
 		input   string
 		want    string
 		wantErr error
 	}{
-		{"example", "example", nil},       // ASCII only
-		{"mnchen-3ya", "mnchen-3ya", nil}, // No encoding
+		// "mnchen-3ya" is the canonical punycode body for "münchen".
+		{"mnchen-3ya", "münchen", nil},
+		// Empty input is an error.
 		{"", "", ErrEmptyLabel},
 	}
 
@@ -669,13 +676,23 @@ func TestEncodePunycode(t *testing.T) {
 }
 
 func TestDecodePunycode(t *testing.T) {
+	// decodePunycode implements RFC 3492 §6.2 directly. Inputs that contain
+	// no '-' delimiter are interpreted as "empty basic prefix + variable
+	// part = input", which is a valid punycode shape (e.g. "nxasmq6b" for
+	// names with no ASCII letters). The earlier identity short-circuit was
+	// wrong: any ASCII-only string was returned verbatim, leaving real
+	// punycode un-decoded for caller paths that stripped the "xn--" ACE
+	// prefix.
 	tests := []struct {
 		input string
 		want  string
 	}{
-		{"example", "example"}, // ASCII only
-		{"", ""},               // Empty
-		{"mnchen", "mnchen"},   // No hyphen = ASCII returned as-is
+		// Canonical punycode body for "münchen".
+		{"mnchen-3ya", "münchen"},
+		// Basic prefix only ("foo-" → "foo"), no variable part.
+		{"foo-", "foo"},
+		// Empty input.
+		{"", ""},
 	}
 
 	for _, tt := range tests {

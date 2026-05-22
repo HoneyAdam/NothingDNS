@@ -14,7 +14,37 @@ import (
 // SerialIncrement (manager.go) — 0% coverage
 // ============================================================================
 
+// TestStripZoneComment verifies that BIND-style ';' comments are stripped
+// only when they appear outside of quoted strings — so TXT records that
+// legitimately contain semicolons inside quotes are preserved.
+func TestStripZoneComment(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain_comment", "foo bar ; this is a comment", "foo bar "},
+		{"no_comment", "foo bar baz", "foo bar baz"},
+		{"semicolon_in_quotes", `"foo;bar" trailing`, `"foo;bar" trailing`},
+		{"semicolon_inside_then_comment", `"foo;bar" ; trailing`, `"foo;bar" `},
+		{"escaped_semicolon", `foo \; bar`, `foo \; bar`},
+		{"unterminated_quote", `"foo;bar`, `"foo;bar`},
+		{"empty", "", ""},
+		{"only_comment", "; just a comment", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripZoneComment(tt.in)
+			if got != tt.want {
+				t.Errorf("stripZoneComment(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSerialIncrement(t *testing.T) {
+	// RFC 1982 §3.1: arithmetic is mod 2^32 over the full uint32 range;
+	// only 0xFFFFFFFF → 0 is a real wrap, not the half-range boundary.
 	tests := []struct {
 		name  string
 		input uint32
@@ -23,8 +53,8 @@ func TestSerialIncrement(t *testing.T) {
 		{"zero", 0, 1},
 		{"normal", 100, 101},
 		{"near_half_range", SerialHalfRange - 2, SerialHalfRange - 1},
-		{"at_half_range_minus_1", SerialHalfRange - 1, 0},
-		{"above_half_range", SerialHalfRange, 0},
+		{"at_half_range_minus_1", SerialHalfRange - 1, SerialHalfRange},
+		{"above_half_range", SerialHalfRange, SerialHalfRange + 1},
 		{"max_uint32", 0xFFFFFFFF, 0},
 	}
 	for _, tt := range tests {
@@ -42,23 +72,29 @@ func TestSerialIncrement(t *testing.T) {
 // ============================================================================
 
 func TestSerialIsNewer_AllBranches(t *testing.T) {
+	// RFC 1982 §3.2: s1 is newer than s2 iff
+	//   (s1 > s2 AND s1-s2 < 2^31) OR (s1 < s2 AND s2-s1 > 2^31)
 	tests := []struct {
 		name      string
 		s1, s2    uint32
 		wantNewer bool
 	}{
-		// diff == 0 => false
+		// equal => false
 		{"equal", 100, 100, false},
-		// diff > 0 and within half range => true
+		// s1 > s2 and s1-s2 < 2^31 => s1 newer
 		{"s1_greater_within_range", 200, 100, true},
-		// diff > 0 but diff >= SerialHalfRange => false
-		{"s1_greater_beyond_half", 100 + SerialHalfRange, 100, false},
-		// diff > 0, exactly SerialHalfRange-1 => true
+		// s1 > s2 and s1-s2 == 2^31 => undefined, we treat as false
+		{"s1_greater_at_half", 100 + SerialHalfRange, 100, false},
+		// s1 > s2 and s1-s2 < 2^31 by 1 => s1 newer
 		{"s1_greater_just_within", 100 + SerialHalfRange - 1, 100, true},
-		// diff < 0, but abs(diff) < SerialHalfRange => treated as wrap-around => true
-		{"s1_less_wrapped", 100, 100 + SerialHalfRange - 1, true},
-		// diff < 0, abs(diff) >= SerialHalfRange => not a wrap-around => false
-		{"s1_less_beyond_half", 100, 100 + SerialHalfRange, false},
+		// s1 < s2 and s2-s1 < 2^31 => s2 is newer, so s1 is NOT newer
+		{"s1_less_direct_order", 100, 100 + SerialHalfRange - 1, false},
+		// s1 < s2 and s2-s1 == 2^31 => undefined, we treat as false
+		{"s1_less_at_half", 100, 100 + SerialHalfRange, false},
+		// s1 < s2 and s2-s1 > 2^31 => wrap-around, s1 IS newer
+		{"s1_wrap_newer", 0, 0xFFFFFFFF, true},
+		// Symmetric: 0xFFFFFFFF NOT newer than 0 (0 is the wrapped-newer one)
+		{"max_not_newer_than_zero", 0xFFFFFFFF, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -985,8 +1021,8 @@ func TestComputeZoneMD_SHA384(t *testing.T) {
 
 func TestComputeZoneMD_UnknownAlgorithm(t *testing.T) {
 	z := &Zone{
-		Origin: "example.com.",
-		SOA:    &SOARecord{MName: "ns1.", RName: "h.", Serial: 1},
+		Origin:  "example.com.",
+		SOA:     &SOARecord{MName: "ns1.", RName: "h.", Serial: 1},
 		Records: map[string][]Record{},
 	}
 	_, err := ComputeZoneMD(z, ZONEMDAlgorithm(99))
@@ -1362,16 +1398,35 @@ func TestSortRRsets(t *testing.T) {
 func TestBuildCanonicalRRset(t *testing.T) {
 	name := "www.example.com."
 	rtype := uint16(1) // A
+	ttl := uint32(3600)
 	rdataList := [][]byte{{192, 0, 2, 1}}
 
-	result := buildCanonicalRRset(name, rtype, rdataList)
+	result := buildCanonicalRRset(name, rtype, ttl, rdataList)
 	if len(result) == 0 {
 		t.Fatal("buildCanonicalRRset should return non-empty bytes")
 	}
-	// Should contain the type bytes
-	// rtype=1 => byte(0), byte(1)
-	typeIdx := len(result) - 4 - 1 // approximate
-	_ = typeIdx
+
+	// RFC 8976 §3.3.2 layout for one RR:
+	//   name(canonical wire) | type(2) | class(2) | ttl(4) | rdlen(2) | rdata
+	// For "www.example.com." the canonical name wire form is
+	// 3 'w' 'w' 'w' 7 'e' 'x' 'a' 'm' 'p' 'l' 'e' 3 'c' 'o' 'm' 0  → 17 bytes.
+	const nameWireLen = 17
+	if len(result) != nameWireLen+2+2+4+2+4 {
+		t.Fatalf("expected %d bytes, got %d", nameWireLen+2+2+4+2+4, len(result))
+	}
+	if result[nameWireLen] != 0x00 || result[nameWireLen+1] != 0x01 {
+		t.Errorf("type field not encoded correctly: %x %x", result[nameWireLen], result[nameWireLen+1])
+	}
+	if result[nameWireLen+2] != 0x00 || result[nameWireLen+3] != 0x01 {
+		t.Errorf("class field (IN) not encoded correctly: %x %x", result[nameWireLen+2], result[nameWireLen+3])
+	}
+	// TTL = 3600 = 0x00 0x00 0x0E 0x10
+	if result[nameWireLen+4] != 0x00 || result[nameWireLen+7] != 0x10 {
+		t.Errorf("TTL field not encoded correctly")
+	}
+	if result[nameWireLen+8] != 0x00 || result[nameWireLen+9] != 0x04 {
+		t.Errorf("rdlength != 4: %x %x", result[nameWireLen+8], result[nameWireLen+9])
+	}
 }
 
 // ============================================================================
@@ -1744,11 +1799,11 @@ func TestParseUint32_EdgeCases(t *testing.T) {
 	}{
 		{"0", 0, false},
 		{"1", 1, false},
-		{"4294967295", 4294967295, false},  // max uint32
-		{"4294967296", 0, true},             // overflow
-		{"abc", 0, true},                    // non-numeric
-		{"", 0, false},                      // empty returns 0 (loop doesn't execute)
-		{"123abc", 0, true},                 // mixed
+		{"4294967295", 4294967295, false}, // max uint32
+		{"4294967296", 0, true},           // overflow
+		{"abc", 0, true},                  // non-numeric
+		{"", 0, false},                    // empty returns 0 (loop doesn't execute)
+		{"123abc", 0, true},               // mixed
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

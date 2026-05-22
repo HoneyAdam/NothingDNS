@@ -155,15 +155,15 @@ func TestCircuitBreaker_RecordFailure_TripsOpen(t *testing.T) {
 func TestTCPPool_Put_OverflowConnection(t *testing.T) {
 	// Create a pool
 	pool := &tcpConnPool{
-		maxIdle: 2,
+		maxIdle:  2,
 		maxTotal: 5,
 	}
 
 	// Create a connection that belongs to a different pool
 	otherPool := &tcpConnPool{}
 	conn := &tcpConn{
-		pool:  otherPool,
-		conn:  &net.TCPConn{},
+		pool: otherPool,
+		conn: &net.TCPConn{},
 	}
 
 	// put should close the overflow connection
@@ -176,15 +176,15 @@ func TestTCPPool_Put_OverflowConnection(t *testing.T) {
 
 func TestTCPPool_Put_PoolClosed(t *testing.T) {
 	pool := &tcpConnPool{
-		maxIdle:   2,
+		maxIdle:  2,
 		maxTotal: 5,
-		closed:    true,
-		active:    1,
+		closed:   true,
+		active:   1,
 	}
 
 	conn := &tcpConn{
-		pool:  pool,
-		conn:  &net.TCPConn{},
+		pool: pool,
+		conn: &net.TCPConn{},
 	}
 	conn.inUse.Store(true)
 
@@ -197,16 +197,16 @@ func TestTCPPool_Put_PoolClosed(t *testing.T) {
 
 func TestTCPPool_Put_TooManyIdle(t *testing.T) {
 	pool := &tcpConnPool{
-		maxIdle:   1,
+		maxIdle:  1,
 		maxTotal: 5,
-		idle:      make([]*tcpConn, 1),
-		active:    2,
+		idle:     make([]*tcpConn, 1),
+		active:   2,
 	}
 	pool.idle[0] = &tcpConn{pool: pool}
 
 	conn := &tcpConn{
-		pool:  pool,
-		conn:  &net.TCPConn{},
+		pool: pool,
+		conn: &net.TCPConn{},
 	}
 	conn.inUse.Store(true)
 
@@ -223,15 +223,15 @@ func TestTCPPool_Put_TooManyIdle(t *testing.T) {
 
 func TestTCPPool_Put_Success(t *testing.T) {
 	pool := &tcpConnPool{
-		maxIdle:   5,
+		maxIdle:  5,
 		maxTotal: 10,
-		idle:      []*tcpConn{},
-		active:    1,
+		idle:     []*tcpConn{},
+		active:   1,
 	}
 
 	conn := &tcpConn{
-		pool:  pool,
-		conn:  &net.TCPConn{},
+		pool: pool,
+		conn: &net.TCPConn{},
 	}
 	conn.inUse.Store(true)
 

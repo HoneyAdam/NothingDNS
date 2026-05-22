@@ -123,16 +123,16 @@ func isOriginAllowed(origin string, allowedOrigins []string) bool {
 // Conn represents a WebSocket connection.
 type Conn struct {
 	conn       io.ReadWriteCloser
-	mu         sync.Mutex   // protects fragmented state during reads
-	fragmented bool         // true if we're reading a fragmented message
-	fragType   int          // message type (1=text, 2=binary) for fragmented message
-	fragAccum  []byte       // accumulated payload for fragmented message
+	mu         sync.Mutex // protects fragmented state during reads
+	fragmented bool       // true if we're reading a fragmented message
+	fragType   int        // message type (1=text, 2=binary) for fragmented message
+	fragAccum  []byte     // accumulated payload for fragmented message
 
 	// Rate limiting
-	rateWindow  time.Time
-	rateCount   int
-	rateMax     int
-	rateDur     time.Duration
+	rateWindow time.Time
+	rateCount  int
+	rateMax    int
+	rateDur    time.Duration
 }
 
 // Close closes the underlying connection.
@@ -208,14 +208,14 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 				continue
 			}
 			if len(c.fragAccum)+len(payload) > MaxFragmentationSize {
-					c.fragmented = false
-					c.fragAccum = nil
-					c.mu.Unlock()
-					c.writeClose(1009, "message too large")
-					return 0, nil, errors.New("websocket: fragmented message exceeds size limit")
-				}
-				c.fragAccum = append(c.fragAccum, payload...)
-				if fin {
+				c.fragmented = false
+				c.fragAccum = nil
+				c.mu.Unlock()
+				c.writeClose(1009, "message too large")
+				return 0, nil, errors.New("websocket: fragmented message exceeds size limit")
+			}
+			c.fragAccum = append(c.fragAccum, payload...)
+			if fin {
 				msgType := c.fragType
 				msg := c.fragAccum
 				c.fragmented = false

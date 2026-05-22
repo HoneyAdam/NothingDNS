@@ -101,9 +101,9 @@ var latencyLabels = [numLatencyBuckets]string{
 
 // Config holds metrics configuration.
 type Config struct {
-	Enabled  bool
-	Bind     string
-	Path     string
+	Enabled   bool
+	Bind      string
+	Path      string
 	AuthToken string // If set, requires ?token= on /metrics requests
 }
 

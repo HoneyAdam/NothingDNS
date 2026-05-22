@@ -59,7 +59,7 @@ type LoadBalancer struct {
 
 	// Circuit breaker state per server address
 	circuitBreakers map[string]*circuitBreaker
-	cbMu             sync.RWMutex
+	cbMu            sync.RWMutex
 }
 
 // circuitBreaker implements the circuit breaker pattern.
@@ -152,9 +152,9 @@ func (lb *LoadBalancer) getOrCreateCircuitBreaker(address string) *circuitBreake
 
 	cb := &circuitBreaker{
 		state:        cbClosed,
-		failureLimit:  5,
-		resetTimeout:  30 * time.Second,
-		backoff:       30 * time.Second,
+		failureLimit: 5,
+		resetTimeout: 30 * time.Second,
+		backoff:      30 * time.Second,
 	}
 	lb.circuitBreakers[address] = cb
 	return cb

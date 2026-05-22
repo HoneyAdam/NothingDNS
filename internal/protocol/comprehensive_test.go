@@ -698,6 +698,11 @@ func TestFlagsString(t *testing.T) {
 		{
 			name:    "response",
 			flags:   NewResponseFlags(RcodeSuccess),
+			wantHas: []string{"qr", "ra", "NOERROR"},
+		},
+		{
+			name:    "authoritative_response",
+			flags:   Flags{QR: true, Opcode: OpcodeQuery, AA: true, RA: true, RCODE: RcodeSuccess},
 			wantHas: []string{"qr", "aa", "ra", "NOERROR"},
 		},
 		{

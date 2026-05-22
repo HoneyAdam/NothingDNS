@@ -593,12 +593,41 @@ func applyGenerateModifier(iter int, modifier string) string {
 	return fmt.Sprintf(format, val)
 }
 
+// stripZoneComment strips a BIND-style ';' comment from line, ignoring
+// semicolons that appear inside double-quoted strings or after a backslash
+// escape. Per RFC 1035 §5.1, TXT/character-string RDATA can legitimately
+// contain semicolons inside quotes.
+func stripZoneComment(line string) string {
+	inQuote := false
+	escape := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if escape {
+			escape = false
+			continue
+		}
+		if c == '\\' {
+			escape = true
+			continue
+		}
+		if c == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if c == ';' && !inQuote {
+			return line[:i]
+		}
+	}
+	return line
+}
+
 // parseRecord parses a single resource record line.
 func (p *parser) parseRecord(line string) error {
-	// Remove comments
-	if idx := strings.Index(line, ";"); idx >= 0 {
-		line = line[:idx]
-	}
+	// Remove comments. A naive strings.Index(";") truncates RDATA inside
+	// quoted strings (e.g. TXT records containing literal semicolons), so we
+	// scan the line ourselves and ignore ';' that appears inside "..." or
+	// after a backslash escape.
+	line = stripZoneComment(line)
 
 	line = strings.TrimSpace(line)
 	if line == "" {

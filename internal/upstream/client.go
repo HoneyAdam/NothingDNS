@@ -393,12 +393,30 @@ func (c *Client) queryUDP(server *Server, msg *protocol.Message) (*protocol.Mess
 }
 
 // queryUDPBuf performs a UDP query using the provided buffer.
-func (c *Client) queryUDPBuf(server *Server, msg *protocol.Message, buf []byte) (*protocol.Message, error) {
-	n, err := msg.Pack(buf)
-	if err != nil {
-		return nil, fmt.Errorf("pack message: %w", err)
+func (c *Client) queryUDPBuf(server *Server, msg *protocol.Message, buf []byte) (resp *protocol.Message, err error) {
+	n, packErr := msg.Pack(buf)
+	if packErr != nil {
+		// Pack failures are input-side bugs (our own malformed message);
+		// do NOT penalise the server health for them.
+		return nil, fmt.Errorf("pack message: %w", packErr)
 	}
 	packed := buf[:n]
+
+	// From here on, any returned error reflects a problem talking to the
+	// server (dial/deadline/write/read/unpack). Record markFailure via defer
+	// so health-check probes and load-balancer back-off see the outcome.
+	// Previously the success path called markSuccess but no path called
+	// markFailure, leaving dead servers permanently marked healthy.
+	//
+	// Truncation is a soft outcome: the server DID respond, just over UDP
+	// with TC=1. The caller retries on TCP. Skip the failure mark in that
+	// case via the local flag below.
+	skipFailureMark := false
+	defer func() {
+		if err != nil && !skipFailureMark {
+			server.markFailure()
+		}
+	}()
 
 	// Create UDP connection
 	conn, err := net.DialTimeout("udp", server.Address, server.Timeout)
@@ -427,15 +445,18 @@ func (c *Client) queryUDPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	latency := time.Since(start)
 
 	// Parse response
-	resp, err := protocol.UnpackMessage(buf[:n])
+	resp, err = protocol.UnpackMessage(buf[:n])
 	if err != nil {
 		return nil, fmt.Errorf("unpack response: %w", err)
 	}
 
 	server.markSuccess(latency)
 
-	// Check for truncation - caller should retry with TCP
+	// Check for truncation - caller should retry with TCP. Treat truncation
+	// as a transport "soft failure": the server responded, so do NOT call
+	// markFailure via the defer.
 	if resp.Header.Flags.TC {
+		skipFailureMark = true
 		return resp, fmt.Errorf("response truncated")
 	}
 
@@ -477,16 +498,26 @@ func (c *Client) queryTCP(server *Server, msg *protocol.Message) (*protocol.Mess
 }
 
 // queryTCPBuf performs a TCP query using the provided buffer.
-func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) (*protocol.Message, error) {
-	n, err := msg.Pack(buf)
-	if err != nil {
-		return nil, fmt.Errorf("pack message: %w", err)
+func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) (resp *protocol.Message, err error) {
+	n, packErr := msg.Pack(buf)
+	if packErr != nil {
+		// Pack/size failures are input-side bugs; don't penalise the server.
+		return nil, fmt.Errorf("pack message: %w", packErr)
 	}
 	packed := buf[:n]
 
 	if len(packed) > 65535 {
 		return nil, fmt.Errorf("message too large for TCP: %d bytes", len(packed))
 	}
+
+	// From here on, any error reflects a problem talking to the server.
+	// Mark failure on return so the health-check loop and the load balancer
+	// can react. Previously success was tracked but failure was not.
+	defer func() {
+		if err != nil {
+			server.markFailure()
+		}
+	}()
 
 	// Get a pooled connection
 	c.mu.RLock()
@@ -570,7 +601,7 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	_ = tc.conn.SetDeadline(time.Time{})
 
 	// Parse response
-	resp, err := protocol.UnpackMessage(buf[:respLen])
+	resp, err = protocol.UnpackMessage(buf[:respLen])
 	if err != nil {
 		return nil, fmt.Errorf("unpack response: %w", err)
 	}

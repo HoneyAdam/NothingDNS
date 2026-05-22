@@ -169,10 +169,10 @@ func TestCluster_CacheSyncLoop_RapidEvents(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "rapid-sync-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48001,
-		CacheSync:  true,
+		NodeID:               "rapid-sync-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48001,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -212,19 +212,19 @@ func TestCluster_TwoClusterCacheInvalidation(t *testing.T) {
 	cfg1 := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "cluster-node-1",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48002,
-		CacheSync:  true,
+		NodeID:               "cluster-node-1",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48002,
+		CacheSync:            true,
 	}
 
 	cfg2 := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "cluster-node-2",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48003,
-		CacheSync:  true,
+		NodeID:               "cluster-node-2",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48003,
+		CacheSync:            true,
 	}
 
 	c1, err := New(cfg1, logger, dnsCache1)
@@ -283,10 +283,10 @@ func TestCluster_CacheSyncDisabled_NoLoopStarted(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "no-sync-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48004,
-		CacheSync:  false,
+		NodeID:               "no-sync-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48004,
+		CacheSync:            false,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -796,10 +796,10 @@ func TestCluster_InvalidateCacheLocal_EmptyKeys(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "empty-keys-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48012,
-		CacheSync:  true,
+		NodeID:               "empty-keys-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48012,
+		CacheSync:            true,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -819,9 +819,9 @@ func TestCluster_Stats_UnhealthyCluster(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "stats-unhealthy",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48013,
+		NodeID:               "stats-unhealthy",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48013,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -868,9 +868,9 @@ func TestCluster_IsHealthy_ExactQuorum(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "quorum-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48014,
+		NodeID:               "quorum-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48014,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -1049,9 +1049,9 @@ func TestCluster_HandleCacheInvalid_NilCache_VerifyCallback(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "nil-cache-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48018,
+		NodeID:               "nil-cache-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48018,
 	}
 
 	c, _ := New(cfg, logger, nil)
@@ -1079,9 +1079,9 @@ func TestCluster_HandleEvents_NoHandlers(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "no-handlers",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48019,
+		NodeID:               "no-handlers",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48019,
 	}
 
 	c, _ := New(cfg, logger, nil)
@@ -1105,10 +1105,10 @@ func TestCluster_New_AutoNodeID_GeneratesUniqueIDs(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		cfg := Config{
 			Enabled:              true,
-		AllowInsecureCluster: true, // test: no encryption key
-			NodeID:     "", // Auto-generate
-			BindAddr:   "127.0.0.1",
-			GossipPort: 48020 + i,
+			AllowInsecureCluster: true, // test: no encryption key
+			NodeID:               "",   // Auto-generate
+			BindAddr:             "127.0.0.1",
+			GossipPort:           48020 + i,
 		}
 		c, err := New(cfg, logger, dnsCache)
 		if err != nil {
@@ -1191,10 +1191,10 @@ func TestCluster_StartStop_LifecycleWithCacheSync(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key
-		NodeID:     "lifecycle-test",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 48022,
-		CacheSync:  true,
+		NodeID:               "lifecycle-test",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           48022,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)

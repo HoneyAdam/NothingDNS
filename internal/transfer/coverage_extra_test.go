@@ -971,7 +971,7 @@ func TestXoTServer_generateIXFRRecords_WithJournal_Incremental(t *testing.T) {
 					Added: []zone.RecordChange{
 						{Name: "mail.example.com.", Type: protocol.TypeA, TTL: 3600, RData: "10.0.0.2"},
 					},
-					Deleted: []zone.RecordChange{},
+					Deleted:   []zone.RecordChange{},
 					Timestamp: time.Now(),
 				},
 			},
@@ -1696,12 +1696,12 @@ func TestParseXoTRData_MX_NoPreference_CovExtra(t *testing.T) {
 
 func TestXoTConfig_Fields_CovExtra(t *testing.T) {
 	cfg := &XoTConfig{
-		CertFile:   "cert.pem",
-		KeyFile:    "key.pem",
-		CAFile:     "ca.pem",
-		TLSAUsage:  TLSASuggested,
-		MinTLSVersion: 12,
-		ListenPort: 853,
+		CertFile:        "cert.pem",
+		KeyFile:         "key.pem",
+		CAFile:          "ca.pem",
+		TLSAUsage:       TLSASuggested,
+		MinTLSVersion:   12,
+		ListenPort:      853,
 		AllowedNetworks: []string{"10.0.0.0/8"},
 	}
 	if cfg.CertFile != "cert.pem" {
@@ -1785,9 +1785,9 @@ var _ = fmt.Sprintf
 func TestXoTServer_changeToRR_A_Valid_CovExtra(t *testing.T) {
 	srv := &XoTServer{}
 	change := zone.RecordChange{
-		Name: "test.example.com.",
-		Type: protocol.TypeA,
-		TTL:  300,
+		Name:  "test.example.com.",
+		Type:  protocol.TypeA,
+		TTL:   300,
 		RData: "192.0.2.1",
 	}
 	rr, err := srv.changeToRR(change)
@@ -1808,9 +1808,9 @@ func TestXoTServer_changeToRR_A_Valid_CovExtra(t *testing.T) {
 func TestXoTServer_changeToRR_AAAA_Valid_CovExtra(t *testing.T) {
 	srv := &XoTServer{}
 	change := zone.RecordChange{
-		Name: "test.example.com.",
-		Type: protocol.TypeAAAA,
-		TTL:  300,
+		Name:  "test.example.com.",
+		Type:  protocol.TypeAAAA,
+		TTL:   300,
 		RData: "2001:db8::1",
 	}
 	rr, err := srv.changeToRR(change)
@@ -1825,9 +1825,9 @@ func TestXoTServer_changeToRR_AAAA_Valid_CovExtra(t *testing.T) {
 func TestXoTServer_changeToRR_MX_Valid_CovExtra(t *testing.T) {
 	srv := &XoTServer{}
 	change := zone.RecordChange{
-		Name: "example.com.",
-		Type: protocol.TypeMX,
-		TTL:  300,
+		Name:  "example.com.",
+		Type:  protocol.TypeMX,
+		TTL:   300,
 		RData: "10 mail.example.com.",
 	}
 	rr, err := srv.changeToRR(change)

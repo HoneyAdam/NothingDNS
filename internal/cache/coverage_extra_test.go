@@ -422,9 +422,9 @@ func TestInvalidatePattern_ReturnsKeys(t *testing.T) {
 	config.Capacity = 128
 	c := New(config)
 
-	c.SetNegative("test.example.com:1", 3)
-	c.SetNegative("www.example.com:1", 3)
-	c.SetNegative("other.test.com:1", 3)
+	c.SetNegative(MakeKey("test.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("www.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("other.test.com", 1, false), 3)
 
 	invalidated := c.InvalidatePattern("example.com")
 
@@ -434,7 +434,7 @@ func TestInvalidatePattern_ReturnsKeys(t *testing.T) {
 	}
 
 	sort.Strings(invalidated)
-	expected := []string{"test.example.com:1", "www.example.com:1"}
+	expected := []string{MakeKey("test.example.com", 1, false), MakeKey("www.example.com", 1, false)}
 	sort.Strings(expected)
 
 	for i, key := range invalidated {
@@ -458,9 +458,9 @@ func TestInvalidatePattern_WithCallback(t *testing.T) {
 		callbackKeys = append(callbackKeys, key)
 	})
 
-	c.SetNegative("alpha.example.com:1", 3)
-	c.SetNegative("beta.example.com:1", 3)
-	c.SetNegative("unrelated.com:1", 3)
+	c.SetNegative(MakeKey("alpha.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("beta.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("unrelated.com", 1, false), 3)
 
 	c.InvalidatePattern("example.com")
 
@@ -469,7 +469,7 @@ func TestInvalidatePattern_WithCallback(t *testing.T) {
 	}
 
 	// Verify unrelated.com still exists.
-	if c.Get("unrelated.com:1") == nil {
+	if c.Get(MakeKey("unrelated.com", 1, false)) == nil {
 		t.Error("expected unrelated.com to still exist")
 	}
 }

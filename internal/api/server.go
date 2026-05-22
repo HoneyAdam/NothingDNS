@@ -57,20 +57,20 @@ type Server struct {
 	// SECURITY (LOW-026): zoneSigners is protected by RWMutex. Writes are rare
 	// (zone reload / DNSSEC key rollover) and reads are frequent. sync.Map is
 	// not used because the map is small and RWMutex performs better.
-	zoneSigners     map[string]*dnssec.Signer // zone name → signer
-	zoneSignersMu   sync.RWMutex
-	rpzEngine       *rpz.Engine
-	geoEngine       *geodns.Engine
-	slaveManager    *transfer.SlaveManager
-	rateLimiter     *filter.RateLimiter
-	odohProxy       *odoh.ObliviousProxy  // ODoH proxy (RFC 9230)
-	odohTarget      *odoh.ObliviousTarget // ODoH target resolver (RFC 9230)
-	loginLimiter    *loginRateLimiter
-	apiRateLimiter  *apiRateLimiter
-	tracer          *otel.Tracer // OpenTelemetry tracing
-	stopCh          chan struct{} // Channel to signal shutdown
-	stopOnce        sync.Once     // Ensure Stop is idempotent
-	bootstrapMu     sync.Mutex    // Serialize bootstrap to prevent TOCTOU race
+	zoneSigners    map[string]*dnssec.Signer // zone name → signer
+	zoneSignersMu  sync.RWMutex
+	rpzEngine      *rpz.Engine
+	geoEngine      *geodns.Engine
+	slaveManager   *transfer.SlaveManager
+	rateLimiter    *filter.RateLimiter
+	odohProxy      *odoh.ObliviousProxy  // ODoH proxy (RFC 9230)
+	odohTarget     *odoh.ObliviousTarget // ODoH target resolver (RFC 9230)
+	loginLimiter   *loginRateLimiter
+	apiRateLimiter *apiRateLimiter
+	tracer         *otel.Tracer  // OpenTelemetry tracing
+	stopCh         chan struct{} // Channel to signal shutdown
+	stopOnce       sync.Once     // Ensure Stop is idempotent
+	bootstrapMu    sync.Mutex    // Serialize bootstrap to prevent TOCTOU race
 
 	// Goroutine leak detection baseline
 	goroutineBaseline int64
@@ -80,8 +80,8 @@ type Server struct {
 // It applies both IP-based and account-based rate limiting to prevent brute force attacks.
 type loginRateLimiter struct {
 	mu           sync.Mutex
-	ipAttempts   map[string]*loginAttempt       // IP-based tracking
-	userAttempts map[string]*loginAttempt       // (IP, username) pair tracking — prevents username lockout DoS from other IPs
+	ipAttempts   map[string]*loginAttempt // IP-based tracking
+	userAttempts map[string]*loginAttempt // (IP, username) pair tracking — prevents username lockout DoS from other IPs
 }
 
 // loginAttempt tracks failed attempts for a single IP or (IP, username) pair.
@@ -271,9 +271,9 @@ type apiRateLimiter struct {
 
 // apiRateLimit constants for authenticated endpoints
 const (
-	apiRateLimitMaxRequests  = 100   // Max requests per window
-	apiRateLimitWindowSecs   = 60    // Window size in seconds
-	apiRateLimitMaxEntries   = 50000 // Max tracked IPs to prevent unbounded memory growth
+	apiRateLimitMaxRequests = 100   // Max requests per window
+	apiRateLimitWindowSecs  = 60    // Window size in seconds
+	apiRateLimitMaxEntries  = 50000 // Max tracked IPs to prevent unbounded memory growth
 )
 
 // maxBodyBytes is the maximum size for request bodies to prevent OOM attacks.
@@ -1009,7 +1009,7 @@ func reverseIPv4Relative(ip string, origin string, cidrPrefix int) string {
 	// For varyingLabels=3: ipLabels[1], ipLabels[2], ipLabels[3] = b, c, d = 168, 1, 4 → "168.1.4"
 	start := 4 - varyingLabels
 	if start < 0 {
-		start = 0
+		start = 0 //nolint:ineffassign // defensive clamp; downstream code uses start in slice math
 	}
 	// ipLabels is [d, c, b, a], we want [c, d] for varyingLabels=2 (which is parts[1], parts[2])
 	// Actually parts[0]=d, parts[1]=c, parts[2]=b, parts[3]=a
@@ -1147,6 +1147,7 @@ func GetUser(ctx context.Context) *auth.User {
 	}
 	return nil
 }
+
 // roleOrder maps a role to its privilege height. Kept local to avoid coupling
 // the api package to internal auth.Store lookup when the request context
 // carries a synthesized legacy-token user whose username is not in the store.

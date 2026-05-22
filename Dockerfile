@@ -1,6 +1,6 @@
 # NothingDNS Dockerfile
 # Multi-stage build for minimal image size
-# Final image is FROM scratch with zero dependencies
+# Final image is FROM scratch with a stdlib-only static binary (no shared libraries)
 # Supports multi-arch builds via docker buildx
 
 # Build stage

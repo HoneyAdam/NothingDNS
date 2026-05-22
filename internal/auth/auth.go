@@ -43,12 +43,12 @@ type User struct {
 // SECURITY (LOW-015): Role is cached at generation time for serialization only.
 // Authorization always uses the live user store role via ValidateToken.
 type Token struct {
-	Token     string    `json:"token"`
-	Signature string    `json:"signature"` // HMAC signature for verification
-	Username  string    `json:"username"`
-	Role      Role      `json:"role"`
-	ExpiresAt time.Time `json:"expires_at"`
-	CreatedAt time.Time `json:"created_at"`
+	Token      string    `json:"token"`
+	Signature  string    `json:"signature"` // HMAC signature for verification
+	Username   string    `json:"username"`
+	Role       Role      `json:"role"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at"`
 	LastAccess time.Time `json:"last_access"` // For session activity tracking
 }
 
@@ -77,10 +77,10 @@ func (s *Store) TokenExpiry() time.Duration {
 
 // Config holds auth store configuration.
 type Config struct {
-	Secret            string   `yaml:"secret"`        // HMAC signing key
-	Users             []User   `yaml:"users"`         // Initial users
-	TokenExpiry       Duration `yaml:"token_expiry"`  // Token TTL (default: 24h)
-	MaxSessionsPerUser int     `yaml:"max_sessions_per_user"` // Max concurrent sessions per user (0 = unlimited)
+	Secret             string   `yaml:"secret"`                // HMAC signing key
+	Users              []User   `yaml:"users"`                 // Initial users
+	TokenExpiry        Duration `yaml:"token_expiry"`          // Token TTL (default: 24h)
+	MaxSessionsPerUser int      `yaml:"max_sessions_per_user"` // Max concurrent sessions per user (0 = unlimited)
 }
 
 type Duration struct {
@@ -118,12 +118,12 @@ func NewStore(cfg *Config) (*Store, error) {
 	}
 
 	s := &Store{
-		users:       make(map[string]*User),
-		tokens:      make(map[string]*Token),
-		secret:      secret,
-		tokenExpiry: cfg.TokenExpiry.Duration,
+		users:              make(map[string]*User),
+		tokens:             make(map[string]*Token),
+		secret:             secret,
+		tokenExpiry:        cfg.TokenExpiry.Duration,
 		maxSessionsPerUser: cfg.MaxSessionsPerUser,
-		activeSessions: make(map[string]int),
+		activeSessions:     make(map[string]int),
 	}
 	if s.tokenExpiry <= 0 {
 		s.tokenExpiry = 24 * time.Hour
@@ -239,9 +239,7 @@ func VerifyPassword(password string, hash []byte) bool {
 	// zeros fill the remainder. The copied bytes are only used for KDF,
 	// not for the comparison, so zero-filling is safe.
 	salt := make([]byte, saltLen)
-	if n := copy(salt, hash); n > 0 {
-		// salt populated by copy; zeros pad any remaining bytes
-	}
+	copy(salt, hash) // zeros pad any remaining bytes if hash is shorter
 
 	// Always run PBKDF2 so every code path pays the same crypto cost.
 	// This closes the timing side-channel where a very-short hash would
@@ -302,12 +300,12 @@ func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, er
 
 	now := time.Now()
 	t := &Token{
-		Token:     token,
-		Signature: signature,
-		Username:  username,
-		Role:      user.Role,
-		ExpiresAt: now.Add(expiry),
-		CreatedAt: now,
+		Token:      token,
+		Signature:  signature,
+		Username:   username,
+		Role:       user.Role,
+		ExpiresAt:  now.Add(expiry),
+		CreatedAt:  now,
 		LastAccess: now,
 	}
 

@@ -21,20 +21,20 @@ const (
 type Config struct {
 	Enabled    bool       `yaml:"enabled"`
 	Level      TraceLevel `yaml:"level"`
-	SampleRate float64   `yaml:"sample_rate"` // 0.0-1.0
+	SampleRate float64    `yaml:"sample_rate"` // 0.0-1.0
 }
 
 // Span represents an in-flight trace.
 type Span struct {
-	Name       string
-	TraceID    [16]byte
-	SpanID     [8]byte
-	ParentID   [8]byte
-	StartTime  time.Time
-	EndTime    time.Time
-	Level      TraceLevel
-	Attrs      []Attr
-	Err        error
+	Name      string
+	TraceID   [16]byte
+	SpanID    [8]byte
+	ParentID  [8]byte
+	StartTime time.Time
+	EndTime   time.Time
+	Level     TraceLevel
+	Attrs     []Attr
+	Err       error
 }
 
 // Attr is a key-value pair for span attributes.
@@ -45,9 +45,8 @@ type Attr struct {
 
 // Tracer provides distributed tracing.
 type Tracer struct {
-	cfg    Config
-	counter uint64
-	spans  []*Span
+	cfg   Config
+	spans []*Span
 }
 
 // NewTracer creates a new tracer.

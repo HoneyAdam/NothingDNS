@@ -176,10 +176,10 @@ func TestNodeHealthStats_HealthScore(t *testing.T) {
 		{
 			name: "all severe clamped to 0",
 			stats: NodeHealthStats{
-				LatencyMs:     600,  // -50
-				CPUPercent:    90,   // -40
-				MemoryPercent: 90,   // -30
-				ActiveConns:   900,  // -30
+				LatencyMs:     600, // -50
+				CPUPercent:    90,  // -40
+				MemoryPercent: 90,  // -30
+				ActiveConns:   900, // -30
 				LastUpdated:   now,
 			},
 			want: 0, // 100 - 50 - 40 - 30 - 30 = -50, clamped to 0
@@ -771,9 +771,9 @@ func TestCluster_CompleteDraining_LeaveCluster(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-leave",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49007,
+		NodeID:               "drain-leave",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49007,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -811,9 +811,9 @@ func TestCluster_CompleteDraining_StayInCluster(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-stay",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49008,
+		NodeID:               "drain-stay",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49008,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -854,9 +854,9 @@ func TestCluster_CompleteDraining_WithoutPriorStart(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-nostart",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49009,
+		NodeID:               "drain-nostart",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49009,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -942,9 +942,9 @@ func TestCluster_UpdateNodeHealth(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "health-update-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49010,
+		NodeID:               "health-update-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49010,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -986,9 +986,9 @@ func TestCluster_GetNodesWithHealth(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "health-list-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49011,
+		NodeID:               "health-list-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49011,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -1021,9 +1021,9 @@ func TestCluster_GetNodeForQuery(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "query-self",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49012,
+		NodeID:               "query-self",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49012,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -1062,9 +1062,9 @@ func TestCluster_GetNodeForQuery_NoAliveNodes(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "query-solo",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49013,
+		NodeID:               "query-solo",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49013,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
@@ -1092,9 +1092,9 @@ func TestCluster_BroadcastClusterMetrics_NotStarted(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "metrics-not-started",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 49014,
+		NodeID:               "metrics-not-started",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           49014,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)

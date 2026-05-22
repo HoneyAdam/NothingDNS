@@ -174,13 +174,13 @@ func (s *NOTIFYSender) buildNOTIFYRequest(zoneName string, serial uint32) (*prot
 
 // NOTIFYSlaveHandler handles incoming NOTIFY requests on slave servers
 type NOTIFYSlaveHandler struct {
-	zones          map[string]*zone.Zone
-	zonesMu        sync.RWMutex
-	notifyChan     chan *NOTIFYRequest
-	serialCheck    SerialChecker
-	closeOnce      sync.Once
+	zones           map[string]*zone.Zone
+	zonesMu         sync.RWMutex
+	notifyChan      chan *NOTIFYRequest
+	serialCheck     SerialChecker
+	closeOnce       sync.Once
 	notifyAllowList []net.IPNet // authorized master IPs
-	keyStore       *KeyStore     // TSIG keys for authentication (VULN-061)
+	keyStore        *KeyStore   // TSIG keys for authentication (VULN-061)
 }
 
 // SerialChecker is called to check if the serial has changed
@@ -332,8 +332,9 @@ func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP
 	needsUpdate := true
 	if h.serialCheck != nil {
 		needsUpdate = h.serialCheck(zoneName, receivedSerial)
-	} else if z.SOA != nil && receivedSerial <= z.SOA.Serial {
-		// If we have the zone and serial hasn't increased, no update needed
+	} else if z.SOA != nil && !serialIsNewer(receivedSerial, z.SOA.Serial) {
+		// If the received serial is not strictly newer per RFC 1982, no update
+		// is needed. Using plain '<=' would mis-handle the 2^32 wraparound.
 		needsUpdate = false
 	}
 

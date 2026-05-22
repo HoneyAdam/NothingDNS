@@ -118,7 +118,7 @@ func (zs *ZoneStore) LoadZone(origin string) (ZoneMeta, map[string][]StoredRecor
 
 		// Load all record sets
 		metaPrefix := []byte("_")
-		zoneBucket.ForEach(func(k, v []byte) error {
+		if err := zoneBucket.ForEach(func(k, v []byte) error {
 			if bytes.HasPrefix(k, metaPrefix) {
 				return nil // skip metadata keys
 			}
@@ -128,7 +128,9 @@ func (zs *ZoneStore) LoadZone(origin string) (ZoneMeta, map[string][]StoredRecor
 			}
 			records[string(k)] = recs
 			return nil
-		})
+		}); err != nil {
+			return err
+		}
 
 		return nil
 	})

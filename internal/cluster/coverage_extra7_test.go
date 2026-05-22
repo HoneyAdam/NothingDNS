@@ -19,10 +19,10 @@ func TestCluster_UpdateNodeHealth_Started(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "health-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
-		CacheSync:  true,
+		NodeID:               "health-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -62,10 +62,10 @@ func TestCluster_UpdateNodeHealth_NotStarted(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "health-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
-		CacheSync:  true,
+		NodeID:               "health-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -101,10 +101,10 @@ func TestCluster_BroadcastClusterMetrics_Started(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "metrics-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
-		CacheSync:  true,
+		NodeID:               "metrics-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -128,9 +128,9 @@ func TestCluster_BroadcastClusterMetrics_NotStartedV2(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "metrics-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "metrics-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -154,9 +154,9 @@ func TestCluster_GetClusterMetrics_WithGossip(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "metrics-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "metrics-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -183,9 +183,9 @@ func TestCluster_Stats_GossipMode(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "stats-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "stats-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -226,10 +226,10 @@ func TestCluster_InvalidateCache_CacheSyncDisabled(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "cache-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
-		CacheSync:  false, // disabled
+		NodeID:               "cache-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
+		CacheSync:            false, // disabled
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -252,10 +252,10 @@ func TestCluster_InvalidateCache_GossipMode(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "cache-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
-		CacheSync:  true,
+		NodeID:               "cache-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -280,9 +280,9 @@ func TestCluster_StartDraining_NotStartedV2(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "drain-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -304,9 +304,9 @@ func TestCluster_CompleteDraining_LeaveClusterV2(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "drain-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -334,9 +334,9 @@ func TestCluster_CompleteDraining_Resume(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "drain-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: pickFreePort(),
+		NodeID:               "drain-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           pickFreePort(),
 	}
 
 	c, err := New(cfg, logger, dnsCache)

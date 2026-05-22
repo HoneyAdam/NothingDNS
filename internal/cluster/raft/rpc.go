@@ -67,11 +67,11 @@ func NewRPCServer(addr string, handler RPCHandler, tlsConfig *tls.Config, aead c
 
 	return &RPCServer{
 		listener:  listener,
-		handler:  handler,
-		conns:    make(map[NodeID]net.Conn),
-		stopCh:   make(chan struct{}),
+		handler:   handler,
+		conns:     make(map[NodeID]net.Conn),
+		stopCh:    make(chan struct{}),
 		tlsConfig: tlsConfig,
-		aead:     aead,
+		aead:      aead,
 	}, nil
 }
 
@@ -185,10 +185,10 @@ func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
 // voteReqBuf pools per-connection buffers to avoid per-message allocation.
 // Each field is a named struct to avoid ambiguity in the type switch.
 type voteReqBuf struct {
-	VoteRequest    VoteRequest
-	VoteResponse  VoteResponse
-	AppendRequest AppendRequest
-	AppendResponse AppendResponse
+	VoteRequest     VoteRequest
+	VoteResponse    VoteResponse
+	AppendRequest   AppendRequest
+	AppendResponse  AppendResponse
 	SnapshotRequest SnapshotRequest
 }
 

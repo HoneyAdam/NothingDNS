@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -355,15 +356,30 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	// Set stream deadline to prevent slow clients from holding resources.
 	stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout))
 
-	// RFC 9250 §4.2: DNS messages over QUIC are NOT length-prefixed.
-	// Read until stream is closed (FIN received).
-	query, err := io.ReadAll(io.LimitReader(stream, DoQMaxMessageSize))
-	if err != nil && !errors.Is(err, io.EOF) {
+	// RFC 9250 §4.2: each DNS message on a QUIC stream is prefixed by a
+	// 2-octet length field, identical to DNS-over-TCP framing per RFC 1035
+	// §4.2.2. Earlier code claimed the opposite — that produced garbage
+	// queries for any RFC-9250-conformant client (kdig, Unbound, Knot,
+	// dnscrypt-proxy) because the first two bytes were treated as the DNS
+	// header ID.
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+		if !errors.Is(err, io.EOF) {
+			atomic.AddUint64(&s.errors, 1)
+		}
+		return
+	}
+	msgLen := binary.BigEndian.Uint16(lenBuf[:])
+	if msgLen == 0 {
+		return
+	}
+	if uint64(msgLen) > DoQMaxMessageSize {
 		atomic.AddUint64(&s.errors, 1)
 		return
 	}
-
-	if len(query) == 0 {
+	query := make([]byte, msgLen)
+	if _, err := io.ReadFull(stream, query); err != nil {
+		atomic.AddUint64(&s.errors, 1)
 		return
 	}
 

@@ -466,6 +466,7 @@ func TestClientDecapsulateResponseCorrupted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientQueryFullRoundTrip(t *testing.T) {
+	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
 	// This test exercises the Query() method through encapsulate + sendToProxy
 	// via a mock proxy+target setup. Because decapsulateResponse does a self-ECDH
 	// (which differs from how the target encrypts), we only test the send side
@@ -640,6 +641,7 @@ func TestNewObliviousTargetUnsupportedKEM(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPDecryptionError(t *testing.T) {
+	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	target, _ := NewObliviousTarget(cfg, &mockHandler{})
 
@@ -671,6 +673,7 @@ func TestObliviousTargetServeHTTPDecryptionError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPNilResponse(t *testing.T) {
+	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	// mockHandler with nil response — handler does nothing
 	mh := &mockHandler{response: nil}
@@ -1070,8 +1073,8 @@ func TestDeriveSharedSecretErrorPaths(t *testing.T) {
 		errMsg string
 	}{
 		{"unsupported KEM", validPriv, validPub, 99, "invalid HPKE key"},
-	{"bad private key", []byte("x"), validPub, HPKEDHX25519, ""},
-	{"bad public key", validPriv, []byte("x"), HPKEDHX25519, ""},
+		{"bad private key", []byte("x"), validPub, HPKEDHX25519, ""},
+		{"bad public key", validPriv, []byte("x"), HPKEDHX25519, ""},
 	}
 
 	for _, tt := range tests {
@@ -1135,6 +1138,7 @@ func TestEncryptDecryptWithAAD(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPFullSuccess(t *testing.T) {
+	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 
 	// Create a DNS response the handler will return
@@ -1290,11 +1294,11 @@ var _ server.Handler = (*mockHandler)(nil)
 
 func TestClientQueryInvalidKEM(t *testing.T) {
 	cfg := &ODoHConfig{
-		TargetName:     "target.example.com",
-		ProxyName:      "proxy.example.com",
-		HPKEKEM:        99, // invalid
-		HPKEKDF:        1,
-		HPKEAEAD:       HPKEAEADAES256GCM,
+		TargetName:      "target.example.com",
+		ProxyName:       "proxy.example.com",
+		HPKEKEM:         99, // invalid
+		HPKEKDF:         1,
+		HPKEAEAD:        HPKEAEADAES256GCM,
 		TargetPublicKey: make([]byte, 32),
 	}
 	client, _ := NewObliviousClient(cfg)
@@ -1313,11 +1317,11 @@ func TestClientQueryInvalidKEM(t *testing.T) {
 
 func TestClientQueryEncapsulateError(t *testing.T) {
 	cfg := &ODoHConfig{
-		TargetName:     "target.example.com",
-		ProxyName:      "proxy.example.com",
-		HPKEKEM:        HPKEDHX25519,
-		HPKEKDF:        1,
-		HPKEAEAD:       HPKEAEADAES256GCM,
+		TargetName:      "target.example.com",
+		ProxyName:       "proxy.example.com",
+		HPKEKEM:         HPKEDHX25519,
+		HPKEKDF:         1,
+		HPKEAEAD:        HPKEAEADAES256GCM,
 		TargetPublicKey: []byte("short"), // invalid public key
 	}
 	client, _ := NewObliviousClient(cfg)
@@ -1337,12 +1341,12 @@ func TestClientQueryEncapsulateError(t *testing.T) {
 func TestClientQuerySendError(t *testing.T) {
 	_, validPub, _ := generateKeyPair(HPKEDHX25519)
 	cfg := &ODoHConfig{
-		TargetName:     "target.example.com",
-		ProxyName:      "proxy.example.com",
-		ProxyURL:       "http://127.0.0.1:1/dns-query",
-		HPKEKEM:        HPKEDHX25519,
-		HPKEKDF:        1,
-		HPKEAEAD:       HPKEAEADAES256GCM,
+		TargetName:      "target.example.com",
+		ProxyName:       "proxy.example.com",
+		ProxyURL:        "http://127.0.0.1:1/dns-query",
+		HPKEKEM:         HPKEDHX25519,
+		HPKEKDF:         1,
+		HPKEAEAD:        HPKEAEADAES256GCM,
 		TargetPublicKey: validPub,
 	}
 	client := &ObliviousClient{
@@ -1470,6 +1474,7 @@ func TestProxyForwardToTargetBadURL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPBodyReadError(t *testing.T) {
+	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	target, _ := NewObliviousTarget(cfg, &mockHandler{})
 

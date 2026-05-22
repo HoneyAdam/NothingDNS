@@ -40,7 +40,7 @@ const (
 
 // rateEntry tracks query timestamps for a single IP.
 type rateEntry struct {
-	count    int
+	count       int
 	windowStart time.Time
 }
 

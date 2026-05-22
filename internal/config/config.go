@@ -529,6 +529,16 @@ type ResolutionConfig struct {
 	// Enable recursive resolution
 	Recursive bool `yaml:"recursive"`
 
+	// AuthoritativeOnly hard-disables every code path that would forward a
+	// query off this server (recursive resolver, upstream forwarder, and
+	// out-of-zone CNAME chase). Names not covered by a local zone return
+	// REFUSED instead of being resolved elsewhere. Set true for any
+	// deployment that intends to be a pure authoritative DNS server — this
+	// closes the cache-poisoning / query-proxy escape hatch that opens
+	// when a malicious or compromised zone contains a CNAME pointing at an
+	// attacker-controlled name outside the zone.
+	AuthoritativeOnly bool `yaml:"authoritative_only"`
+
 	// Root hints file for recursive resolution
 	RootHints string `yaml:"root_hints"`
 

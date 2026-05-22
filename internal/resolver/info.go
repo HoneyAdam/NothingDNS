@@ -265,7 +265,6 @@ func parseBasicRESPInfo(data []byte) (*ResolverInfo, error) {
 		return nil, fmt.Errorf("truncated version")
 	}
 	version := string(data[offset : offset+versionLen])
-	offset += versionLen
 
 	return &ResolverInfo{
 		ID:      id,

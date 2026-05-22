@@ -526,12 +526,16 @@ func TestBuildSignedData_WithPreviousMAC_Extra6(t *testing.T) {
 	}
 
 	prevMAC := []byte("previous-mac-value-for-testing-1234")
-	data, err := buildSignedData(msg, prevMAC, HmacSHA256, time.Now().UTC(), 300, 1234)
+	data, err := buildSignedData(msg, "test.key.", prevMAC, HmacSHA256, time.Now().UTC(), 300, 1234)
 	if err != nil {
 		t.Fatalf("buildSignedData with previousMAC: %v", err)
 	}
-	if !bytes.HasPrefix(data, prevMAC) {
-		t.Error("expected signed data to start with previousMAC")
+	// RFC 8945 §5.3.2.1: previous MAC is length-prefixed (uint16 BE) before
+	// the message body. So the data must start with [hi, lo, prevMAC...].
+	expectedPrefix := []byte{byte(len(prevMAC) >> 8), byte(len(prevMAC))}
+	expectedPrefix = append(expectedPrefix, prevMAC...)
+	if !bytes.HasPrefix(data, expectedPrefix) {
+		t.Error("expected signed data to start with length-prefixed previousMAC (RFC 8945 §5.3.2.1)")
 	}
 }
 

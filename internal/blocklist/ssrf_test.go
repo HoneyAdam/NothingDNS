@@ -137,8 +137,8 @@ func TestIsPrivateOrReservedIP(t *testing.T) {
 		{"10.255.255.255", true},
 		{"172.16.0.1", true},
 		{"172.31.255.255", true},
-		{"172.15.0.1", false},   // Not in 172.16/12
-		{"172.32.0.1", false},   // Not in 172.16/12
+		{"172.15.0.1", false}, // Not in 172.16/12
+		{"172.32.0.1", false}, // Not in 172.16/12
 		{"192.168.0.1", true},
 		{"192.168.255.255", true},
 		// Loopback
@@ -153,12 +153,12 @@ func TestIsPrivateOrReservedIP(t *testing.T) {
 		{"172.15.0.1", false},
 		{"192.169.0.1", false},
 		// IPv6
-		{"::1", true},           // loopback
-		{"fe80::1", true},       // link-local
-		{"::", true},            // unspecified
-		{"fd00::1", true},       // unique local
-		{"fc00::1", true},       // unique local
-		{"2001:db8::1", false},  // documentation prefix, not in our check
+		{"::1", true},          // loopback
+		{"fe80::1", true},      // link-local
+		{"::", true},           // unspecified
+		{"fd00::1", true},      // unique local
+		{"fc00::1", true},      // unique local
+		{"2001:db8::1", false}, // documentation prefix, not in our check
 	}
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {

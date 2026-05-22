@@ -13,7 +13,7 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 ## Features
 
 ### Core DNS
-- **Minimal Dependencies** - Pure Go implementation, only `quic-go` for DoQ and `golang.org/x/sys` for platform sockets
+- **Minimal Dependencies** - Pure Go implementation; only `quic-go` (DoQ transport) and `golang.org/x/{sys,net,crypto}` (transitive)
 - **DNS Protocol Support** - Full RFC 1035 compliant DNS message handling
 - **UDP & TCP** - Support for both UDP and TCP DNS queries with SO_REUSEPORT
 - **Caching** - Thread-safe LRU cache with TTL support, prefetching, and negative caching (RFC 2308)

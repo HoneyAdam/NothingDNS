@@ -591,9 +591,9 @@ func TestEncodeDecode_ConfigSyncPayload(t *testing.T) {
 		Timestamp:    now,
 		NodeID:       "leader-node",
 		ClusterConfig: &ClusterConfigJSON{
-			Enabled:   true,
-			NodeID:    "cfg-node",
-			BindAddr:  "10.0.0.1",
+			Enabled:    true,
+			NodeID:     "cfg-node",
+			BindAddr:   "10.0.0.1",
 			GossipPort: 7946,
 		},
 	}
@@ -1300,112 +1300,112 @@ func TestNodeHealthScore_EdgeValues(t *testing.T) {
 			want:  50,
 		},
 		{
-			name: "exactly 500ms latency falls into >200 tier (-25)",
+			name:  "exactly 500ms latency falls into >200 tier (-25)",
 			stats: NodeHealthStats{LatencyMs: 500, LastUpdated: time.Now()},
 			want:  75,
 		},
 		{
-			name: "exactly 200ms latency falls into >100 tier (-10)",
+			name:  "exactly 200ms latency falls into >100 tier (-10)",
 			stats: NodeHealthStats{LatencyMs: 200, LastUpdated: time.Now()},
 			want:  90,
 		},
 		{
-			name: "exactly 100ms latency no penalty (boundary)",
+			name:  "exactly 100ms latency no penalty (boundary)",
 			stats: NodeHealthStats{LatencyMs: 100, LastUpdated: time.Now()},
 			want:  100,
 		},
 		{
-			name: "just above 500ms latency -50",
+			name:  "just above 500ms latency -50",
 			stats: NodeHealthStats{LatencyMs: 501, LastUpdated: time.Now()},
 			want:  50,
 		},
 		{
-			name: "just above 200ms latency -25",
+			name:  "just above 200ms latency -25",
 			stats: NodeHealthStats{LatencyMs: 201, LastUpdated: time.Now()},
 			want:  75,
 		},
 		{
-			name: "just above 100ms latency -10",
+			name:  "just above 100ms latency -10",
 			stats: NodeHealthStats{LatencyMs: 101, LastUpdated: time.Now()},
 			want:  90,
 		},
 		{
-			name: "exactly 80% CPU falls into >60 tier (-20)",
+			name:  "exactly 80% CPU falls into >60 tier (-20)",
 			stats: NodeHealthStats{CPUPercent: 80, LastUpdated: time.Now()},
 			want:  80,
 		},
 		{
-			name: "just above 80% CPU -40",
+			name:  "just above 80% CPU -40",
 			stats: NodeHealthStats{CPUPercent: 81, LastUpdated: time.Now()},
 			want:  60,
 		},
 		{
-			name: "exactly 60% CPU falls into >40 tier (-10)",
+			name:  "exactly 60% CPU falls into >40 tier (-10)",
 			stats: NodeHealthStats{CPUPercent: 60, LastUpdated: time.Now()},
 			want:  90,
 		},
 		{
-			name: "just above 60% CPU -20",
+			name:  "just above 60% CPU -20",
 			stats: NodeHealthStats{CPUPercent: 61, LastUpdated: time.Now()},
 			want:  80,
 		},
 		{
-			name: "exactly 40% CPU no penalty (boundary)",
+			name:  "exactly 40% CPU no penalty (boundary)",
 			stats: NodeHealthStats{CPUPercent: 40, LastUpdated: time.Now()},
 			want:  100,
 		},
 		{
-			name: "just above 40% CPU -10",
+			name:  "just above 40% CPU -10",
 			stats: NodeHealthStats{CPUPercent: 41, LastUpdated: time.Now()},
 			want:  90,
 		},
 		{
-			name: "exactly 85% memory falls into >70 tier (-15)",
+			name:  "exactly 85% memory falls into >70 tier (-15)",
 			stats: NodeHealthStats{MemoryPercent: 85, LastUpdated: time.Now()},
 			want:  85,
 		},
 		{
-			name: "just above 85% memory -30",
+			name:  "just above 85% memory -30",
 			stats: NodeHealthStats{MemoryPercent: 86, LastUpdated: time.Now()},
 			want:  70,
 		},
 		{
-			name: "exactly 70% memory no penalty (boundary)",
+			name:  "exactly 70% memory no penalty (boundary)",
 			stats: NodeHealthStats{MemoryPercent: 70, LastUpdated: time.Now()},
 			want:  100,
 		},
 		{
-			name: "just above 70% memory -15",
+			name:  "just above 70% memory -15",
 			stats: NodeHealthStats{MemoryPercent: 71, LastUpdated: time.Now()},
 			want:  85,
 		},
 		{
-			name: "exactly 800 conns falls into >500 tier (-15)",
+			name:  "exactly 800 conns falls into >500 tier (-15)",
 			stats: NodeHealthStats{ActiveConns: 800, LastUpdated: time.Now()},
 			want:  85,
 		},
 		{
-			name: "just above 800 conns -30",
+			name:  "just above 800 conns -30",
 			stats: NodeHealthStats{ActiveConns: 801, LastUpdated: time.Now()},
 			want:  70,
 		},
 		{
-			name: "exactly 500 conns falls into >300 tier (-5)",
+			name:  "exactly 500 conns falls into >300 tier (-5)",
 			stats: NodeHealthStats{ActiveConns: 500, LastUpdated: time.Now()},
 			want:  95,
 		},
 		{
-			name: "just above 500 conns -15",
+			name:  "just above 500 conns -15",
 			stats: NodeHealthStats{ActiveConns: 501, LastUpdated: time.Now()},
 			want:  85,
 		},
 		{
-			name: "exactly 300 conns no penalty (boundary)",
+			name:  "exactly 300 conns no penalty (boundary)",
 			stats: NodeHealthStats{ActiveConns: 300, LastUpdated: time.Now()},
 			want:  100,
 		},
 		{
-			name: "just above 300 conns -5",
+			name:  "just above 300 conns -5",
 			stats: NodeHealthStats{ActiveConns: 301, LastUpdated: time.Now()},
 			want:  95,
 		},
@@ -1549,4 +1549,3 @@ func TestGossipProtocol_HandleClusterMetrics(t *testing.T) {
 		t.Errorf("QueriesPerSec = %f, want 250.0", m.QueriesPerSec)
 	}
 }
-

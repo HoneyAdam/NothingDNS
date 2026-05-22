@@ -480,72 +480,21 @@ func TestResponder_HandlePacket_Response_BrowserDisabled(t *testing.T) {
 // queryMatches / queryMatchesService
 // ---------------------------------------------------------------------------
 
-func TestResponder_QueryMatches_Positive(t *testing.T) {
+// handleQuery now parses the wire-format DNS message itself rather than
+// running strings.Contains over raw bytes; the legacy substring helpers
+// were removed because they produced spoofable coincidental matches. Tests
+// for the new parsing behaviour belong with the rest of the handleQuery
+// suite — they cannot be exercised through removed functions.
+
+func TestHandleQuery_RejectsGarbage(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	r := NewResponder(DefaultConfig(), logger)
 
-	data := []byte("some preamble myprinter.local. trailing")
-	if !r.queryMatches(data, "myprinter.local.") {
-		t.Error("queryMatches should return true when hostname is in data")
-	}
-}
-
-func TestResponder_QueryMatches_Negative(t *testing.T) {
-	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
-	r := NewResponder(DefaultConfig(), logger)
-
-	data := []byte("some other data that does not match")
-	if r.queryMatches(data, "myprinter.local.") {
-		t.Error("queryMatches should return false when hostname is not in data")
-	}
-}
-
-func TestResponder_QueryMatchesService_ByServiceType(t *testing.T) {
-	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
-	r := NewResponder(DefaultConfig(), logger)
-
-	svc := &Service{
-		InstanceName: "MyPrinter",
-		ServiceType:  "_ipp._tcp",
-		Domain:       "local",
-	}
-	data := []byte("looking for _ipp._tcp services")
-
-	if !r.queryMatchesService(data, svc) {
-		t.Error("queryMatchesService should match by ServiceType")
-	}
-}
-
-func TestResponder_QueryMatchesService_ByFullName(t *testing.T) {
-	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
-	r := NewResponder(DefaultConfig(), logger)
-
-	svc := &Service{
-		InstanceName: "MyPrinter",
-		ServiceType:  "_ipp._tcp",
-		Domain:       "local",
-	}
-	data := []byte("query for MyPrinter._ipp._tcp.local.")
-
-	if !r.queryMatchesService(data, svc) {
-		t.Error("queryMatchesService should match by FullServiceName")
-	}
-}
-
-func TestResponder_QueryMatchesService_NoMatch(t *testing.T) {
-	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
-	r := NewResponder(DefaultConfig(), logger)
-
-	svc := &Service{
-		InstanceName: "MyPrinter",
-		ServiceType:  "_ipp._tcp",
-		Domain:       "local",
-	}
-	data := []byte("completely unrelated query data")
-
-	if r.queryMatchesService(data, svc) {
-		t.Error("queryMatchesService should return false for non-matching data")
-	}
+	// Random bytes are not a valid DNS message; handleQuery must reject
+	// without panic and without sending any spurious response (we can't
+	// observe the multicast path in a unit test, but no panic is required).
+	r.handleQuery([]byte{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, nil)
+	r.handleQuery([]byte("some preamble myprinter.local. trailing"), nil)
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +958,7 @@ func TestCache_AddAndGet_WithTXTRecords(t *testing.T) {
 		Port:         631,
 		TTL:          300,
 		TXT: map[string]string{
-			"txtvers":  "1",
+			"txtvers": "1",
 			"qtotal":  "1",
 			"rp":      "text",
 			"product": "(NothingDNS Virtual Printer)",

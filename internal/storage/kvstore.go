@@ -337,21 +337,39 @@ func (s *KVStore) writeTLV(w io.Writer) error {
 
 // Begin starts a new transaction.
 // Read-only transactions acquire a read lock (concurrent with other readers).
-// Writable transactions acquire a write lock (exclusive).
+// Begin starts a new transaction. Writable transactions take an exclusive
+// lock; read-only transactions take a shared lock.
+//
+// F060 isolation contract: the acquired lock is held open by the returned
+// *Tx for its entire lifetime. Tx and KVBucket methods are lock-free under
+// the assumption that this lock is still held; Commit() and Rollback()
+// release it. The lock-held-during-fn semantics are what View/Update rely
+// on for true read/write isolation — without it the previous design let
+// concurrent writers observe each other's uncommitted state, which broke
+// the project's "ACID" claim.
 func (s *KVStore) Begin(writable bool) (*Tx, error) {
 	if writable {
 		s.mu.Lock()
-		defer s.mu.Unlock()
 	} else {
 		s.mu.RLock()
-		defer s.mu.RUnlock()
+	}
+
+	// On any error past this point we must release the lock we just took.
+	releaseLockOnError := func() {
+		if writable {
+			s.mu.Unlock()
+		} else {
+			s.mu.RUnlock()
+		}
 	}
 
 	if s.closed {
+		releaseLockOnError()
 		return nil, ErrDatabaseClosed
 	}
 
 	if writable && s.rwtx != nil {
+		releaseLockOnError()
 		return nil, errors.New("transaction already in progress")
 	}
 
@@ -373,7 +391,8 @@ func (s *KVStore) Begin(writable bool) (*Tx, error) {
 	return tx, nil
 }
 
-// Update executes a function in a writable transaction
+// Update executes fn inside a writable transaction. The exclusive lock is
+// held for the entire duration of fn, guaranteeing serialisable isolation.
 func (s *KVStore) Update(fn func(*Tx) error) error {
 	tx, err := s.Begin(true)
 	if err != nil {
@@ -388,24 +407,28 @@ func (s *KVStore) Update(fn func(*Tx) error) error {
 	return tx.Commit()
 }
 
-// View executes a function in a read-only transaction.
-// The lock is held for the entire duration of fn to ensure consistent reads.
+// View executes fn inside a read-only transaction. The shared lock is held
+// for the entire duration of fn so concurrent writers cannot mutate state
+// out from under the reader.
 func (s *KVStore) View(fn func(*Tx) error) error {
 	tx, err := s.Begin(false)
 	if err != nil {
 		return err
 	}
 
-	// Execute fn while holding the read lock
 	err = fn(tx)
-
-	// Rollback explicitly (not deferred) to ensure lock is held until fn completes
 	tx.Rollback()
-
 	return err
 }
 
 // Close closes the database and flushes any pending writes.
+//
+// F060: with Begin holding the store lock for the lifetime of every
+// transaction, Close acquires the exclusive lock and therefore blocks
+// until all in-flight transactions have called Commit or Rollback (which
+// release their lock). We do NOT call Rollback on those transactions
+// ourselves — they own their own lock — instead we mark them closed so
+// any post-Close call returns ErrTxClosed.
 func (s *KVStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -413,22 +436,16 @@ func (s *KVStore) Close() error {
 	if s.closed {
 		return nil
 	}
-
 	s.closed = true
 
-	if s.rwtx != nil {
-		s.rwtx.Rollback()
-	}
-
+	s.rwtx = nil
 	for _, tx := range s.txs {
 		tx.closed = true
 	}
 
-	// Flush any unflushed data before closing
 	if err := s.save(); err != nil {
 		return err
 	}
-
 	return nil
 }
 
@@ -446,27 +463,35 @@ func (s *KVStore) Path() string {
 
 // Tx methods
 
-// Commit commits the transaction
+// Commit commits the transaction.
+//
+// F060: the store lock is held by the caller (Begin acquired it and did
+// not release it). This method performs state mutations under that
+// already-held lock, then releases the lock as the final step before
+// returning so the transaction lifetime equals the lock lifetime.
 func (tx *Tx) Commit() error {
 	if tx.closed {
 		return ErrTxClosed
 	}
 
 	if !tx.writable {
-		// Read-only transactions: clean up without saving
-		tx.store.mu.Lock()
+		// Read-only: nothing to save; cleanup + release shared lock.
 		tx.closed = true
 		tx.store.removeTx(tx)
-		tx.store.mu.Unlock()
 		atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
+		tx.store.mu.RUnlock()
 		return nil
 	}
 
-	tx.store.mu.Lock()
-	defer tx.store.mu.Unlock()
-
-	// Save to disk
+	// Writable: save first; on error keep the lock held so the caller can
+	// observe the failed transaction's state and decide whether to retry.
 	if err := tx.store.save(); err != nil {
+		// Save failed — release the exclusive lock and bail.
+		tx.store.rwtx = nil
+		tx.closed = true
+		tx.store.removeTx(tx)
+		atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
+		tx.store.mu.Unlock()
 		return err
 	}
 
@@ -479,34 +504,29 @@ func (tx *Tx) Commit() error {
 	}
 
 	atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
+	tx.store.mu.Unlock()
 	return nil
 }
 
-// Rollback rolls back the transaction.
-// For read-only transactions the lock was already released by Begin,
-// so this acquires only a read lock to perform cleanup.
-// For writable transactions a full write lock is acquired.
+// Rollback rolls back the transaction and releases the store lock that
+// Begin acquired. Safe to call on an already-closed transaction (no-op).
 func (tx *Tx) Rollback() error {
 	if tx.closed {
 		return ErrTxClosed
 	}
 
-	// Read-only transactions: acquire lock to safely mutate txs slice.
 	if !tx.writable {
-		tx.store.mu.Lock()
+		// Read-only: cleanup + release shared lock.
 		tx.closed = true
 		tx.store.removeTx(tx)
-		tx.store.mu.Unlock()
 		atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
+		tx.store.mu.RUnlock()
 		return nil
 	}
 
-	// Writable transactions: need write lock for state changes.
-	tx.store.mu.Lock()
-	defer tx.store.mu.Unlock()
-
+	// Writable: discard in-memory changes by re-loading from disk under the
+	// still-held exclusive lock.
 	tx.store.rwtx = nil
-	// Reload data from disk to discard changes
 	if err := tx.store.load(); err != nil {
 		util.Warnf("kvstore: failed to reload data during rollback: %v", err)
 	}
@@ -514,6 +534,7 @@ func (tx *Tx) Rollback() error {
 	tx.closed = true
 	tx.store.removeTx(tx)
 	atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
+	tx.store.mu.Unlock()
 	return nil
 }
 
@@ -528,11 +549,9 @@ func (s *KVStore) removeTx(tx *Tx) {
 	}
 }
 
-// Bucket returns a bucket by name
+// Bucket returns a bucket by name. F060: lock-free; the store lock is
+// already held by Begin for the lifetime of the transaction.
 func (tx *Tx) Bucket(name []byte) *KVBucket {
-	tx.store.mu.RLock()
-	defer tx.store.mu.RUnlock()
-
 	key := string(name)
 	data, ok := tx.store.root.Buckets[key]
 	if !ok {
@@ -546,14 +565,11 @@ func (tx *Tx) Bucket(name []byte) *KVBucket {
 	}
 }
 
-// CreateBucket creates a new bucket
+// CreateBucket creates a new bucket. F060: lock-free.
 func (tx *Tx) CreateBucket(name []byte) (*KVBucket, error) {
 	if !tx.writable {
 		return nil, ErrTxNotWritable
 	}
-
-	tx.store.mu.Lock()
-	defer tx.store.mu.Unlock()
 
 	key := string(name)
 	if _, ok := tx.store.root.Buckets[key]; ok {
@@ -581,14 +597,11 @@ func (tx *Tx) CreateBucketIfNotExists(name []byte) (*KVBucket, error) {
 	return tx.CreateBucket(name)
 }
 
-// DeleteBucket deletes a bucket
+// DeleteBucket deletes a bucket. F060: lock-free.
 func (tx *Tx) DeleteBucket(name []byte) error {
 	if !tx.writable {
 		return ErrTxNotWritable
 	}
-
-	tx.store.mu.Lock()
-	defer tx.store.mu.Unlock()
 
 	key := string(name)
 	if _, ok := tx.store.root.Buckets[key]; !ok {
@@ -606,12 +619,9 @@ func (tx *Tx) OnCommit(fn func()) {
 
 // KVBucket methods
 
-// Get retrieves a value by key
+// Get retrieves a value by key. F060: lock-free.
 func (b *KVBucket) Get(key []byte) []byte {
 	tx := b.tx
-	tx.store.mu.RLock()
-	defer tx.store.mu.RUnlock()
-
 	if tx.closed {
 		return nil
 	}
@@ -643,8 +653,7 @@ func (b *KVBucket) Put(key, value []byte) error {
 		return ErrTxNotWritable
 	}
 
-	b.tx.store.mu.Lock()
-	defer b.tx.store.mu.Unlock()
+	// F060: lock-free; Begin holds the exclusive lock.
 
 	// Store copies
 	keyCopy := make([]byte, len(key))
@@ -656,14 +665,11 @@ func (b *KVBucket) Put(key, value []byte) error {
 	return nil
 }
 
-// Delete removes a key
+// Delete removes a key. F060: lock-free.
 func (b *KVBucket) Delete(key []byte) error {
 	if !b.tx.writable {
 		return ErrTxNotWritable
 	}
-
-	b.tx.store.mu.Lock()
-	defer b.tx.store.mu.Unlock()
 
 	keyStr := string(key)
 	if _, ok := b.data.Entries[keyStr]; !ok {
@@ -674,11 +680,8 @@ func (b *KVBucket) Delete(key []byte) error {
 	return nil
 }
 
-// Bucket returns a nested bucket
+// Bucket returns a nested bucket. F060: lock-free.
 func (b *KVBucket) Bucket(name []byte) *KVBucket {
-	b.tx.store.mu.RLock()
-	defer b.tx.store.mu.RUnlock()
-
 	key := string(name)
 	data, ok := b.data.Buckets[key]
 	if !ok {
@@ -692,14 +695,11 @@ func (b *KVBucket) Bucket(name []byte) *KVBucket {
 	}
 }
 
-// CreateBucket creates a nested bucket
+// CreateBucket creates a nested bucket. F060: lock-free.
 func (b *KVBucket) CreateBucket(name []byte) (*KVBucket, error) {
 	if !b.tx.writable {
 		return nil, ErrTxNotWritable
 	}
-
-	b.tx.store.mu.Lock()
-	defer b.tx.store.mu.Unlock()
 
 	key := string(name)
 	if _, ok := b.data.Buckets[key]; ok {
@@ -727,14 +727,11 @@ func (b *KVBucket) CreateBucketIfNotExists(name []byte) (*KVBucket, error) {
 	return b.CreateBucket(name)
 }
 
-// DeleteBucket deletes a nested bucket
+// DeleteBucket deletes a nested bucket. F060: lock-free.
 func (b *KVBucket) DeleteBucket(name []byte) error {
 	if !b.tx.writable {
 		return ErrTxNotWritable
 	}
-
-	b.tx.store.mu.Lock()
-	defer b.tx.store.mu.Unlock()
 
 	key := string(name)
 	if _, ok := b.data.Buckets[key]; !ok {
@@ -745,11 +742,8 @@ func (b *KVBucket) DeleteBucket(name []byte) error {
 	return nil
 }
 
-// Cursor returns a cursor for iteration
+// Cursor returns a cursor for iteration. F060: lock-free.
 func (b *KVBucket) Cursor() *KVCursor {
-	b.tx.store.mu.RLock()
-	defer b.tx.store.mu.RUnlock()
-
 	keys := make([]string, 0, len(b.data.Entries))
 	for k := range b.data.Entries {
 		keys = append(keys, k)
@@ -774,11 +768,8 @@ func (b *KVBucket) ForEach(fn func(k, v []byte) error) error {
 	return nil
 }
 
-// Stats returns bucket statistics
+// Stats returns bucket statistics. F060: lock-free.
 func (b *KVBucket) Stats() BucketStats {
-	b.tx.store.mu.RLock()
-	defer b.tx.store.mu.RUnlock()
-
 	return BucketStats{
 		KeyCount: int64(len(b.data.Entries)),
 	}

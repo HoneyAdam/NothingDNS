@@ -266,8 +266,11 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 			validated:  true,
 			nsec3Param: childNSEC3Param,
 		})
-
-		currentZone = childZone
+		// currentZone tracked the parent for the next loop iteration; the
+		// loop terminates after the last hop so the final assignment was
+		// flagged ineffectual. We keep it removed; if the loop body grows,
+		// re-add as needed.
+		_ = childZone
 	}
 
 	return chain, nil
@@ -484,19 +487,47 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 	return err == nil
 }
 
-// canonicalizeRRSet creates the canonical data that was signed.
+// canonicalizeRRSet builds the exact byte sequence that the signer hashed
+// for an RRSIG, per RFC 4034 §3.1.8.1:
+//
+//	signature_input =
+//	    RRSIG_RDATA(without the trailing Signature field)
+//	  || RR(1) || RR(2) || ... || RR(n)   (RRs in canonical order)
+//
+// The earlier implementation emitted only the RR portion. Any HMAC/signature
+// verification against signer-produced data therefore failed (or worse,
+// "succeeded" against a different prefix-stripped input), turning DNSSEC
+// validation into a placebo. The prefix construction here mirrors the
+// signer's createSignedData in internal/dnssec/signer.go.
 func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) []byte {
-	// Sort records canonically
+	var result []byte
+
+	// 1. RRSIG RDATA prefix: TypeCovered | Algorithm | Labels | OriginalTTL
+	//    | SignatureExpiration | SignatureInception | KeyTag | SignerName
+	//    (Signature field intentionally omitted.)
+	result = append(result,
+		byte(rrsig.TypeCovered>>8), byte(rrsig.TypeCovered),
+		rrsig.Algorithm,
+		rrsig.Labels,
+		byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
+		byte(rrsig.OriginalTTL>>8), byte(rrsig.OriginalTTL),
+		byte(rrsig.Expiration>>24), byte(rrsig.Expiration>>16),
+		byte(rrsig.Expiration>>8), byte(rrsig.Expiration),
+		byte(rrsig.Inception>>24), byte(rrsig.Inception>>16),
+		byte(rrsig.Inception>>8), byte(rrsig.Inception),
+		byte(rrsig.KeyTag>>8), byte(rrsig.KeyTag),
+	)
+	if rrsig.SignerName != nil {
+		result = append(result, protocol.CanonicalWireName(rrsig.SignerName.String())...)
+	}
+
+	// 2. Each RR in canonical wire form, in canonical RRset order.
 	sorted := make([]*protocol.ResourceRecord, len(rrSet))
 	copy(sorted, rrSet)
 	canonicalSort(sorted)
 
-	// Concatenate all RRs in canonical order
-	var result []byte
 	for _, rr := range sorted {
-		// Create canonical wire format representation
-		canonical := v.canonicalizeRR(rr, rrsig.OriginalTTL)
-		result = append(result, canonical...)
+		result = append(result, v.canonicalizeRR(rr, rrsig.OriginalTTL)...)
 	}
 
 	return result
@@ -608,17 +639,38 @@ func canonicalSort(rrs []*protocol.ResourceRecord) {
 
 // validateNegativeResponse validates NSEC/NSEC3 for negative answers.
 //
-// KeyTrap mitigation (VULN-040): caps the number of NSEC/NSEC3 evaluations
-// considered per message. NSEC3 hashing is the expensive operation and an
-// attacker could otherwise stuff the Authority section with thousands of
-// bogus NSEC3 records to pin CPU.
+// Two distinct response shapes need to be proven:
+//
+//	NXDOMAIN  — the name itself does not exist. RFC 4035 §5.4 / RFC 5155 §8
+//	            require TWO proofs: (a) an NSEC/NSEC3 that covers queryName
+//	            in the name space (proves the name does not exist) AND
+//	            (b) an NSEC/NSEC3 that covers the wildcard "*.<closest
+//	            encloser>" (proves no wildcard could have synthesised an
+//	            answer). Accepting a single proof was a forgery primitive:
+//	            an attacker could replay any one valid NSEC and have us
+//	            silently mark arbitrary names as authenticated-NXDOMAIN.
+//	NODATA    — the name exists but the requested type does not. A single
+//	            NSEC/NSEC3 with owner == queryName and qtype absent from
+//	            the type bitmap is sufficient (RFC 4035 §5.4).
+//
+// KeyTrap mitigation (VULN-040): caps NSEC/NSEC3 evaluations per message.
+// NSEC3 hashing is the expensive operation and an attacker could otherwise
+// stuff the Authority section with thousands of bogus NSEC3 records to pin
+// CPU.
 func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName string, chain []*chainLink) ValidationResult {
 	if len(msg.Questions) == 0 {
 		return ValidationBogus
 	}
 	qtype := msg.Questions[0].QType
+	isNXDomain := msg.Header.Flags.RCODE == protocol.RcodeNameError
 
-	// Check for NSEC records
+	// Walk Authority once, counting distinct proof contributions.
+	// A name-cover proof: NSEC/NSEC3 whose range covers queryName.
+	// A wildcard-cover proof: NSEC range covers "*.<ancestor>" of queryName,
+	// or (for NSEC3) any second distinct NSEC3 that passes range checks.
+	nameProofs := make(map[string]bool)     // distinct owner names whose range proves queryName
+	wildcardProofs := make(map[string]bool) // distinct owner names whose range covers a wildcard
+
 	checks := 0
 	for _, rr := range msg.Authorities {
 		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
@@ -629,13 +681,18 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 		}
 		checks++
 
+		key := strings.ToLower(rr.Name.String())
+
 		if rr.Type == protocol.TypeNSEC {
 			nsec, ok := rr.Data.(*protocol.RDataNSEC)
 			if !ok {
 				continue
 			}
 			if v.validateNSEC(rr.Name.String(), queryName, qtype, nsec) {
-				return ValidationSecure
+				nameProofs[key] = true
+			}
+			if nsecCoversWildcardOfAncestor(rr.Name.String(), nsec, queryName) {
+				wildcardProofs[key] = true
 			}
 		}
 		if rr.Type == protocol.TypeNSEC3 {
@@ -644,12 +701,262 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 				continue
 			}
 			if v.validateNSEC3(rr.Name.String(), queryName, qtype, nsec3, chain) {
-				return ValidationSecure
+				nameProofs[key] = true
 			}
 		}
 	}
 
+	// For NXDOMAIN responses backed by NSEC3, compute the full RFC 5155 §8.4
+	// closest-encloser proof: closest_encloser exact-match + next_closer
+	// cover + wildcard cover. This supersedes the older "≥2 distinct
+	// NSEC3 owners" heuristic.
+	if isNXDomain {
+		var nsec3RRs []*protocol.ResourceRecord
+		for _, rr := range msg.Authorities {
+			if rr.Type == protocol.TypeNSEC3 {
+				nsec3RRs = append(nsec3RRs, rr)
+			}
+		}
+		if len(nsec3RRs) > 0 {
+			if v.validateNSEC3ClosestEncloser(queryName, nsec3RRs) {
+				return ValidationSecure
+			}
+			// If NSEC3 records exist but closest-encloser proof fails, do
+			// not fall back to the NSEC path — that would let an attacker
+			// mix-and-match record types.
+			if len(nsec3RRs) == checks {
+				return ValidationBogus
+			}
+		}
+	}
+
+	if isNXDomain {
+		// Require at least one name-cover AND a distinct wildcard-cover.
+		// For NSEC3 the second proof can come from any distinct NSEC3 (see
+		// above) — this is a strict superset of "single-proof accepted" but
+		// not the full RFC 5155 §8 three-proof closest-encloser algorithm.
+		if len(nameProofs) >= 1 && len(wildcardProofs) >= 1 {
+			// And the two proofs must come from distinct owner names; an
+			// attacker recycling the same NSEC for both slots is rejected.
+			for k := range nameProofs {
+				if !wildcardProofs[k] {
+					return ValidationSecure
+				}
+				if len(wildcardProofs) >= 2 {
+					return ValidationSecure
+				}
+			}
+		}
+		return ValidationBogus
+	}
+
+	// NODATA: a single matching proof is sufficient.
+	if len(nameProofs) >= 1 {
+		return ValidationSecure
+	}
 	return ValidationBogus
+}
+
+// validateNSEC3ClosestEncloser implements the three-part NXDOMAIN proof
+// from RFC 5155 §8.4:
+//
+//  1. Closest encloser proof: there exists an ancestor of queryName (the
+//     "closest encloser") whose NSEC3 hash exactly matches one of the
+//     owner-name hashes in the response. Walks ancestors from
+//     queryName upward; the FIRST ancestor whose hash matches a present
+//     NSEC3 is the closest encloser.
+//  2. Next closer cover: the "next closer name" — one label deeper than
+//     the closest encloser, toward queryName — must have its hash fall
+//     inside the [owner_hash, next_hash) range of some NSEC3.
+//  3. Wildcard cover: the synthesised wildcard "*.<closest_encloser>"
+//     must also have its hash fall inside an NSEC3 range, proving no
+//     wildcard could have answered the query either.
+//
+// All three proofs must use NSEC3 records carrying the same hash params
+// (algorithm, iterations, salt). The function returns true only when all
+// three sub-proofs succeed; any single failure means NXDOMAIN is unproven
+// and the caller must mark the response Bogus.
+func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protocol.ResourceRecord) bool {
+	if len(rrs) == 0 {
+		return false
+	}
+
+	// Use the first NSEC3's params as the canonical set. Per RFC 5155 §8.1
+	// all NSEC3 in a single proof MUST share params; mismatches make the
+	// proof unverifiable.
+	first, ok := rrs[0].Data.(*protocol.RDataNSEC3)
+	if !ok {
+		return false
+	}
+	algo, iter, salt := first.HashAlgorithm, first.Iterations, first.Salt
+	for _, rr := range rrs[1:] {
+		n, ok := rr.Data.(*protocol.RDataNSEC3)
+		if !ok {
+			return false
+		}
+		if n.HashAlgorithm != algo || n.Iterations != iter || !bytes.Equal(n.Salt, salt) {
+			return false
+		}
+	}
+
+	hashName := func(name string) (string, bool) {
+		h, err := NSEC3Hash(name, algo, iter, salt)
+		if err != nil {
+			return "", false
+		}
+		return protocol.Base32Encode(h), true
+	}
+	ownerHashOf := func(rr *protocol.ResourceRecord) string {
+		return strings.ToUpper(extractNSEC3Hash(rr.Name.String()))
+	}
+	nextHashOf := func(rr *protocol.ResourceRecord) string {
+		n := rr.Data.(*protocol.RDataNSEC3)
+		return strings.ToUpper(protocol.Base32Encode(n.NextHashed))
+	}
+
+	// 1. Closest encloser: walk queryName's ancestors (longest first,
+	// excluding queryName itself per §8.4 since queryName is presumed
+	// non-existent), find the FIRST one whose hash equals some NSEC3
+	// owner-hash.
+	labels := splitLabels(queryName)
+	var closestEncloser string
+	var closestEncloserHash string
+	// Iterate from the longest ancestor (root excluded — handled below as
+	// the empty-suffix case) down to "." Inclusive.
+	for i := 1; i <= len(labels); i++ {
+		ancestor := strings.Join(labels[i:], ".")
+		if ancestor == "" {
+			ancestor = "."
+		}
+		h, ok := hashName(ancestor)
+		if !ok {
+			continue
+		}
+		hUpper := strings.ToUpper(h)
+		for _, rr := range rrs {
+			if ownerHashOf(rr) == hUpper {
+				closestEncloser = ancestor
+				closestEncloserHash = hUpper
+				break
+			}
+		}
+		if closestEncloser != "" {
+			break
+		}
+	}
+	if closestEncloser == "" {
+		return false
+	}
+
+	// 2. Next closer: one label deeper than closest encloser, toward
+	// queryName. Find it by counting labels.
+	ceLabels := splitLabels(closestEncloser)
+	if len(labels) <= len(ceLabels) {
+		// queryName is shorter than or equal to closest encloser; can't
+		// have a "next closer" label deeper.
+		return false
+	}
+	nextCloserIdx := len(labels) - len(ceLabels) - 1
+	nextCloser := strings.Join(labels[nextCloserIdx:], ".")
+	if nextCloser == "" {
+		return false
+	}
+	nextCloserHash, ok := hashName(nextCloser)
+	if !ok {
+		return false
+	}
+	nextCloserHashU := strings.ToUpper(nextCloserHash)
+	nextCloserCovered := false
+	for _, rr := range rrs {
+		o := ownerHashOf(rr)
+		n := nextHashOf(rr)
+		if nsec3HashInRange(nextCloserHashU, o, n) {
+			nextCloserCovered = true
+			break
+		}
+	}
+	if !nextCloserCovered {
+		return false
+	}
+
+	// 3. Wildcard "*.<closest_encloser>" cover.
+	wildcard := "*." + strings.TrimSuffix(closestEncloser, ".")
+	if closestEncloser == "." {
+		wildcard = "*."
+	}
+	wildcardHash, ok := hashName(wildcard)
+	if !ok {
+		return false
+	}
+	wildcardHashU := strings.ToUpper(wildcardHash)
+	wildcardCovered := false
+	for _, rr := range rrs {
+		o := ownerHashOf(rr)
+		n := nextHashOf(rr)
+		if nsec3HashInRange(wildcardHashU, o, n) {
+			wildcardCovered = true
+			break
+		}
+	}
+	if !wildcardCovered {
+		return false
+	}
+
+	// Suppress closestEncloserHash unused warning — retained for trace
+	// telemetry if a future patch adds debug logging.
+	_ = closestEncloserHash
+
+	return true
+}
+
+// nsec3HashInRange reports whether hash falls inside the half-open range
+// [ownerHash, nextHash) on the canonical NSEC3 hash ring. Because the ring
+// wraps, when ownerHash >= nextHash the range is "owner..max OR 0..next".
+func nsec3HashInRange(hash, ownerHash, nextHash string) bool {
+	if ownerHash == nextHash {
+		// Degenerate: a single-NSEC3 zone covers everything except its own
+		// hash. Match if hash != ownerHash.
+		return hash != ownerHash
+	}
+	if ownerHash < nextHash {
+		return hash > ownerHash && hash < nextHash
+	}
+	// Wrap-around
+	return hash > ownerHash || hash < nextHash
+}
+
+// nsecCoversWildcardOfAncestor reports whether the NSEC's [owner, NextDomain)
+// range covers a wildcard owner "*.<X>" for some ancestor X of queryName
+// (including queryName itself). RFC 4035 §5.4 wildcard non-existence proof.
+func nsecCoversWildcardOfAncestor(owner string, nsec *protocol.RDataNSEC, queryName string) bool {
+	if nsec == nil || nsec.NextDomain == nil {
+		return false
+	}
+	next := nsec.NextDomain.String()
+	// Walk ancestors of queryName: the name itself, then its parent, ... up
+	// to (but not including) the root. The wildcard "*.<root>" == "*." is
+	// included as the broadest fallback.
+	name := strings.TrimSuffix(queryName, ".")
+	for {
+		wildcard := "*." + name
+		if name == "" {
+			wildcard = "*."
+		}
+		if nameInRange(wildcard, owner, next) {
+			return true
+		}
+		idx := strings.Index(name, ".")
+		if idx < 0 {
+			// Last iteration: try wildcard at root.
+			if name != "" {
+				name = ""
+				continue
+			}
+			break
+		}
+		name = name[idx+1:]
+	}
+	return false
 }
 
 // validateNSEC validates an NSEC record for authenticated denial.
@@ -835,7 +1142,9 @@ func (v *Validator) fetchNSEC3PARAM(ctx context.Context, zone string) (*protocol
 
 // calculateDSDigestFromDNSKEY computes the DS digest for a DNSKEY.
 // Per RFC 4034 Section 5:
-//   digest = hash(canonical_owner_name | DNSKEY_RDATA)
+//
+//	digest = hash(canonical_owner_name | DNSKEY_RDATA)
+//
 // Where DNSKEY_RDATA = flags | protocol | algorithm | public_key
 func calculateDSDigestFromDNSKEY(zone string, dnskey *protocol.RDataDNSKEY, digestType uint8) []byte {
 	// Create the data to be hashed: canonical owner name + DNSKEY RDATA

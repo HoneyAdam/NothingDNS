@@ -17,14 +17,12 @@ var (
 		0x0000000000000001, 0x0000000000008082, 0x0000000000800080, 0x0000000080008080,
 		0x0000000080000000, 0x0000000000800000, 0x0000000000808080, 0x0000000000008081,
 	}
-	// gostPi is the permutation table for GOST (32 bytes for L matrix)
-	gostPi = [32]uint64{
-		0x07, 0x0f, 0x17, 0x1b, 0x13, 0x01, 0x05, 0x09,
-		0x0d, 0x11, 0x0b, 0x03, 0x00, 0x06, 0x0a, 0x0e,
-		0x12, 0x1f, 0x16, 0x1a, 0x14, 0x02, 0x04, 0x08,
-		0x1c, 0x18, 0x10, 0x0c, 0x1e, 0x1d, 0x15, 0x19,
-	}
 )
+
+// gostPi was the permutation table for the GOST R 34.11-94 hash. The DS
+// digest-type 3 (GOST) implementation here was incomplete and produced
+// non-conformant output; rather than ship broken crypto we removed the
+// algorithm. gostPi is retained only in git history.
 
 // RDataDS represents a Delegation Signer (DS) record (RFC 4034).
 // DS records are used to secure delegation to child zones.

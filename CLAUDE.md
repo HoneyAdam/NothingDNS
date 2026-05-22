@@ -141,7 +141,7 @@ internal/
 
 ## Dependency Policy
 
-**ZERO external dependencies** — entire codebase uses Go stdlib only (`golang.org/x/sys` for platform-specific socket ops). Do not add any third-party imports.
+**Minimal external dependencies** — currently `github.com/quic-go/quic-go` (DoQ transport) plus `golang.org/x/{sys,net,crypto}` (transitive). Everything else is hand-rolled on stdlib. Adding any new third-party import requires explicit discussion and justification.
 
 ## Known Gotchas
 

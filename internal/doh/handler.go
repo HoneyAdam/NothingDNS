@@ -273,7 +273,7 @@ type dohResponseWriter struct {
 	w       http.ResponseWriter
 	r       *http.Request
 	query   *protocol.Message
-	written  bool
+	written bool
 	padding bool
 }
 

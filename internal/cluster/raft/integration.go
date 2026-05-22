@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 )
 
@@ -172,7 +173,15 @@ func (ci *ClusterIntegration) applyLoop() {
 					if e.Term == 0 {
 						continue
 					}
-					ci.stateMachine.Apply(e)
+					if err := ci.stateMachine.Apply(e); err != nil {
+						// F050: a state-machine apply failure means this
+						// node has diverged from the cluster's intended
+						// state. Log loudly but advance appliedIndex anyway
+						// — re-applying the same failed entry on the next
+						// tick would just busy-loop. Operators should treat
+						// this as a Sev-1 alert.
+						log.Printf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
+					}
 					ci.appliedIndex = e.Index
 					ci.lastAppliedTerm = e.Term
 				}

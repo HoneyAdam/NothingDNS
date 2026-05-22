@@ -23,10 +23,10 @@ const (
 	DefaultPort = 5353
 
 	// mDNS TTL values per RFC 6762
-	DefaultTTL   = 120 // seconds - for most records
-	HostnameTTL  = 120 // seconds - for hostnames
-	ServiceTTL   = 4500 // seconds - for service instances (75 minutes)
-	PtrTTL       = 4500 // seconds - for PTR records
+	DefaultTTL  = 120  // seconds - for most records
+	HostnameTTL = 120  // seconds - for hostnames
+	ServiceTTL  = 4500 // seconds - for service instances (75 minutes)
+	PtrTTL      = 4500 // seconds - for PTR records
 
 	// Probe interval and timeouts
 	ProbeInterval = 250 * time.Millisecond
@@ -312,22 +312,57 @@ func (r *Responder) handlePacket(data []byte, src *net.UDPAddr) {
 }
 
 // handleQuery processes an mDNS query and sends a response if applicable.
+// Per RFC 6762 §6 the responder matches a query against its records by
+// comparing each Question's owner name (case-insensitive, RFC 1035 §2.3.3)
+// against the registered hostname/service. Earlier code did a raw byte-level
+// substring match on the wire bytes — that produced coincidental matches on
+// crafted payloads and could be spoofed by an off-link attacker.
 func (r *Responder) handleQuery(data []byte, src *net.UDPAddr) {
-	// Parse questions and determine if we have answers
-	// Check for hostname queries
+	msg, err := protocol.UnpackMessage(data)
+	if err != nil {
+		return
+	}
+	if len(msg.Questions) == 0 {
+		return
+	}
+
+	// Collect the question names once, lower-cased and stripped of any
+	// trailing dot, so the inner loops do not repeat the work.
+	qNames := make([]string, 0, len(msg.Questions))
+	for _, q := range msg.Questions {
+		if q == nil || q.Name == nil {
+			continue
+		}
+		qNames = append(qNames, strings.ToLower(strings.TrimSuffix(q.Name.String(), ".")))
+	}
+	if len(qNames) == 0 {
+		return
+	}
+
+	// Hostname queries: exact match on (lower-case, no trailing dot).
 	r.hostnamesMu.RLock()
 	for hostname, ip := range r.hostnames {
-		if r.queryMatches(data, hostname) {
-			r.sendHostnameResponse(hostname, ip, src)
+		host := strings.ToLower(strings.TrimSuffix(hostname, "."))
+		for _, qn := range qNames {
+			if qn == host {
+				r.sendHostnameResponse(hostname, ip, src)
+				break
+			}
 		}
 	}
 	r.hostnamesMu.RUnlock()
 
-	// Check for service queries
+	// Service queries: match either the service type
+	// (e.g. "_http._tcp.local") or the full service instance name.
 	r.servicesMu.RLock()
 	for _, svc := range r.services {
-		if r.queryMatchesService(data, svc) {
-			r.sendServiceResponse(svc, src)
+		stype := strings.ToLower(strings.TrimSuffix(svc.ServiceType, "."))
+		full := strings.ToLower(strings.TrimSuffix(svc.FullServiceName(), "."))
+		for _, qn := range qNames {
+			if qn == stype || qn == full {
+				r.sendServiceResponse(svc, src)
+				break
+			}
 		}
 	}
 	r.servicesMu.RUnlock()
@@ -348,17 +383,11 @@ func (r *Responder) handleResponse(data []byte, src *net.UDPAddr) {
 	// and update cache
 }
 
-// queryMatches checks if a query matches a hostname.
-func (r *Responder) queryMatches(data []byte, hostname string) bool {
-	return strings.Contains(string(data), hostname)
-}
-
-// queryMatchesService checks if a query matches a service.
-func (r *Responder) queryMatchesService(data []byte, svc *Service) bool {
-	queryStr := string(data)
-	return strings.Contains(queryStr, svc.ServiceType) ||
-		strings.Contains(queryStr, svc.FullServiceName())
-}
+// queryMatches and queryMatchesService were removed in favour of full
+// wire-format parsing inside handleQuery. The old implementations ran
+// strings.Contains over raw wire bytes, which produced coincidental
+// matches and could be spoofed by an off-link attacker who knew the
+// hostname/service string. Keep no shim — call sites have been updated.
 
 // sendHostnameResponse sends an A/AAAA record response for a hostname query.
 func (r *Responder) sendHostnameResponse(hostname string, ip net.IP, dst *net.UDPAddr) {
@@ -382,11 +411,12 @@ func (r *Responder) sendServiceResponse(svc *Service, dst *net.UDPAddr) {
 func (r *Responder) sendARecord(name string, ip net.IP, dst *net.UDPAddr) {
 	// Build DNS response message
 	msg := protocol.NewMessage(protocol.Header{
-		ID:     r.generateTransactionID(),
-		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
 		QDCount: 0,
 		ANCount: 1,
 	})
+	msg.Header.Flags.AA = true // RFC 6762 §18.4: mDNS responses MUST set AA
 
 	// Create A record data
 	ip4 := ip.To4()
@@ -413,11 +443,12 @@ func (r *Responder) sendARecord(name string, ip net.IP, dst *net.UDPAddr) {
 func (r *Responder) sendAAAARecord(name string, ip net.IP, dst *net.UDPAddr) {
 	// Build DNS response message
 	msg := protocol.NewMessage(protocol.Header{
-		ID:     r.generateTransactionID(),
-		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
 		QDCount: 0,
 		ANCount: 1,
 	})
+	msg.Header.Flags.AA = true // RFC 6762 §18.4: mDNS responses MUST set AA
 
 	// Create AAAA record data
 	var addr16 [16]byte
@@ -438,11 +469,12 @@ func (r *Responder) sendAAAARecord(name string, ip net.IP, dst *net.UDPAddr) {
 func (r *Responder) sendSRVRecord(svc *Service, dst *net.UDPAddr) {
 	// Build DNS response message
 	msg := protocol.NewMessage(protocol.Header{
-		ID:     r.generateTransactionID(),
-		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
 		QDCount: 0,
 		ANCount: 1,
 	})
+	msg.Header.Flags.AA = true // RFC 6762 §18.4: mDNS responses MUST set AA
 
 	// Parse target hostname
 	targetName, err := protocol.ParseName(svc.HostName)
@@ -471,11 +503,12 @@ func (r *Responder) sendSRVRecord(svc *Service, dst *net.UDPAddr) {
 func (r *Responder) sendTXTRecord(svc *Service, dst *net.UDPAddr) {
 	// Build DNS response message
 	msg := protocol.NewMessage(protocol.Header{
-		ID:     r.generateTransactionID(),
-		Flags:  protocol.NewResponseFlags(protocol.RcodeSuccess),
+		ID:      r.generateTransactionID(),
+		Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
 		QDCount: 0,
 		ANCount: 1,
 	})
+	msg.Header.Flags.AA = true // RFC 6762 §18.4: mDNS responses MUST set AA
 
 	// Create TXT record data from service TXT map
 	var txtStrings []string
@@ -533,6 +566,7 @@ func (r *Responder) sendGoodbye(fullName string) {
 		QDCount: 0,
 		ANCount: 2, // SRV and TXT
 	})
+	msg.Header.Flags.AA = true // RFC 6762 §18.4: mDNS responses MUST set AA
 
 	// Parse empty target for SRV
 	emptyName, _ := protocol.ParseName("")

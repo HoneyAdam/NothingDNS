@@ -37,7 +37,7 @@ type PrivateKey struct {
 func ParseDNSKEYPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 	switch algorithm {
 	case protocol.AlgorithmRSASHA256, protocol.AlgorithmRSASHA512:
-		return parseRSAPublicKey(keyData)
+		return parseRSAPublicKey(algorithm, keyData)
 	case protocol.AlgorithmECDSAP256SHA256, protocol.AlgorithmECDSAP384SHA384:
 		return parseECDSAPublicKey(algorithm, keyData)
 	case protocol.AlgorithmED25519:
@@ -48,8 +48,11 @@ func ParseDNSKEYPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 }
 
 // parseRSAPublicKey parses an RSA public key from DNSKEY wire format.
-// Wire format: exponent length (1 or 3 bytes) + exponent + modulus
-func parseRSAPublicKey(keyData []byte) (*PublicKey, error) {
+// Wire format: exponent length (1 or 3 bytes) + exponent + modulus.
+// The algorithm parameter (RSASHA256 or RSASHA512) determines which hash
+// is paired with the key for signature verification — hard-coding SHA256
+// silently corrupts RSASHA512 zones.
+func parseRSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 	if len(keyData) < 3 {
 		return nil, fmt.Errorf("RSA key data too short: %d bytes", len(keyData))
 	}
@@ -84,12 +87,8 @@ func parseRSAPublicKey(keyData []byte) (*PublicKey, error) {
 	}
 	modulus := new(big.Int).SetBytes(keyData[offset:])
 
-	// Determine algorithm from key size or use a default
-	// This is a simplified approach - real implementation should track algorithm
-	alg := protocol.AlgorithmRSASHA256
-
 	return &PublicKey{
-		Algorithm: uint8(alg),
+		Algorithm: algorithm,
 		Key: &rsa.PublicKey{
 			N: modulus,
 			E: int(exponent.Int64()),

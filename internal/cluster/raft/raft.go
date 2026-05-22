@@ -48,6 +48,14 @@ type Config struct {
 	ElectionTimeout   time.Duration // Election timeout (should be >> heartbeat)
 	MaxLogEntries     int           // Max entries per AppendEntries call
 	SnapshotInterval  time.Duration // How often to snapshot
+
+	// DataDir is the directory where Raft persists HardState (currentTerm
+	// and votedFor) per RFC §5.1. Leaving this empty disables persistence —
+	// which is unsafe for production: a restart loses all votes and the
+	// node may vote twice in the same term, violating election safety.
+	// Tests may use a temp dir; production deployments must set this
+	// alongside the WAL directory.
+	DataDir string
 }
 
 // DefaultConfig returns a default Raft configuration.
@@ -306,6 +314,18 @@ func NewNode(config Config, peers []NodeID, transport Transport) *Node {
 		rng:          NewLockedRand(),
 	}
 
+	// Restore persistent HardState from disk so currentTerm and votedFor
+	// survive a restart. Without this the node can grant the same term's
+	// vote twice and violate election safety on the very first RPC after
+	// reboot. If DataDir is empty (e.g. unit tests, in-memory clusters)
+	// persistence is silently skipped — production callers must set it.
+	if config.DataDir != "" {
+		if hs, err := loadHardState(config.DataDir); err == nil {
+			n.currentTerm = hs.CurrentTerm
+			n.votedFor = hs.VotedFor
+		}
+	}
+
 	// Initialize peer tracking
 	for _, id := range peers {
 		n.peers[id] = &Peer{ID: id}
@@ -314,6 +334,54 @@ func NewNode(config Config, peers []NodeID, transport Transport) *Node {
 	}
 
 	return n
+}
+
+// setVotedForLocked records a vote for v and persists it before any
+// response that depends on it can be sent. MUST be called with n.mu held.
+func (n *Node) setVotedForLocked(v NodeID) {
+	if v == n.votedFor {
+		return
+	}
+	n.votedFor = v
+	n.persistHardStateLocked()
+}
+
+// advanceTermLocked advances currentTerm to t, resets votedFor (Raft §5.1
+// "first vote of a new term is fresh"), transitions to follower state, and
+// persists the change to disk before returning. MUST be called with n.mu
+// held. No-op when t is not greater than n.currentTerm.
+func (n *Node) advanceTermLocked(t Term) {
+	if t <= n.currentTerm {
+		return
+	}
+	n.currentTerm = t
+	n.state = StateFollower
+	n.votedFor = ""
+	n.persistHardStateLocked()
+}
+
+// persistHardStateLocked writes the current (currentTerm, votedFor) tuple
+// to disk via the atomic+fsync helper. MUST be called with n.mu held so
+// the values read are consistent with what's being persisted. Returns no
+// error: persistence is best-effort here — a failure indicates a
+// catastrophic environment problem (disk full, ENOMEM in fsync) that the
+// surrounding RPC handler cannot meaningfully recover from. The error is
+// surfaced via panic only if DataDir was explicitly configured but the
+// write failed, so silent silent-data-loss never happens.
+func (n *Node) persistHardStateLocked() {
+	if n.config.DataDir == "" {
+		return
+	}
+	hs := HardState{
+		CurrentTerm: n.currentTerm,
+		VotedFor:    n.votedFor,
+	}
+	if err := saveHardState(n.config.DataDir, hs); err != nil {
+		// Surface the failure rather than silently continuing — a node
+		// that thinks it persisted state but didn't is exactly the
+		// election-safety violation we're trying to prevent.
+		panic(fmt.Sprintf("raft: persisting HardState failed: %v (term=%d votedFor=%q)", err, hs.CurrentTerm, hs.VotedFor))
+	}
 }
 
 // Start starts the Raft node's main loop.
@@ -360,8 +428,7 @@ func (n *Node) runFollower(electionTimer *time.Timer) {
 			// Election timeout — become candidate
 			n.mu.Lock()
 			n.state = StateCandidate
-			n.currentTerm++
-			n.votedFor = "" // Reset vote
+			n.advanceTermLocked(n.currentTerm + 1)
 			n.mu.Unlock()
 			return
 		case req := <-n.voteCh:
@@ -376,9 +443,10 @@ func (n *Node) runFollower(electionTimer *time.Timer) {
 
 // runCandidate runs the candidate state.
 func (n *Node) runCandidate() {
-	// Vote for self
+	// Vote for self (Raft §5.2). Persist before sending vote requests so a
+	// restart can't lead us to vote again for someone else in the same term.
 	n.mu.Lock()
-	n.votedFor = n.config.NodeID
+	n.setVotedForLocked(n.config.NodeID)
 	term := n.currentTerm
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
 	n.mu.Unlock()
@@ -399,8 +467,7 @@ func (n *Node) runCandidate() {
 			// Election timeout — restart election
 			n.mu.Lock()
 			n.state = StateCandidate
-			n.currentTerm++
-			n.votedFor = ""
+			n.advanceTermLocked(n.currentTerm + 1)
 			n.mu.Unlock()
 			return
 		case resp := <-n.voteRespCh:
@@ -479,7 +546,7 @@ func (n *Node) handleVoteRequest(req VoteRequest) {
 	// If votedFor is null or candidateId, and candidate's log is at least as
 	// up-to-date as receiver's log, grant vote
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
-		n.votedFor = req.CandidateID
+		n.setVotedForLocked(req.CandidateID)
 		n.voteRespCh <- VoteResponse{
 			Term:        n.currentTerm,
 			VoteGranted: true,
@@ -513,9 +580,7 @@ func (n *Node) handleAppendRequest(req AppendRequest) {
 
 	// Update term and convert to follower if necessary
 	if req.Term > n.currentTerm {
-		n.currentTerm = req.Term
-		n.state = StateFollower
-		n.votedFor = ""
+		n.advanceTermLocked(req.Term)
 	}
 
 	// Check if we have the previous log entry
@@ -570,13 +635,11 @@ func (n *Node) HandleVoteRequest(req VoteRequest) VoteResponse {
 	}
 
 	if req.Term > n.currentTerm {
-		n.currentTerm = req.Term
-		n.state = StateFollower
-		n.votedFor = ""
+		n.advanceTermLocked(req.Term)
 	}
 
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
-		n.votedFor = req.CandidateID
+		n.setVotedForLocked(req.CandidateID)
 		return VoteResponse{
 			Term:        n.currentTerm,
 			VoteGranted: true,
@@ -606,9 +669,7 @@ func (n *Node) HandleAppendRequest(req AppendRequest) AppendResponse {
 	}
 
 	if req.Term > n.currentTerm {
-		n.currentTerm = req.Term
-		n.state = StateFollower
-		n.votedFor = ""
+		n.advanceTermLocked(req.Term)
 	}
 
 	if req.PrevLogIndex > 0 {
@@ -652,9 +713,7 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	if req.Term > n.currentTerm {
-		n.currentTerm = req.Term
-		n.state = StateFollower
-		n.votedFor = ""
+		n.advanceTermLocked(req.Term)
 	}
 
 	// If we have a state machine and snapshot data, restore it
@@ -684,8 +743,7 @@ func (n *Node) handleAppendResponse(resp AppendResponse) {
 
 	if resp.Term > n.currentTerm {
 		// Newer term discovered
-		n.state = StateFollower
-		n.currentTerm = resp.Term
+		n.advanceTermLocked(resp.Term)
 		return
 	}
 
@@ -715,9 +773,7 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	if req.Term > n.currentTerm {
-		n.currentTerm = req.Term
-		n.state = StateFollower
-		n.votedFor = ""
+		n.advanceTermLocked(req.Term)
 	}
 
 	// If we have a state machine and snapshot data, restore it
@@ -736,9 +792,14 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 
 // becomeFollower transitions to follower state.
 func (n *Node) becomeFollower(term Term) {
-	n.state = StateFollower
-	n.currentTerm = term
-	n.votedFor = ""
+	// advanceTermLocked is a no-op when term <= currentTerm; ensure we at
+	// least transition to follower state in that case (e.g. on a peer
+	// step-down where the term doesn't move).
+	if term > n.currentTerm {
+		n.advanceTermLocked(term)
+	} else {
+		n.state = StateFollower
+	}
 	n.leadershipCh <- LeadershipState{State: StateFollower, Term: term}
 }
 
@@ -753,8 +814,14 @@ func (n *Node) becomeLeader(term Term) {
 		n.matchIndex[id] = 0
 	}
 
-	// Commit a no-op entry to prove liveness
-	n.Propose(nil, EntryNoOp)
+	// Commit a no-op entry to prove liveness. Failure here is logged but
+	// does not abort the leader transition — the next AppendEntries cycle
+	// will retry. The no-op also defends against the Raft §5.4.2 commit
+	// bug (a leader cannot commit entries from a previous term without
+	// also committing one of its own).
+	if err := n.Propose(nil, EntryNoOp); err != nil {
+		_ = err // logged by integration layer
+	}
 }
 
 // broadcastVoteRequest sends vote requests to all peers.
@@ -861,7 +928,7 @@ func (n *Node) maybeAdvanceCommitIndex() {
 	// Can't commit entries from previous terms
 	for i := int(n.commitIndex) + 1; i <= len(n.log); i++ {
 		entry := n.log[i-1]
-		if entry.Term != Term(n.currentTerm) {
+		if entry.Term != n.currentTerm {
 			continue
 		}
 

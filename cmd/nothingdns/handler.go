@@ -76,7 +76,7 @@ type integratedHandler struct {
 	mdnsResponder *mdns.Responder
 	dsoManager    *dso.Manager
 
-	zoneProvider  ZoneProvider // unified zone lookup
+	zoneProvider ZoneProvider // unified zone lookup
 
 	notifyOnce sync.Once
 	updateOnce sync.Once
@@ -454,6 +454,22 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		}
 	}
 
+	// Authoritative-only short-circuit: when the operator has declared this
+	// server to be a pure authoritative DNS server, names that fall outside
+	// any local zone must NOT leak to the resolver or upstream forwarder.
+	// Return REFUSED per RFC 8914 §4.21 instead. This closes the cache
+	// poisoning / query-proxy escape hatch that opens when a malicious or
+	// compromised local zone contains a CNAME pointing at an attacker-
+	// controlled name outside the zone (see authoritative.go).
+	if h.config != nil && h.config.Resolution.AuthoritativeOnly {
+		if h.metrics != nil {
+			h.metrics.RecordResponse(protocol.RcodeRefused)
+		}
+		recordRcode(protocol.RcodeRefused)
+		sendErrorWithEDE(w, r, protocol.RcodeRefused, protocol.EDENotAuthoritative, "authoritative-only server: name is outside all configured zones")
+		return
+	}
+
 	// Use iterative recursive resolver if enabled
 	if h.resolver != nil {
 		h.logger.Debugf("Resolving %s iteratively", qname)
@@ -718,7 +734,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 	if h.metrics != nil {
 		h.metrics.RecordResponse(protocol.RcodeNameError)
 	}
-		recordRcode(protocol.RcodeNameError)
+	recordRcode(protocol.RcodeNameError)
 	sendErrorWithEDE(w, r, protocol.RcodeNameError, protocol.EDENotAuthoritative, "no upstream configured")
 }
 
@@ -728,6 +744,12 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 // Returns true if a synthesized response was written, false otherwise.
 func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
 	if h.dns64Synth == nil {
+		return false
+	}
+	// RFC 6147 §5.5: when the client sets CD=1 it is performing its own DNSSEC
+	// validation and would be misled by a synthesised AAAA that we cannot
+	// authenticate. Skip synthesis in that case.
+	if r.Header.Flags.CD {
 		return false
 	}
 	if !h.dns64Synth.ShouldSynthesize(q, resp) {

@@ -154,26 +154,28 @@ func encodeSuffix(src []rune) string {
 	return out.String()
 }
 
-// decodePunycode decodes a punycode string to Unicode.
+// decodePunycode decodes a punycode string to Unicode per RFC 3492 §6.2.
+//
+// Format: an optional ASCII basic-code-point prefix, a single '-' delimiter,
+// then the variable-part digits. If the input contains no '-', the entire
+// string is the variable part (basic prefix is empty). The previous
+// implementation short-circuited "no hyphen" → return as-is, which produced
+// the original ASCII for every real-world punycode (e.g. "nxasmq6b" should
+// decode to "Ü" / "ä"-bearing strings, not stay literal).
 func decodePunycode(src string) string {
 	if src == "" {
 		return ""
 	}
 
-	// Check for ASCII-only (no hyphens or all before hyphen)
-	if !strings.Contains(src, string(delimiter)) {
-		return src
+	// Locate the last delimiter (RFC 3492 §6.2 step "find last '-'"). If
+	// there is none, the basic prefix is empty and the whole string is the
+	// encoded suffix.
+	prefix := ""
+	encoded := src
+	if lastHyphen := strings.LastIndex(src, string(delimiter)); lastHyphen >= 0 {
+		prefix = src[:lastHyphen]
+		encoded = src[lastHyphen+1:]
 	}
-
-	// Find the last hyphen
-	lastHyphen := strings.LastIndex(src, "-")
-	if lastHyphen < 0 {
-		return src
-	}
-
-	// Everything before the last hyphen is the basic prefix (ASCII)
-	prefix := src[:lastHyphen]
-	encoded := src[lastHyphen+1:]
 
 	if encoded == "" {
 		return prefix

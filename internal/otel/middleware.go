@@ -91,9 +91,9 @@ func TraceHandler(tracer *Tracer, name string, handler http.HandlerFunc) http.Ha
 // DNSTraceAttrs returns standard attributes for DNS operations.
 func DNSTraceAttrs(queryType string, server string, cacheHit bool) []Attr {
 	return []Attr{
-		Attr{Key: "dns.query_type", Value: queryType},
-		Attr{Key: "dns.server", Value: server},
-		Attr{Key: "dns.cache_hit", Value: cacheHit},
+		{Key: "dns.query_type", Value: queryType},
+		{Key: "dns.server", Value: server},
+		{Key: "dns.cache_hit", Value: cacheHit},
 	}
 }
 

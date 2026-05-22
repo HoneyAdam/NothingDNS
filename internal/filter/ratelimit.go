@@ -23,9 +23,9 @@ type RateLimiter struct {
 
 // bucket holds token bucket state for a single client.
 type bucket struct {
-	tokens      float64
-	lastTime    time.Time
-	createdAt   time.Time // for LRU eviction when maxBuckets exceeded
+	tokens    float64
+	lastTime  time.Time
+	createdAt time.Time // for LRU eviction when maxBuckets exceeded
 }
 
 // NewRateLimiter creates a rate limiter from config.

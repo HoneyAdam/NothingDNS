@@ -168,4 +168,3 @@ func TestNewRunner(t *testing.T) {
 		t.Errorf("expected latencies cap 500, got %d", cap(r.latencies))
 	}
 }
-

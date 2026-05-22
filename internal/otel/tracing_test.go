@@ -140,8 +140,8 @@ func TestDNSTraceAttrs(t *testing.T) {
 	}
 	expected := map[string]interface{}{
 		"dns.query_type": "A",
-		"dns.server":    "8.8.8.8",
-		"dns.cache_hit": false,
+		"dns.server":     "8.8.8.8",
+		"dns.cache_hit":  false,
 	}
 	for _, attr := range attrs {
 		if attr.Value != expected[attr.Key] {

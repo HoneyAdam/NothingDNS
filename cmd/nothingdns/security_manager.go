@@ -21,7 +21,7 @@ type SecurityManagerResult struct {
 	DNS64Synth  *dns64.Synthesizer
 	ACLChecher  *filter.ACLChecker
 	RateLimiter *filter.RateLimiter
-	RRL        *filter.RRL
+	RRL         *filter.RRL
 }
 
 // SecurityManager manages DNS security features: blocklist, RPZ, GeoDNS, ACL, and rate limiting.

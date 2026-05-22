@@ -464,7 +464,16 @@ func (h *integratedHandler) resolveCNAMETarget(w server.ResponseWriter, r *proto
 		}
 	}
 
-	// 3. Forward to upstream
+	// 3. Forward to upstream (only when this server is allowed to act as a
+	// resolver as well). In authoritative-only mode the operator has chosen
+	// to never forward queries off this server; out-of-zone CNAME targets
+	// are returned with whatever in-zone answers we already have rather
+	// than being resolved via upstream — that prevents a local CNAME (which
+	// any zone writer can set) from being used to weaponise this server as
+	// a query proxy against arbitrary external services.
+	if h.config != nil && h.config.Resolution.AuthoritativeOnly {
+		return nil
+	}
 	if h.upstream != nil || h.loadBalancer != nil {
 		targetNameParsed, err := protocol.ParseName(targetName)
 		if err != nil {
@@ -525,6 +534,7 @@ func (h *integratedHandler) buildCNAMEResponse(query *protocol.Message, cnameRec
 		},
 		Questions: query.Questions,
 	}
+	resp.Header.Flags.AA = true
 
 	// Add all CNAME records in the chain
 	for _, rec := range cnameRecords {

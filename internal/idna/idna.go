@@ -175,36 +175,19 @@ func encodeLabel(label string) (string, error) {
 	return encoded, nil
 }
 
-// decodeLabel decodes a punycode label to Unicode.
+// decodeLabel decodes a punycode label (the bytes after the "xn--" ACE
+// prefix) to Unicode per RFC 3492 §6.2.
+//
+// Format: optional ASCII prefix, single '-' delimiter, then the encoded
+// suffix. If there is no '-', the entire label is the encoded suffix (the
+// ASCII prefix is empty). The previous implementation split on "--" — that
+// is not the punycode delimiter and produced "no encoding part" for every
+// real punycode label, leaving Unicode names un-decoded.
 func decodeLabel(punycode string) (string, error) {
 	if punycode == "" {
 		return "", ErrEmptyLabel
 	}
-
-	// Check if it's punycode (has ACE prefix handled by caller)
-	if !strings.ContainsRune(punycode, '-') {
-		// No hyphen means pure ASCII (no punycode encoding needed)
-		// But the ACE prefix check is done by the caller
-		return punycode, nil
-	}
-
-	// Find the hyphen that separates base and digit parts
-	// Punycode format: [label before hyphen]--[encoded]
-	// The "encoded" part contains the base and digit sequence
-	parts := strings.Split(punycode, "--")
-	if len(parts) < 2 {
-		// No encoding part
-		return punycode, nil
-	}
-
-	prefix := parts[0]
-	encoded := parts[1]
-
-	// Decode the punycode
-	decoded := decodePunycode(encoded)
-
-	// Combine the prefix (already ASCII) with decoded
-	return prefix + decoded, nil
+	return decodePunycode(punycode), nil
 }
 
 // mapLabel applies the character mapping from RFC 5895.

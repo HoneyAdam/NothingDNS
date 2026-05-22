@@ -9,11 +9,12 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/nothingdns/nothingdns/internal/util"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // MessageType represents the type of gossip message.
@@ -275,13 +276,13 @@ func NewGossipProtocol(config GossipConfig, nodeList *NodeList, allowInsecure bo
 	ctx, cancel := context.WithCancel(context.Background())
 
 	gp := &GossipProtocol{
-		config:        config,
-		nodeList:      nodeList,
-		ctx:           ctx,
-		cancel:        cancel,
-		nodeMetrics:   make(map[string]ClusterMetricsPayload),
-		sequences:     make(map[string]uint64),
-		nextSequence:  1, // Start at 1; 0 is the null/unset sentinel
+		config:       config,
+		nodeList:     nodeList,
+		ctx:          ctx,
+		cancel:       cancel,
+		nodeMetrics:  make(map[string]ClusterMetricsPayload),
+		sequences:    make(map[string]uint64),
+		nextSequence: 1, // Start at 1; 0 is the null/unset sentinel
 	}
 
 	// VULN-062: Encryption is mandatory unless explicitly allowed for dev/test.
@@ -667,7 +668,21 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 	gp.callbacksMu.RUnlock()
 }
 
-// handleElection handles leader election messages (bully algorithm).
+// handleElection handles leader election messages.
+//
+// F053: the previous "bully algorithm" implementation crowned this node as
+// leader on receipt of a single Election message whose ProposedLeader
+// equalled our own NodeID — with NO quorum, vote-collection or proof-of-
+// life from any other node. Any peer (or off-path attacker who could spoof
+// an Election frame past the AEAD perimeter) could elect an arbitrary node
+// by sending one message.
+//
+// The gossip layer is not the right place for consensus: real leader
+// election uses the Raft RPC tier (internal/cluster/raft). This handler is
+// kept alive only to bump the election term used by split-brain
+// detection. It no longer mutates leadership state. Operators that need a
+// gossip-layer election must build a quorum-vote state machine on top of
+// this stub.
 func (gp *GossipProtocol) handleElection(msg Message, from *net.UDPAddr) {
 	var payload ElectionPayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -677,20 +692,11 @@ func (gp *GossipProtocol) handleElection(msg Message, from *net.UDPAddr) {
 	gp.leaderMu.Lock()
 	defer gp.leaderMu.Unlock()
 
-	selfID := gp.nodeList.GetSelf().ID
-
-	// If we have a higher priority (lower NodeID lexically as tiebreaker), we win
-	if payload.ProposedLeader != selfID {
-		// Start our own election with higher term
-		gp.electionTerm = payload.Term + 1
-		go gp.startElection()
-		return
+	// Track the highest term we have seen so split-brain telemetry remains
+	// meaningful, but do NOT change isLeader / currentLeader here.
+	if payload.Term > gp.electionTerm {
+		gp.electionTerm = payload.Term
 	}
-
-	// We are the proposed leader — send Leader message to all
-	gp.leaderTerm = payload.Term
-	gp.currentLeader = selfID
-	gp.isLeader = true
 }
 
 // handleLeader handles leader announcement messages.

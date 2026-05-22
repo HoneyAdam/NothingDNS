@@ -185,8 +185,8 @@ func TestKVJournalStore_SaveEntryWithHMAC(t *testing.T) {
 
 	zoneName := "example.com."
 	entry := &IXFRJournalEntry{
-		Serial: 2024010101,
-		Added:  []zone.RecordChange{{Name: "test.example.com.", Type: protocol.TypeA, TTL: 300}},
+		Serial:    2024010101,
+		Added:     []zone.RecordChange{{Name: "test.example.com.", Type: protocol.TypeA, TTL: 300}},
 		Timestamp: time.Now(),
 	}
 

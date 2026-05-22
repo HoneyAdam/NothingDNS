@@ -135,7 +135,7 @@ func TestParseECDSAPublicKeyWrongLength(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseRSAPublicKeyTooShort(t *testing.T) {
-	_, err := parseRSAPublicKey([]byte{0x01, 0x00})
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, []byte{0x01, 0x00})
 	if err == nil {
 		t.Error("expected error for RSA key too short")
 	}

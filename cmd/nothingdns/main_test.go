@@ -64,11 +64,11 @@ func newCaptureWriter(ip string, proto string) *captureWriter {
 
 func newTestHandler() *integratedHandler {
 	return &integratedHandler{
-		config:      config.DefaultConfig(),
-		logger:      util.NewLogger(util.ERROR, util.TextFormat, nil),
-		cache:       cache.New(cache.Config{Capacity: 100, DefaultTTL: 60 * time.Second, MinTTL: time.Second, MaxTTL: 300 * time.Second}),
-		metrics:     metrics.New(metrics.Config{Enabled: true}),
-		zones:       make(map[string]*zone.Zone),
+		config:       config.DefaultConfig(),
+		logger:       util.NewLogger(util.ERROR, util.TextFormat, nil),
+		cache:        cache.New(cache.Config{Capacity: 100, DefaultTTL: 60 * time.Second, MinTTL: time.Second, MaxTTL: 300 * time.Second}),
+		metrics:      metrics.New(metrics.Config{Enabled: true}),
+		zones:        make(map[string]*zone.Zone),
 		zoneProvider: NewMultiZoneProvider(make(map[string]*zone.Zone), nil, nil, nil),
 	}
 }
@@ -3284,7 +3284,9 @@ func TestServeDNS_DNSCookie_Valid(t *testing.T) {
 // --- adapters.go tests ---
 
 func TestResolverCacheAdapter(t *testing.T) {
-	c := cache.New(cache.Config{Capacity: 10, DefaultTTL: 60 * time.Second})
+	cfg := cache.DefaultConfig()
+	cfg.Capacity = 10
+	c := cache.New(cfg)
 	adapter := &resolverCacheAdapter{cache: c}
 
 	msg, _ := protocol.NewQuery(1, "example.com.", protocol.TypeA)

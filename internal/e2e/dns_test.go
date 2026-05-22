@@ -19,7 +19,7 @@ type DNSRunner struct {
 }
 
 type testDNSServer struct {
-	ln     net.Listener
+	ln      net.Listener
 	packets int
 }
 

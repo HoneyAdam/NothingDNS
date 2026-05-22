@@ -20,9 +20,9 @@ type RRLConfig struct {
 // Tracking by qtype+rcode prevents a flood of TYPE=ANY from hiding legitimate
 // A record responses behind the same client IP.
 type rrlBucket struct {
-	tokens    float64 // remaining token capacity
-	lastTime  time.Time
-	createdAt time.Time
+	tokens     float64 // remaining token capacity
+	lastTime   time.Time
+	createdAt  time.Time
 	suppressed time.Time // when suppression window started; zero = not suppressed
 }
 
@@ -32,13 +32,13 @@ type rrlBucket struct {
 // relative to the configured rate. This catches reflected amplification floods
 // where the attacker spoofs the victim's source IP.
 type RRL struct {
-	mu       sync.Mutex
-	buckets  map[string]*rrlBucket
-	rate     float64
-	burst    int
-	window   time.Duration
-	enabled  bool
-	stopCh   chan struct{}
+	mu      sync.Mutex
+	buckets map[string]*rrlBucket
+	rate    float64
+	burst   int
+	window  time.Duration
+	enabled bool
+	stopCh  chan struct{}
 
 	maxBuckets int
 }
@@ -81,11 +81,11 @@ func u8toa(v uint8) string {
 	i := len(buf)
 	for v >= 10 {
 		i--
-		buf[i] = byte('0' + v%10)
+		buf[i] = '0' + v%10
 		v /= 10
 	}
 	i--
-	buf[i] = byte('0' + v)
+	buf[i] = '0' + v
 	return string(buf[i:])
 }
 
@@ -141,9 +141,9 @@ func (rrl *RRL) Allow(clientIP net.IP, qtype uint16, rcode uint8) (allowed, supp
 			rrl.evictOldest(100)
 		}
 		b = &rrlBucket{
-			tokens:     float64(rrl.burst) - 1,
-			lastTime:   now,
-			createdAt:  now,
+			tokens:    float64(rrl.burst) - 1,
+			lastTime:  now,
+			createdAt: now,
 		}
 		rrl.buckets[key] = b
 		return true, false
@@ -201,9 +201,9 @@ func (rrl *RRL) LogSuperlative(clientIP net.IP, qtype uint16, rcode uint8, query
 			rrl.evictOldest(100)
 		}
 		b = &rrlBucket{
-			tokens:      float64(rrl.burst) - 1,
-			lastTime:    time.Now(),
-			createdAt:   time.Now(),
+			tokens:    float64(rrl.burst) - 1,
+			lastTime:  time.Now(),
+			createdAt: time.Now(),
 		}
 		rrl.buckets[key] = b
 		return

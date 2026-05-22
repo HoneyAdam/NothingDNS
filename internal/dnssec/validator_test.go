@@ -1742,17 +1742,62 @@ func TestValidateNegativeResponseNoRecords(t *testing.T) {
 }
 
 func TestValidateNegativeResponseWithNSECProvesNonExistence(t *testing.T) {
+	// RFC 4035 §5.4 requires TWO NSEC proofs for NXDOMAIN: one that covers
+	// the queried name AND one that covers the closest-encloser's wildcard
+	// "*.<encloser>". A single NSEC is intentionally insufficient — the
+	// validator was previously vulnerable to single-NSEC replay forgeries.
+	//
+	// Provide both proofs:
+	//   NSEC 1 (name-cover):
+	//     owner    a.example.com.
+	//     next     c.example.com.
+	//     covers   b.example.com. (queried name)
+	//   NSEC 2 (wildcard-cover):
+	//     owner    example.com.
+	//     next     a.example.com.
+	//     covers   *.example.com.  ('*' = 0x2A sorts below 'a' = 0x61)
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 
-	// Create NSEC that proves b.example.com doesn't exist
-	// owner=a.example.com., next=c.example.com.
-	// query=b.example.com. (between a and c, so nameInRange returns true)
+	nextA, _ := protocol.ParseName("c.example.com.")
+	nsecName, _ := protocol.ParseName("a.example.com.")
+	nsecName1 := &protocol.RDataNSEC{NextDomain: nextA, TypeBitMap: []uint16{protocol.TypeNS}}
+
+	nextW, _ := protocol.ParseName("a.example.com.")
+	nsecWild, _ := protocol.ParseName("example.com.")
+	nsecName2 := &protocol.RDataNSEC{NextDomain: nextW, TypeBitMap: []uint16{protocol.TypeSOA, protocol.TypeNS}}
+
+	rr1 := &protocol.ResourceRecord{Name: nsecName, Type: protocol.TypeNSEC, Class: protocol.ClassIN, Data: nsecName1}
+	rr2 := &protocol.ResourceRecord{Name: nsecWild, Type: protocol.TypeNSEC, Class: protocol.ClassIN, Data: nsecName2}
+
+	questionName, _ := protocol.ParseName("b.example.com.")
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.NewResponseFlags(protocol.RcodeNameError),
+		},
+		Authorities: []*protocol.ResourceRecord{rr1, rr2},
+		Questions: []*protocol.Question{
+			{Name: questionName, QType: protocol.TypeA},
+		},
+	}
+
+	chain := []*chainLink{{zone: "example.com.", validated: true}}
+	result := v.validateNegativeResponse(msg, "b.example.com.", chain)
+	if result != ValidationSecure {
+		t.Errorf("Expected SECURE for NSEC-proved non-existence with both name-cover and wildcard-cover NSECs, got %s", result)
+	}
+}
+
+// TestValidateNegativeResponse_SingleNSECRejected confirms the regression
+// fix: a single NSEC that only covers the name (no wildcard proof) must NOT
+// be accepted as authenticated NXDOMAIN.
+func TestValidateNegativeResponse_SingleNSECRejected(t *testing.T) {
+	v := NewValidator(DefaultValidatorConfig(), nil, nil)
+
 	nextDomain, _ := protocol.ParseName("c.example.com.")
 	nsec := &protocol.RDataNSEC{
 		NextDomain: nextDomain,
 		TypeBitMap: []uint16{protocol.TypeNS},
 	}
-
 	nsecOwner, _ := protocol.ParseName("a.example.com.")
 	nsecRR := &protocol.ResourceRecord{
 		Name:  nsecOwner,
@@ -1760,7 +1805,6 @@ func TestValidateNegativeResponseWithNSECProvesNonExistence(t *testing.T) {
 		Class: protocol.ClassIN,
 		Data:  nsec,
 	}
-
 	questionName, _ := protocol.ParseName("b.example.com.")
 	msg := &protocol.Message{
 		Header: protocol.Header{
@@ -1771,11 +1815,9 @@ func TestValidateNegativeResponseWithNSECProvesNonExistence(t *testing.T) {
 			{Name: questionName, QType: protocol.TypeA},
 		},
 	}
-
 	chain := []*chainLink{{zone: "example.com.", validated: true}}
-	result := v.validateNegativeResponse(msg, "b.example.com.", chain)
-	if result != ValidationSecure {
-		t.Errorf("Expected SECURE for NSEC-proved non-existence, got %s", result)
+	if result := v.validateNegativeResponse(msg, "b.example.com.", chain); result != ValidationBogus {
+		t.Errorf("single NSEC must NOT authenticate NXDOMAIN (RFC 4035 §5.4); got %s", result)
 	}
 }
 

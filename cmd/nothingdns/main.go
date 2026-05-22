@@ -501,11 +501,11 @@ func run() error {
 		return nil
 	}, handler, clusterMgr, dashboardServer).
 		WithConfigGetter(func() *config.Config {
-				cfgMu.RLock()
-				c := cfg
-				cfgMu.RUnlock()
-				return c
-			}).
+			cfgMu.RLock()
+			c := cfg
+			cfgMu.RUnlock()
+			return c
+		}).
 		WithBlocklist(bl).
 		WithUpstream(client, loadBalancer).
 		WithACL(aclChecker).

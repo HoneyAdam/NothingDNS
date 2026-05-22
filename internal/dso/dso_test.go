@@ -11,6 +11,7 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
 
 	if cfg.Enabled {
 		t.Error("Default Enabled should be false")
@@ -29,7 +30,9 @@ func TestDefaultConfig(t *testing.T) {
 func TestNewManager(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
 
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 	if m == nil {
 		t.Fatal("NewManager returned nil")
@@ -43,7 +46,9 @@ func TestNewManager(t *testing.T) {
 func TestManager_StartStop(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
 
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	m.Start()
@@ -245,6 +250,8 @@ func TestSession_IsClosed(t *testing.T) {
 func TestManager_SessionCount(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	if m.SessionCount() != 0 {
@@ -255,6 +262,8 @@ func TestManager_SessionCount(t *testing.T) {
 func TestManager_RemoveSession(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	// Create a mock session
@@ -330,7 +339,9 @@ func TestTLV_Size(t *testing.T) {
 func TestManager_cleanupExpiredSessions(t *testing.T) {
 	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
 	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
 	cfg.InactivityTimeout = 100 * time.Millisecond
+	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, logger)
 
 	// Create expired session

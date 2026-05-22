@@ -86,11 +86,15 @@ func NewQueryFlags() Flags {
 }
 
 // NewResponseFlags returns Flags appropriate for a response.
+//
+// AA defaults to false (RFC 1035 §4.1.1: AA is set only when the answering
+// server is authoritative for the QNAME). Authoritative paths must opt in
+// explicitly by setting Flags.AA = true after construction.
 func NewResponseFlags(rcode uint8) Flags {
 	return Flags{
 		QR:     true,
 		Opcode: OpcodeQuery,
-		AA:     true,
+		AA:     false,
 		RA:     true,
 		RCODE:  rcode,
 	}
@@ -241,8 +245,10 @@ func (f Flags) String() string {
 		parts = append(parts, "qr")
 	}
 
-	opcodeStr := "QUERY"
+	var opcodeStr string
 	switch f.Opcode {
+	case OpcodeQuery:
+		opcodeStr = "QUERY"
 	case OpcodeIQuery:
 		opcodeStr = "IQUERY"
 	case OpcodeStatus:

@@ -255,10 +255,15 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 		return nil
 	}
 
+	// RFC 6147 §5.5: a DNS64 synthesiser MUST NOT set AD on the synthesised
+	// AAAA, because it cannot validate the synthesised record — only the
+	// source A. Carry over the RCODE/RA/RD/QR/Opcode but clear AD.
+	flags := aResponse.Header.Flags
+	flags.AD = false
 	msg := &protocol.Message{
 		Header: protocol.Header{
 			ID:    aResponse.Header.ID,
-			Flags: aResponse.Header.Flags,
+			Flags: flags,
 		},
 		Questions:   make([]*protocol.Question, 0, 1),
 		Answers:     make([]*protocol.ResourceRecord, 0, len(aResponse.Answers)),

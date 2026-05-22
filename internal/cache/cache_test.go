@@ -410,20 +410,26 @@ func TestEntryRemainingTTL(t *testing.T) {
 
 func TestMakeKey(t *testing.T) {
 	key := MakeKey("example.com", 1, false)
-	expected := "example.com:1:0"
+	expected := "example.com|1|0"
 	if key != expected {
 		t.Errorf("expected key %q, got %q", expected, key)
 	}
 
 	key = MakeKey("test.com", 28, true)
-	expected = "test.com:28:1"
+	expected = "test.com|28|1"
 	if key != expected {
 		t.Errorf("expected key %q, got %q", expected, key)
+	}
+
+	// Case-insensitive: mixed-case names hash to the same key as lowercase.
+	if got, want := MakeKey("EXAMPLE.com", 1, false), MakeKey("example.com", 1, false); got != want {
+		t.Errorf("case-insensitive: expected %q, got %q", want, got)
 	}
 }
 
 func TestExtractQueryInfo(t *testing.T) {
-	name, qtype := ExtractQueryInfo("example.com:1")
+	// Round-trip with the canonical MakeKey output.
+	name, qtype := ExtractQueryInfo(MakeKey("example.com", 1, false))
 	if name != "example.com" {
 		t.Errorf("expected name 'example.com', got %q", name)
 	}
@@ -431,7 +437,7 @@ func TestExtractQueryInfo(t *testing.T) {
 		t.Errorf("expected type 1 (A), got %d", qtype)
 	}
 
-	name, qtype = ExtractQueryInfo("test.com:28")
+	name, qtype = ExtractQueryInfo(MakeKey("test.com", 28, true))
 	if name != "test.com" {
 		t.Errorf("expected name 'test.com', got %q", name)
 	}
@@ -439,8 +445,8 @@ func TestExtractQueryInfo(t *testing.T) {
 		t.Errorf("expected type 28 (AAAA), got %d", qtype)
 	}
 
-	// Invalid key
-	name, qtype = ExtractQueryInfo("nocolon")
+	// Invalid key (no separator)
+	name, qtype = ExtractQueryInfo("nopipe")
 	if name != "" || qtype != 0 {
 		t.Error("expected empty values for invalid key")
 	}
@@ -586,23 +592,23 @@ func TestCacheInvalidatePattern(t *testing.T) {
 	c := New(config)
 
 	// Add entries with different patterns
-	c.SetNegative("test.example.com:1", 3)
-	c.SetNegative("www.example.com:1", 3)
-	c.SetNegative("other.test.com:1", 3)
+	c.SetNegative(MakeKey("test.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("www.example.com", 1, false), 3)
+	c.SetNegative(MakeKey("other.test.com", 1, false), 3)
 
 	// Invalidate all example.com entries
 	c.InvalidatePattern("example.com")
 
 	// example.com entries should be gone
-	if c.Get("test.example.com:1") != nil {
+	if c.Get(MakeKey("test.example.com", 1, false)) != nil {
 		t.Error("expected test.example.com to be invalidated")
 	}
-	if c.Get("www.example.com:1") != nil {
+	if c.Get(MakeKey("www.example.com", 1, false)) != nil {
 		t.Error("expected www.example.com to be invalidated")
 	}
 
 	// other.test.com should still exist
-	if c.Get("other.test.com:1") == nil {
+	if c.Get(MakeKey("other.test.com", 1, false)) == nil {
 		t.Error("expected other.test.com to still exist")
 	}
 }
@@ -776,15 +782,15 @@ func TestUpdateConfig(t *testing.T) {
 	cache := New(Config{Capacity: 100, MinTTL: 60, MaxTTL: 3600})
 
 	newCfg := Config{
-		Capacity:         500,
-		MinTTL:           120,
-		MaxTTL:           7200,
-		DefaultTTL:       300,
-		NegativeTTL:      60,
-		PrefetchEnabled:  true,
+		Capacity:          500,
+		MinTTL:            120,
+		MaxTTL:            7200,
+		DefaultTTL:        300,
+		NegativeTTL:       60,
+		PrefetchEnabled:   true,
 		PrefetchThreshold: 60 * time.Second,
-		ServeStale:       true,
-		StaleGrace:       30 * time.Second,
+		ServeStale:        true,
+		StaleGrace:        30 * time.Second,
 	}
 	cache.UpdateConfig(newCfg)
 
@@ -891,7 +897,6 @@ func TestLoad_InvalidWire(t *testing.T) {
 		t.Errorf("Load should skip invalid wire data, got %d restored", restored)
 	}
 }
-
 
 func validWireMessage(t *testing.T) []byte {
 	t.Helper()

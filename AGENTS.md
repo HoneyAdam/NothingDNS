@@ -19,11 +19,11 @@ Violation of any rule is a blocking issue.
 ### Language & Tooling
 
 - Language: Go
-- Min version: 1.22+
+- Min version: 1.25.0 (toolchain go1.26.2 per go.mod)
 - Build: `go build ./...`
 - Lint: `go vet ./...`
 - Test: `go test ./... -count=1 -short`
-- Dependency policy: **strict-zero** — no external dependencies, everything is hand-rolled
+- Dependency policy: **minimal-deps** — only `quic-go` (DoQ) and `golang.org/x/{sys,net,crypto}`; everything else is hand-rolled. New third-party deps require explicit discussion.
 
 ### Architecture Notes
 
@@ -37,7 +37,7 @@ Violation of any rule is a blocking issue.
 
 ### Dependency Policy
 
-**ZERO external dependencies.** The entire codebase uses only Go stdlib. Do not add any third-party imports. This is a core design constraint.
+**Minimal external dependencies.** Currently allowed: `github.com/quic-go/quic-go` for DoQ transport plus `golang.org/x/{sys,net,crypto}` (transitive). Everything else is hand-rolled on stdlib. Adding any new third-party import requires explicit discussion and justification.
 
 ### Known Gotchas
 

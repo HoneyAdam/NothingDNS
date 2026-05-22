@@ -4,6 +4,8 @@
 package dso
 
 import (
+	cryptorand "crypto/rand"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -66,13 +68,13 @@ type Session struct {
 	MaxPayload    uint16
 
 	// Session state
-	mu       sync.RWMutex
-	closed   bool
+	mu                sync.RWMutex
+	closed            bool
 	keepalivesEnabled bool
 
 	// Channels for coordination
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	stopCh chan struct{}
+	doneCh chan struct{}
 }
 
 // IsExpired returns true if the session has exceeded its inactivity timeout.
@@ -259,11 +261,15 @@ type Manager struct {
 	// Configuration
 	inactivityTimeout time.Duration
 	maxSessions       int
+	allowPlainTCP     bool
 	maxPayloadSize    uint16
 
-	// Session ID generator
+	// Session ID generator (crypto/rand-backed; counter is a fallback only)
 	nextSessionID uint64
 	sessionIDMu   sync.Mutex
+
+	// startOnce guards Start() from racy double-fires
+	startOnce sync.Once
 
 	// Logger
 	logger *util.Logger
@@ -279,6 +285,12 @@ type Config struct {
 	InactivityTimeout time.Duration
 	MaxSessions       int
 	MaxPayloadSize    uint16
+
+	// AllowPlainTCP relaxes the RFC 8490 §5.1 requirement that DSO sessions
+	// run only over TLS / DoT / DoQ. Default false (TLS required). Only enable
+	// for unit tests or trusted-network deployments where the underlying
+	// transport is independently secured (e.g. WireGuard tunnels).
+	AllowPlainTCP bool
 }
 
 // DefaultConfig returns default DSO configuration.
@@ -308,24 +320,24 @@ func NewManager(config Config, logger *util.Logger) *Manager {
 		inactivityTimeout: config.InactivityTimeout,
 		maxSessions:       config.MaxSessions,
 		maxPayloadSize:    config.MaxPayloadSize,
+		allowPlainTCP:     config.AllowPlainTCP,
 		logger:            logger,
 		stopCh:            make(chan struct{}),
 	}
 }
 
-// Start starts the DSO manager's background tasks.
+// Start starts the DSO manager's background tasks. Idempotent: subsequent
+// calls are no-ops thanks to the startOnce gate (TryLock-based deduplication
+// was racy because two callers could each observe a free lock in different
+// microseconds and both fire cleanupLoop).
 func (m *Manager) Start() {
-	if !m.sessionsMu.TryLock() {
-		return // Already started
-	}
-	m.sessionsMu.Unlock()
-
-	m.wg.Add(1)
-	go m.cleanupLoop()
-
-	if m.logger != nil {
-		m.logger.Info("DSO manager started")
-	}
+	m.startOnce.Do(func() {
+		m.wg.Add(1)
+		go m.cleanupLoop()
+		if m.logger != nil {
+			m.logger.Info("DSO manager started")
+		}
+	})
 }
 
 // Stop stops the DSO manager.
@@ -353,7 +365,18 @@ func (m *Manager) Stop() {
 }
 
 // CreateSession creates a new DSO session.
+//
+// RFC 8490 §5.1 mandates that DSO operate ONLY over an encrypted transport
+// (DoT / DoH / DoQ). We enforce that here by requiring conn to be a
+// *tls.Conn unless the operator has explicitly opted in to plain TCP via
+// Config.AllowPlainTCP (intended for tests / trusted internal networks).
 func (m *Manager) CreateSession(conn net.Conn) (*Session, error) {
+	if !m.allowPlainTCP {
+		if _, ok := conn.(*tls.Conn); !ok {
+			return nil, fmt.Errorf("dso: RFC 8490 §5.1 requires TLS; refusing plain TCP connection from %s", conn.RemoteAddr())
+		}
+	}
+
 	m.sessionsMu.Lock()
 	defer m.sessionsMu.Unlock()
 
@@ -414,11 +437,32 @@ func (m *Manager) SessionCount() int {
 	return len(m.sessions)
 }
 
-// generateSessionID generates a unique session ID.
+// generateSessionID returns a fresh, unpredictable 64-bit session ID.
+//
+// RFC 8490 §6.6.1.2 requires session identifiers to be unpredictable so an
+// off-path attacker cannot guess and hijack an active session. The previous
+// implementation just incremented a uint64 counter — that gave attackers the
+// next session's ID with zero work. We now draw from crypto/rand and fall
+// back to the counter only if the system entropy source is unavailable,
+// matching the defensive pattern used by the resolver's transaction-ID
+// generator.
 func (m *Manager) generateSessionID() uint64 {
+	var b [8]byte
+	if _, err := cryptorand.Read(b[:]); err == nil {
+		id := binary.BigEndian.Uint64(b[:])
+		// Reserve ID 0 as "unassigned" sentinel; redraw rather than return it.
+		if id != 0 {
+			return id
+		}
+	}
+	// crypto/rand failure: fall back to the monotonic counter so we still
+	// produce a unique (but predictable) ID. The keeper at least logs.
 	m.sessionIDMu.Lock()
 	defer m.sessionIDMu.Unlock()
 	m.nextSessionID++
+	if m.logger != nil {
+		m.logger.Warnf("crypto/rand unavailable; falling back to sequential session ID %d", m.nextSessionID)
+	}
 	return m.nextSessionID
 }
 
@@ -516,12 +560,23 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 	return response, nil
 }
 
-// extractTLVs extracts TLV data from the additional section.
+// extractTLVs extracts the TLV data carried by a DSO message.
+//
+// F127: DSO wire format (RFC 8490 §5.2) does not place TLVs in OPT records
+// in the Additional section. A DSO message uses OPCODE 6, an empty
+// Question/Answer/Authority/Additional set, and an unframed TLV stream
+// directly in the message body. NothingDNS still routes incoming queries
+// through the standard DNS message parser, which discards anything that
+// isn't a recognised section — so by the time HandleDSORequest sees the
+// *protocol.Message there is no body buffer to read TLVs from.
+//
+// Implementing real DSO parsing requires plumbing the raw wire bytes
+// through ServeDNS as well as a proper DSO-mode message decoder. Until
+// that lands, this function fails loud so HandleDSORequest cannot pretend
+// to have processed an empty TLV list and silently no-op every request.
 func (m *Manager) extractTLVs(msg *protocol.Message) ([]byte, error) {
-	// DSO TLVs are stored in the additional section as OPT RDATA
-	// For simplicity, we return an empty buffer here
-	// Full implementation would parse OPT records
-	return nil, nil
+	_ = msg
+	return nil, fmt.Errorf("dso: TLV extraction not implemented (RFC 8490 §5.2 requires raw-body parsing path; tracked as F127)")
 }
 
 // buildDSOResponse builds a DSO response message.
@@ -540,37 +595,22 @@ func (m *Manager) buildDSOResponse(request *protocol.Message, tlvs []*TLV) *prot
 	return response
 }
 
-// SendKeepalive sends a keepalive message on the session.
+// SendKeepalive would send an unsolicited DSO keepalive on the session.
+//
+// F129: the previous implementation built a TLV and a message header, then
+// silently dropped both — no bytes were actually written to session.Conn.
+// Pretending to send a keepalive while doing nothing causes any
+// inactivity-timeout countdown the peer is running to expire and tear
+// down the session shortly after we claim to keep it alive.
+//
+// A correct implementation requires the DSO wire-format serialiser
+// (paired with the parser tracked as F127). Until that lands, fail loud
+// so callers cannot rely on a phantom keepalive.
 func (m *Manager) SendKeepalive(session *Session) error {
 	if session.IsClosed() {
 		return fmt.Errorf("session closed")
 	}
-
-	_ = NewKeepaliveTLV(session.KeepaliveTime, session.KeepaliveTime/2)
-
-	// Build DSO keepalive message
-	_ = &protocol.Message{
-		Header: protocol.Header{
-			ID: 0, // DSO messages use ID=0
-			Flags: protocol.Flags{
-				QR:     true, // Response
-				Opcode: 6,    // DSO
-			},
-			QDCount: 0,
-			ANCount: 0,
-			NSCount: 0,
-			ARCount: 0,
-		},
-	}
-
-	// Serialize and send
-	// Note: Full implementation would serialize TLVs into the message
-
-	if m.logger != nil {
-		m.logger.Debugf("DSO keepalive sent for session %d", session.ID)
-	}
-
-	return nil
+	return fmt.Errorf("dso: SendKeepalive not implemented (no DSO wire-format serialiser yet; tracked as F129)")
 }
 
 // IsDSOMessage checks if a message is a DSO message.

@@ -27,9 +27,9 @@ func TestNew_GetLocalIPErrors(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "",
-		BindAddr:   "", // triggers GetLocalIP
-		GossipPort: 37901,
+		NodeID:               "",
+		BindAddr:             "", // triggers GetLocalIP
+		GossipPort:           37901,
 	}
 	c, err := New(cfg, logger, dnsCache)
 	if err != nil {
@@ -73,9 +73,9 @@ func TestCluster_Start_GossipStartError(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "test-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 37902,
+		NodeID:               "test-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           37902,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -123,10 +123,10 @@ func TestCluster_Stop_GossipAlreadyStopped(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "test-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 37903,
-		CacheSync:  true,
+		NodeID:               "test-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           37903,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -161,10 +161,10 @@ func TestCluster_cacheSyncLoop_UnknownEventType(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "test-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 37904,
-		CacheSync:  true,
+		NodeID:               "test-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           37904,
+		CacheSync:            true,
 	}
 
 	c, err := New(cfg, logger, dnsCache)
@@ -604,9 +604,9 @@ func TestCluster_MultipleEventHandlers(t *testing.T) {
 	cfg := Config{
 		Enabled:              true,
 		AllowInsecureCluster: true, // test: no encryption key required
-		NodeID:     "test-node",
-		BindAddr:   "127.0.0.1",
-		GossipPort: 37916,
+		NodeID:               "test-node",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           37916,
 	}
 
 	c, _ := New(cfg, logger, dnsCache)
