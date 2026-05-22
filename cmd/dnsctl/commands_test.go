@@ -454,12 +454,23 @@ func TestCmdRecord_AddWithTTL(t *testing.T) {
 }
 
 func TestCmdRecord_AddInvalidTTL(t *testing.T) {
-	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"message": "ok"})
-	})
-	// Invalid TTL falls back to 300, should still succeed
-	if err := cmdRecord([]string{"add", "example.com", "www", "A", "192.0.2.1", "not-a-number"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// The CLI now rejects invalid TTLs with a parse error rather than
+	// silently inserting the default. Previously a typo'd TTL was
+	// indistinguishable from a working command — the record landed
+	// with TTL=300 and no warning to the operator.
+	err := cmdRecord([]string{"add", "example.com", "www", "A", "192.0.2.1", "not-a-number"})
+	if err == nil {
+		t.Fatal("expected parse error for non-integer TTL, got nil")
+	}
+	if !strings.Contains(err.Error(), "TTL") {
+		t.Errorf("error should mention TTL: %v", err)
+	}
+}
+
+func TestCmdRecord_AddNegativeTTL(t *testing.T) {
+	err := cmdRecord([]string{"add", "example.com", "www", "A", "192.0.2.1", "-5"})
+	if err == nil {
+		t.Fatal("expected error for negative TTL")
 	}
 }
 
@@ -521,12 +532,13 @@ func TestCmdRecord_UpdateWithTTL(t *testing.T) {
 }
 
 func TestCmdRecord_UpdateInvalidTTL(t *testing.T) {
-	setupMockServer(t, func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]interface{}{"message": "ok"})
-	})
-	// Invalid TTL falls back to 0, should still succeed
-	if err := cmdRecord([]string{"update", "example.com", "www", "A", "old", "new", "bad"}); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	// Same TTL parse contract as add: reject non-integer with an error.
+	err := cmdRecord([]string{"update", "example.com", "www", "A", "old", "new", "bad"})
+	if err == nil {
+		t.Fatal("expected parse error for non-integer TTL, got nil")
+	}
+	if !strings.Contains(err.Error(), "TTL") {
+		t.Errorf("error should mention TTL: %v", err)
 	}
 }
 

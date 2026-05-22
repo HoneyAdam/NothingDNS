@@ -52,9 +52,18 @@ func cmdRecord(args []string) error {
 		rdata := args[4]
 		ttl := 300
 		if len(args) > 5 {
-			if t, err := strconv.Atoi(args[5]); err == nil {
-				ttl = t
+			// Reject invalid TTL strings rather than silently keeping the
+			// default. The old behavior accepted `record add z n A 1.2.3.4
+			// abc` and inserted with TTL=300 with no warning — most users
+			// reading the output would have no clue their TTL was ignored.
+			t, err := strconv.Atoi(args[5])
+			if err != nil {
+				return fmt.Errorf("invalid TTL %q: must be an integer", args[5])
 			}
+			if t < 0 {
+				return fmt.Errorf("invalid TTL %d: must be non-negative", t)
+			}
+			ttl = t
 		}
 		body := map[string]interface{}{
 			"name": name,
@@ -102,9 +111,14 @@ func cmdRecord(args []string) error {
 		newData := args[5]
 		ttl := 0
 		if len(args) > 6 {
-			if t, err := strconv.Atoi(args[6]); err == nil {
-				ttl = t
+			t, err := strconv.Atoi(args[6])
+			if err != nil {
+				return fmt.Errorf("invalid TTL %q: must be an integer", args[6])
 			}
+			if t < 0 {
+				return fmt.Errorf("invalid TTL %d: must be non-negative", t)
+			}
+			ttl = t
 		}
 		body := map[string]interface{}{
 			"name":     name,
