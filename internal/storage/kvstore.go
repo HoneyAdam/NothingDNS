@@ -59,9 +59,16 @@ type KVStore struct {
 	root     *bucketData
 	txid     uint64
 	rwtx     *Tx
-	txs      []*Tx
-	stats    StoreStats
-	hmacKey  []byte // nil means no integrity protection (legacy mode)
+	// txsMu guards mutations of the txs slice. It exists separately
+	// from `mu` because read-only transactions hold s.mu as an RLock
+	// while still needing to insert/remove themselves from this slice
+	// — multiple concurrent Begin(false) / read-only Commit / Rollback
+	// calls would otherwise race on the slice header itself even
+	// though each one holds a valid shared-mode store lock.
+	txsMu   sync.Mutex
+	txs     []*Tx
+	stats   StoreStats
+	hmacKey []byte // nil means no integrity protection (legacy mode)
 }
 
 // StoreStats contains database statistics
@@ -384,7 +391,11 @@ func (s *KVStore) Begin(writable bool) (*Tx, error) {
 		s.txid++
 	}
 
+	// Insert under the dedicated txsMu so concurrent Begin(false) calls
+	// (each holding only RLock on s.mu) don't race on the slice header.
+	s.txsMu.Lock()
 	s.txs = append(s.txs, tx)
+	s.txsMu.Unlock()
 	atomic.AddInt64(&s.stats.TxCount, 1)
 	atomic.AddInt64(&s.stats.OpenTxCount, 1)
 
@@ -539,8 +550,12 @@ func (tx *Tx) Rollback() error {
 }
 
 // removeTx removes a transaction from the store's txs slice to prevent unbounded memory growth.
-// Must be called with s.mu held.
+// Acquires the dedicated txsMu briefly; the store's s.mu may be held in
+// either mode by the caller — both are fine since txsMu only protects
+// the slice header itself.
 func (s *KVStore) removeTx(tx *Tx) {
+	s.txsMu.Lock()
+	defer s.txsMu.Unlock()
 	for i, t := range s.txs {
 		if t == tx {
 			s.txs = append(s.txs[:i], s.txs[i+1:]...)
