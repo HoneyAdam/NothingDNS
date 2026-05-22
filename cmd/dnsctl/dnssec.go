@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"flag"
@@ -691,16 +692,34 @@ func hexEncode(data []byte) string {
 
 // findKeyFiles discovers DNSSEC key files in the given directory for a zone.
 // Key files follow the BIND naming convention: K<zone>+<algorithm>+<keytag>.key
+//
+// generate-key emits the trailing-dot form (`Kexample.com.+013+12345.key`)
+// since the zone name is normalised with a trailing dot before key
+// generation. Earlier this function stripped the trailing dot and the
+// pattern `Kexample.com+*.key` failed to match the actual files —
+// every sign-zone run claimed "No key files found" and regenerated
+// fresh keys, defeating key reuse entirely. We now try the FQDN
+// form first, falling back to the dot-less form for files produced
+// by external tools that don't normalise.
 func findKeyFiles(dir, zone string) ([]string, error) {
-	// Strip trailing dot for file matching
-	zoneName := strings.TrimSuffix(zone, ".")
-
-	pattern := fmt.Sprintf("K%s+*.key", zoneName)
+	// Try FQDN form (with trailing dot) first.
+	fqdn := zone
+	if !strings.HasSuffix(fqdn, ".") {
+		fqdn += "."
+	}
+	pattern := fmt.Sprintf("K%s+*.key", fqdn)
 	matches, err := filepath.Glob(filepath.Join(dir, pattern))
 	if err != nil {
 		return nil, err
 	}
-	return matches, nil
+	if len(matches) > 0 {
+		return matches, nil
+	}
+
+	// Fall back to dot-less form for files from other tooling.
+	zoneName := strings.TrimSuffix(zone, ".")
+	pattern = fmt.Sprintf("K%s+*.key", zoneName)
+	return filepath.Glob(filepath.Join(dir, pattern))
 }
 
 // loadSigningKey loads a signing key from a .key/.private file pair.
@@ -1235,6 +1254,49 @@ func parseRDataFromZone(rrtype uint16, rdata, origin string) (protocol.RData, er
 		return &protocol.RDataNSEC{
 			NextDomain: next,
 			TypeBitMap: types,
+		}, nil
+
+	case protocol.TypeNSEC3:
+		// Presentation format (RFC 5155 §3.3):
+		//   HASH-ALG FLAGS ITERATIONS SALT NEXT-HASHED-OWNER TYPE1 TYPE2 ...
+		// Salt is hex or "-" (empty). Next-hashed is base32hex without
+		// padding, unpadded; we decode it the same way protocol's
+		// Base32Encode produces it.
+		fields := strings.Fields(rdata)
+		if len(fields) < 5 {
+			return nil, fmt.Errorf("invalid NSEC3 record: need ≥5 fields, got %d", len(fields))
+		}
+		alg, _ := strconv.ParseUint(fields[0], 10, 8)
+		flags, _ := strconv.ParseUint(fields[1], 10, 8)
+		iter, _ := strconv.ParseUint(fields[2], 10, 16)
+		var salt []byte
+		if fields[3] != "-" {
+			s, err := hex.DecodeString(fields[3])
+			if err != nil {
+				return nil, fmt.Errorf("NSEC3 salt: %w", err)
+			}
+			salt = s
+		}
+		// RFC 5155 base32hex without padding.
+		enc := base32.HexEncoding.WithPadding(base32.NoPadding)
+		nextHashed, err := enc.DecodeString(strings.ToUpper(fields[4]))
+		if err != nil {
+			return nil, fmt.Errorf("NSEC3 next-hashed-owner: %w", err)
+		}
+		types := make([]uint16, 0, len(fields)-5)
+		for _, t := range fields[5:] {
+			if code, ok := protocol.StringToType[strings.ToUpper(t)]; ok {
+				types = append(types, code)
+			}
+		}
+		return &protocol.RDataNSEC3{
+			HashAlgorithm: uint8(alg),
+			Flags:         uint8(flags),
+			Iterations:    uint16(iter),
+			Salt:          salt,
+			HashLength:    uint8(len(nextHashed)),
+			NextHashed:    nextHashed,
+			TypeBitMap:    types,
 		}, nil
 
 	default:
