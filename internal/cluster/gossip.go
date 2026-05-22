@@ -1246,26 +1246,18 @@ func (gp *GossipProtocol) startElection() {
 		return
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeElection, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return
-	}
-
-	// Broadcast to all known nodes
+	// Route through sendMessage so each per-peer wire frame gets a
+	// fresh sequence + AAD-bound ciphertext. The previous
+	// encodeMessage+gp.encrypt path emitted Sequence=0 and used
+	// plaintext-AAD encryption, both of which the receiver-side
+	// replay/integrity guards reject — election broadcasts were
+	// silently dropped by every peer that had ever seen us before.
 	for _, node := range gp.nodeList.GetAll() {
 		if node.ID == selfID || node.State != NodeStateAlive {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		data := msgBytes
-		if gp.aead != nil {
-			var err error
-			data, err = gp.encrypt(data)
-			if err != nil {
-				util.Warnf("gossip: failed to encrypt election message: %v - sending plaintext", err)
-			}
-		}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeElection, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send election message to %s: %v", addr, err)
 		}
 	}
@@ -1292,26 +1284,20 @@ func (gp *GossipProtocol) AnnounceLeader() error {
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeLeader, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	// Broadcast to all known nodes
+	// Route through sendMessage so each per-peer wire frame carries a
+	// fresh monotonic sequence number AND the AAD-bound encryption
+	// expected by replay protection (VULN-045/046). The old code built
+	// one msgBytes (Sequence=0) and resent the same buffer to every
+	// peer, plus used `encrypt` (no AAD) instead of `encryptWithAAD`.
+	// Every peer that had ever received a non-zero-sequence message
+	// from us dropped the announcement as a replay, so a new leader
+	// could not actually inform the cluster of its election.
 	for _, node := range gp.nodeList.GetAll() {
 		if node.ID == self.ID || node.State != NodeStateAlive {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		data := msgBytes
-		if gp.aead != nil {
-			var err error
-			data, err = gp.encrypt(data)
-			if err != nil {
-				util.Warnf("gossip: failed to encrypt leader announcement: %v - sending plaintext", err)
-			}
-		}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeLeader, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send leader announcement to %s: %v", addr, err)
 		}
 	}
