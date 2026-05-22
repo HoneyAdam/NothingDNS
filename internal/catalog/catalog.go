@@ -5,6 +5,7 @@ package catalog
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -118,7 +119,11 @@ func ParseCatalogMemberRecord(rdata string) (*CatalogMemberRecord, error) {
 
 	rec.ZoneName = parts[0]
 
-	// Check for optional class, ttl, applications, group
+	// Check for optional class, ttl, applications, group.
+	// The TTL branch was missing — `isNumericTTL` lived next door,
+	// fully tested, but ParseCatalogMemberRecord never called it, so
+	// a record like `example.com. 3600 IN` silently dropped the TTL
+	// field and the resulting CatalogMemberRecord carried TTL=0.
 	for i := 1; i < len(parts); i++ {
 		part := parts[i]
 		if part == "*" {
@@ -130,6 +135,9 @@ func ParseCatalogMemberRecord(rdata string) (*CatalogMemberRecord, error) {
 			rec.Group = strings.Trim(part, "\"")
 		} else if isValidClass(part) {
 			rec.Class = part
+		} else if isNumericTTL(part) {
+			ttl, _ := strconv.ParseUint(part, 10, 32)
+			rec.TTL = uint32(ttl)
 		}
 	}
 

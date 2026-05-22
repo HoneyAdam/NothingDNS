@@ -138,7 +138,7 @@ func TestParseCatalogMemberRecord(t *testing.T) {
 			want: &CatalogMemberRecord{
 				ZoneName: "zone1.example.com.",
 				Class:    "IN",
-				TTL:      0, // TTL parsing doesn't store the value in this simple parser
+				TTL:      300, // numeric field is now recognized via isNumericTTL
 			},
 			wantErr: false,
 		},
