@@ -1230,6 +1230,47 @@ func TestZoneStateMachineRestoreInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestZoneStateMachine_RestoreFailureKeepsPriorState verifies that a
+// failed Restore (truncated/malformed snapshot) does NOT mutate the
+// already-loaded zone map. Pre-fix json.Unmarshal(data, &z.zones)
+// would partially populate z.zones when decoding errored midway,
+// leaving the state machine holding half of the snapshot plus
+// whatever remained from before — Raft's snapshot-install correctness
+// requirement (no torn state on error) was effectively lost.
+func TestZoneStateMachine_RestoreFailureKeepsPriorState(t *testing.T) {
+	zsm := NewZoneStateMachine()
+	// Seed the state machine with one real zone.
+	apply := ZoneCommand{
+		Type:   "add_record",
+		Zone:   "stable.example.",
+		Name:   "host.stable.example.",
+		RRType: 1,
+		TTL:    300,
+		RData:  []string{"203.0.113.1"},
+	}
+	if err := zsm.Apply(entry{Command: mustMarshalJSON(apply)}); err != nil {
+		t.Fatalf("seed Apply: %v", err)
+	}
+	if zones := zsm.GetZones(); len(zones) != 1 || zones[0] != "stable.example." {
+		t.Fatalf("seed zone list = %v, want [stable.example.]", zones)
+	}
+
+	// Construct a payload that is syntactically valid up to a point
+	// but type-mismatches on a later key. Go's json.Unmarshal will
+	// populate the partial successes into the destination map before
+	// it errors out on the mismatch — this is the exact hazard the
+	// new Restore guards against.
+	bad := []byte(`{"valid.example.": {"Zone": "valid.example.", "Records": {}, "Modified": false}, "broken.example.": "this-should-be-an-object"}`)
+	err := zsm.Restore(bad)
+	if err == nil {
+		t.Fatal("expected error from type-mismatched JSON")
+	}
+	zones := zsm.GetZones()
+	if len(zones) != 1 || zones[0] != "stable.example." {
+		t.Errorf("post-failure zone list = %v, want [stable.example.] preserved (no partial 'valid.example.' from failed restore)", zones)
+	}
+}
+
 func TestZoneStateMachineMultipleRecordsSameKey(t *testing.T) {
 	zsm := NewZoneStateMachine()
 	for i := 0; i < 5; i++ {

@@ -187,11 +187,27 @@ func (z *ZoneStateMachine) Snapshot() ([]byte, error) {
 }
 
 // Restore restores state from a snapshot.
+//
+// Unmarshals into a fresh map and only swaps it into place on
+// success. The previous implementation passed &z.zones directly
+// to Unmarshal, which leaves the map partially populated if
+// Unmarshal errors out mid-way (e.g. a truncated payload that
+// successfully decoded the first three zones before hitting bad
+// data on the fourth). The Raft snapshot-install handler in
+// raft.go now refuses to advance lastApplied when Restore fails,
+// but only if Restore actually returns an error — and if we'd
+// already mutated z.zones before erroring, the state machine
+// holds half the new snapshot plus all of the old one.
 func (z *ZoneStateMachine) Restore(data []byte) error {
-	z.mu.Lock()
-	defer z.mu.Unlock()
+	var newZones map[string]*ZoneData
+	if err := json.Unmarshal(data, &newZones); err != nil {
+		return err
+	}
 
-	return json.Unmarshal(data, &z.zones)
+	z.mu.Lock()
+	z.zones = newZones
+	z.mu.Unlock()
+	return nil
 }
 
 // OnUpdate sets a callback for zone updates.
