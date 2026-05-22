@@ -352,6 +352,67 @@ func TestWALRecovery_PartialTrailingEntry(t *testing.T) {
 	}
 }
 
+// TestWALRecovery_AppendAfterTornTail verifies that after a torn write
+// leaves garbage at the segment tail, the next OpenWAL → Append → close
+// → re-Open cycle still surfaces the post-crash entries. The previous
+// fix made readSegment stop *cleanly* at the torn bytes, but OpenWAL
+// continued to use the file's raw size as the active offset and
+// appended past the garbage. Recovery then re-stopped at the same
+// torn bytes and never reached the new entries.
+func TestWALRecovery_AppendAfterTornTail(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultWALOptions()
+
+	// Write entry, fsync, close.
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("pre-crash")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	wal.Sync()
+	wal.Close()
+
+	// Simulate torn tail.
+	entries, _ := os.ReadDir(dir)
+	var segPath string
+	for _, e := range entries {
+		segPath = filepath.Join(dir, e.Name())
+	}
+	f, _ := os.OpenFile(segPath, os.O_WRONLY|os.O_APPEND, 0)
+	_, _ = f.Write([]byte{0xAA, 0xBB, 0xCC})
+	f.Close()
+
+	// Reopen, Append a recovery entry, close.
+	wal2, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	if _, err := wal2.Append(EntryTypePut, []byte("post-crash")); err != nil {
+		t.Fatalf("Append after torn tail: %v", err)
+	}
+	wal2.Sync()
+	wal2.Close()
+
+	// Re-open and ReadAll. Both entries must come back.
+	wal3, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("Final reopen: %v", err)
+	}
+	defer wal3.Close()
+	got, err := wal3.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries post-recovery, got %d", len(got))
+	}
+	if string(got[0].Data) != "pre-crash" || string(got[1].Data) != "post-crash" {
+		t.Errorf("entry data: pre=%q post=%q", got[0].Data, got[1].Data)
+	}
+}
+
 func TestWALCorruptedEntry(t *testing.T) {
 	wal := &WAL{}
 

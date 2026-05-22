@@ -122,14 +122,30 @@ func OpenWAL(dir string, opts WALOptions) (*WAL, error) {
 			return nil, fmt.Errorf("create initial segment: %w", err)
 		}
 	} else {
-		// Use the last segment as active, open its file for appending
-		lastPath := wal.segments[len(wal.segments)-1].Path
-		file, err := os.OpenFile(lastPath, os.O_APPEND|os.O_WRONLY, 0600)
+		active := wal.segments[len(wal.segments)-1]
+
+		// Truncate any torn trailing bytes (partial header, partial body,
+		// or fully corrupt entry) so subsequent Appends start at the last
+		// valid offset. Without this step, recovery would `break` cleanly
+		// at the torn bytes but new entries written *past* the garbage
+		// would be hidden behind it on the next replay.
+		validEnd, err := findValidEnd(active.Path)
+		if err != nil {
+			return nil, fmt.Errorf("scan active segment %s: %w", active.Path, err)
+		}
+		if validEnd < active.size {
+			if err := os.Truncate(active.Path, validEnd); err != nil {
+				return nil, fmt.Errorf("truncate torn tail: %w", err)
+			}
+			active.size = validEnd
+		}
+
+		file, err := os.OpenFile(active.Path, os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("open active segment file: %w", err)
 		}
-		wal.segments[len(wal.segments)-1].file = file
-		wal.active = wal.segments[len(wal.segments)-1]
+		active.file = file
+		wal.active = active
 	}
 
 	// Start sync goroutine
@@ -137,6 +153,52 @@ func OpenWAL(dir string, opts WALOptions) (*WAL, error) {
 	go wal.syncLoop()
 
 	return wal, nil
+}
+
+// findValidEnd scans a WAL segment file and returns the byte offset
+// just past the last entry whose header parses and whose body length
+// is fully present in the file. A torn trailing entry — short header,
+// truncated body, or any kind of corruption — gets dropped via the
+// returned offset, which OpenWAL then truncates to. The scan uses
+// the same length-prefix logic as readSegment but stops at first
+// problem rather than per-entry CRC validation (that's still done at
+// ReadAll time; here we just need a safe append point).
+func findValidEnd(path string) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	stat, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	total := stat.Size()
+
+	var pos int64
+	hdr := make([]byte, WALHeaderSize)
+	for {
+		// Try to read a full header at `pos`.
+		n, err := f.ReadAt(hdr, pos)
+		if err != nil || n < WALHeaderSize {
+			// Partial / no header at this offset — `pos` is the safe end.
+			return pos, nil
+		}
+		length := binary.BigEndian.Uint32(hdr[5:9])
+		// Bound the declared body length the same way decodeEntry does so
+		// a corrupt header can't claim a multi-GiB body and convince us
+		// to keep more bytes than we actually have.
+		if int64(length) > MaxSegmentSize {
+			return pos, nil
+		}
+		entryEnd := pos + int64(WALHeaderSize) + int64(length)
+		if entryEnd > total {
+			// Body is truncated — drop everything from `pos` forward.
+			return pos, nil
+		}
+		pos = entryEnd
+	}
 }
 
 // loadSegments loads existing WAL segments from disk
