@@ -5,6 +5,122 @@ All notable changes to NothingDNS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **Go toolchain bump 1.26.2 → 1.26.3** to pull in stdlib fixes for
+  GO-2026-491? (net dialer) and GO-2026-4918 (net/http HTTP/2
+  SETTINGS_MAX_FRAME_SIZE infinite loop). `govulncheck` now reports
+  "No vulnerabilities found".
+- **Data race on `enabled` flag** in `RateLimiter`, `RRL`, and
+  `Blocklist`: hot-path predicate read the bool without a lock while
+  `SetEnabled`/`Reload` wrote it under the package mutex. Converted
+  to `sync/atomic.Bool` — wait-free reads, visibility-guaranteed
+  writes.
+- **GOST DS digest type 3 explicitly rejected** (previous
+  `hashGOST94` used a placeholder S-box that produced
+  non-conformant hashes — silent miscompare risk). Deprecated by
+  RFC 8624 §3.2 anyway.
+
+### Added
+
+#### Real implementations replacing previous honest-fail stubs
+
+- **F127/F129 — DSO TLV wire-format pipeline (RFC 8490)**:
+  `protocol.Message.RawBody` captures DSO bodies; `OpcodeDSO=6`
+  constant. `extractTLVs` enforces RFC 8490 §5.2 (DSO opcode +
+  zero section counts). `SendKeepalive` frames a real DSO
+  keepalive TLV + DNS header + TCP length prefix and writes to the
+  session connection.
+- **F138 — Real MaxMind DB binary-format parser**
+  (`internal/geodns/mmdb.go`, ~440 LOC) with the MMDB §1.4 IPv4-in-
+  IPv6 expansion, all 15 type codes, 24/28/32-bit record sizes, and
+  MSB-first BST traversal. Earlier follow-up fixed a
+  data-pointer arithmetic bug (was double-adding `treeBytes`).
+- **F122 — RFC 9180 HPKE base mode + RFC 9230 ODoH wire format**
+  (`internal/odoh/hpke.go` + `rfc9230.go`). Hand-rolled with
+  Go stdlib only (`crypto/ecdh` X25519, `crypto/hkdf` HKDF-SHA256,
+  `crypto/aes`+`crypto/cipher` AES-GCM). HPKE math validated
+  byte-for-byte against RFC 9180 §A.1 test vectors (DHKEM
+  shared_secret, KeySchedule base_nonce, AEAD seal[0]). Full
+  Client→Proxy→Target→handler round-trip green.
+
+#### Raft consensus
+
+- **Leader-redirect error type**: `*raft.ErrNotLeader` now carries
+  the known leader's `NodeID` so admin clients calling
+  `AddNodeViaLeader` / `RemoveNodeViaLeader` on a follower can
+  retry directly against the leader instead of probing every peer.
+  Followers track `leaderID` from `AppendEntries.LeaderID`.
+
+#### Test infrastructure
+
+- **Fuzz harnesses** for all attacker-controlled wire-format
+  parsers (none run by default; invoke with `-fuzz=Name`):
+  - `protocol`: FuzzUnpackMessage, FuzzUnpackName,
+    FuzzUnpackResourceRecord
+  - `zone`: FuzzParseZoneFile
+  - `dso`: FuzzUnpackTLV, FuzzHandleDSORequest
+  - `odoh`: FuzzParseODoHMessage, FuzzParseConfigContents,
+    FuzzDecryptQuery
+  Local 3-minute runs reached 25M+ iterations on
+  `FuzzUnpackMessage` with zero panics.
+- **CI fuzz job**: `go.yml` runs each target 30s on every PR with
+  corpus caching; on any panic, the corpus and any
+  `internal/*/testdata/fuzz` artifacts are uploaded.
+- **mmdb_writer_test.go**: small in-memory MMDB binary-format
+  writer so unit tests can produce real fixtures the production
+  parser decodes, replacing six tests that were skipped because
+  hand-crafted bytes from the honest-fail era didn't form valid
+  records.
+
+### Fixed
+
+- **JoinSeed nil-deref before Start**: calling `Cluster.JoinSeed`
+  on a non-started cluster panicked because the gossip layer
+  reached `gp.conn.WriteToUDP` on a nil conn. Added an explicit
+  "cluster must be started" guard.
+- **MMDB pointer arithmetic** (`internal/geodns/mmdb.go`):
+  `mmdbLookup` returned `rec - nodeCount - 16 + treeBytes` and the
+  caller in `geodns.go` added `treeBytes + 16` on top, double-adding
+  the tree size. Records were decoded from an offset 12+ bytes
+  past the real one. Replaced with the canonical
+  `abs_file_offset = treeBytes + (rec - nodeCount)` formula used
+  by MaxMind-DB-Reader-python.
+- **DNSSL multi-label encoder** (`internal/resolver/rdnss.go`):
+  `encodeDNSSLLabel` was a single-label calculator misnamed and
+  called with full domains. Renamed to `encodeDNSSLDomain`, split
+  on ".", and the RFC 8106 §5.2 8-byte padding fixed.
+- **NSEC3 closest-encloser SECURE test** rebuilt with a 3-record
+  fixture satisfying RFC 5155 §8.4 (closest encloser exact match +
+  next-closer cover + wildcard cover). Was a stale skip.
+- **KV Close-with-active-tx** stale skip: F060 changed
+  `Begin` to hold the store lock for tx lifetime, so `Close` now
+  blocks on in-flight tx. Replaced the skip with a real
+  concurrency test that exercises the new behavior.
+
+### Coverage
+
+Lifted across multiple packages:
+
+| Package | Before | After | Δ |
+|---|---|---|---|
+| filter | 57.8% | 92.4% | +34.6 |
+| geodns | 70.3% | 85.0% | +14.7 |
+| cluster/raft | 51.9% | 63.8% | +11.9 |
+| api | 79.2% | 82.3% | +3.1 |
+| dso | 89.1% | 91.9% | +2.8 |
+| cmd/nothingdns | 69.3% | 71.3% | +2.0 |
+
+### Removed
+
+- Dead code: legacy `hashGOST94` (placeholder S-box),
+  `loadMMDBFromBytes`, `mocks.go` → `mocks_test.go` (test-only
+  symbols no longer shipped in the production binary),
+  `ErrMMDBNotSupported` sentinel (LoadMMDB returns specific decode
+  errors now), unused `DynamicDNSHandler.closed` field.
+
 ## [0.1.1] — 2026-04-12
 
 ### Added
