@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -567,7 +568,52 @@ func (s *Store) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0600)
+
+	// Atomic write via temp + fsync + rename. A torn write to the user
+	// database is catastrophic: the daemon on restart sees malformed
+	// JSON and Load returns an error, leaving no users (or, worse, a
+	// partial set). os.WriteFile alone offers none of the ordering
+	// guarantees a crash-recovery sequence needs.
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create dir: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".users-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	cleanup = false
+	// Best-effort directory fsync so the rename's dirent is durable.
+	if dirFd, err := os.Open(dir); err == nil {
+		_ = dirFd.Sync()
+		_ = dirFd.Close()
+	}
+	return nil
 }
 
 // Load reads users from a file.

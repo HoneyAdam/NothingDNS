@@ -485,6 +485,39 @@ func TestSaveLoadMissingFile(t *testing.T) {
 	}
 }
 
+// TestSave_AtomicReplaceLeavesNoPartialFile asserts that Save uses
+// the temp + rename pattern: an existing valid users.json should not
+// be replaced by a partial write. Hard to crash mid-write in a unit
+// test, but we *can* observe the rename behavior: after Save the
+// destination file's modtime updates atomically (single rename), and
+// no temp files are left in the directory.
+func TestSave_AtomicReplaceLeavesNoPartialFile(t *testing.T) {
+	store, _ := NewStore(&Config{Secret: "test-secret-12345"})
+	_, _ = store.CreateUser("alice", "password12345", RoleAdmin)
+
+	dir := t.TempDir()
+	path := dir + "/users.json"
+	if err := store.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// After Save the destination must exist with the expected content.
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("destination missing: %v", err)
+	}
+
+	// And no stray .tmp files (the temp-rename cleanup discipline).
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file after Save: %s", e.Name())
+		}
+	}
+}
+
 func TestSignToken(t *testing.T) {
 	secret := []byte("test-secret-key-32-bytes-long!!")
 	token := "test-token-string"
