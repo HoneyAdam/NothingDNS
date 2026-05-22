@@ -382,6 +382,61 @@ func TestParseFileWithContinuationLine(t *testing.T) {
 	_ = z
 }
 
+// TestParseFile_ContinuationOwnerInherited verifies RFC 1035 §5.1
+// "the owner name of a record is the same as that of the previous
+// resource record" behavior. The previous parser checked the leading
+// whitespace with `strings.HasPrefix(text, " \t")` — a 2-char literal
+// match that only matches space-then-tab, not the common cases of
+// "all spaces" or "all tabs" indents. As a result every continuation
+// line in a canonical BIND-style zone got the class field (IN) parsed
+// as the owner name. Verify the fix by inspecting the parsed record's
+// resolved name.
+func TestParseFile_ContinuationOwnerInherited(t *testing.T) {
+	zoneContent := strings.Join([]string{
+		"$ORIGIN example.com.",
+		"$TTL 3600",
+		"@ IN SOA ns1 hostmaster 2024010101 3600 900 604800 86400",
+		"@ IN NS ns1",
+		"www IN A 192.0.2.1",
+		"    IN A 192.0.2.2", // space-indented continuation of "www"
+		"\tIN A 192.0.2.3",   // tab-indented continuation of "www"
+	}, "\n") + "\n"
+
+	z, err := ParseFile("test.zone", strings.NewReader(zoneContent))
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+
+	// All three A records should live under www.example.com.
+	records, ok := z.Records["www.example.com."]
+	if !ok {
+		t.Fatalf("no records under www.example.com.; got keys %v", keysOf(z.Records))
+	}
+	var aCount int
+	for _, r := range records {
+		if r.Type == "A" {
+			aCount++
+		}
+	}
+	if aCount != 3 {
+		t.Errorf("expected 3 A records for www.example.com., got %d", aCount)
+	}
+
+	// And nothing should have landed under "in.example.com." (the bug
+	// would have parsed the class field "IN" as the owner).
+	if _, leaked := z.Records["in.example.com."]; leaked {
+		t.Error("continuation lines wrongly created in.example.com. — owner-name detection broken")
+	}
+}
+
+func keysOf(m map[string][]Record) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
 // ============================================================================
 // parseRecord with too few fields
 // ============================================================================

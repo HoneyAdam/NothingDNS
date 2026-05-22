@@ -648,8 +648,20 @@ func (p *parser) parseRecord(line string) error {
 
 	fieldIdx := 0
 
-	// First field: owner name (optional if it starts with whitespace)
-	if !strings.HasPrefix(p.scanner.Text(), " \t") {
+	// First field: owner name. RFC 1035 §5.1 says a line whose first
+	// character is whitespace inherits the previous record's owner
+	// name. The previous check used `strings.HasPrefix(text, " \t")`,
+	// which only matches the literal two-character sequence
+	// space-then-tab — so a normal indent (just tabs, or just spaces)
+	// fell through to the "this line has an owner name" branch and
+	// the parser swallowed the class field (typically `IN`) as the
+	// owner name, producing wrong records for any zone file written
+	// in the canonical BIND style:
+	//   www  IN  A  1.2.3.4
+	//        IN  A  1.2.3.5   ; continuation — owner is "www"
+	rawLine := p.scanner.Text()
+	startsWithWhitespace := len(rawLine) > 0 && (rawLine[0] == ' ' || rawLine[0] == '\t')
+	if !startsWithWhitespace {
 		// Line starts with owner name
 		record.Name = fields[fieldIdx]
 		fieldIdx++
