@@ -32,9 +32,18 @@ const (
 
 // User represents a user account.
 type User struct {
-	Username  string `json:"username"`
-	Password  string `json:"-"`    // Never expose in JSON
-	Hash      []byte `json:"hash"` // Stored password hash
+	Username string `json:"username"`
+	Password string `json:"-"` // Never expose in JSON
+	// Hash uses lowercase JSON for on-disk persistence (Save/Load
+	// round-trip the users.json file) but it must never reach an
+	// API response. The api/response.UserResponse type intentionally
+	// omits this field; any future endpoint that marshals *auth.User
+	// directly via writeJSON would leak the PBKDF2 digest plus salt
+	// to clients. Until that defense is encoded at the type level
+	// (e.g. a separate UserOnDisk struct), the json tag stays
+	// lowercase and reviewers must catch direct *auth.User
+	// serialization at PR time.
+	Hash      []byte `json:"hash,omitempty"`
 	Role      Role   `json:"role"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
