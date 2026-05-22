@@ -444,6 +444,27 @@ func cmdDNSSECVerifyAnchor(args []string) error {
 
 // Helper functions
 
+// parseRRSIGTime parses an RRSIG inception/expiration time from a BIND
+// zone-file RRSIG record. Per RFC 4034 §3.2 the presentation format
+// is `YYYYMMDDHHMMSS` (14 ASCII digits, UTC). For interoperability the
+// pure-uint32 Unix-seconds form is also accepted. Returns 0 on parse
+// failure (caller should treat as "invalid sig" — any RRSIG with
+// inception 0 will validate as not-yet-valid against any later real
+// time, which is the safe default).
+func parseRRSIGTime(s string) uint32 {
+	if len(s) == 14 {
+		// Try YYYYMMDDHHMMSS.
+		if t, err := time.Parse("20060102150405", s); err == nil {
+			return uint32(t.Unix())
+		}
+	}
+	// Fall back to bare Unix seconds (legacy / wire-derived dumps).
+	if v, err := strconv.ParseUint(s, 10, 32); err == nil {
+		return uint32(v)
+	}
+	return 0
+}
+
 func generateKeyPair(algorithm uint8, isKSK bool, keySize int) (*dnssec.SigningKey, error) {
 	var privKey crypto.PrivateKey
 	var pubKey crypto.PublicKey
@@ -1110,8 +1131,13 @@ func parseRDataFromZone(rrtype uint16, rdata, origin string) (protocol.RData, er
 		alg, _ := strconv.ParseUint(fields[1], 10, 8)
 		labels, _ := strconv.ParseUint(fields[2], 10, 8)
 		origTTL, _ := strconv.ParseUint(fields[3], 10, 32)
-		expiration, _ := strconv.ParseUint(fields[4], 10, 32)
-		inception, _ := strconv.ParseUint(fields[5], 10, 32)
+		// RFC 4034 §3.2: RRSIG inception/expiration in presentation
+		// format are YYYYMMDDHHMMSS (14 digits, UTC). The wire format
+		// is Unix seconds. If the field is 14 chars, parse as a time
+		// and convert. Treating it as a Unix uint32 silently overflows
+		// to 4294967295 — caught by smoke-testing `validate-zone`.
+		expiration := parseRRSIGTime(fields[4])
+		inception := parseRRSIGTime(fields[5])
 		keyTag, _ := strconv.ParseUint(fields[6], 10, 16)
 		signerName := fields[7]
 		sigB64 := strings.Join(fields[8:], "")
@@ -1128,8 +1154,8 @@ func parseRDataFromZone(rrtype uint16, rdata, origin string) (protocol.RData, er
 			Algorithm:   uint8(alg),
 			Labels:      uint8(labels),
 			OriginalTTL: uint32(origTTL),
-			Expiration:  uint32(expiration),
-			Inception:   uint32(inception),
+			Expiration:  expiration,
+			Inception:   inception,
 			KeyTag:      uint16(keyTag),
 			SignerName:  signer,
 			Signature:   signature,
