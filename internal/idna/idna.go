@@ -61,11 +61,24 @@ func ToASCII(domain string) (string, error) {
 
 	// Check if already ASCII-only
 	if isASCII(domain) {
-		// ASCII-only domain - labels will be validated in the loop below
+		// Enforce RFC 1035 §2.3.4 / RFC 5891 §4.4 length limits on the
+		// pure-ASCII path. Previously this branch fell through to
+		// `validateSTD3` per label, which only checks character classes
+		// and hyphen placement — a 256-byte ASCII domain or a 200-byte
+		// single label both slipped through, leaving downstream code
+		// (cache key sizing, zone radix tree, NSEC bitmap) to discover
+		// the violation later. The non-ASCII path already checked total
+		// length at the end; harmonize the rules across both paths.
+		if len(domain) > MaxNameLength {
+			return "", ErrNameTooLong
+		}
 		labels := strings.Split(domain, ".")
 		for _, label := range labels {
 			if label == "" {
 				continue
+			}
+			if len(label) > MaxLabelLength {
+				return "", ErrLabelTooLong
 			}
 			if err := validateSTD3(label); err != nil {
 				return "", err
@@ -85,7 +98,13 @@ func ToASCII(domain string) (string, error) {
 
 		// Try to encode the label
 		if isASCII(label) {
-			// ASCII label - already validated above, just add
+			// ASCII label — enforce label-length cap. The pure-ASCII
+			// fast-path above already does this, but the mixed path
+			// (one IDNA + several ASCII labels) flows through here
+			// without ever calling validateSTD3 on the ASCII labels.
+			if len(label) > MaxLabelLength {
+				return "", ErrLabelTooLong
+			}
 			result = append(result, label)
 		} else {
 			// Non-ASCII label - convert to punycode
@@ -93,7 +112,13 @@ func ToASCII(domain string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("label %q: %w", label, err)
 			}
-			result = append(result, ACEPrefix+encoded)
+			aceLabel := ACEPrefix + encoded
+			// Post-encoding length check: a short Unicode label can
+			// expand past 63 ASCII bytes after punycode + xn-- prefix.
+			if len(aceLabel) > MaxLabelLength {
+				return "", ErrLabelTooLong
+			}
+			result = append(result, aceLabel)
 		}
 	}
 
