@@ -118,6 +118,7 @@ internal/
 ├── dnscookie/      # DNS Cookies (RFC 7873)
 ├── dnssec/         # DNSSEC validation/signing, Ed25519/ECDSA/RSA
 ├── doh/            # DNS over HTTPS (RFC 8484)
+├── dso/            # DNS Stateful Operations (RFC 8490)
 ├── e2e/            # End-to-end tests
 ├── filter/         # Split-horizon views, rate limiting, ACL
 ├── geodns/         # GeoIP DNS with MMDB support

@@ -33,7 +33,8 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 - **DNS over TLS (DoT)** - RFC 7858 compliant DoT support
 - **DNS Cookies** - RFC 7873 anti-spoofing with HMAC-SHA256 client/server cookies
 - **DNS over QUIC (DoQ)** - QUIC-based encrypted DNS transport
-- **Oblivious DNS over HTTPS (ODoH)** - RFC 9230 privacy-preserving DNS proxy
+- **Oblivious DNS over HTTPS (ODoH)** - RFC 9230 privacy-preserving DNS proxy with RFC 9180 HPKE (stdlib-only: X25519 / HKDF-SHA256 / AES-GCM; HPKE math validated against RFC 9180 §A.1 test vectors)
+- **DNS Stateful Operations (DSO)** - RFC 8490 long-lived TCP/TLS sessions with keepalive and maximum-payload negotiation
 - **Blocklist Support** - Block domains using hosts file format or URL-based lists
 - **Response Policy Zones (RPZ)** - Policy-based DNS filtering with NXDOMAIN, NODATA, redirect, and DROP actions
 - **Response Rate Limiting (RRL)** - Per-client token bucket rate limiting
@@ -780,6 +781,7 @@ cluster:
 │   ├── dnscookie/      # DNS Cookies (RFC 7873)
 │   ├── dnssec/         # DNSSEC validation, signing, key rollover
 │   ├── doh/            # DNS over HTTPS (RFC 8484)
+│   ├── dso/            # DNS Stateful Operations (RFC 8490)
 │   ├── e2e/            # End-to-end tests
 │   ├── filter/         # Split-horizon views, rate limiting, ACL
 │   ├── geodns/         # GeoIP DNS with MMDB support
@@ -1103,3 +1105,5 @@ guide (development environment, build/test commands, PR checklist).
 - [x] SVCB/HTTPS record types (RFC 9460)
 - [x] DNS Cookies anti-spoofing (RFC 7873)
 - [x] QNAME Minimization privacy (RFC 7816)
+- [x] Oblivious DoH target + proxy (RFC 9230 + RFC 9180 HPKE, vector-validated)
+- [x] DNS Stateful Operations (RFC 8490 — TCP/TLS keepalive sessions)
