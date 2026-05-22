@@ -593,7 +593,15 @@ func IncrementSerial(z *Zone) {
 	}
 }
 
-// writeZoneFile writes a zone to a file in BIND format.
+// writeZoneFile writes a zone to a file in BIND format using the
+// standard temp + fsync + rename atomic-replace pattern. A crash
+// mid-write to a zone file used to leave a partial BIND text on
+// disk; on the next start, the parser would either error out
+// ("zone has no origin", "unexpected token") and refuse to load
+// the zone, or silently drop trailing records. PersistZone is
+// invoked from API mutations (zone add/remove/update) and from the
+// catalog/IXFR paths, so this fronts every write that ever lands
+// in `zoneDir`.
 func (m *Manager) writeZoneFile(z *Zone, path string) error {
 	content, err := WriteZone(z)
 	if err != nil {
@@ -605,7 +613,41 @@ func (m *Manager) writeZoneFile(z *Zone, path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, []byte(content), 0644)
+	tmp, err := os.CreateTemp(dir, ".zone-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if err := os.Chmod(tmpName, 0644); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	cleanup = false
+	if dirFd, err := os.Open(dir); err == nil {
+		_ = dirFd.Sync()
+		_ = dirFd.Close()
+	}
+	return nil
 }
 
 // PersistZone writes a zone file to disk if zoneDir is configured.
