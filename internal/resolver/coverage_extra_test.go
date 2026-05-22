@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -750,6 +751,68 @@ func TestCacheResponse_NilCache(t *testing.T) {
 			makeARR("example.com.", "1.2.3.4"),
 		},
 	}, ".")
+}
+
+// TestCacheResponse_SideRecordQuestionRewritten verifies the
+// resolver's per-owner side-record cache stores a *synthesized*
+// message whose question section matches the cache key, not the
+// original upstream response's question section. Pre-fix, a
+// cache entry keyed by (ns1.example., A) returned the original
+// msg whose Questions=[www.example. A], which the handler would
+// then echo to the client — RFC 1035 §4.1.1 says the response's
+// question section MUST match the query.
+func TestCacheResponse_SideRecordQuestionRewritten(t *testing.T) {
+	cache := newMockCache()
+	cfg := DefaultConfig()
+	cfg.AllowPrivateUpstream = true
+	r := NewResolver(cfg, cache, newMockTransport())
+
+	// Original upstream response: a query for www.example. returns
+	// an answer set including an A for ns1.example. (an in-bailiwick
+	// glue record the resolver should cache for later use).
+	qname, _ := protocol.ParseName("www.example.")
+	resp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess},
+		},
+		Questions: []*protocol.Question{
+			{Name: qname, QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+	resp.AddAnswer(makeARR("www.example.", "192.0.2.1"))
+	resp.AddAnswer(makeARR("ns1.example.", "192.0.2.53"))
+
+	// Cache it. zoneCut is "example." so both records are in-bailiwick.
+	r.cacheResponse("www.example.", protocol.TypeA, resp, "example.")
+
+	// The primary entry under (www.example., A) carries the original
+	// question — that's fine, key matches question.
+	primary := cache.Get(cacheKey("www.example.", protocol.TypeA))
+	if primary == nil {
+		t.Fatal("missing primary cache entry for www.example.")
+	}
+	if len(primary.Message.Questions) != 1 ||
+		!strings.EqualFold(primary.Message.Questions[0].Name.String(), "www.example.") {
+		t.Errorf("primary cache question = %v, want www.example.",
+			primary.Message.Questions)
+	}
+
+	// The side entry under (ns1.example., A) MUST have its question
+	// section rewritten to ns1.example., not the original www.example.
+	side := cache.Get(cacheKey("ns1.example.", protocol.TypeA))
+	if side == nil {
+		t.Fatal("missing side cache entry for ns1.example.")
+	}
+	if len(side.Message.Questions) != 1 {
+		t.Fatalf("side cache question count = %d, want 1", len(side.Message.Questions))
+	}
+	if got := side.Message.Questions[0].Name.String(); !strings.EqualFold(got, "ns1.example.") {
+		t.Errorf("side cache question = %q, want ns1.example. (was the original www.example. — bug)", got)
+	}
+	// And the side entry's Answer must contain the ns1 record only.
+	if len(side.Message.Answers) != 1 {
+		t.Errorf("side cache answer count = %d, want 1 (only ns1.example.)", len(side.Message.Answers))
+	}
 }
 
 func TestCacheResponse_ZeroTTL(t *testing.T) {

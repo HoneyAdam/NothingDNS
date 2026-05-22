@@ -655,6 +655,14 @@ func (r *Resolver) cacheResponse(name string, qtype uint16, msg *protocol.Messag
 	// lookups — but only for records in-bailiwick of the serving zone. A record
 	// whose owner falls outside zoneCut was not within the answering server's
 	// authority and must not be trusted for any other name.
+	//
+	// We must NOT store the original `msg` under (owner, A/AAAA) because the
+	// message's question section is still for `name`, not `owner`. When the
+	// handler later replies from this cached entry the response carries a
+	// question section that disagrees with what the client actually asked
+	// (RFC 1035 §4.1.1) — a real bug for clients that strict-match. Build a
+	// synthesized per-owner message instead, containing just the matching
+	// answer records and a correct question section.
 	for _, rr := range msg.Answers {
 		switch rr.Type {
 		case protocol.TypeA, protocol.TypeAAAA:
@@ -668,14 +676,56 @@ func (r *Resolver) cacheResponse(name string, qtype uint16, msg *protocol.Messag
 		switch rr.Type {
 		case protocol.TypeA:
 			if _, ok := rr.Data.(*protocol.RDataA); ok {
-				r.cache.Set(cacheKey(owner, protocol.TypeA), msg, rr.TTL)
+				if synth := synthesizeSideRecord(owner, protocol.TypeA, msg); synth != nil {
+					r.cache.Set(cacheKey(owner, protocol.TypeA), synth, rr.TTL)
+				}
 			}
 		case protocol.TypeAAAA:
 			if _, ok := rr.Data.(*protocol.RDataAAAA); ok {
-				r.cache.Set(cacheKey(owner, protocol.TypeAAAA), msg, rr.TTL)
+				if synth := synthesizeSideRecord(owner, protocol.TypeAAAA, msg); synth != nil {
+					r.cache.Set(cacheKey(owner, protocol.TypeAAAA), synth, rr.TTL)
+				}
 			}
 		}
 	}
+}
+
+// synthesizeSideRecord builds a per-owner DNS response carrying only
+// the A/AAAA records matching (owner, qtype) from `src`, plus a
+// question section for that exact (owner, qtype). Returns nil if no
+// matching record is present. Used by cacheResponse to avoid cross-
+// contaminating the cache with messages whose question section
+// disagrees with the cache key.
+func synthesizeSideRecord(owner string, qtype uint16, src *protocol.Message) *protocol.Message {
+	qname, err := protocol.ParseName(owner)
+	if err != nil {
+		return nil
+	}
+	resp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+		Questions: []*protocol.Question{
+			{Name: qname, QType: qtype, QClass: protocol.ClassIN},
+		},
+	}
+	resp.Header.Flags.QR = true
+	resp.Header.Flags.RA = true
+	for _, rr := range src.Answers {
+		if rr.Type != qtype {
+			continue
+		}
+		if !strings.EqualFold(rr.Name.String(), owner) {
+			continue
+		}
+		resp.Answers = append(resp.Answers, rr)
+	}
+	if len(resp.Answers) == 0 {
+		return nil
+	}
+	resp.Header.QDCount = uint16(len(resp.Questions))
+	resp.Header.ANCount = uint16(len(resp.Answers))
+	return resp
 }
 
 // cacheNegative stores a negative (NXDOMAIN/NODATA) cache entry.
