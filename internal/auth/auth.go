@@ -352,14 +352,32 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 	if time.Now().After(token.ExpiresAt) {
 		s.mu.RUnlock()
 		s.mu.Lock()
-		delete(s.tokens, tokenStr)
-		s.activeSessions[token.Username]--
+		// Re-check token presence under the write lock. Two concurrent
+		// ValidateToken calls can both observe the expired token under
+		// the read lock, both drop and re-acquire the write lock, and
+		// both reach this decrement — double-decrementing activeSessions
+		// (which can drive the int counter negative and either lock the
+		// user out of new sessions via the max-sessions cap or pass it
+		// when they shouldn't, depending on signedness handling). Make
+		// the cleanup idempotent.
+		if _, stillPresent := s.tokens[tokenStr]; stillPresent {
+			delete(s.tokens, tokenStr)
+			if s.activeSessions[token.Username] > 0 {
+				s.activeSessions[token.Username]--
+			}
+		}
 		s.mu.Unlock()
 		return nil, fmt.Errorf("token expired")
 	}
 
-	// Update LastAccess timestamp
-	token.LastAccess = time.Now()
+	// Note: LastAccess is informational only (never used for expiry
+	// or revocation decisions). Previously this hot path mutated
+	// token.LastAccess under the read lock, which is a data race —
+	// time.Time is multi-word (wall, ext, loc) and concurrent
+	// validators could read a torn value. Skipping the update keeps
+	// the read lock semantics honest; if a future feature needs
+	// last-access for idle-session detection, switch the storage to
+	// an atomic.Int64 of UnixNano or move the write under s.mu.Lock.
 
 	user, ok := s.users[token.Username]
 	s.mu.RUnlock()
