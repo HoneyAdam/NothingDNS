@@ -783,6 +783,37 @@ func TestFormatSSEWithOnlyData(t *testing.T) {
 	}
 }
 
+// TestFormatSSE_MultilineData verifies that a Data payload
+// containing literal newlines is emitted as one `data:` line per
+// segment, matching WHATWG §9.2.6. The previous implementation
+// emitted a single `data:` line followed by raw subsequent lines
+// that the SSE dispatcher would parse as orphan fields or as a
+// premature event terminator.
+func TestFormatSSE_MultilineData(t *testing.T) {
+	event := SSEEvent{
+		Event: "log",
+		Data:  "line one\nline two\nline three",
+	}
+	got := FormatSSE(event)
+	want := "event: log\ndata: line one\ndata: line two\ndata: line three\n\n"
+	if got != want {
+		t.Errorf("multiline Data:\n got:  %q\n want: %q", got, want)
+	}
+}
+
+// TestFormatSSE_PrettyJSON: pretty-printed JSON (multiple lines)
+// also must produce well-formed multi-line SSE so the receiver
+// can reassemble the original payload by joining the data lines
+// on '\n'.
+func TestFormatSSE_PrettyJSON(t *testing.T) {
+	event := SSEEvent{Data: "{\n  \"a\": 1\n}"}
+	got := FormatSSE(event)
+	want := "data: {\ndata:   \"a\": 1\ndata: }\n\n"
+	if got != want {
+		t.Errorf("pretty json:\n got:  %q\n want: %q", got, want)
+	}
+}
+
 func TestSSETransport(t *testing.T) {
 	handler := &MockHandler{}
 	server := NewServer("test-server", "1.0.0", handler)

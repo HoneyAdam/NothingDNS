@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -568,20 +569,38 @@ func (t *SSETransport) HandleMessage(ctx context.Context, data []byte) ([]byte, 
 	return json.Marshal(resp)
 }
 
-// FormatSSE formats an event for SSE
+// FormatSSE formats an event for SSE.
+//
+// Per WHATWG HTML §9.2.6 the data payload must be emitted as one
+// `data:` line per logical line of content — the parser concatenates
+// consecutive `data:` lines (each delimited by a single LF) and
+// treats a blank line as the end-of-event marker. The previous
+// implementation slammed event.Data into a single `data:` line and
+// terminated with "\n\n", so any payload containing a literal '\n'
+// (a pretty-printed JSON blob, a multi-line log message) emitted
+// raw second-and-subsequent lines that the receiver would parse as
+// orphan tokens — at best dropped, at worst causing event-boundary
+// confusion.
 func FormatSSE(event SSEEvent) string {
-	result := ""
+	var b strings.Builder
 	if event.ID != "" {
-		result += fmt.Sprintf("id: %s\n", event.ID)
+		fmt.Fprintf(&b, "id: %s\n", event.ID)
 	}
 	if event.Event != "" {
-		result += fmt.Sprintf("event: %s\n", event.Event)
+		fmt.Fprintf(&b, "event: %s\n", event.Event)
 	}
 	if event.Retry > 0 {
-		result += fmt.Sprintf("retry: %d\n", event.Retry)
+		fmt.Fprintf(&b, "retry: %d\n", event.Retry)
 	}
-	result += fmt.Sprintf("data: %s\n\n", event.Data)
-	return result
+	// Split on LF and emit one `data:` line per chunk. A trailing
+	// empty element from `strings.Split` on "x\n" is preserved so
+	// the receiver sees the original "x\n" data after rejoining,
+	// matching the WHATWG dispatcher.
+	for _, line := range strings.Split(event.Data, "\n") {
+		fmt.Fprintf(&b, "data: %s\n", line)
+	}
+	b.WriteByte('\n') // event terminator (blank line)
+	return b.String()
 }
 
 // ParseTimestamp parses an RFC 3339 timestamp
