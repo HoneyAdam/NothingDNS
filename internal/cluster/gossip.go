@@ -1656,6 +1656,20 @@ func (gp *GossipProtocol) decodeMessage(data []byte, msg *Message) error {
 		}
 	}
 
+	// Reject incompatible protocol versions BEFORE bumping the
+	// per-sender sequence tracker. The previous order let any party
+	// who could send a high-sequence message (legitimate node running
+	// a newer protocol, or an attacker with valid AAD) poison our
+	// sequences map: we'd advance the high-water mark past `lastSeq`
+	// to msg.Sequence, then reject the message on version. Legitimate
+	// future v-matching messages from that sender at the old sequence
+	// then get refused as replays — a self-inflicted partition.
+	if msg.ProtocolVersion != 0 && msg.ProtocolVersion != gp.config.ProtocolVersion {
+		util.Warnf("gossip: dropped message from node %s: protocol version %d != our version %d",
+			msg.From, msg.ProtocolVersion, gp.config.ProtocolVersion)
+		return fmt.Errorf("incompatible protocol version")
+	}
+
 	// VULN-045: Replay protection via per-sender high-water mark.
 	if msg.ProtocolVersion != 0 {
 		gp.sequenceMu.Lock()
@@ -1666,12 +1680,6 @@ func (gp *GossipProtocol) decodeMessage(data []byte, msg *Message) error {
 		}
 		gp.sequences[msg.From] = msg.Sequence
 		gp.sequenceMu.Unlock()
-	}
-
-	if msg.ProtocolVersion != 0 && msg.ProtocolVersion != gp.config.ProtocolVersion {
-		util.Warnf("gossip: dropped message from node %s: protocol version %d != our version %d",
-			msg.From, msg.ProtocolVersion, gp.config.ProtocolVersion)
-		return fmt.Errorf("incompatible protocol version")
 	}
 
 	return nil
