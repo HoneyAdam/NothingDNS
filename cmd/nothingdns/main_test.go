@@ -8458,6 +8458,30 @@ func TestLoadCacheFromKV_Nil(t *testing.T) {
 	cm.LoadCacheFromKV(nil)
 }
 
+func TestBindEntryToAddr(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		port int
+		want string
+	}{
+		{"bare ipv4 + port", "127.0.0.1", 5353, "127.0.0.1:5353"},
+		{"bare ipv6 bracketed + port", "[::1]", 5353, "[::1]:5353"},
+		{"already host:port preserved", "127.0.0.1:15353", 53, "127.0.0.1:15353"},
+		{"colon-port-only preserved", ":15353", 53, ":15353"},
+		{"ipv6 host:port preserved", "[::1]:15353", 53, "[::1]:15353"},
+		{"empty host + port", "", 53, ":53"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bindEntryToAddr(tc.in, tc.port)
+			if got != tc.want {
+				t.Errorf("bindEntryToAddr(%q, %d) = %q, want %q", tc.in, tc.port, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNewZoneManager_KVStoreOpenError(t *testing.T) {
 	// Use a path that storage.OpenKVStore will reject
 	cfg := config.DefaultConfig()

@@ -573,14 +573,14 @@ func run() error {
 	if len(cfg.Server.UDPBind) > 0 {
 		udpAddr = cfg.Server.UDPBind[0]
 	} else if len(cfg.Server.Bind) > 0 {
-		udpAddr = net.JoinHostPort(cfg.Server.Bind[0], fmt.Sprintf("%d", cfg.Server.Port))
+		udpAddr = bindEntryToAddr(cfg.Server.Bind[0], cfg.Server.Port)
 	}
 
 	tcpAddr := defaultAddr
 	if len(cfg.Server.TCPBind) > 0 {
 		tcpAddr = cfg.Server.TCPBind[0]
 	} else if len(cfg.Server.Bind) > 0 {
-		tcpAddr = net.JoinHostPort(cfg.Server.Bind[0], fmt.Sprintf("%d", cfg.Server.Port))
+		tcpAddr = bindEntryToAddr(cfg.Server.Bind[0], cfg.Server.Port)
 	}
 
 	udpServer := server.NewUDPServerWithWorkers(udpAddr, handler, cfg.Server.UDPWorkers)
@@ -1108,6 +1108,28 @@ func validateConfigOnly(path string) error {
 }
 
 // sdNotifySend sends a notification to systemd via unix sock.
+// bindEntryToAddr turns a `server.bind` list entry into a listener
+// address. The historical implementation always called
+// net.JoinHostPort(entry, port), which silently wrapped an entry
+// that already carried a port (e.g. ":15353" or "127.0.0.1:5353")
+// into nonsense like "[:15353]:53" — UDP/TCP startup then failed
+// with "lookup :15353" because the result was treated as an IPv6
+// host. We now accept both forms: if the entry already parses as
+// host:port we use it as-is; otherwise we treat it as a bare host
+// and join it with the configured port. IPv6 literals must already
+// be bracket-wrapped per RFC 3986 to disambiguate from host:port.
+func bindEntryToAddr(entry string, port int) string {
+	if _, _, err := net.SplitHostPort(entry); err == nil {
+		return entry
+	}
+	// Strip outer brackets if a user supplied "[::1]" — JoinHostPort
+	// would re-bracket and produce "[[::1]]:port".
+	if len(entry) >= 2 && entry[0] == '[' && entry[len(entry)-1] == ']' {
+		entry = entry[1 : len(entry)-1]
+	}
+	return net.JoinHostPort(entry, fmt.Sprintf("%d", port))
+}
+
 func sdNotifySend(socket string) error {
 	// Try NOTIFY_SOCKET environment variable first, then explicit path
 	notifySocket := socket
