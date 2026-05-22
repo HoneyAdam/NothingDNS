@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -90,23 +91,13 @@ func cmdZone(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl zone export <zone>")
 		}
 		zoneName := args[1]
-		result, err := apiGet("/api/v1/zones/" + zoneName + "/export")
+		body, err := apiGetRaw("/api/v1/zones/" + zoneName + "/export")
 		if err != nil {
 			return err
 		}
-		if content, ok := result["content"].(string); ok {
-			fmt.Print(content)
-		} else {
-			// fallback: print entire response as raw text
-			for k, v := range result {
-				if k == "content" || k == "zone" || k == "data" {
-					if s, ok := v.(string); ok {
-						fmt.Print(s)
-						return nil
-					}
-				}
-			}
-			fmt.Println(result)
+		os.Stdout.Write(body)
+		if len(body) > 0 && body[len(body)-1] != '\n' {
+			fmt.Println()
 		}
 
 	default:

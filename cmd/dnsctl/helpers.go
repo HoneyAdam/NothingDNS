@@ -58,6 +58,40 @@ func apiGet(path string) (map[string]interface{}, error) {
 	return apiRequest("GET", path, "")
 }
 
+// apiGetRaw issues a GET and returns the raw response body bytes,
+// for endpoints that don't return JSON (e.g. /zones/{name}/export
+// emits BIND-format zone text with application/x-zone-file). Auth
+// and base URL handling match apiRequest.
+func apiGetRaw(path string) ([]byte, error) {
+	url := strings.TrimRight(globalFlags.Server, "/") + path
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if globalFlags.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+globalFlags.APIKey)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading response body: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errResp map[string]interface{}
+		if json.Unmarshal(respBody, &errResp) == nil {
+			if msg, ok := errResp["error"].(string); ok {
+				return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, msg)
+			}
+		}
+		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(respBody))
+	}
+	return respBody, nil
+}
+
 func apiPost(path, body string) (map[string]interface{}, error) {
 	return apiRequest("POST", path, body)
 }

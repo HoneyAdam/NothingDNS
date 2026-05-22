@@ -93,6 +93,15 @@ func cmdConfig(args []string) error {
 		if err != nil {
 			return err
 		}
+		if len(args) >= 2 && args[1] != "" {
+			key := args[1]
+			val, ok := lookupConfigPath(result, key)
+			if !ok {
+				return fmt.Errorf("no such config key: %s", key)
+			}
+			printJSON(key, val, "")
+			return nil
+		}
 		fmt.Println("Server Configuration:")
 		printJSON("config", result, "  ")
 
@@ -109,6 +118,38 @@ func cmdConfig(args []string) error {
 		return fmt.Errorf("unknown config subcommand: %s (supported: get, reload)", args[0])
 	}
 	return nil
+}
+
+// lookupConfigPath walks a dot-separated path through a decoded JSON
+// map / slice tree. Path segments are compared case-insensitively
+// because the server may marshal struct fields with PascalCase keys
+// (e.g. "Server.Port") while users expect dotted lowercase
+// ("server.port"). Returns the leaf value and true on a clean walk.
+func lookupConfigPath(root interface{}, dotted string) (interface{}, bool) {
+	if dotted == "" {
+		return root, true
+	}
+	parts := strings.Split(dotted, ".")
+	cur := root
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]interface{}:
+			found := false
+			for k, vv := range v {
+				if strings.EqualFold(k, p) {
+					cur = vv
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, false
+			}
+		default:
+			return nil, false
+		}
+	}
+	return cur, true
 }
 
 func cmdServer(args []string) error {
