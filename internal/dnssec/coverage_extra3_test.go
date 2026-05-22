@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1302,55 +1303,82 @@ func TestValidateTrustAnchor_AlgorithmMismatch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidateNegativeResponse_NSEC3Secure(t *testing.T) {
-	t.Skip("NSEC3 closest-encloser proof requires full RFC 5155 §8 implementation; the current validator demands ≥2 distinct NSEC3 owners (a strict superset of single-proof) but constructing a synthetic two-owner test that passes the hash-range check requires more setup. Tracked as TODO for the NSEC3 hardening pass.")
-	// RFC 5155 §8 requires multiple NSEC3 proofs for NXDOMAIN (closest-
-	// encloser + next-closer cover + wildcard cover). The current validator
-	// approximates this by demanding ≥ 2 distinct NSEC3 owners — strictly
-	// less than the full three-proof algorithm but enough to defeat the
-	// single-NSEC3 forgery primitive. Provide two distinct NSEC3 records.
+	// Full RFC 5155 §8.4 closest-encloser proof for NXDOMAIN.
+	//
+	// Query: test.example.com (type MX), NXDOMAIN.
+	// Closest encloser: example.com (must hash-match an NSEC3 owner).
+	// Next closer:     test.example.com (must fall in an NSEC3 range).
+	// Wildcard cover:  *.example.com   (must fall in an NSEC3 range).
+	//
+	// Three separate NSEC3 records provide each sub-proof. To avoid the
+	// dance of computing precise ranges from SHA-1 hashes, the "cover"
+	// records use the degenerate owner == next encoding (RFC 5155 §6.1)
+	// which covers every hash except its own.
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 
 	queryName := "test.example.com."
-	hashed, err := NSEC3Hash(queryName, 1, 0, nil)
-	if err != nil {
-		t.Fatalf("NSEC3Hash: %v", err)
-	}
-	encoded := encodeBase32Hex(hashed)
-	ownerName1 := encoded + ".example.com."
-	nextHash := make([]byte, len(hashed))
-	copy(nextHash, hashed)
-	nextHash[0]++
-	nsec3a := &protocol.RDataNSEC3{
-		HashAlgorithm: 1, Iterations: 0, Salt: nil,
-		HashLength: uint8(len(nextHash)), NextHashed: nextHash,
-		TypeBitMap: []uint16{protocol.TypeA},
+	hashEnc := func(name string) ([]byte, string) {
+		raw, err := NSEC3Hash(name, 1, 0, nil)
+		if err != nil {
+			t.Fatalf("NSEC3Hash(%q): %v", name, err)
+		}
+		return raw, strings.ToUpper(protocol.Base32Encode(raw))
 	}
 
-	// Second NSEC3 with a different owner — represents wildcard /
-	// closest-encloser cover. The exact range is not validated to the full
-	// RFC 5155 §8 standard here; the distinct-owner requirement alone
-	// blocks the single-record replay forgery.
-	nextHash2 := make([]byte, len(hashed))
-	copy(nextHash2, hashed)
-	nextHash2[0] += 2
-	otherHashOwner := "00000000000000000000000000000001.example.com."
-	nsec3b := &protocol.RDataNSEC3{
+	// Closest encloser hash.
+	ceRaw, ceEnc := hashEnc("example.com.")
+
+	// Owner names follow base32hex(hash) + "." + zone form.
+	closestEncloserOwner := ceEnc + ".example.com."
+
+	// rr1 — closest encloser: owner_hash exactly matches H(example.com).
+	// Use a tight degenerate range so this record only proves the exact
+	// match and does not accidentally also cover the next-closer hash
+	// (which would still be fine here, but keep proofs distinct).
+	rr1Data := &protocol.RDataNSEC3{
 		HashAlgorithm: 1, Iterations: 0, Salt: nil,
-		HashLength: uint8(len(nextHash2)), NextHashed: nextHash2,
+		HashLength: uint8(len(ceRaw)), NextHashed: ceRaw,
+		TypeBitMap: []uint16{protocol.TypeNS, protocol.TypeSOA},
+	}
+
+	// rr2 — next-closer cover (covers H("test.example.com")). Use a
+	// degenerate "covers everything except own hash" record. Choose an
+	// owner hash that is NOT equal to H(test.example.com).
+	otherOwner := "00000000000000000000000000000001.example.com."
+	otherRaw := make([]byte, len(ceRaw))
+	otherRaw[len(otherRaw)-1] = 0x01
+	rr2Data := &protocol.RDataNSEC3{
+		HashAlgorithm: 1, Iterations: 0, Salt: nil,
+		HashLength: uint8(len(otherRaw)), NextHashed: otherRaw,
 		TypeBitMap: []uint16{},
 	}
 
-	owner1, _ := protocol.ParseName(ownerName1)
-	owner2, _ := protocol.ParseName(otherHashOwner)
-	rr1 := &protocol.ResourceRecord{Name: owner1, Type: protocol.TypeNSEC3, Class: protocol.ClassIN, Data: nsec3a}
-	rr2 := &protocol.ResourceRecord{Name: owner2, Type: protocol.TypeNSEC3, Class: protocol.ClassIN, Data: nsec3b}
+	// rr3 — wildcard cover (covers H("*.example.com")). Same trick.
+	yetAnotherOwner := "00000000000000000000000000000002.example.com."
+	yetAnotherRaw := make([]byte, len(ceRaw))
+	yetAnotherRaw[len(yetAnotherRaw)-1] = 0x02
+	rr3Data := &protocol.RDataNSEC3{
+		HashAlgorithm: 1, Iterations: 0, Salt: nil,
+		HashLength: uint8(len(yetAnotherRaw)), NextHashed: yetAnotherRaw,
+		TypeBitMap: []uint16{},
+	}
+
+	mkRR := func(name string, d *protocol.RDataNSEC3) *protocol.ResourceRecord {
+		n, _ := protocol.ParseName(name)
+		return &protocol.ResourceRecord{
+			Name: n, Type: protocol.TypeNSEC3, Class: protocol.ClassIN, Data: d,
+		}
+	}
+	rr1 := mkRR(closestEncloserOwner, rr1Data)
+	rr2 := mkRR(otherOwner, rr2Data)
+	rr3 := mkRR(yetAnotherOwner, rr3Data)
 
 	questionName, _ := protocol.ParseName(queryName)
 	msg := &protocol.Message{
 		Header: protocol.Header{
 			Flags: protocol.NewResponseFlags(protocol.RcodeNameError),
 		},
-		Authorities: []*protocol.ResourceRecord{rr1, rr2},
+		Authorities: []*protocol.ResourceRecord{rr1, rr2, rr3},
 		Questions: []*protocol.Question{
 			{Name: questionName, QType: protocol.TypeMX},
 		},
@@ -1359,7 +1387,7 @@ func TestValidateNegativeResponse_NSEC3Secure(t *testing.T) {
 	chain := []*chainLink{{zone: "example.com.", validated: true}}
 	result := v.validateNegativeResponse(msg, queryName, chain)
 	if result != ValidationSecure {
-		t.Errorf("expected SECURE for NSEC3-proved negative response with two distinct proofs, got %s", result)
+		t.Errorf("expected SECURE for NSEC3 closest-encloser proof, got %s", result)
 	}
 }
 

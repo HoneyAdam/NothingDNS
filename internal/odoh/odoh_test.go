@@ -443,13 +443,15 @@ func TestObliviousTargetServeHTTPGET(t *testing.T) {
 }
 
 func TestObliviousTargetServeHTTPPostBadRequest(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	// Empty body should fail at the ODoH message parse step → 400.
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
-	target := &ObliviousTarget{config: cfg}
+	target, err := NewObliviousTarget(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewObliviousTarget: %v", err)
+	}
 
-	// Empty body should fail parsing
 	req := httptest.NewRequest("POST", "http://test/", strings.NewReader(""))
-	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Content-Type", "application/oblivious-dns-message")
 	w := httptest.NewRecorder()
 
 	target.ServeHTTP(w, req)
@@ -723,7 +725,7 @@ func (h *mockHandler) ServeDNS(w server.ResponseWriter, req *protocol.Message) {
 }
 
 func TestObliviousTargetServeHTTPWithHandler(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 
 	// Create a mock DNS response using the protocol helpers

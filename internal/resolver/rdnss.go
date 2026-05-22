@@ -7,6 +7,7 @@ package resolver
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -167,20 +168,30 @@ func (d *DNSSLOption) Validate() error {
 	return nil
 }
 
-// ToTLV converts DNSSL option to TLV format for Router Advertisements.
+// ToTLV converts DNSSL option to TLV format for Router Advertisements
+// (RFC 8106 §5.2). Each search domain is encoded as a wire-format DNS
+// name (length-prefixed labels) with a trailing zero terminator. The
+// Length field reports the entire option size in 8-byte units, padded
+// to a multiple of 8 per RFC 8106.
 func (d *DNSSLOption) ToTLV() *DNSSLTLV {
-	// Calculate length: 1 (type) + 1 (length) + 4 (lifetime) + encoded_domains
+	// 2 bytes (type+length) + 2 reserved + 4 (lifetime) + encoded domains
+	// (per RFC 8106 §5.2 the option header is type+length+reserved+lifetime
+	// = 8 bytes before the domain list).
 	encodedLen := 0
 	for _, domain := range d.SearchDomains {
-		encodedLen += encodeDNSSLLabel(domain) // placeholder
+		encodedLen += encodeDNSSLDomain(domain)
+		encodedLen += 1 // per-domain zero terminator (RFC 1035 §3.1)
 	}
-	encodedLen += 1 // null terminator
 
-	length := 1 + 1 + 4 + encodedLen
+	totalBytes := 8 + encodedLen
+	// Pad to 8-byte boundary.
+	if pad := totalBytes % 8; pad != 0 {
+		totalBytes += 8 - pad
+	}
 
 	return &DNSSLTLV{
 		Type:          32, // DNSSL option type
-		Length:        uint8(length / 8),
+		Length:        uint8(totalBytes / 8),
 		Lifetime:      d.Lifetime,
 		SearchDomains: d.SearchDomains,
 	}
@@ -206,11 +217,23 @@ func ParseDNSSLOption(tlv *DNSSLTLV) (*DNSSLOption, error) {
 	}, nil
 }
 
-// encodeDNSSLLabel encodes a single domain label for DNSSL.
-func encodeDNSSLLabel(label string) int {
-	// Labels are encoded as: length byte + label bytes
-	// Each label ends with a length byte, except the last which is 0
-	return 1 + len(label)
+// encodeDNSSLDomain returns the wire-format byte count of a DNS domain
+// encoded for DNSSL: each label prefixed by its length per RFC 1035
+// §3.1. The caller appends a single 0 terminator byte per domain.
+//
+// "example"      → 8  (1+7)
+// "example.com"  → 12 (1+7 + 1+3)
+// ""             → 0  (caller still appends terminator)
+func encodeDNSSLDomain(domain string) int {
+	domain = strings.TrimSuffix(domain, ".")
+	if domain == "" {
+		return 0
+	}
+	n := 0
+	for _, label := range strings.Split(domain, ".") {
+		n += 1 + len(label)
+	}
+	return n
 }
 
 // IsExpired returns true if the DNSSL option has expired.

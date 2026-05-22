@@ -604,12 +604,22 @@ func TestParseDNSSLOptionInvalidType(t *testing.T) {
 	}
 }
 
-func TestEncodeDNSSLLabel(t *testing.T) {
-	// Each label is encoded as length byte + label bytes
-	if n := encodeDNSSLLabel("example"); n != 8 { // 1 + 7
-		t.Errorf("encodeDNSSLLabel(example) = %d, want 8", n)
+func TestEncodeDNSSLDomain(t *testing.T) {
+	// Wire format per RFC 1035 §3.1: each label prefixed by its length.
+	// Caller appends the trailing zero terminator separately.
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"example", 8},      // [7]example
+		{"example.com", 12}, // [7]example[3]com
+		{"a.b.c.d", 8},      // [1]a[1]b[1]c[1]d
+		{"", 0},
+		{"trailing.dot.", 13}, // [8]trailing[3]dot (trailing root dot stripped)
 	}
-	if n := encodeDNSSLLabel(""); n != 1 {
-		t.Errorf("encodeDNSSLLabel(\"\") = %d, want 1", n)
+	for _, c := range cases {
+		if n := encodeDNSSLDomain(c.in); n != c.want {
+			t.Errorf("encodeDNSSLDomain(%q) = %d, want %d", c.in, n, c.want)
+		}
 	}
 }

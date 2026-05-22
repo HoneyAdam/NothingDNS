@@ -229,33 +229,51 @@ func (ci *ClusterIntegration) ProposeZoneChange(cmd ZoneCommand) error {
 	return nil
 }
 
-// GetLeaderID returns the current leader's node ID, or empty if unknown.
+// GetLeaderID returns the current leader's node ID. If this node is the
+// leader, returns its own ID; otherwise returns the leader ID learned
+// via AppendEntries, or "" if no leader has been observed yet.
 func (ci *ClusterIntegration) GetLeaderID() NodeID {
 	ci.mu.RLock()
-	defer ci.mu.RUnlock()
+	isLdr := ci.isLeader
+	ci.mu.RUnlock()
 
-	if ci.isLeader {
+	if isLdr {
 		return ci.nodeID
 	}
-	// In real implementation, would track who we think the leader is
-	return ""
+	return ci.node.LeaderID()
 }
 
-// AddNode proposes adding a new node to the Raft cluster using joint consensus.
-// Returns an error if this node is not the leader or if another config change is pending.
+// ErrNotLeader is returned by AddNode/RemoveNode when this node is not
+// the Raft leader. Callers can read LeaderID to redirect the request
+// to the right node. LeaderID is "" if no leader has been observed yet
+// (the cluster may be in an election).
+type ErrNotLeader struct {
+	LeaderID NodeID
+}
+
+func (e *ErrNotLeader) Error() string {
+	if e.LeaderID == "" {
+		return "raft: not the leader; leader unknown (cluster may be in election)"
+	}
+	return fmt.Sprintf("raft: not the leader; retry against %s", e.LeaderID)
+}
+
+// AddNode proposes adding a new node to the Raft cluster using joint
+// consensus. Returns *ErrNotLeader (with the known leader ID, when
+// available) if this node is not the leader.
 func (ci *ClusterIntegration) AddNode(nodeID NodeID, addr string) error {
 	if !ci.IsLeader() {
-		return fmt.Errorf("not the leader")
+		return &ErrNotLeader{LeaderID: ci.node.LeaderID()}
 	}
 
 	return ci.node.AddPeer(nodeID, addr)
 }
 
-// RemoveNode proposes removing a node from the Raft cluster.
-// Returns an error if this node is not the leader or if another config change is pending.
+// RemoveNode proposes removing a node from the Raft cluster. Returns
+// *ErrNotLeader when called on a follower.
 func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
 	if !ci.IsLeader() {
-		return fmt.Errorf("not the leader")
+		return &ErrNotLeader{LeaderID: ci.node.LeaderID()}
 	}
 
 	ci.node.mu.Lock()

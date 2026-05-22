@@ -719,35 +719,24 @@ func (c *Cluster) JoinSeed(seedAddr string) error {
 	return c.gossip.Join(seedAddr)
 }
 
-// AddNodeViaLeader proposes adding a node to the Raft cluster via the current leader.
-// Only works in Raft consensus mode.
+// AddNodeViaLeader proposes adding a node to the Raft cluster. Only
+// works in Raft consensus mode and only on the current leader. When
+// called on a follower returns *raft.ErrNotLeader carrying the known
+// leader's node ID so the caller can retry directly against it.
 func (c *Cluster) AddNodeViaLeader(nodeID raft.NodeID, addr string) error {
 	if c.consensus != ConsensusRaft || c.raft == nil {
 		return fmt.Errorf("not using Raft consensus")
 	}
-
-	// If we're the leader, propose directly
-	if c.raft.IsLeader() {
-		return c.raft.AddNode(nodeID, addr)
-	}
-
-	// In a full implementation, we would forward to the leader
-	return fmt.Errorf("not the leader; forward to leader not yet implemented")
+	return c.raft.AddNode(nodeID, addr)
 }
 
-// RemoveNodeViaLeader proposes removing a node from the Raft cluster via the current leader.
-// Only works in Raft consensus mode.
+// RemoveNodeViaLeader proposes removing a node from the Raft cluster.
+// Same redirect semantics as AddNodeViaLeader.
 func (c *Cluster) RemoveNodeViaLeader(nodeID raft.NodeID) error {
 	if c.consensus != ConsensusRaft || c.raft == nil {
 		return fmt.Errorf("not using Raft consensus")
 	}
-
-	// If we're the leader, propose directly
-	if c.raft.IsLeader() {
-		return c.raft.RemoveNode(nodeID)
-	}
-
-	return fmt.Errorf("not the leader; forward to leader not yet implemented")
+	return c.raft.RemoveNode(nodeID)
 }
 
 // LeaveCluster initiates graceful departure from the cluster.

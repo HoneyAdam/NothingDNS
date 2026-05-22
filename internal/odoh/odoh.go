@@ -101,6 +101,9 @@ type ObliviousTarget struct {
 	privKey []byte // Target's private key
 	pubKey  []byte // Target's public key
 	handler server.Handler
+	// keyPair holds the RFC 9230 / RFC 9180 HPKE state. Generated once
+	// in NewObliviousTarget; key rotation requires a fresh target.
+	keyPair *odohKeyPair
 }
 
 // odohResponseWriter captures a DNS response message from the handler.
@@ -378,106 +381,142 @@ func (p *ObliviousProxy) forwardToTarget(msg *ObliviousDNSMessage) ([]byte, erro
 	return respBody, nil
 }
 
-// NewObliviousTarget creates a new ODoH target resolver.
+// NewObliviousTarget creates a new ODoH target resolver. The target
+// generates an RFC 9180 HPKE key pair using the suite specified in the
+// config; only DHKEM-X25519 / HKDF-SHA256 / AES-128-GCM or AES-256-GCM
+// are supported (zero-dep policy excludes ChaCha20Poly1305).
+//
+// Returns an error if the requested KEM/KDF/AEAD combination is not
+// one of the supported suites.
 func NewObliviousTarget(config *ODoHConfig, handler server.Handler) (*ObliviousTarget, error) {
-	// Generate target's key pair
-	priv, pub, err := generateKeyPair(config.HPKEKEM)
-	if err != nil {
-		return nil, fmt.Errorf("generating key pair: %w", err)
+	if err := validateODoHSuite(config); err != nil {
+		return nil, fmt.Errorf("unsupported HPKE suite: %w", err)
 	}
-
+	kp, err := newODoHKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("generating HPKE key pair: %w", err)
+	}
 	return &ObliviousTarget{
 		config:  config,
-		privKey: priv,
-		pubKey:  pub,
+		privKey: kp.skR.Bytes(),
+		pubKey:  kp.pkRBytes,
 		handler: handler,
+		keyPair: kp,
 	}, nil
 }
 
-// ServeHTTP implements the HTTP handler for the target.
+// validateODoHSuite returns an error if the config's KEM/KDF/AEAD does
+// not name one of the supported HPKE suites.
+func validateODoHSuite(cfg *ODoHConfig) error {
+	if cfg.HPKEKEM != HPKEDHX25519 {
+		return fmt.Errorf("KEM %d not supported (only X25519 = %d)", cfg.HPKEKEM, HPKEDHX25519)
+	}
+	if cfg.HPKEKDF != HPKEKDFHKDFSHA256 {
+		return fmt.Errorf("KDF %d not supported (only HKDF-SHA256 = %d)", cfg.HPKEKDF, HPKEKDFHKDFSHA256)
+	}
+	if cfg.HPKEAEAD != HPKEAEADAES256GCM && cfg.HPKEAEAD != HPKEAEADAES128GCM {
+		return fmt.Errorf("AEAD %d not supported (only AES-128/256-GCM)", cfg.HPKEAEAD)
+	}
+	return nil
+}
+
+// HPKEAEADAES128GCM is exposed for callers selecting the AES-128-GCM
+// AEAD variant in ODoHConfig.
+const HPKEAEADAES128GCM = 3
+
+// ServeHTTP implements the HTTP handler for an ODoH target, conformant
+// to RFC 9230 / RFC 9180 (HPKE).
 //
-// F122: the current encapsulation code is NOT a conformant implementation
-// of RFC 9230 / RFC 9180 (HPKE). The KDF, AEAD key separation and message
-// framing all deviate from the spec — running this in production would
-// publish broken oblivious responses to compliant ODoH proxies (Cloudflare,
-// dnscrypt-proxy, …) and may leak query data to the proxy that ODoH is
-// meant to hide. Until a proper HPKE implementation lands, the target
-// refuses requests with a clear error so deployments cannot rely on
-// incorrect crypto.
+// Wire flow:
+//
+//  1. Proxy POSTs an ObliviousDoHMessage (type=0x01) to /dns-query.
+//  2. Target decrypts the inner DNS query via HPKE base mode setup with
+//     its long-lived recipient key.
+//  3. Target resolves the query through the configured server.Handler.
+//  4. Target re-encrypts the DNS response under a fresh AEAD key+nonce
+//     derived from the query plaintext (RFC 9230 §4.1.2) and returns
+//     it as an ObliviousDoHMessage (type=0x02).
+//
+// On any decode, decrypt, or resolution failure, HTTP 400 / 500 is
+// returned without leaking which step failed.
 func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	http.Error(w, "ODoH target disabled: implementation is not RFC 9230 / RFC 9180 (HPKE) conformant; tracked as F122", http.StatusServiceUnavailable)
-}
+	if t.keyPair == nil {
+		http.Error(w, "ODoH target not initialised", http.StatusServiceUnavailable)
+		return
+	}
 
-// serveHTTPInternal is the original (non-conformant) handler body, kept so
-// that internal unit tests of the message-framing path continue to compile
-// but unreachable from the HTTP surface.
-//
-//nolint:unused // retained for legacy test compatibility; F122 tracks real HPKE.
-func (t *ObliviousTarget) serveHTTPInternal(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
 	if err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Parse the oblivious DNS message
-	msg, err := parseProxyRequest(body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Decrypt the DNS query
-	dnsQuery, err := t.decapsulateQuery(msg)
+	dnsQuery, respCtx, err := t.keyPair.decryptQuery(body)
 	if err != nil {
 		http.Error(w, "Decryption error", http.StatusBadRequest)
 		return
 	}
 
-	// Unpack the DNS wire-format message
 	query, err := protocol.UnpackMessage(dnsQuery)
 	if err != nil {
 		http.Error(w, "Invalid DNS message", http.StatusBadRequest)
 		return
 	}
 
-	// Resolve the query through the handler
 	rw := &odohResponseWriter{}
 	(&server.ServeDNSWithRecovery{Handler: t.handler}).ServeDNS(rw, query)
-
 	if rw.response == nil {
 		http.Error(w, "Failed to process query", http.StatusInternalServerError)
 		return
 	}
 
-	// Pack the response to wire format
 	respLen := rw.response.WireLength()
 	buf := make([]byte, respLen)
-	_, err = rw.response.Pack(buf)
-	if err != nil {
+	if _, err := rw.response.Pack(buf); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
 
-	// Encrypt the DNS response back to the client
-	encryptedResponse, err := t.encapsulateResponse(dnsQuery, buf, msg)
+	encryptedResponse, err := respCtx.encryptResponse(buf)
 	if err != nil {
 		http.Error(w, "Encryption error", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/dns-message")
+	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	w.Write(encryptedResponse)
+	_, _ = w.Write(encryptedResponse)
 }
 
-// PublicKey returns the target's HPKE public key.
+// PublicKey returns the raw X25519 public key bytes. Most clients want
+// ConfigContents()/ConfigsObject() instead.
 func (t *ObliviousTarget) PublicKey() []byte {
 	return t.pubKey
+}
+
+// ConfigContents returns the marshaled ObliviousDoHConfigContents
+// (RFC 9230 §3.1) describing this target's HPKE suite and public key.
+// Suitable for clients that already know the version wrapper.
+func (t *ObliviousTarget) ConfigContents() []byte {
+	if t.keyPair == nil {
+		return nil
+	}
+	out := make([]byte, len(t.keyPair.configBytes))
+	copy(out, t.keyPair.configBytes)
+	return out
+}
+
+// ConfigsObject returns the version-wrapped ObliviousDoHConfigs object
+// (RFC 9230 §3) suitable for serving over /.well-known/odohconfigs.
+func (t *ObliviousTarget) ConfigsObject() []byte {
+	if t.keyPair == nil {
+		return nil
+	}
+	return t.keyPair.configsObject()
 }
 
 // decapsulateQuery decrypts a DNS query using HPKE.

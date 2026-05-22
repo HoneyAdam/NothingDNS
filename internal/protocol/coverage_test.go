@@ -970,19 +970,19 @@ func TestCalculateDSDigestSHA1(t *testing.T) {
 }
 
 func TestCalculateDSDigestGOST(t *testing.T) {
+	// GOST R 34.11-94 (DS digest type 3) is intentionally not implemented;
+	// see internal/protocol/dnssec_ds.go header comment. Confirm the
+	// honest-fail path returns an error rather than silently producing a
+	// non-conformant hash that could match either side of a forgery.
 	dnskey := &RDataDNSKEY{
 		Flags:     DNSKEYFlagZone,
 		Protocol:  3,
 		Algorithm: AlgorithmRSASHA256,
 		PublicKey: []byte{0x01, 0x02, 0x03, 0x04},
 	}
-	digest, err := CalculateDSDigest("example.com.", dnskey, 3) // GOST
-	if err != nil {
-		t.Fatalf("CalculateDSDigest(GOST) failed: %v", err)
-	}
-	// GOST R 34.11-94 produces a 32-byte hash
-	if len(digest) != 32 {
-		t.Errorf("GOST digest length = %d, want 32", len(digest))
+	_, err := CalculateDSDigest("example.com.", dnskey, 3)
+	if err == nil {
+		t.Fatal("expected error for digest type 3 (GOST); deprecated by RFC 8624 §3.2")
 	}
 }
 

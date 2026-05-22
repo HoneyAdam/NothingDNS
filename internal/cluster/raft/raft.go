@@ -177,6 +177,13 @@ type Node struct {
 	lastApplied  Index
 	lastSnapshot Index // Highest index included in snapshot
 
+	// leaderID is the most-recently-seen leader. Followers learn this
+	// from AppendEntries (req.LeaderID). Candidates clear it on start
+	// of an election; leaders set it to themselves on becomeLeader.
+	// Used so cluster-membership clients calling Add/Remove on a
+	// non-leader can be redirected to the right node.
+	leaderID NodeID
+
 	// Leader-specific volatile state
 	nextIndex  map[NodeID]Index // For each peer, the next log index to send
 	matchIndex map[NodeID]Index // For each peer, the highest replicated index
@@ -672,6 +679,13 @@ func (n *Node) HandleAppendRequest(req AppendRequest) AppendResponse {
 		n.advanceTermLocked(req.Term)
 	}
 
+	// The peer that successfully sends us AppendEntries for our current
+	// term IS the leader of that term. Remember it so callers asking
+	// "where do I retry a write?" can be answered.
+	if req.LeaderID != "" {
+		n.leaderID = req.LeaderID
+	}
+
 	if req.PrevLogIndex > 0 {
 		if int(req.PrevLogIndex) > len(n.log) {
 			return resp
@@ -806,6 +820,7 @@ func (n *Node) becomeFollower(term Term) {
 // becomeLeader transitions to leader state.
 func (n *Node) becomeLeader(term Term) {
 	n.state = StateLeader
+	n.leaderID = n.config.NodeID
 	n.leadershipCh <- LeadershipState{State: StateLeader, Term: term}
 
 	// Initialize nextIndex and matchIndex for all peers
@@ -1334,6 +1349,16 @@ func (n *Node) Term() Term {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.currentTerm
+}
+
+// LeaderID returns the most-recently-seen leader node ID, or "" if no
+// leader has been observed since startup (e.g. fresh follower waiting
+// for the first heartbeat). Followers learn the leader via
+// AppendEntries; leaders return their own ID.
+func (n *Node) LeaderID() NodeID {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.leaderID
 }
 
 // CommitIndex returns the current commit index.

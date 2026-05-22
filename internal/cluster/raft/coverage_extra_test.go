@@ -1836,3 +1836,60 @@ func TestHandleSnapshotRequestInternal(t *testing.T) {
 		t.Errorf("log should be cleared after snapshot install")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// LeaderID tracking: follower learns leader via AppendEntries; leader knows
+// itself; ErrNotLeader carries the redirect target.
+// ---------------------------------------------------------------------------
+
+func TestLeaderID_LearnedFromAppendEntries(t *testing.T) {
+	n := NewNode(Config{NodeID: "follower"}, []NodeID{"leader"}, nil)
+	if got := n.LeaderID(); got != "" {
+		t.Errorf("fresh follower should have empty LeaderID, got %q", got)
+	}
+
+	// Successful AppendEntries from "leader" should record it.
+	n.HandleAppendRequest(AppendRequest{
+		Term:         1,
+		LeaderID:     "leader",
+		PrevLogIndex: 0,
+	})
+	if got := n.LeaderID(); got != "leader" {
+		t.Errorf("after AppendEntries, LeaderID = %q, want %q", got, "leader")
+	}
+}
+
+func TestLeaderID_SelfOnBecomeLeader(t *testing.T) {
+	// becomeLeader has side effects (Propose, replicateToFollowers) that
+	// require full transport wiring; we only assert the leaderID
+	// assignment here by setting state directly the same way
+	// becomeLeader does.
+	n := NewNode(Config{NodeID: "me"}, []NodeID{"me"}, nil)
+	n.mu.Lock()
+	n.state = StateLeader
+	n.leaderID = n.config.NodeID
+	n.mu.Unlock()
+	if got := n.LeaderID(); got != "me" {
+		t.Errorf("leader's own LeaderID = %q, want %q", got, "me")
+	}
+}
+
+func TestErrNotLeader_ErrorMessages(t *testing.T) {
+	e1 := &ErrNotLeader{}
+	if msg := e1.Error(); msg == "" || !contains(msg, "leader unknown") {
+		t.Errorf("empty LeaderID error: %q", msg)
+	}
+	e2 := &ErrNotLeader{LeaderID: "node-3"}
+	if msg := e2.Error(); !contains(msg, "node-3") {
+		t.Errorf("known LeaderID error: %q (want to mention node-3)", msg)
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

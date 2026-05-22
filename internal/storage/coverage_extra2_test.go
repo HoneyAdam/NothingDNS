@@ -6,19 +6,65 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 // ---------------------------------------------------------------------------
-// kvstore.go:210-212 - Close with active write transaction
-// NOTE: Close() calls s.rwtx.Rollback() while holding s.mu.Lock(),
-// but Rollback() also acquires s.mu.Lock() -- this is a deadlock.
-// This path cannot be safely tested without fixing the source code.
+// Close-with-active-tx behaviour after F060
+//
+// Prior locking model: Close held s.mu while calling rwtx.Rollback(),
+// which also took s.mu → deadlock. F060 changed Begin to hold the store
+// lock for the lifetime of every transaction, so Close just blocks
+// waiting for in-flight tx to Commit/Rollback (which release the lock).
 // ---------------------------------------------------------------------------
 
-func TestKVStoreClose_WithActiveWriteTx(t *testing.T) {
-	t.Skip("Close with active rwtx causes deadlock: Close holds s.mu while calling rwtx.Rollback which also needs s.mu")
+func TestKVStoreClose_WaitsForActiveWriteTx(t *testing.T) {
+	dir := t.TempDir()
+	store, err := OpenKVStore(dir)
+	if err != nil {
+		t.Fatalf("OpenKVStore: %v", err)
+	}
+
+	// Begin a write tx in the foreground; it now holds the store lock
+	// until Commit/Rollback.
+	tx, err := store.Begin(true)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+
+	var (
+		closeDone  atomic.Bool
+		closeWG    sync.WaitGroup
+		closeStart = make(chan struct{})
+	)
+	closeWG.Add(1)
+	go func() {
+		defer closeWG.Done()
+		close(closeStart)
+		_ = store.Close()
+		closeDone.Store(true)
+	}()
+
+	// Wait for the Close goroutine to be scheduled, then confirm it is
+	// still blocked because we hold the write lock.
+	<-closeStart
+	time.Sleep(50 * time.Millisecond)
+	if closeDone.Load() {
+		_ = tx.Rollback()
+		t.Fatal("Close returned while a write tx is still in flight")
+	}
+
+	// Release the tx; Close should now complete.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	closeWG.Wait()
+	if !closeDone.Load() {
+		t.Fatal("Close did not complete after tx released the lock")
+	}
 }
 
 // ---------------------------------------------------------------------------

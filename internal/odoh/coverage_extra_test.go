@@ -466,7 +466,7 @@ func TestClientDecapsulateResponseCorrupted(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientQueryFullRoundTrip(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	// This test exercises the Query() method through encapsulate + sendToProxy
 	// via a mock proxy+target setup. Because decapsulateResponse does a self-ECDH
 	// (which differs from how the target encrypts), we only test the send side
@@ -641,7 +641,7 @@ func TestNewObliviousTargetUnsupportedKEM(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPDecryptionError(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	target, _ := NewObliviousTarget(cfg, &mockHandler{})
 
@@ -673,7 +673,7 @@ func TestObliviousTargetServeHTTPDecryptionError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPNilResponse(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	// mockHandler with nil response — handler does nothing
 	mh := &mockHandler{response: nil}
@@ -1138,7 +1138,7 @@ func TestEncryptDecryptWithAAD(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPFullSuccess(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 
 	// Create a DNS response the handler will return
@@ -1474,7 +1474,7 @@ func TestProxyForwardToTargetBadURL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestObliviousTargetServeHTTPBodyReadError(t *testing.T) {
-	t.Skip("F122: ODoH ServeHTTP returns 503 until RFC 9180 HPKE compliance lands")
+	t.Skip("legacy non-RFC-9230 wire format; superseded by TestRFC9230RoundTrip in rfc9230_test.go")
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	target, _ := NewObliviousTarget(cfg, &mockHandler{})
 
