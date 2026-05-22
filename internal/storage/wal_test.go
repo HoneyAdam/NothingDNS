@@ -276,6 +276,82 @@ func TestWALEntryEncoding(t *testing.T) {
 	}
 }
 
+// TestWALRecovery_PartialTrailingEntry simulates a power-loss crash
+// that left a torn entry at the end of the active segment: the
+// first valid entry is intact, then the file ends mid-header (or
+// mid-body) of what would have been the next entry. Recovery should
+// return the valid entries it can read and stop cleanly, rather
+// than failing the whole segment with "read header at N: unexpected
+// EOF" — which is what the pre-fix code did.
+func TestWALRecovery_PartialTrailingEntry(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("alpha")); err != nil {
+		t.Fatalf("Append alpha: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("beta")); err != nil {
+		t.Fatalf("Append beta: %v", err)
+	}
+	if err := wal.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	wal.Close()
+
+	// Find the active segment file and truncate the last few bytes
+	// to simulate a torn write. Any segment file in the dir works.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var segPath string
+	for _, e := range entries {
+		if !e.IsDir() {
+			segPath = filepath.Join(dir, e.Name())
+		}
+	}
+	if segPath == "" {
+		t.Fatal("no segment file found")
+	}
+	info, err := os.Stat(segPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	// Append 3 garbage bytes (less than a header) to mimic a torn write.
+	f, err := os.OpenFile(segPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	if _, err := f.Write([]byte{0x01, 0x02, 0x03}); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	f.Close()
+	if newInfo, _ := os.Stat(segPath); newInfo.Size() != info.Size()+3 {
+		t.Fatalf("size mismatch: expected +3, got %d", newInfo.Size()-info.Size())
+	}
+
+	// Reopen and ReadAll should succeed and return both valid entries.
+	wal2, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("Reopen: %v", err)
+	}
+	defer wal2.Close()
+	got, err := wal2.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll on partial-tail segment: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 entries surviving torn trailer, got %d", len(got))
+	}
+	if string(got[0].Data) != "alpha" || string(got[1].Data) != "beta" {
+		t.Errorf("entry data mismatch: %q, %q", got[0].Data, got[1].Data)
+	}
+}
+
 func TestWALCorruptedEntry(t *testing.T) {
 	wal := &WAL{}
 

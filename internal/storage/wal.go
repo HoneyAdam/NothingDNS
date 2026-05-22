@@ -279,9 +279,21 @@ func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 		return 0, fmt.Errorf("encode entry: %w", err)
 	}
 
-	// Write to active segment
+	// Write to active segment. Use file.WriteAt-style retry: if Write
+	// returns a short count (rare but possible on some filesystems or
+	// when the OS interrupts mid-syscall), advancing only `n` would
+	// leave a torn entry at the current offset and corrupt every
+	// subsequent Append. Truncate the segment back to its pre-Append
+	// size on error so recovery sees a clean log.
 	n, err := wal.active.file.Write(buf)
-	if err != nil {
+	if err != nil || n != len(buf) {
+		// Best-effort rollback: truncate to the pre-Append size and
+		// reseek so the next Append starts at a known-clean offset.
+		_ = wal.active.file.Truncate(wal.active.size)
+		_, _ = wal.active.file.Seek(wal.active.size, 0)
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return 0, fmt.Errorf("write entry: %w", err)
 	}
 
@@ -350,7 +362,13 @@ func (wal *WAL) appendLocked(entryType byte, data []byte) (uint64, error) {
 	}
 
 	n, err := wal.active.file.Write(buf)
-	if err != nil {
+	if err != nil || n != len(buf) {
+		// Same torn-write rollback as Append — see comment there.
+		_ = wal.active.file.Truncate(wal.active.size)
+		_, _ = wal.active.file.Seek(wal.active.size, 0)
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return 0, fmt.Errorf("write entry: %w", err)
 	}
 
@@ -460,12 +478,25 @@ func (wal *WAL) readSegment(segment *WALSegment) ([]WALEntry, error) {
 		if err == io.EOF {
 			break
 		}
+		// A partial header at the tail of the segment is the signature of
+		// a power-loss crash mid-Append: we wrote some bytes but not the
+		// full 9-byte header. Treat that as the end of the valid log and
+		// return what we have, rather than failing recovery for the whole
+		// segment.
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			break
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read header at %d: %w", pos, err)
 		}
 
 		// Parse length
 		length := binary.BigEndian.Uint32(header[5:9])
+		// Defensively bound the entry size before allocating — a corrupt
+		// header could claim a 4 GiB body and OOM us.
+		if int64(length) > wal.opts.MaxSegmentSize {
+			break
+		}
 
 		// Read full entry
 		entrySize := WALHeaderSize + int(length)
@@ -476,6 +507,11 @@ func (wal *WAL) readSegment(segment *WALSegment) ([]WALEntry, error) {
 		}
 
 		_, err = io.ReadFull(io.NewSectionReader(file, pos, int64(entrySize)), buf)
+		// Partial trailing entry (some header, not enough body) — same
+		// torn-write story; stop and return successfully.
+		if errors.Is(err, io.ErrUnexpectedEOF) || err == io.EOF {
+			break
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read entry at %d: %w", pos, err)
 		}
