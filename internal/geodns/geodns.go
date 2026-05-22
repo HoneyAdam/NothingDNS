@@ -48,12 +48,15 @@ type Engine struct {
 	// Geo rules keyed by domain:type
 	rules map[string]*GeoRecord
 
-	// MMDB data.
-	mmdbData      []byte
-	mmdbIPv4Count uint32
-	mmdbIPv6Count uint32
-	mmdbTreeSize  uint32
-	mmdbLoaded    bool
+	// MMDB data + parsed metadata cache.
+	mmdbData       []byte
+	mmdbIPv4Count  uint32
+	mmdbIPv6Count  uint32
+	mmdbTreeSize   uint32
+	mmdbRecordSize uint32 // 24, 28, or 32 bits per tree-node record
+	mmdbIPVersion  uint32 // 4 or 6 (DB-level, distinct from query IP version)
+	mmdbNodeCount  uint32 // total BST node count (== mmdbIPv4Count for v4 DBs)
+	mmdbLoaded     bool
 
 	// Metadata.
 	enabled bool
@@ -88,26 +91,44 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
-// ErrMMDBNotSupported is returned by LoadMMDB until a proper libmaxminddb-
-// compatible parser is implemented. The previous "parser" brute-force-
-// guessed the first uint32 in [0, 1e8) as node_count and pattern-grepped
-// two ASCII bytes as the country code — every routing decision was
-// effectively random, which is worse than no GeoDNS at all.
-//
-// LoadMMDB now fails loudly so misconfiguration cannot silently mis-route
-// traffic. Internal helpers (parseMMDBMetadata, extractCountryCode, etc.)
-// are retained because unit tests still exercise them and call sites that
-// depend on mmdbLoaded == true are unreachable when LoadMMDB fails.
-//
-// Operators that need geo-routing should use views/split-horizon or run a
-// dedicated geoip service in front of NothingDNS until F138 lands.
+// ErrMMDBNotSupported is retained for historical callers that key on the
+// "not supported" sentinel. With the real parser now in place it should no
+// longer be returned by LoadMMDB; specific decode errors come back instead.
 var ErrMMDBNotSupported = errors.New("geodns: MMDB binary format parser is not implemented; configure split-horizon views instead (see F138)")
 
-// LoadMMDB previously appeared to load a MaxMind DB but in fact produced
-// random routing decisions. Always returns ErrMMDBNotSupported now.
+// LoadMMDB loads a MaxMind DB file using the real binary-format parser in
+// mmdb.go. Supersedes the original brute-force heuristic that produced
+// effectively-random routing decisions (F138 audit finding).
 func (e *Engine) LoadMMDB(path string) error {
-	_ = path
-	return ErrMMDBNotSupported
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("geodns: read mmdb: %w", err)
+	}
+
+	nodeCount, recordSize, ipVersion, _, _, err := mmdbParseMetadata(data)
+	if err != nil {
+		return fmt.Errorf("geodns: parse metadata: %w", err)
+	}
+
+	// Tree size = nodeCount * (2*recordSize) bits = nodeCount * recordSize / 4 bytes.
+	treeBytes := nodeCount * (recordSize * 2) / 8
+
+	e.mu.Lock()
+	e.mmdbData = data
+	if ipVersion == 4 {
+		e.mmdbIPv4Count = nodeCount
+		e.mmdbIPv6Count = 0
+	} else {
+		e.mmdbIPv4Count = nodeCount
+		e.mmdbIPv6Count = nodeCount
+	}
+	e.mmdbTreeSize = treeBytes
+	e.mmdbRecordSize = recordSize
+	e.mmdbIPVersion = ipVersion
+	e.mmdbNodeCount = nodeCount
+	e.mmdbLoaded = true
+	e.mu.Unlock()
+	return nil
 }
 
 // loadMMDBFromBytes is the legacy brute-force implementation, kept as an
@@ -178,7 +199,15 @@ func parseMMDBMetadata(data []byte) (ipv4Count, treeSize uint32, err error) {
 	return ipv4Count, treeSize, nil
 }
 
-// LookupCountry looks up the country code for an IP address using the MMDB.
+// LookupCountry looks up the ISO 3166-1 alpha-2 country code for ip
+// (e.g. "US", "DE"). Returns "" when the IP is not in the database or
+// the record lacks a country.iso_code field.
+//
+// GeoLite2-Country / GeoIP2-Country / GeoIP2-City all use the structure
+//
+//	{ "country": { "iso_code": "<code>", ... }, ... }
+//
+// so the same code path works across products.
 func (e *Engine) LookupCountry(ip net.IP) string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -186,17 +215,25 @@ func (e *Engine) LookupCountry(ip net.IP) string {
 	if !e.mmdbLoaded || len(e.mmdbData) == 0 {
 		return ""
 	}
-
-	result := e.mmdbLookup(ip)
-	if result == nil {
+	rec := e.mmdbLookup(ip)
+	if rec == nil {
 		return ""
 	}
-
-	// Extract country ISO code from the record
-	return extractCountryCode(result)
+	country, ok := rec["country"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	iso, _ := country["iso_code"].(string)
+	return iso
 }
 
-// LookupASN looks up the ASN for an IP address.
+// LookupASN looks up the autonomous system number for ip, returned as
+// "AS<number>" (e.g. "AS15169"). Returns "" when the IP is not in the
+// database or the record lacks an autonomous_system_number field.
+//
+// GeoLite2-ASN encodes the field as a uint32 at the top level:
+//
+//	{ "autonomous_system_number": <uint32>, "autonomous_system_organization": "...", ... }
 func (e *Engine) LookupASN(ip net.IP) string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -204,13 +241,15 @@ func (e *Engine) LookupASN(ip net.IP) string {
 	if !e.mmdbLoaded || len(e.mmdbData) == 0 {
 		return ""
 	}
-
-	result := e.mmdbLookup(ip)
-	if result == nil {
+	rec := e.mmdbLookup(ip)
+	if rec == nil {
 		return ""
 	}
-
-	return extractASN(result)
+	asn, ok := rec["autonomous_system_number"].(uint64)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("AS%d", asn)
 }
 
 // LookupContinent looks up the continent code for an IP address.
@@ -219,75 +258,74 @@ func (e *Engine) LookupContinent(ip net.IP) string {
 	return countryToContinent(country)
 }
 
-// mmdbLookup traverses the MMDB tree for the given IP.
-func (e *Engine) mmdbLookup(ip net.IP) []byte {
-	originalIP := ip
-	ip = ip.To4()
-	isIPv4 := ip != nil
-	if !isIPv4 {
-		ip = originalIP.To16()
-	}
-
+// mmdbLookup traverses the MMDB tree for ip and, if found, returns the
+// decoded data-section record (always a typed map for GeoLite2/GeoIP2
+// databases). Returns nil on "not found" or any decode error.
+//
+// IPv4 lookups against an IPv6 database expand to the ::ffff:0:0/96
+// IPv4-mapped range per MaxMind convention (MMDB §1.4 "IPv4 in IPv6").
+func (e *Engine) mmdbLookup(ip net.IP) map[string]interface{} {
 	if ip == nil {
 		return nil
 	}
 
-	nodeCount := e.mmdbIPv4Count
-	if !isIPv4 {
-		nodeCount = e.mmdbIPv6Count
-		if nodeCount == 0 {
-			nodeCount = e.mmdbIPv4Count // fallback
-		}
-	}
-
-	// Traverse the tree bit by bit
-	nodeIdx := uint32(0)
-	bits := len(ip) * 8
-
-	for i := 0; i < bits; i++ {
-		if nodeIdx >= nodeCount {
-			// Data section
-			dataOffset := nodeIdx - nodeCount
-			dataStart := e.mmdbTreeSize
-			if int(dataStart+dataOffset) < len(e.mmdbData) {
-				return e.parseDataRecord(int(dataStart + dataOffset))
-			}
-			return nil
-		}
-
-		// Read node (6 bytes: left 3 bytes + right 3 bytes)
-		// Using 24-bit record size (6 bytes per node)
-		byteOffset := nodeIdx * 6
-		if int(byteOffset)+6 > int(e.mmdbTreeSize) {
-			return nil
-		}
-
-		nodeData := e.mmdbData[byteOffset : byteOffset+6]
-
-		var nextNode uint32
-		bit := (ip[i/8] >> (7 - uint(i%8))) & 1
-
-		if bit == 0 {
-			// Left child (first 3 bytes)
-			nextNode = uint32(nodeData[0])<<16 | uint32(nodeData[1])<<8 | uint32(nodeData[2])
+	// Normalise: IPv4 in v6 DB → expand to 16-byte IPv4-mapped form.
+	var lookupIP net.IP
+	var bits int
+	if ip4 := ip.To4(); ip4 != nil {
+		if e.mmdbIPVersion == 6 {
+			lookupIP = ip.To16() // ::ffff:a.b.c.d
+			bits = 128
 		} else {
-			// Right child (last 3 bytes)
-			nextNode = uint32(nodeData[3])<<16 | uint32(nodeData[4])<<8 | uint32(nodeData[5])
+			lookupIP = ip4
+			bits = 32
 		}
-
-		nodeIdx = nextNode
+	} else {
+		lookupIP = ip.To16()
+		if lookupIP == nil {
+			return nil
+		}
+		bits = 128
+		// An IPv6 query against a v4-only DB has no useful answer.
+		if e.mmdbIPVersion == 4 {
+			return nil
+		}
 	}
 
-	return nil
+	// Tree walk to get the data-section offset.
+	treeBytes := e.mmdbTreeSize
+	tree := e.mmdbData[:treeBytes]
+	dataOff, ok, err := mmdbLookup(tree, e.mmdbNodeCount, e.mmdbRecordSize, lookupIP, bits)
+	if err != nil || !ok {
+		return nil
+	}
+
+	// Decode the data-section record. dataOff is already relative to file start.
+	dec := &mmdbDecoder{
+		buf:       e.mmdbData,
+		dataStart: int(treeBytes) + 16,
+	}
+	v, _, err := dec.decodeValue(int(dataOff)+int(treeBytes)+16, 32)
+	if err != nil {
+		// Some DBs encode pointers; if the absolute calculation above
+		// is off by a section boundary, try the offset as already absolute.
+		v, _, err = dec.decodeValue(int(dataOff), 32)
+		if err != nil {
+			return nil
+		}
+	}
+	m, _ := v.(map[string]interface{})
+	return m
 }
 
-// parseDataRecord parses a data record from the MMDB data section.
+// parseDataRecord is a legacy helper kept for unit tests of the bounds-
+// check branch. The real lookup path uses mmdbDecoder.decodeValue.
+//
+//nolint:unused // retained for legacy test compatibility.
 func (e *Engine) parseDataRecord(offset int) []byte {
 	if offset >= len(e.mmdbData) {
 		return nil
 	}
-	// Data records start with a type byte followed by length and content.
-	// Simplified: return raw bytes for further parsing.
 	return e.mmdbData[offset:]
 }
 
