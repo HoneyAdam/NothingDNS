@@ -708,8 +708,12 @@ func TestParseXoTRData_AAAA_Valid_CovExtra(t *testing.T) {
 	if !ok {
 		t.Fatal("expected RDataAAAA")
 	}
-	if len(aaaa.Address) != 16 {
-		t.Errorf("address length = %d, want 16", len(aaaa.Address))
+	// 2001:db8::1 in network byte order — verify the address actually
+	// decoded, not just that the fixed-size array has its compile-time
+	// length of 16.
+	want := [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}
+	if aaaa.Address != want {
+		t.Errorf("address = %x, want %x", aaaa.Address, want)
 	}
 }
 
@@ -1015,7 +1019,7 @@ func TestXoTServer_generateIXFRRecords_WithJournal_FallbackToAXFR(t *testing.T) 
 		t.Fatalf("generateIXFRRecords() error: %v", err)
 	}
 	// Should fall back to AXFR (SOA + SOA pattern)
-	if records == nil || len(records) == 0 {
+	if len(records) == 0 {
 		t.Error("expected AXFR fallback records, got none")
 	}
 }

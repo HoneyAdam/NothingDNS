@@ -78,10 +78,7 @@ func (r *rateLimiter) Allow(ip string) bool {
 		return true
 	}
 	e.count++
-	if e.count > r.maxCount {
-		return false
-	}
-	return true
+	return e.count <= r.maxCount
 }
 
 // Prune removes stale entries older than the window.

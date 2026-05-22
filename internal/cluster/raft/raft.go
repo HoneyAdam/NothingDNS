@@ -731,7 +731,7 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	// If we have a state machine and snapshot data, restore it
-	if req.Data != nil && len(req.Data) > 0 && n.stateMachine != nil {
+	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
 			// Log error but continue with snapshot install
 			// The snapshot install still updates indices even if state restore fails
@@ -791,7 +791,7 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	// If we have a state machine and snapshot data, restore it
-	if req.Data != nil && len(req.Data) > 0 && n.stateMachine != nil {
+	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
 			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
 		}

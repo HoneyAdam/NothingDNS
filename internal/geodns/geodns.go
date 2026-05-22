@@ -124,49 +124,6 @@ func (e *Engine) LoadMMDB(path string) error {
 	return nil
 }
 
-// loadMMDBFromBytes is the legacy brute-force implementation, kept as an
-// internal helper so unit tests of the heuristic compile. It must NOT be
-// wired into LoadMMDB.
-//
-//nolint:unused // retained for legacy test compatibility; F138 tracks real parser.
-func (e *Engine) loadMMDBFromBytes(data []byte) error {
-	// Find metadata section (search from end of file)
-	idx := len(data) - len(mmdbMetadataMarker)
-	if idx < 0 {
-		return fmt.Errorf("geodns: invalid mmdb: metadata marker not found")
-	}
-	found := -1
-	for i := idx; i >= 0; i-- {
-		if string(data[i:i+len(mmdbMetadataMarker)]) == mmdbMetadataMarker {
-			found = i
-			break
-		}
-	}
-	if found == -1 {
-		return fmt.Errorf("geodns: metadata marker not found")
-	}
-	metaStart := found + len(mmdbMetadataMarker)
-	if metaStart >= len(data) {
-		return fmt.Errorf("geodns: truncated metadata")
-	}
-	ipv4Count, treeSize, err := parseMMDBMetadata(data[metaStart:])
-	if err != nil {
-		return fmt.Errorf("geodns: parse metadata: %w", err)
-	}
-	e.mu.Lock()
-	e.mmdbData = data
-	e.mmdbIPv4Count = ipv4Count
-	e.mmdbTreeSize = treeSize
-	e.mmdbLoaded = true
-	e.mu.Unlock()
-	return nil
-}
-
-// Compile-time use of unused imports — these are needed by the retained
-// internal helpers below.
-var _ = os.ReadFile
-var _ = binary.BigEndian
-
 // parseMMDBMetadata extracts tree size and node count from MMDB metadata.
 // SEE F138: this is a brute-force heuristic, not an MMDB parser. Retained
 // solely so unit tests compile. Do not call from production paths.

@@ -15,12 +15,10 @@ import (
 type DNSRunner struct {
 	Address string
 	server  *testDNSServer
-	mu      sync.Mutex
 }
 
 type testDNSServer struct {
-	ln      net.Listener
-	packets int
+	ln net.Listener
 }
 
 func (s *testDNSServer) Close() error {

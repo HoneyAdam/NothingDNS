@@ -780,7 +780,7 @@ func parseXoTRData(rrtype uint16, rdataStr, origin string) (protocol.RData, erro
 		}
 		ipv4 := ip.To4()
 		if ipv4 == nil {
-			return nil, fmt.Errorf("A record requires IPv4")
+			return nil, fmt.Errorf("a record requires IPv4")
 		}
 		var addr [4]byte
 		copy(addr[:], ipv4)

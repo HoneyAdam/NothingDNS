@@ -443,12 +443,8 @@ func TestHandleReadiness_WithUpstreamClient(t *testing.T) {
 	cfg := config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}
 	srv := NewServer(cfg, nil, nil, nil, nil, nil, nil)
 
-	// Set an unhealthy upstream client to test 503 branch
-	type mockUpstreamClient struct {
-		healthy bool
-	}
-	// We can't easily mock upstream.Client, but we can set upstreamLB and upstreamClient to nil
-	// and verify the no-upstream path returns 200
+	// We can't easily mock upstream.Client, but we can set upstreamLB and
+	// upstreamClient to nil and verify the no-upstream path returns 200.
 	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 	rec := httptest.NewRecorder()
 	srv.handleReadiness(rec, req)

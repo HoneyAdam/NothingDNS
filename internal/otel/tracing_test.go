@@ -215,6 +215,8 @@ func TestTraceHandler_Enabled(t *testing.T) {
 		span := SpanFromContext(r.Context())
 		if span == nil {
 			t.Error("span should be in context")
+			w.WriteHeader(http.StatusOK)
+			return
 		}
 		if span.Name != "dns.query" {
 			t.Errorf("expected span name 'dns.query', got %s", span.Name)

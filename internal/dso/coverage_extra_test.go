@@ -980,13 +980,14 @@ func TestDSOTypeConstants(t *testing.T) {
 	tests := []struct {
 		name  string
 		value uint16
+		want  uint16
 	}{
-		{"DSOTypeRequest", DSOTypeRequest},
-		{"DSOTypeResponse", DSOTypeResponse},
+		{"DSOTypeRequest", DSOTypeRequest, 0x0000},
+		{"DSOTypeResponse", DSOTypeResponse, 0x8000},
 	}
 	for _, tt := range tests {
-		if tt.value != tt.value {
-			// just ensure no panic
+		if tt.value != tt.want {
+			t.Errorf("%s = %d, want %d", tt.name, tt.value, tt.want)
 		}
 	}
 }

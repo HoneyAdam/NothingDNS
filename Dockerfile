@@ -4,7 +4,7 @@
 # Supports multi-arch builds via docker buildx
 
 # Build stage
-FROM golang:1.26.2-alpine AS builder
+FROM golang:1.26.3-alpine AS builder
 
 # Install build dependencies (ca-certificates for TLS/DoH in final image)
 RUN apk add --no-cache git make ca-certificates

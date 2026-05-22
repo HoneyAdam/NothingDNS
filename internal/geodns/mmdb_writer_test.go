@@ -50,13 +50,6 @@ func (b *mmdbBuilder) addNode(left, right mmdbRef) mmdbRef {
 	return mmdbRef{isData: false, idx: idx}
 }
 
-// noData returns a ref that, when stored in a tree node, means "the
-// IP has no data in this database" (record value == node_count).
-func (b *mmdbBuilder) noData() mmdbRef {
-	// Use a sentinel idx; resolved in build() below.
-	return mmdbRef{isData: false, idx: 0xffffffff}
-}
-
 // build returns the full MMDB file bytes.
 func (b *mmdbBuilder) build(ipVersion uint32) ([]byte, error) {
 	nodeCount := uint32(len(b.nodes))
@@ -74,10 +67,6 @@ func (b *mmdbBuilder) build(ipVersion uint32) ([]byte, error) {
 	}
 
 	resolve := func(r mmdbRef) (uint32, error) {
-		if r.idx == 0xffffffff {
-			// "No data" sentinel.
-			return nodeCount, nil
-		}
 		if r.isData {
 			if r.idx >= uint32(len(dataOffsets)) {
 				return 0, fmt.Errorf("mmdbBuilder: data ref %d out of range", r.idx)

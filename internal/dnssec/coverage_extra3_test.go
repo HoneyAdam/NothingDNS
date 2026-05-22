@@ -1391,43 +1391,6 @@ func TestValidateNegativeResponse_NSEC3Secure(t *testing.T) {
 	}
 }
 
-// encodeBase32Hex encodes bytes to base32hex (extended hex) without padding.
-func encodeBase32Hex(data []byte) string {
-	const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
-	if len(data) == 0 {
-		return ""
-	}
-	var result []byte
-	for i := 0; i < len(data); i += 5 {
-		end := i + 5
-		if end > len(data) {
-			end = len(data)
-		}
-		chunk := make([]byte, 5)
-		copy(chunk, data[i:end])
-		result = append(result, alphabet[(chunk[0]>>3)&0x1F])
-		result = append(result, alphabet[((chunk[0]&0x07)<<2|(chunk[1]>>6))&0x1F])
-		result = append(result, alphabet[(chunk[1]>>1)&0x1F])
-		result = append(result, alphabet[((chunk[1]&0x01)<<4|(chunk[2]>>4))&0x1F])
-		result = append(result, alphabet[((chunk[2]&0x0F)<<1|(chunk[3]>>7))&0x1F])
-		result = append(result, alphabet[(chunk[3]>>2)&0x1F])
-		result = append(result, alphabet[((chunk[3]&0x03)<<3|(chunk[4]>>5))&0x1F])
-		result = append(result, alphabet[chunk[4]&0x1F])
-	}
-	// Trim padding characters based on input length
-	switch len(data) % 5 {
-	case 1:
-		result = result[:len(result)-6]
-	case 2:
-		result = result[:len(result)-4]
-	case 3:
-		result = result[:len(result)-3]
-	case 4:
-		result = result[:len(result)-1]
-	}
-	return string(result)
-}
-
 // ---------------------------------------------------------------------------
 // validator.go:198-200 buildChain delegation validation failure.
 // Tests the path where DS/DNSKEY exist but delegation validation fails

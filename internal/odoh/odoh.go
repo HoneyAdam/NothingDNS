@@ -241,7 +241,7 @@ func (c *ObliviousClient) getTargetPublicKey() ([]byte, error) {
 	//
 	// A zeroed key is cryptographically invalid and would fail
 	// key agreement - callers must provide a valid key.
-	if c.config.TargetPublicKey == nil || len(c.config.TargetPublicKey) == 0 {
+	if len(c.config.TargetPublicKey) == 0 {
 		return nil, ErrInvalidKey
 	}
 	return c.config.TargetPublicKey, nil

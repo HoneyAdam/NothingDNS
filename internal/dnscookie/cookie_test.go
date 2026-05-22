@@ -436,9 +436,12 @@ func TestClientCookieEdgeCases(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cc := jar.GenerateClientCookie(tc.clientIP, tc.serverIP)
-			// Just ensure it doesn't panic and produces valid length
-			if len(cc) != ClientCookieLen {
-				t.Errorf("client cookie length = %d, want %d", len(cc), ClientCookieLen)
+			// len(cc) is a compile-time constant (fixed-size array);
+			// verify the cookie is non-zero so we actually exercise the
+			// generation path rather than a typed-zero default.
+			var zero [ClientCookieLen]byte
+			if cc == zero {
+				t.Errorf("client cookie is all-zero; generation appears to have no-op'd")
 			}
 		})
 	}
