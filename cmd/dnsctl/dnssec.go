@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
@@ -17,6 +18,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -993,6 +995,14 @@ func cmdDNSSECValidateZone(args []string) error {
 
 // buildSignedDataForValidation constructs the signed data blob for RRSIG verification.
 // This mirrors the Signer.createSignedData logic but for standalone validation.
+//
+// RFC 4034 §6.2 requires the RRSet to be sorted in canonical order
+// (byte-wise ascending on RDATA wire form) before being included in
+// the signed data. For an RRSet with multiple records of the same
+// owner+type — most commonly DNSKEY with KSK + ZSK — the order
+// matters because the signer sorted them too. Skipping the sort
+// here caused every KSK-over-DNSKEY-RRSet signature to fail
+// verification (zone-file order ≠ canonical order in general).
 func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) []byte {
 	var data []byte
 
@@ -1012,19 +1022,31 @@ func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *proto
 	signerWire := canonicalWireName(rrsig.SignerName.String())
 	data = append(data, signerWire...)
 
+	// Pre-pack each record's RDATA and sort by RDATA wire form
+	// (canonical RRSet order per RFC 4034 §6.2).
+	type packed struct {
+		rr    *protocol.ResourceRecord
+		rdata []byte
+	}
+	packedSet := make([]packed, 0, len(rrSet))
 	for _, rr := range rrSet {
-		ownerWire := canonicalWireName(rr.Name.String())
-		data = append(data, ownerWire...)
-		data = append(data, byte(rr.Type>>8), byte(rr.Type))
-		data = append(data, byte(rr.Class>>8), byte(rr.Class))
-		data = append(data, byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
-			byte(rrsig.OriginalTTL>>8), byte(rrsig.OriginalTTL))
-
 		buf := make([]byte, 65535)
 		n, _ := rr.Data.Pack(buf, 0)
-		rdata := buf[:n]
-		data = append(data, byte(len(rdata)>>8), byte(len(rdata)))
-		data = append(data, rdata...)
+		packedSet = append(packedSet, packed{rr: rr, rdata: append([]byte(nil), buf[:n]...)})
+	}
+	sort.Slice(packedSet, func(i, j int) bool {
+		return bytes.Compare(packedSet[i].rdata, packedSet[j].rdata) < 0
+	})
+
+	for _, p := range packedSet {
+		ownerWire := canonicalWireName(p.rr.Name.String())
+		data = append(data, ownerWire...)
+		data = append(data, byte(p.rr.Type>>8), byte(p.rr.Type))
+		data = append(data, byte(p.rr.Class>>8), byte(p.rr.Class))
+		data = append(data, byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
+			byte(rrsig.OriginalTTL>>8), byte(rrsig.OriginalTTL))
+		data = append(data, byte(len(p.rdata)>>8), byte(len(p.rdata)))
+		data = append(data, p.rdata...)
 	}
 
 	return data
