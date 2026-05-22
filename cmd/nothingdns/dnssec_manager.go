@@ -42,5 +42,16 @@ func NewDNSSECManager(cfg *config.Config, resolverAdapter dnssec.Resolver, logge
 
 	logger.Info("DNSSEC validation enabled")
 
+	// Loud warning when ignore_time is on. The YAML field is documented
+	// as "for testing" but it's also a security downgrade — bogus
+	// expired or future-dated signatures sail through validation. An
+	// operator who set it during local debug and forgot would otherwise
+	// have no startup signal that production DNSSEC is effectively
+	// permissive about replay-style attacks.
+	if cfg.DNSSEC.IgnoreTime {
+		logger.Warnf("DNSSEC: ignore_time=true — RRSIG inception/expiration checks are DISABLED. " +
+			"This is a security downgrade intended for testing only. Unset dnssec.ignore_time in config for production deployments.")
+	}
+
 	return mgr, nil
 }
