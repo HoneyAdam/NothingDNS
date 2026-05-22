@@ -89,7 +89,15 @@ type SlaveZone struct {
 	Zone         *zone.Zone
 	LastSerial   uint32
 	LastTransfer time.Time
-	mu           sync.RWMutex
+	// retries counts consecutive failures since the last successful
+	// transfer; reset to zero on success. Used by scheduleRetry to
+	// honor SlaveZoneConfig.MaxRetries — when MaxRetries > 0 and we
+	// hit it, retries stop. Previously MaxRetries was declared on
+	// SlaveZoneConfig but read nowhere, so a permanently-unreachable
+	// master would receive a steady hammer of zone-transfer attempts
+	// for the lifetime of the process.
+	retries int
+	mu      sync.RWMutex
 }
 
 // NewSlaveZone creates a new slave zone.
@@ -114,13 +122,17 @@ func (sz *SlaveZone) GetZone() *zone.Zone {
 	return sz.Zone
 }
 
-// UpdateZone updates the zone data (thread-safe).
+// UpdateZone updates the zone data (thread-safe). A successful zone
+// transfer clears the consecutive-failure counter so a transient
+// master outage doesn't permanently disable retries once the master
+// recovers.
 func (sz *SlaveZone) UpdateZone(newZone *zone.Zone, serial uint32) {
 	sz.mu.Lock()
 	defer sz.mu.Unlock()
 	sz.Zone = newZone
 	sz.LastSerial = serial
 	sz.LastTransfer = time.Now()
+	sz.retries = 0
 }
 
 // GetLastSerial returns the last known SOA serial (thread-safe).
@@ -498,12 +510,30 @@ func (sm *SlaveManager) applyTransferredZone(slaveZone *SlaveZone, records []*pr
 }
 
 // scheduleRetry schedules a retry of the zone transfer.
+// Honors SlaveZoneConfig.MaxRetries — when > 0, the chain stops after
+// that many consecutive failures (since the last successful transfer).
+// MaxRetries == 0 retains the legacy "retry forever" behavior, matching
+// the field-doc comment ("0 = unlimited"). Either way scheduleRetry
+// only ever waits one RetryInterval; the chain is performZoneTransfer →
+// (on failure) scheduleRetry → performZoneTransfer → … and termination
+// happens either at MaxRetries or at sm.stopChan.
 func (sm *SlaveManager) scheduleRetry(zoneName string) {
 	sm.mu.RLock()
 	slaveZone, exists := sm.slaveZones[zoneName]
 	sm.mu.RUnlock()
 
 	if !exists {
+		return
+	}
+
+	slaveZone.mu.Lock()
+	slaveZone.retries++
+	count := slaveZone.retries
+	slaveZone.mu.Unlock()
+
+	if max := slaveZone.Config.MaxRetries; max > 0 && count > max {
+		util.Warnf("slave: giving up on %s after %d consecutive transfer failures (MaxRetries=%d)",
+			zoneName, count-1, max)
 		return
 	}
 
