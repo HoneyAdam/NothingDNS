@@ -630,33 +630,38 @@ func (c *Client) healthCheckLoop(ctx context.Context) {
 
 // checkHealth performs health checks on all servers.
 func (c *Client) checkHealth() {
-	// Create a simple query for health check
-	msg := &protocol.Message{
-		Header: protocol.Header{
-			ID:      0,
-			Flags:   protocol.Flags{RD: true},
-			QDCount: 1,
-		},
-	}
-	// Add a question for root NS (should always work)
-	msg.Questions = append(msg.Questions, &protocol.Question{
+	// Build a question for root NS (should always work). One Question
+	// instance is shared across the per-server goroutines — Pack only
+	// reads from it, never mutates — but each goroutine builds its own
+	// Message header with a fresh random transaction ID via RandomTXID
+	// (VULN-059 style). The previous code reused ID=0 across every
+	// goroutine and every health-check cycle, which makes the response
+	// matching trivial to spoof for any in-path attacker that can
+	// see the source-port-randomised UDP socket.
+	rootQuestion := &protocol.Question{
 		Name:   &protocol.Name{Labels: []string{}, FQDN: true},
 		QType:  protocol.TypeNS,
 		QClass: protocol.ClassIN,
-	})
+	}
 
 	var healthWg sync.WaitGroup
 	for _, server := range c.servers {
 		healthWg.Add(1)
 		go func(s *Server) {
 			defer healthWg.Done()
-			// Copy msg to avoid data race across goroutines
-			queryCopy := *msg
-			_, err := c.queryUDP(s, &queryCopy)
+			query := &protocol.Message{
+				Header: protocol.Header{
+					ID:      RandomTXID(),
+					Flags:   protocol.Flags{RD: true},
+					QDCount: 1,
+				},
+				Questions: []*protocol.Question{rootQuestion},
+			}
+			_, err := c.queryUDP(s, query)
 			if err != nil {
 				// Try TCP
 				util.Warnf("health check UDP failed for %s: %v, trying TCP", s.Address, err)
-				if _, tcpErr := c.queryTCP(s, &queryCopy); tcpErr != nil {
+				if _, tcpErr := c.queryTCP(s, query); tcpErr != nil {
 					util.Debugf("health check TCP failed for %s: %v", s.Address, tcpErr)
 				}
 			}
