@@ -550,6 +550,23 @@ func (n *Node) handleVoteRequest(req VoteRequest) {
 		return
 	}
 
+	// Raft §5.1: if RPC carries a higher term we MUST update our own
+	// currentTerm, drop to follower, and reset votedFor BEFORE deciding
+	// whether to grant this vote. The previous code skipped this step
+	// and proceeded to the votedFor check below with the *old* term's
+	// vote intact — so a node that had voted for itself in term N
+	// would reject every candidate's request in term N+1 even though
+	// no one in term N+1 had been voted for yet. The cluster could get
+	// stuck unable to elect a leader (livelock) because every node
+	// holds a stale per-term vote from an earlier term.
+	//
+	// Note: advanceTermLocked also persists the new (currentTerm,
+	// votedFor="") tuple via fsync before we proceed, satisfying the
+	// election-safety durability requirement.
+	if req.Term > n.currentTerm {
+		n.advanceTermLocked(req.Term)
+	}
+
 	// If votedFor is null or candidateId, and candidate's log is at least as
 	// up-to-date as receiver's log, grant vote
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {

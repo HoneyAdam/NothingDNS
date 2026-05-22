@@ -1833,6 +1833,53 @@ func TestHandleVoteRequestInternalRejectStaleTerm(t *testing.T) {
 	}
 }
 
+// TestHandleVoteRequest_Internal_HigherTermResetsVote verifies that
+// the channel-based handleVoteRequest path advances currentTerm and
+// resets votedFor when the incoming request carries a higher term,
+// matching Raft §5.1 and the behavior already implemented in the
+// exported HandleVoteRequest. Pre-fix the channel path kept the old
+// term and the old per-term vote intact, so a node that had voted
+// for itself in term N would reject every candidate in term N+1 —
+// livelock that wouldn't clear until another RPC (heartbeat,
+// append) happened to advance the term as a side effect.
+func TestHandleVoteRequest_Internal_HigherTermResetsVote(t *testing.T) {
+	dir := t.TempDir()
+	n := NewNode(Config{NodeID: "n1", DataDir: dir}, nil, &mockTransport{})
+	defer n.Stop()
+
+	n.mu.Lock()
+	n.currentTerm = 5
+	n.votedFor = "n1" // we voted for ourselves last election
+	n.log = []entry{{Index: 1, Term: 5}}
+	n.mu.Unlock()
+
+	// Drive the channel-based path: a candidate at higher term asks
+	// for our vote. Their log is at least as up-to-date as ours.
+	n.handleVoteRequest(VoteRequest{
+		Term:         7,
+		CandidateID:  "c-newer",
+		LastLogIndex: 1,
+		LastLogTerm:  5,
+	})
+
+	resp := <-n.voteRespCh
+	if !resp.VoteGranted {
+		t.Fatalf("vote should be granted after term advance — got resp=%+v", resp)
+	}
+	if resp.Term != 7 {
+		t.Errorf("response term = %d, want 7", resp.Term)
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.currentTerm != 7 {
+		t.Errorf("currentTerm = %d, want 7", n.currentTerm)
+	}
+	if n.votedFor != "c-newer" {
+		t.Errorf("votedFor = %q, want %q", n.votedFor, "c-newer")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 43. handleAppendRequest internal (via channel)
 // ---------------------------------------------------------------------------
