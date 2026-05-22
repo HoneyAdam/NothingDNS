@@ -824,13 +824,27 @@ func parseFields(line string) []string {
 				}
 			}
 		case '(':
-			// Ignore parentheses (line continuation markers in zone files)
+			// Ignore parentheses ONLY when they appear as zone-file
+			// line-continuation markers, i.e. outside a quoted string.
+			// A TXT record like `"v=spf1 include:(_spf.example) ~all"`
+			// previously had the parens stripped — and worse, the `(`
+			// flushed the in-progress quoted field early, yielding
+			// "v=spf1 include:" followed by orphan tokens for "_spf...
+			// ~all" outside any field. With this guard the parens stay
+			// inside the quoted run as literal characters.
+			if inQuotes {
+				current.WriteRune(r)
+				continue
+			}
 			if current.Len() > 0 {
 				fields = append(fields, current.String())
 				current.Reset()
 			}
 		case ')':
-			// End of multi-line record
+			// End of multi-line record — same in-quotes guard.
+			if inQuotes {
+				current.WriteRune(r)
+			}
 		default:
 			current.WriteRune(r)
 		}

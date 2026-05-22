@@ -125,6 +125,14 @@ func TestParseFields(t *testing.T) {
 			"  www   3600   A   192.0.2.1  ",
 			[]string{"www", "3600", "A", "192.0.2.1"},
 		},
+		// Parens are line-continuation markers in BIND zone files but
+		// must be literal characters inside a quoted string. Pre-fix
+		// the SPF record below split at '(' and ')', dropping the
+		// "include:(_spf.example.com)" segment from the TXT data.
+		{
+			`@ IN TXT "v=spf1 include:(_spf.example.com) ~all"`,
+			[]string{"@", "IN", "TXT", "v=spf1 include:(_spf.example.com) ~all"},
+		},
 	}
 
 	for _, tt := range tests {
