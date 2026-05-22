@@ -32,7 +32,7 @@ var commands = []Command{
 	{Name: "blocklist", Description: "Blocklist management (status, sources, reload)", Run: cmdBlocklist},
 	{Name: "config", Description: "Configuration operations (get, reload)", Run: cmdConfig},
 	{Name: "dig", Description: "DNS query tool (like dig)", Run: cmdDig},
-	{Name: "dnssec", Description: "DNSSEC operations (generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", Run: cmdDNSSEC},
+	{Name: "dnssec", Description: "DNSSEC operations (status, keys, generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", Run: cmdDNSSEC},
 	{Name: "server", Description: "Server operations (status, health)", Run: cmdServer},
 }
 

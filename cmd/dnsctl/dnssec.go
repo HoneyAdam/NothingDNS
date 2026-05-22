@@ -30,13 +30,17 @@ import (
 
 func cmdDNSSEC(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("dnssec subcommand required (generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)")
+		return fmt.Errorf("dnssec subcommand required (status, keys, generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)")
 	}
 
 	subcmd := args[0]
 	subArgs := args[1:]
 
 	switch subcmd {
+	case "status":
+		return cmdDNSSECStatus(subArgs)
+	case "keys":
+		return cmdDNSSECKeys(subArgs)
 	case "generate-key":
 		return cmdDNSSECGenerateKey(subArgs)
 	case "ds-from-dnskey":
@@ -48,8 +52,53 @@ func cmdDNSSEC(args []string) error {
 	case "validate-zone":
 		return cmdDNSSECValidateZone(subArgs)
 	default:
-		return fmt.Errorf("unknown dnssec subcommand: %s (supported: generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", subcmd)
+		return fmt.Errorf("unknown dnssec subcommand: %s (supported: status, keys, generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", subcmd)
 	}
+}
+
+// cmdDNSSECStatus queries the live daemon's validator state via
+// GET /api/v1/dnssec/status — reports whether DNSSEC validation is
+// enabled, the configured trust anchor count, and the validation
+// cache hit/miss counters.
+func cmdDNSSECStatus(_ []string) error {
+	result, err := apiGet("/api/v1/dnssec/status")
+	if err != nil {
+		return err
+	}
+	fmt.Println("DNSSEC Status:")
+	printJSON("dnssec", result, "  ")
+	return nil
+}
+
+// cmdDNSSECKeys queries the daemon's per-zone signer keys via
+// GET /api/v1/dnssec/keys. Admin role is required by the server.
+func cmdDNSSECKeys(_ []string) error {
+	result, err := apiGet("/api/v1/dnssec/keys")
+	if err != nil {
+		return err
+	}
+	zones, _ := result["zones"].([]interface{})
+	if len(zones) == 0 {
+		fmt.Println("No DNSSEC keys configured.")
+		return nil
+	}
+	fmt.Printf("%-30s %-8s %-9s %-5s %-5s\n", "ZONE", "KEY-TAG", "ALGORITHM", "KSK", "ZSK")
+	fmt.Printf("%-30s %-8s %-9s %-5s %-5s\n",
+		strings.Repeat("-", 30), strings.Repeat("-", 8),
+		strings.Repeat("-", 9), strings.Repeat("-", 5), strings.Repeat("-", 5))
+	for _, z := range zones {
+		k, ok := z.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		zone, _ := k["zone"].(string)
+		keyTag := fmt.Sprintf("%v", k["key_tag"])
+		algo := fmt.Sprintf("%v", k["algorithm"])
+		ksk := fmt.Sprintf("%v", k["is_ksk"])
+		zsk := fmt.Sprintf("%v", k["is_zsk"])
+		fmt.Printf("%-30s %-8s %-9s %-5s %-5s\n", zone, keyTag, algo, ksk, zsk)
+	}
+	return nil
 }
 
 func cmdDNSSECGenerateKey(args []string) error {
