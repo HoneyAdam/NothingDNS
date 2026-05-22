@@ -109,6 +109,36 @@ func TestDoHPOSTRequest(t *testing.T) {
 	}
 }
 
+// TestDoHPOSTRequest_ContentTypeWithParameters verifies that a POST
+// Content-Type carrying RFC 7231 §3.1.1.1 parameters (charset,
+// version, etc.) is accepted as long as the base media type matches
+// application/dns-message. Pre-fix the strict equality check
+// rejected such headers with "unsupported Content-Type" even though
+// the payload was a valid DNS wire message.
+func TestDoHPOSTRequest_ContentTypeWithParameters(t *testing.T) {
+	handler := NewHandler(&mockDNSHandler{})
+	queryData, _ := createTestQuery()
+
+	cases := []string{
+		"application/dns-message",
+		"application/dns-message; charset=binary",
+		"application/dns-message;version=1",
+		"  application/dns-message  ; charset=utf-8 ",
+	}
+	for _, ct := range cases {
+		t.Run(ct, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(queryData))
+			req.Header.Set("Content-Type", ct)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Errorf("Content-Type %q: status %d, want 200 — body=%q",
+					ct, rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
 func TestDoHMissingDNSParameter(t *testing.T) {
 	handler := NewHandler(&mockDNSHandler{})
 

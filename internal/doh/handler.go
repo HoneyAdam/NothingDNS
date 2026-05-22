@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 
@@ -251,8 +252,13 @@ func (h *Handler) handleGET(r *http.Request) ([]byte, error) {
 
 // handlePOST processes POST requests with DNS query in body.
 func (h *Handler) handlePOST(w http.ResponseWriter, r *http.Request) ([]byte, error) {
-	contentType := r.Header.Get("Content-Type")
-	if contentType != ContentTypeDNSMessage {
+	// Parse Content-Type with mime.ParseMediaType so parameters
+	// (charset, boundary, etc. — permitted by RFC 7231 §3.1.1.1) don't
+	// trip a strict-equality check. A previously-rejected
+	// `application/dns-message; charset=utf-8` now passes the type
+	// check while still locking out actual other media types.
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != ContentTypeDNSMessage {
 		return nil, fmt.Errorf("unsupported Content-Type")
 	}
 
