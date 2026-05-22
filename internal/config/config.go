@@ -994,8 +994,19 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 	"quic": {}, "signing": {}, "rpc": {}, "seed_nodes": {},
 	"odoh": {}, "idna": {}, "otel": {}, "tracing": {},
 	"catalog": {}, "mdns": {}, "load": {}, "filter": {},
+}
 
-	// Documented in config.example.yaml at the document root.
+// documentedButUnwiredKeys lists keys that appear at the document
+// root of config.example.yaml (so operators reasonably reach for
+// them) but have NO corresponding code path inside unmarshalToConfig.
+// The settings inside them are silently dropped. Treating them like
+// any other unknown key would (rightly) flag them, but the warning
+// here is more actionable: it tells the operator the section was
+// recognized as a documented stub, not just a typo.
+//
+// Move keys out of here only when the corresponding section is
+// actually wired through unmarshalToConfig.
+var documentedButUnwiredKeys = map[string]struct{}{
 	"api": {}, "auth": {}, "ddns": {}, "dso": {},
 	"resolver": {}, "security": {}, "transfer": {}, "zonemd": {},
 }
@@ -1012,9 +1023,18 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 	// wrong thing. Stop short of erroring because future versions may
 	// add new sections that an older binary doesn't recognise.
 	for _, k := range node.Keys() {
-		if _, ok := knownTopLevelConfigKeys[k]; !ok {
-			util.Warnf("config: unknown top-level key %q — ignored (typo?)", k)
+		if _, ok := knownTopLevelConfigKeys[k]; ok {
+			continue
 		}
+		if _, ok := documentedButUnwiredKeys[k]; ok {
+			// Documented in config.example.yaml but the parser has no
+			// branch that reads it. Loud-by-default so the operator
+			// can't quietly deploy a config whose half is dead weight.
+			util.Warnf("config: section %q is documented in config.example.yaml "+
+				"but not yet wired into the daemon — its settings will be ignored", k)
+			continue
+		}
+		util.Warnf("config: unknown top-level key %q — ignored (typo?)", k)
 	}
 
 	// Server config
