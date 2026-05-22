@@ -2,7 +2,6 @@ package geodns
 
 import (
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -90,11 +89,6 @@ func NewEngine(cfg Config) *Engine {
 	}
 	return e
 }
-
-// ErrMMDBNotSupported is retained for callers that still test against this
-// sentinel; LoadMMDB no longer returns it now that the real parser is in
-// place — specific decode errors come back instead.
-var ErrMMDBNotSupported = errors.New("geodns: MMDB binary format parser is not implemented")
 
 // LoadMMDB loads a MaxMind DB file using the real binary-format parser in
 // mmdb.go (RFC: https://maxmind.github.io/MaxMind-DB/).

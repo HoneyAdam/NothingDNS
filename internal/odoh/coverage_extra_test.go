@@ -547,8 +547,8 @@ func TestObliviousProxyServeHTTPSuccess(t *testing.T) {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusOK)
 	}
 	ct := w.Header().Get("Content-Type")
-	if ct != "application/dns-message" {
-		t.Errorf("Content-Type = %q, want %q", ct, "application/dns-message")
+	if ct != "application/oblivious-dns-message" {
+		t.Errorf("Content-Type = %q, want %q", ct, "application/oblivious-dns-message")
 	}
 }
 
@@ -590,12 +590,7 @@ func TestProxyForwardToTargetNon200(t *testing.T) {
 	cfg.TargetURL = ts.URL
 	proxy, _ := NewObliviousProxy(cfg)
 
-	msg := &ObliviousDNSMessage{
-		PublicKey:  make([]byte, 32),
-		Ciphertext: []byte("test"),
-		Nonce:      make([]byte, 12),
-	}
-	_, err := proxy.forwardToTarget(msg)
+	_, err := proxy.forwardRaw([]byte("dummy"))
 	if err == nil {
 		t.Error("expected error for non-200 target")
 	}
@@ -609,12 +604,7 @@ func TestProxyForwardToTargetConnectionRefused(t *testing.T) {
 	cfg.TargetURL = "http://127.0.0.1:1/dns-query"
 	proxy, _ := NewObliviousProxy(cfg)
 
-	msg := &ObliviousDNSMessage{
-		PublicKey:  make([]byte, 32),
-		Ciphertext: []byte("test"),
-		Nonce:      make([]byte, 12),
-	}
-	_, err := proxy.forwardToTarget(msg)
+	_, err := proxy.forwardRaw([]byte("dummy"))
 	if err == nil {
 		t.Error("expected error for connection refused")
 	}
@@ -1293,21 +1283,22 @@ var _ server.Handler = (*mockHandler)(nil)
 // ---------------------------------------------------------------------------
 
 func TestClientQueryInvalidKEM(t *testing.T) {
+	// RFC 9230 client validates the target config's suite IDs at parse
+	// time; an unsupported KEM in the config bytes is rejected with an
+	// "encapsulating query" wrapper. (TargetPublicKey holds the config
+	// contents in the new API surface.)
 	cfg := &ODoHConfig{
 		TargetName:      "target.example.com",
 		ProxyName:       "proxy.example.com",
-		HPKEKEM:         99, // invalid
+		HPKEKEM:         99,
 		HPKEKDF:         1,
 		HPKEAEAD:        HPKEAEADAES256GCM,
-		TargetPublicKey: make([]byte, 32),
+		TargetPublicKey: make([]byte, 8+32), // valid-shaped but kem_id=0 (unsupported)
 	}
 	client, _ := NewObliviousClient(cfg)
 	_, err := client.Query([]byte("test"))
 	if err == nil {
 		t.Error("expected error for invalid KEM in Query")
-	}
-	if !contains(err.Error(), "generating ephemeral key") {
-		t.Errorf("error = %q, want mention of 'generating ephemeral key'", err.Error())
 	}
 }
 
@@ -1339,7 +1330,13 @@ func TestClientQueryEncapsulateError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestClientQuerySendError(t *testing.T) {
-	_, validPub, _ := generateKeyPair(HPKEDHX25519)
+	// Build a valid ObliviousDoHConfigContents so Query gets past the
+	// encapsulation step and reaches the HTTP forward, then fail at the
+	// unreachable proxy URL.
+	kp, err := newODoHKeyPair()
+	if err != nil {
+		t.Fatalf("newODoHKeyPair: %v", err)
+	}
 	cfg := &ODoHConfig{
 		TargetName:      "target.example.com",
 		ProxyName:       "proxy.example.com",
@@ -1347,13 +1344,13 @@ func TestClientQuerySendError(t *testing.T) {
 		HPKEKEM:         HPKEDHX25519,
 		HPKEKDF:         1,
 		HPKEAEAD:        HPKEAEADAES256GCM,
-		TargetPublicKey: validPub,
+		TargetPublicKey: kp.configBytes,
 	}
 	client := &ObliviousClient{
 		config: cfg,
 		client: &http.Client{Timeout: 100 * time.Millisecond},
 	}
-	_, err := client.Query([]byte("test"))
+	_, err = client.Query([]byte("test"))
 	if err == nil {
 		t.Error("expected error from sendToProxy")
 	}
@@ -1458,12 +1455,7 @@ func TestProxyForwardToTargetBadURL(t *testing.T) {
 	cfg.TargetURL = "://invalid-url"
 	proxy, _ := NewObliviousProxy(cfg)
 
-	msg := &ObliviousDNSMessage{
-		PublicKey:  make([]byte, 32),
-		Ciphertext: []byte("test"),
-		Nonce:      make([]byte, 12),
-	}
-	_, err := proxy.forwardToTarget(msg)
+	_, err := proxy.forwardRaw([]byte("dummy"))
 	if err == nil {
 		t.Error("expected error for invalid target URL")
 	}

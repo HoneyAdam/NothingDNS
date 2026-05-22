@@ -1,6 +1,20 @@
 // Package odoh implements Oblivious DNS over HTTPS (ODoH) as specified in RFC 9230.
 // ODoH provides encrypted DNS queries through an oblivious proxy,
 // preventing the resolver from learning the client's identity.
+//
+// The conformant RFC 9180 (HPKE) implementation lives in hpke.go +
+// rfc9230.go and is exercised end-to-end by TestRFC9230RoundTrip and
+// TestRFC9230_ClientProxyTargetRoundTrip. The HPKE math is verified
+// against the canonical RFC 9180 §A.1 test vectors in
+// hpke_vectors_test.go (DHKEM shared_secret, base_nonce, AEAD seal[0]).
+//
+// The legacy ObliviousDNSMessage struct and its encapsulate/decapsulate
+// helpers in this file are NO LONGER WIRED into ServeHTTP/Query. They
+// remain only because pre-RFC-9230 unit tests covered the underlying
+// crypto primitives (ECDH, HKDF, AES-GCM). Removing them would delete
+// real coverage without changing observable server behavior. Do not
+// introduce new callers of these legacy helpers — extend hpke.go /
+// rfc9230.go instead.
 package odoh
 
 import (
@@ -148,40 +162,72 @@ func NewObliviousClient(config *ODoHConfig) (*ObliviousClient, error) {
 	}, nil
 }
 
-// Query sends an encrypted DNS query through the proxy to the target.
+// Query sends an encrypted DNS query through the proxy to the target,
+// conformant with RFC 9230 / RFC 9180 (HPKE base mode).
+//
+// The client must have a valid ObliviousDoHConfigContents for the
+// target in c.config.TargetPublicKey (treated as the raw config bytes,
+// not just the X25519 public key — see SetTargetConfig).
 func (c *ObliviousClient) Query(dnsQuery []byte) ([]byte, error) {
-	// Generate HPKE key pair for encapsulation
-	ephemeralPriv, err := generateEphemeralKey(c.config.HPKEKEM)
+	targetConfig, err := c.getTargetConfigContents()
 	if err != nil {
-		return nil, fmt.Errorf("generating ephemeral key: %w", err)
-	}
-	defer clearBytes(ephemeralPriv)
-
-	// Get target's public key (in real implementation, this would be fetched via DNS)
-	targetPub, err := c.getTargetPublicKey()
-	if err != nil {
-		return nil, fmt.Errorf("getting target public key: %w", err)
+		return nil, fmt.Errorf("getting target config: %w", err)
 	}
 
-	// Encapsulate the DNS query to the target
-	encapsulated, err := c.encapsulateQuery(dnsQuery, ephemeralPriv, targetPub)
+	msgBytes, qCtx, err := encryptQueryRFC9230(targetConfig, dnsQuery)
 	if err != nil {
 		return nil, fmt.Errorf("encapsulating query: %w", err)
 	}
 
-	// Send encapsulated message to proxy
-	response, err := c.sendToProxy(encapsulated)
+	respBytes, err := c.postEncapsulated(msgBytes)
 	if err != nil {
 		return nil, fmt.Errorf("sending to proxy: %w", err)
 	}
 
-	// Decapsulate the response
-	plaintext, err := c.decapsulateResponse(response, ephemeralPriv)
+	// Reconstruct the query plaintext envelope to seed the response
+	// key derivation (RFC 9230 §4.1.2: response_key = Expand(Extract(
+	// query_plaintext, enc), "key", "odoh response", ...)).
+	clientQueryPlain := append([]byte(nil), u16BE(uint16(len(dnsQuery)))...)
+	clientQueryPlain = append(clientQueryPlain, dnsQuery...)
+	clientQueryPlain = append(clientQueryPlain, u16BE(0)...) // pad_len = 0
+
+	plain, err := qCtx.decryptResponse(respBytes, clientQueryPlain)
 	if err != nil {
 		return nil, fmt.Errorf("decapsulating response: %w", err)
 	}
+	return plain, nil
+}
 
-	return plaintext, nil
+// getTargetConfigContents returns the marshaled
+// ObliviousDoHConfigContents. The client config carries it in
+// TargetPublicKey for compatibility with the existing API surface.
+func (c *ObliviousClient) getTargetConfigContents() ([]byte, error) {
+	if len(c.config.TargetPublicKey) == 0 {
+		return nil, ErrInvalidKey
+	}
+	return c.config.TargetPublicKey, nil
+}
+
+// postEncapsulated POSTs the RFC 9230 wire-format message to the
+// configured proxy URL and returns the response bytes.
+func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
+	req, err := http.NewRequest("POST", c.config.ProxyURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/oblivious-dns-message")
+	req.Header.Set("Accept", "application/oblivious-dns-message")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sending request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("proxy returned status: %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 }
 
 // getTargetPublicKey returns the target's public key.
@@ -315,7 +361,11 @@ func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
 	}, nil
 }
 
-// ServeHTTP implements the HTTP handler for the proxy.
+// ServeHTTP implements the HTTP handler for the ODoH proxy. The proxy
+// is intentionally opaque: it forwards the encrypted body to the
+// configured target URL without parsing or modifying it. RFC 9230 §5
+// requires the proxy never see the inner DNS message, which is exactly
+// what a byte-for-byte pass-through achieves.
 func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -328,40 +378,26 @@ func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse the oblivious DNS message
-	msg, err := parseProxyRequest(body)
-	if err != nil {
-		http.Error(w, "Bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Forward to target (with target's public key in the message)
-	response, err := p.forwardToTarget(msg)
+	respBytes, err := p.forwardRaw(body)
 	if err != nil {
 		http.Error(w, "Target error", http.StatusBadGateway)
 		return
 	}
 
-	// Return response to client
-	w.Header().Set("Content-Type", "application/dns-message")
+	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	w.Write(response)
+	_, _ = w.Write(respBytes)
 }
 
-// forwardToTarget forwards the encapsulated message to the target resolver.
-func (p *ObliviousProxy) forwardToTarget(msg *ObliviousDNSMessage) ([]byte, error) {
-	// Build the HTTP request to forward to the target
-	reqBody, err := buildProxyRequest(msg)
-	if err != nil {
-		return nil, fmt.Errorf("building proxy request: %w", err)
-	}
-
-	req, err := http.NewRequest("POST", p.config.TargetURL, bytes.NewReader(reqBody))
+// forwardRaw POSTs the opaque ODoH message bytes to the configured
+// target URL and returns the response bytes verbatim.
+func (p *ObliviousProxy) forwardRaw(body []byte) ([]byte, error) {
+	req, err := http.NewRequest("POST", p.config.TargetURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/dns-message")
-	req.Header.Set("Accept", "application/dns-message")
+	req.Header.Set("Content-Type", "application/oblivious-dns-message")
+	req.Header.Set("Accept", "application/oblivious-dns-message")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -372,13 +408,7 @@ func (p *ObliviousProxy) forwardToTarget(msg *ObliviousDNSMessage) ([]byte, erro
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("target returned status: %d", resp.StatusCode)
 	}
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
-	if err != nil {
-		return nil, fmt.Errorf("reading target response: %w", err)
-	}
-
-	return respBody, nil
+	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 }
 
 // NewObliviousTarget creates a new ODoH target resolver. The target

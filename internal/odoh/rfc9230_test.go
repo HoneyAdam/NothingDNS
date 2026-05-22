@@ -4,12 +4,18 @@ package odoh
 
 import (
 	"bytes"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
 )
+
+func httptestNewServer(t *testing.T, h http.Handler) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(h)
+}
 
 // rfc9230MockHandler returns a fixed response for any query so we can
 // assert the round-trip identity.
@@ -168,5 +174,78 @@ func TestRFC9230_ConfigsObjectShape(t *testing.T) {
 	version := uint16(cfgs[2])<<8 | uint16(cfgs[3])
 	if version != 0x0001 {
 		t.Errorf("version = %#x, want 0x0001", version)
+	}
+}
+
+// TestRFC9230_ClientProxyTargetRoundTrip is the full pipeline test:
+// real Client → real Proxy → real Target → DNS handler, decrypted on
+// return. Proves all four moving parts wire together under RFC 9230.
+func TestRFC9230_ClientProxyTargetRoundTrip(t *testing.T) {
+	// Build a DNS response the target's handler will emit.
+	respMsg, err := protocol.NewQuery(0xcafe, "example.com.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("NewQuery: %v", err)
+	}
+	respMsg.Header.Flags.QR = true
+	respMsg.Header.Flags.AA = true
+	rr, _ := protocol.NewResourceRecord(
+		"example.com.", protocol.TypeA, protocol.ClassIN, 60,
+		&protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+	)
+	respMsg.Answers = append(respMsg.Answers, rr)
+	respMsg.Header.ANCount = 1
+
+	target, err := NewObliviousTarget(
+		NewODoHConfig("target.example.com", "proxy.example.com"),
+		&rfc9230MockHandler{response: respMsg},
+	)
+	if err != nil {
+		t.Fatalf("NewObliviousTarget: %v", err)
+	}
+	targetServer := httptestNewServer(t, target)
+	defer targetServer.Close()
+
+	// Proxy points at the target.
+	proxyCfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	proxyCfg.TargetURL = targetServer.URL
+	proxy, err := NewObliviousProxy(proxyCfg)
+	if err != nil {
+		t.Fatalf("NewObliviousProxy: %v", err)
+	}
+	proxyServer := httptestNewServer(t, proxy)
+	defer proxyServer.Close()
+
+	// Client points at the proxy and trusts the target's config.
+	clientCfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	clientCfg.ProxyURL = proxyServer.URL
+	clientCfg.TargetPublicKey = target.ConfigContents()
+	client, err := NewObliviousClient(clientCfg)
+	if err != nil {
+		t.Fatalf("NewObliviousClient: %v", err)
+	}
+
+	queryMsg, _ := protocol.NewQuery(0xcafe, "example.com.", protocol.TypeA)
+	queryWire := make([]byte, queryMsg.WireLength())
+	if _, err := queryMsg.Pack(queryWire); err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+
+	respWire, err := client.Query(queryWire)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+
+	got, err := protocol.UnpackMessage(respWire)
+	if err != nil {
+		t.Fatalf("UnpackMessage: %v", err)
+	}
+	if got.Header.ID != 0xcafe {
+		t.Errorf("response ID = %#x, want 0xcafe", got.Header.ID)
+	}
+	if len(got.Answers) != 1 {
+		t.Fatalf("answers = %d, want 1", len(got.Answers))
+	}
+	if a, ok := got.Answers[0].Data.(*protocol.RDataA); !ok || a.Address != [4]byte{1, 2, 3, 4} {
+		t.Errorf("answer A = %+v, want 1.2.3.4", got.Answers[0].Data)
 	}
 }

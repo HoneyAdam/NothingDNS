@@ -413,18 +413,23 @@ func TestObliviousProxyServeHTTPGET(t *testing.T) {
 }
 
 func TestObliviousProxyServeHTTPPostBadRequest(t *testing.T) {
+	// Proxy is opaque now: empty body still triggers a forward attempt.
+	// Point at an unreachable target so the forward fails with 502.
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
-	proxy := &ObliviousProxy{config: cfg}
+	cfg.TargetURL = "http://127.0.0.1:1/dns-query"
+	proxy, err := NewObliviousProxy(cfg)
+	if err != nil {
+		t.Fatalf("NewObliviousProxy: %v", err)
+	}
 
-	// Empty body should fail parsing
 	req := httptest.NewRequest("POST", "http://test/", strings.NewReader(""))
-	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Content-Type", "application/oblivious-dns-message")
 	w := httptest.NewRecorder()
 
 	proxy.ServeHTTP(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
 	}
 }
 
@@ -538,21 +543,14 @@ func TestProxyForwardToTarget(t *testing.T) {
 		t.Fatalf("NewObliviousProxy failed: %v", err)
 	}
 
-	msg := &ObliviousDNSMessage{
-		PublicKey:  []byte("test-pub-key"),
-		Ciphertext: []byte("test-ciphertext"),
-		Nonce:      []byte("test-nonce-12b"),
-		AAD:        []byte(cfg.TargetName),
-	}
-
-	result, err := proxy.forwardToTarget(msg)
+	// Proxy is opaque: send arbitrary bytes; echo server returns them.
+	wire := []byte("rfc9230-opaque-bytes")
+	result, err := proxy.forwardRaw(wire)
 	if err != nil {
-		t.Fatalf("forwardToTarget failed: %v", err)
+		t.Fatalf("forwardRaw failed: %v", err)
 	}
-
-	// Verify the response contains the echoed ciphertext
-	if !bytes.Contains(result, msg.Ciphertext) {
-		t.Errorf("forwardToTarget result = %q, want to contain %q", result, msg.Ciphertext)
+	if !bytes.Equal(result, wire) {
+		t.Errorf("forwardRaw round-trip = %q, want %q", result, wire)
 	}
 }
 

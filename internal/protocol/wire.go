@@ -365,9 +365,10 @@ func ValidateMessage(data []byte) error {
 	return nil
 }
 
-// CompactName compresses a domain name using the given offset map.
-// Returns the compressed name and true if compression was applied.
-// Note: This is a placeholder - actual implementation is in labels.go.
+// offsetMap is the compression dictionary used by PackName when
+// emitting wire-format names (RFC 1035 §4.1.4 message-compression).
+// Maps already-emitted owner names to their byte offset in the
+// outgoing message so suffix references can be encoded as pointers.
 type offsetMap map[string]int
 
 func (m offsetMap) add(name string, offset int) {
