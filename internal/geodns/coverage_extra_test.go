@@ -2,7 +2,6 @@ package geodns
 
 import (
 	"encoding/binary"
-	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -121,28 +120,45 @@ func TestLoadMMDBTruncatedAfterMarker(t *testing.T) {
 }
 
 func TestLoadMMDBValidFile(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB fixture is not valid under the real binary-format parser; replace with a real GeoLite2 fixture in a future test pass")
-	// F138: LoadMMDB now always returns ErrMMDBNotSupported because the
-	// previous "parser" produced random routing decisions. Confirm the
-	// honest-failure behaviour so silent mis-routing cannot return.
+	// F138 (real parser): build a minimal but valid MMDB fixture via
+	// mmdbBuilder and confirm LoadMMDB parses metadata, sets MMDBLoaded,
+	// and the tree+data record decode correctly end-to-end.
+	//
+	// Single-node tree: node 0 is the root; both children point at the
+	// same data record. Every IP resolves to that record.
+	b := &mmdbBuilder{}
+	usRef, err := b.addData(map[string]interface{}{
+		"country": map[string]interface{}{"iso_code": "US"},
+	})
+	if err != nil {
+		t.Fatalf("addData: %v", err)
+	}
+	b.addNode(usRef, usRef) // node 0 = root
+
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.mmdb")
-	if err := os.WriteFile(path, make([]byte, 200), 0644); err != nil {
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	e := NewEngine(Config{Enabled: true})
-	err := e.LoadMMDB(path)
-	if err == nil {
-		t.Fatal("expected LoadMMDB to fail with ErrMMDBNotSupported (F138)")
-	}
-	if !errors.Is(err, ErrMMDBNotSupported) {
-		t.Errorf("expected ErrMMDBNotSupported, got %v", err)
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
 	}
 
 	stats := e.Stats()
-	if stats.MMDBLoaded {
-		t.Error("MMDBLoaded must remain false when LoadMMDB fails")
+	if !stats.MMDBLoaded {
+		t.Error("MMDBLoaded should be true after LoadMMDB succeeds")
+	}
+
+	got := e.LookupCountry(net.ParseIP("8.8.8.8"))
+	if got != "US" {
+		t.Errorf("LookupCountry = %q, want US", got)
 	}
 }
 
@@ -740,81 +756,84 @@ func TestIsEnabledFalse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLookupCountryWithLoadedMMDB(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB fixture is not valid under the real binary-format parser; replace with a real GeoLite2 fixture in a future test pass")
-	// Build a minimal MMDB that resolves 127.0.0.1 to "US".
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): build a valid IPv4 MMDB via mmdbBuilder and
+	// confirm LookupCountry returns the iso_code embedded in the data
+	// record (GeoLite2-Country schema).
+	b := &mmdbBuilder{}
+	usRef, _ := b.addData(map[string]interface{}{
+		"country": map[string]interface{}{"iso_code": "US"},
+	})
+	b.addNode(usRef, usRef)
 
-	// Node 0: left→1, right→1
-	// Node 1: left→2(data), right→2(data)
-	// For 127.0.0.1, first byte = 0x7F = 0111 1111.
-	// First bit is 0 → left → node 1
-	// Second bit is 1 → right → data(2)
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	dataSection := []byte{0x02, 'U', 'S', 0x00, 0x00}
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
-	country := e.LookupCountry(net.ParseIP("127.0.0.1"))
-	if country != "US" {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "country.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
+	if country := e.LookupCountry(net.ParseIP("127.0.0.1")); country != "US" {
 		t.Errorf("LookupCountry = %q, want US", country)
 	}
 }
 
 func TestLookupASNWithLoadedMMDB(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB fixture is not valid under the real binary-format parser; replace with a real GeoLite2 fixture in a future test pass")
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): GeoLite2-ASN schema is a top-level map with an
+	// autonomous_system_number uint field. Confirm LookupASN returns
+	// "AS<n>" with n decoded from the uint.
+	b := &mmdbBuilder{}
+	asnRef, _ := b.addData(map[string]interface{}{
+		"autonomous_system_number": uint64(13335), // Cloudflare
+	})
+	b.addNode(asnRef, asnRef)
 
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	// ASN 13335 (Cloudflare) → 0x003427
-	// ASN 13335 = 0x3417. extractASN reads data[i+1]<<16 | data[i+2]<<8 | data[i+3]
-	dataSection := []byte{0xc0, 0x00, 0x34, 0x17, 0x00}
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
-	asn := e.LookupASN(net.ParseIP("10.0.0.1"))
-	if asn != "AS13335" {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "asn.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
+	if asn := e.LookupASN(net.ParseIP("10.0.0.1")); asn != "AS13335" {
 		t.Errorf("LookupASN = %q, want AS13335", asn)
 	}
 }
 
 func TestLookupContinentWithCountry(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB fixture is not valid under the real binary-format parser")
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): LookupContinent uses LookupCountry + a static
+	// country→continent table. Confirm DE → EU via the real pipeline.
+	b := &mmdbBuilder{}
+	deRef, _ := b.addData(map[string]interface{}{
+		"country": map[string]interface{}{"iso_code": "DE"},
+	})
+	b.addNode(deRef, deRef)
 
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	dataSection := []byte{0x02, 'D', 'E', 0x00}
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
-	continent := e.LookupContinent(net.ParseIP("10.0.0.1"))
-	if continent != "EU" {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cont.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
+	if continent := e.LookupContinent(net.ParseIP("10.0.0.1")); continent != "EU" {
 		t.Errorf("LookupContinent = %q, want EU", continent)
 	}
 }
@@ -824,25 +843,27 @@ func TestLookupContinentWithCountry(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestResolveWithMMDBCountryMatch(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB bytes from honest-fail era do not form valid records under the real binary-format parser; replace with a real GeoLite2 fixture file in a future test pass")
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): the MMDB returns US for every IP; Resolve
+	// should pick the US record from the GeoRecord rule.
+	b := &mmdbBuilder{}
+	usRef, _ := b.addData(map[string]interface{}{
+		"country": map[string]interface{}{"iso_code": "US"},
+	})
+	b.addNode(usRef, usRef)
 
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	dataSection := []byte{0x02, 'U', 'S', 0x00}
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
-		enabled:       true,
-		rules:         make(map[string]*GeoRecord),
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
+	dir := t.TempDir()
+	path := filepath.Join(dir, "country.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
 	e.SetRule("cdn.example.com.", "A", &GeoRecord{
 		Records: map[string]string{
 			"US": "192.168.1.1",
@@ -851,7 +872,6 @@ func TestResolveWithMMDBCountryMatch(t *testing.T) {
 		Default: "172.16.0.1",
 	})
 
-	// The crafted MMDB returns "US" for any IP, so the US record should match.
 	result := e.Resolve("cdn.example.com.", "A", net.ParseIP("192.168.0.1"))
 	if result != "192.168.1.1" {
 		t.Errorf("Resolve with MMDB = %q, want 192.168.1.1 (US match)", result)
@@ -859,33 +879,34 @@ func TestResolveWithMMDBCountryMatch(t *testing.T) {
 }
 
 func TestResolveWithMMDBContinentFallback(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB bytes from honest-fail era do not form valid records under the real binary-format parser; replace with a real GeoLite2 fixture file in a future test pass")
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): MMDB returns DE → continent fallback should
+	// pick the EU record from the rule.
+	b := &mmdbBuilder{}
+	deRef, _ := b.addData(map[string]interface{}{
+		"country": map[string]interface{}{"iso_code": "DE"},
+	})
+	b.addNode(deRef, deRef)
 
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	dataSection := []byte{0x02, 'D', 'E', 0x00}
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
-		enabled:       true,
-		rules:         make(map[string]*GeoRecord),
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
+	dir := t.TempDir()
+	path := filepath.Join(dir, "country.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
 	e.SetRule("cdn.example.com.", "A", &GeoRecord{
 		Records: map[string]string{
-			"EU": "10.0.1.1", // continent match
+			"EU": "10.0.1.1",
 		},
 		Default: "172.16.0.1",
 	})
 
-	// DE → EU continent match.
 	result := e.Resolve("cdn.example.com.", "A", net.ParseIP("10.0.0.1"))
 	if result != "10.0.1.1" {
 		t.Errorf("Resolve continent fallback = %q, want 10.0.1.1", result)
@@ -893,36 +914,37 @@ func TestResolveWithMMDBContinentFallback(t *testing.T) {
 }
 
 func TestResolveWithMMDBASNMatch(t *testing.T) {
-	t.Skip("F138: hand-crafted MMDB bytes from honest-fail era do not form valid records under the real binary-format parser; replace with a real GeoLite2 fixture file in a future test pass")
-	nodeCount := uint32(2)
-	treeSize := nodeCount * 6
+	// F138 (real parser): MMDB returns both an ASN and a US country, so
+	// the resolver should prefer the AS10 record over US/NA.
+	b := &mmdbBuilder{}
+	combinedRef, _ := b.addData(map[string]interface{}{
+		"country":                  map[string]interface{}{"iso_code": "US"},
+		"autonomous_system_number": uint64(10),
+	})
+	b.addNode(combinedRef, combinedRef)
 
-	node0 := []byte{0x00, 0x00, 0x01, 0x00, 0x00, 0x01}
-	node1 := []byte{0x00, 0x00, 0x02, 0x00, 0x00, 0x02}
-	// Country code first, then ASN.
-	dataSection := []byte{0x02, 'U', 'S', 0x00, 0xc0, 0x00, 0x00, 0x0A, 0x00} // AS10
-
-	mmdb := append(append(node0, node1...), dataSection...)
-
-	e := &Engine{
-		mmdbData:      mmdb,
-		mmdbIPv4Count: nodeCount,
-		mmdbTreeSize:  treeSize,
-		mmdbLoaded:    true,
-		enabled:       true,
-		rules:         make(map[string]*GeoRecord),
+	fixture, err := b.build(4)
+	if err != nil {
+		t.Fatalf("build: %v", err)
 	}
-
+	dir := t.TempDir()
+	path := filepath.Join(dir, "combined.mmdb")
+	if err := os.WriteFile(path, fixture, 0644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(Config{Enabled: true})
+	if err := e.LoadMMDB(path); err != nil {
+		t.Fatalf("LoadMMDB: %v", err)
+	}
 	e.SetRule("cdn.example.com.", "A", &GeoRecord{
 		Records: map[string]string{
-			"AS10": "10.10.10.10", // ASN match
-			"US":   "1.1.1.1",     // country match (lower priority)
-			"NA":   "2.2.2.2",     // continent match (even lower)
+			"AS10": "10.10.10.10",
+			"US":   "1.1.1.1",
+			"NA":   "2.2.2.2",
 		},
 		Default: "172.16.0.1",
 	})
 
-	// ASN match should win over country and continent.
 	result := e.Resolve("cdn.example.com.", "A", net.ParseIP("10.0.0.1"))
 	if result != "10.10.10.10" {
 		t.Errorf("Resolve ASN match = %q, want 10.10.10.10", result)

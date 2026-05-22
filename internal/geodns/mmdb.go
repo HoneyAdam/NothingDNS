@@ -399,14 +399,21 @@ func mmdbReadRecord(data []byte, nodeIdx uint32, recordSize uint32, isRight bool
 	}
 }
 
-// mmdbLookup walks the tree for ip and returns the offset in the data
-// section (relative to file start) where the record lives, or
-// ok=false if the IP is not in the database. Bit-by-bit traversal:
-// at each level, bit i (MSB first) selects left (0) or right (1).
+// mmdbLookup walks the tree for ip and returns the absolute file offset
+// of the data record, or ok=false if the IP is not in the database.
+// Bit-by-bit traversal: at each level, bit i (MSB first) selects left (0)
+// or right (1).
 //
 // ipBits = 32 for IPv4 lookups on an IPv4-only DB; 128 for IPv6 lookups;
 // for IPv6 DBs that store IPv4 in the ::ffff:0:0/96 range, IPv4 queries
 // should be expanded to 16 bytes before being passed in.
+//
+// MMDB spec pointer arithmetic:
+//
+//	abs_file_offset = treeBytes + (record_value - node_count)
+//
+// Reference implementations: MaxMind-DB-Reader-python (_resolve_data_pointer)
+// and the spec at https://maxmind.github.io/MaxMind-DB/ §"Data Section Separator".
 func mmdbLookup(data []byte, nodeCount, recordSize uint32, ip net.IP, ipBits int) (dataOffset uint32, ok bool, err error) {
 	if len(ip) == 0 {
 		return 0, false, nil
@@ -428,10 +435,8 @@ func mmdbLookup(data []byte, nodeCount, recordSize uint32, ip net.IP, ipBits int
 			return 0, false, nil
 		}
 		if rec > nodeCount {
-			// Pointer into the data section. Offset is measured from
-			// the *end* of the tree + 16-byte separator.
 			treeBytes := nodeCount * (recordSize * 2) / 8
-			return rec - nodeCount - 16 + treeBytes, true, nil
+			return treeBytes + (rec - nodeCount), true, nil
 		}
 		// Descend into next node.
 		nodeIdx = rec

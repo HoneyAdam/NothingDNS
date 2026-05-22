@@ -91,14 +91,13 @@ func NewEngine(cfg Config) *Engine {
 	return e
 }
 
-// ErrMMDBNotSupported is retained for historical callers that key on the
-// "not supported" sentinel. With the real parser now in place it should no
-// longer be returned by LoadMMDB; specific decode errors come back instead.
-var ErrMMDBNotSupported = errors.New("geodns: MMDB binary format parser is not implemented; configure split-horizon views instead (see F138)")
+// ErrMMDBNotSupported is retained for callers that still test against this
+// sentinel; LoadMMDB no longer returns it now that the real parser is in
+// place — specific decode errors come back instead.
+var ErrMMDBNotSupported = errors.New("geodns: MMDB binary format parser is not implemented")
 
 // LoadMMDB loads a MaxMind DB file using the real binary-format parser in
-// mmdb.go. Supersedes the original brute-force heuristic that produced
-// effectively-random routing decisions (F138 audit finding).
+// mmdb.go (RFC: https://maxmind.github.io/MaxMind-DB/).
 func (e *Engine) LoadMMDB(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -292,7 +291,7 @@ func (e *Engine) mmdbLookup(ip net.IP) map[string]interface{} {
 		}
 	}
 
-	// Tree walk to get the data-section offset.
+	// Tree walk to get the data-section offset (absolute file offset).
 	treeBytes := e.mmdbTreeSize
 	tree := e.mmdbData[:treeBytes]
 	dataOff, ok, err := mmdbLookup(tree, e.mmdbNodeCount, e.mmdbRecordSize, lookupIP, bits)
@@ -300,12 +299,14 @@ func (e *Engine) mmdbLookup(ip net.IP) map[string]interface{} {
 		return nil
 	}
 
-	// Decode the data-section record. dataOff is already relative to file start.
+	// Decode the data-section record at the absolute file offset returned
+	// by mmdbLookup. dataStart is the start of the data section, used by
+	// the decoder to resolve internal pointers relative to it.
 	dec := &mmdbDecoder{
 		buf:       e.mmdbData,
 		dataStart: int(treeBytes) + 16,
 	}
-	v, _, err := dec.decodeValue(int(dataOff)+int(treeBytes)+16, 32)
+	v, _, err := dec.decodeValue(int(dataOff), 32)
 	if err != nil {
 		// Some DBs encode pointers; if the absolute calculation above
 		// is off by a section boundary, try the offset as already absolute.
