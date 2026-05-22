@@ -149,7 +149,7 @@ internal/
 ## Known Gotchas
 
 - **Port 53** requires root on Unix; use 5354+ for testing
-- **YAML parser** is custom — does not support anchors/aliases or multiline strings
+- **YAML parser** is custom — does not support anchors/aliases or multiline strings. Also: a block-sequence of inline maps (`- key: value` / `key: value`) followed by a sibling map key in the same parent CURRENTLY FAILS parsing — the inner loop in `parseBlockSequence` greedily consumes the sibling. Documented in `config.example.yaml` (which trips on this and does not pass `-validate-config`); the open fix is in `parser.go parseBlockSequence` around the "additional key-value pairs" loop where indent-boundary tracking is incomplete. Workaround: use flow-style `[{k: v, ...}]` for sequences-of-maps that have siblings.
 - **`protocol.CanonicalWireName()`** is the shared canonical name encoder — do not create new ones
 - **`advance()` and `peek()`** skip `TokenComment` automatically — never handle comments in parse logic
 - **Health check goroutines** use per-round `sync.WaitGroup` — do not reuse the main WG
