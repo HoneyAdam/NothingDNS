@@ -6,6 +6,7 @@ package main
 import (
 	"testing"
 
+	"github.com/nothingdns/nothingdns/internal/storage"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
@@ -139,5 +140,36 @@ func TestMultiZoneProvider_EmptyProviders(t *testing.T) {
 	}
 	if got := mp.FindZones("anything."); got != nil {
 		t.Errorf("empty providers FindZones = %v, want nil", got)
+	}
+}
+
+func TestKVZoneProvider(t *testing.T) {
+	// kvZoneProvider wraps a zone.KVPersistence whose Manager()
+	// returns the live zone set. Construct one over a tempdir
+	// KVStore + freshly-loaded Manager.
+	tmp := t.TempDir()
+	kvStore, err := storage.OpenKVStore(tmp)
+	if err != nil {
+		t.Fatalf("OpenKVStore: %v", err)
+	}
+	defer kvStore.Close()
+
+	mgr := zone.NewManager()
+	mgr.LoadZone(makeZone("kv.example.com."), "")
+
+	kvp := zone.NewKVPersistence(mgr, kvStore)
+	p := &kvZoneProvider{kv: kvp}
+
+	if list := p.ListZones(); len(list) != 1 {
+		t.Errorf("ListZones len = %d, want 1", len(list))
+	}
+	if z, ok := p.GetZone("kv.example.com."); !ok || z.Origin != "kv.example.com." {
+		t.Errorf("GetZone hit failed: %v %v", z, ok)
+	}
+	if _, ok := p.GetZone("missing.com."); ok {
+		t.Error("GetZone(missing) should miss")
+	}
+	if got := p.FindZones("host.kv.example.com."); len(got) == 0 {
+		t.Error("FindZones should match kv.example.com.")
 	}
 }
