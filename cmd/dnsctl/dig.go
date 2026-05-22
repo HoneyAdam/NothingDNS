@@ -121,17 +121,17 @@ func cmdDig(args []string) error {
 		},
 	}
 
-	// Set DO bit if DNSSEC requested
+	// Set DO bit if DNSSEC requested. Use the protocol.SetEDNS0 helper
+	// rather than open-coding the OPT record: that helper sets the
+	// OPT owner name to root ("."), as RFC 6891 §6.1.2 requires.
+	// The previous code attached the query name as the OPT owner,
+	// which an RFC-strict resolver may reject as malformed (the wire
+	// bytes are still parseable, but a peer that validates OPT owner
+	// per spec sees a violation and may drop the EDNS0 option set
+	// entirely — losing the DO bit and silently demoting the query
+	// to a non-DNSSEC one).
 	if wantDNSSEC {
-		msg.Additionals = []*protocol.ResourceRecord{
-			{
-				Name:  name,
-				Type:  protocol.TypeOPT,
-				Class: 4096,   // UDP payload size
-				TTL:   0x8000, // DO bit set
-				Data:  &protocol.RDataOPT{},
-			},
-		}
+		msg.SetEDNS0(4096, true)
 	}
 
 	// Pack message
