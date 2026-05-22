@@ -54,8 +54,16 @@ func (r *RDataOPT) Pack(buf []byte, offset int) (int, error) {
 		PutUint16(buf[offset:], opt.Code)
 		offset += 2
 
-		// Option length (2 bytes)
+		// Option length (2 bytes). EDNS0 option length is a uint16 on
+		// the wire (RFC 6891 §6.1.2); an option longer than 65535
+		// bytes can't be represented at all, and silently casting
+		// would emit a truncated length that the receiver decodes
+		// as a short option, swallowing the rest of the buffer as
+		// garbage. Refuse explicitly.
 		optLen := len(opt.Data)
+		if optLen > 0xFFFF {
+			return 0, fmt.Errorf("EDNS0 option code %d data too large: %d bytes (max 65535)", opt.Code, optLen)
+		}
 		if offset+2 > len(buf) {
 			return 0, ErrBufferTooSmall
 		}

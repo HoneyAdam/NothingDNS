@@ -222,6 +222,13 @@ func (m *Message) Release() {
 	}
 	m.Additionals = m.Additionals[:0]
 	m.Header = Header{}
+	// Clear the DSO body reference so a Released-but-not-yet-Reused
+	// message in the pool doesn't keep a (potentially large) TLV
+	// stream alive. UnpackMessage also nils this on each Get, but
+	// nil-on-Release is the right symmetric place for it — the
+	// window between Put and Get can be arbitrarily long under
+	// light load.
+	m.RawBody = nil
 	messagePool.Put(m)
 }
 
