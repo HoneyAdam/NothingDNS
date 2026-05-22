@@ -1,13 +1,52 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
+
+// digQueryTCP performs a single-shot DNS-over-TCP query (RFC 1035
+// §4.2.2 two-byte length prefix) and returns the parsed response.
+// Used by cmdDig when the UDP response has the TC bit set.
+func digQueryTCP(addr string, query []byte) (*protocol.Message, error) {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial tcp %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return nil, err
+	}
+
+	var prefix [2]byte
+	binary.BigEndian.PutUint16(prefix[:], uint16(len(query)))
+	if _, err := conn.Write(prefix[:]); err != nil {
+		return nil, fmt.Errorf("write tcp len-prefix: %w", err)
+	}
+	if _, err := conn.Write(query); err != nil {
+		return nil, fmt.Errorf("write tcp body: %w", err)
+	}
+
+	if _, err := io.ReadFull(conn, prefix[:]); err != nil {
+		return nil, fmt.Errorf("read tcp len-prefix: %w", err)
+	}
+	respLen := binary.BigEndian.Uint16(prefix[:])
+	if respLen == 0 {
+		return nil, fmt.Errorf("tcp response empty")
+	}
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBuf); err != nil {
+		return nil, fmt.Errorf("read tcp body: %w", err)
+	}
+	return protocol.UnpackMessage(respBuf)
+}
 
 func cmdDig(args []string) error {
 	// Parse dig-style arguments: [@server] <name> [<type>] [+dnssec]
@@ -133,6 +172,18 @@ func cmdDig(args []string) error {
 		return fmt.Errorf("unpacking response: %w", err)
 	}
 
+	// RFC 1035 §4.2.1: if the UDP response has TC=1, the answer was
+	// truncated and the caller is expected to retry over TCP. Real `dig`
+	// does this automatically; without it our subcommand silently drops
+	// records the daemon explicitly told us to refetch. Try once.
+	if resp.Header.Flags.TC {
+		if tcpResp, tcpErr := digQueryTCP(addr, buf[:n]); tcpErr == nil {
+			resp = tcpResp
+		} else {
+			fmt.Fprintf(os.Stderr, ";; warning: UDP response truncated and TCP retry failed: %v\n", tcpErr)
+		}
+	}
+
 	// Display results
 	fmt.Printf("; Query: %s %s @%s\n", qname, qtypeStr, server)
 	if wantDNSSEC {
@@ -219,7 +270,16 @@ func cmdDig(args []string) error {
 	}
 
 	fmt.Printf(";; Query time: ~0ms\n")
-	fmt.Printf(";; SERVER: %s#53\n", server)
+	// `addr` is the host:port we actually dialed (server, plus :53 if
+	// the user didn't include one). Splitting it back out keeps the
+	// dig-style "SERVER: host#port" output honest when a non-53 port
+	// is in play (the previous hard-coded #53 lied to operators using
+	// 5353/15353 for local testing).
+	if host, port, splitErr := net.SplitHostPort(addr); splitErr == nil {
+		fmt.Printf(";; SERVER: %s#%s\n", host, port)
+	} else {
+		fmt.Printf(";; SERVER: %s\n", addr)
+	}
 	fmt.Printf(";; WHEN: %s\n", time.Now().Format("Mon Jan 02 15:04:05 MST 2006"))
 
 	return nil
