@@ -48,7 +48,7 @@ func cmdDNSSEC(args []string) error {
 	case "validate-zone":
 		return cmdDNSSECValidateZone(subArgs)
 	default:
-		return fmt.Errorf("unknown dnssec subcommand: %s", subcmd)
+		return fmt.Errorf("unknown dnssec subcommand: %s (supported: generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", subcmd)
 	}
 }
 

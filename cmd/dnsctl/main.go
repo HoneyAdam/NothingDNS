@@ -25,14 +25,14 @@ type Command struct {
 }
 
 var commands = []Command{
-	{Name: "zone", Description: "Manage DNS zones (list, add, remove, reload)", Run: cmdZone},
-	{Name: "record", Description: "Manage DNS records (add, remove, update)", Run: cmdRecord},
+	{Name: "zone", Description: "Manage DNS zones (list, add, remove, reload, export)", Run: cmdZone},
+	{Name: "record", Description: "Manage DNS records (list, add, remove, update)", Run: cmdRecord},
 	{Name: "cache", Description: "Cache operations (flush, stats)", Run: cmdCache},
-	{Name: "cluster", Description: "Cluster management (status, peers)", Run: cmdCluster},
-	{Name: "blocklist", Description: "Blocklist management (status, sources)", Run: cmdBlocklist},
-	{Name: "config", Description: "Configuration operations (get, set, reload)", Run: cmdConfig},
+	{Name: "cluster", Description: "Cluster management (status, peers, join, leave)", Run: cmdCluster},
+	{Name: "blocklist", Description: "Blocklist management (status, sources, reload)", Run: cmdBlocklist},
+	{Name: "config", Description: "Configuration operations (get, reload)", Run: cmdConfig},
 	{Name: "dig", Description: "DNS query tool (like dig)", Run: cmdDig},
-	{Name: "dnssec", Description: "DNSSEC operations (generate-key, ds-from-dnskey, sign-zone)", Run: cmdDNSSEC},
+	{Name: "dnssec", Description: "DNSSEC operations (generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", Run: cmdDNSSEC},
 	{Name: "server", Description: "Server operations (status, health)", Run: cmdServer},
 }
 
