@@ -14,7 +14,17 @@ import (
 // ============================================================================
 
 func apiRequest(method, path, body string) (map[string]interface{}, error) {
-	url := strings.TrimRight(globalFlags.Server, "/") + path
+	server := strings.TrimRight(globalFlags.Server, "/")
+	// Reject scheme-less server URLs with a clear, actionable message.
+	// Without this guard, `--server localhost:8080` is interpreted by
+	// Go's net/url parser as scheme="localhost" rest="8080/api/...",
+	// and the request fails with the cryptic
+	//   `unsupported protocol scheme "localhost"`.
+	// Most operators reach for `localhost:8080` reflexively.
+	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
+		return nil, fmt.Errorf("--server must start with http:// or https://, got %q", globalFlags.Server)
+	}
+	url := server + path
 	var bodyReader io.Reader
 	if body != "" {
 		bodyReader = bytes.NewReader([]byte(body))
@@ -63,7 +73,11 @@ func apiGet(path string) (map[string]interface{}, error) {
 // emits BIND-format zone text with application/x-zone-file). Auth
 // and base URL handling match apiRequest.
 func apiGetRaw(path string) ([]byte, error) {
-	url := strings.TrimRight(globalFlags.Server, "/") + path
+	server := strings.TrimRight(globalFlags.Server, "/")
+	if !strings.HasPrefix(server, "http://") && !strings.HasPrefix(server, "https://") {
+		return nil, fmt.Errorf("--server must start with http:// or https://, got %q", globalFlags.Server)
+	}
+	url := server + path
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
