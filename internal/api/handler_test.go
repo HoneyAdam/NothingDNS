@@ -15,6 +15,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/cluster"
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/rpz"
+	"github.com/nothingdns/nothingdns/internal/util"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
@@ -89,8 +90,8 @@ func TestHandleStatus(t *testing.T) {
 			t.Errorf("Expected status 'running', got %v", response["status"])
 		}
 
-		if response["version"] != "0.1.0" {
-			t.Errorf("Expected version '0.1.0', got %v", response["version"])
+		if response["version"] != util.Version {
+			t.Errorf("Expected version %q, got %v", util.Version, response["version"])
 		}
 
 		clusterInfo, ok := response["cluster"].(map[string]interface{})
