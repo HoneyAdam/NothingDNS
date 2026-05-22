@@ -312,6 +312,11 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 		Col:  p.current.Col,
 	}
 
+	// Column of the FIRST dash. Subsequent items must be at this same
+	// column to belong to this sequence; a dash at a shallower column
+	// belongs to an enclosing sequence (terminator for ours).
+	sequenceDashCol := p.current.Col
+
 	for {
 		// Expect dash
 		if p.current.Type != TokenDash {
@@ -406,7 +411,14 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 						Col:      savedKey.Col,
 						Children: []*Node{savedKey, valNode},
 					}
-					// Parse additional key-value pairs
+					// Parse additional key-value pairs that belong to THIS
+					// sequence-item mapping. After a DEDENT, peek the
+					// next significant token: if it's at or beyond the
+					// item's first-key column, the dedent is internal
+					// (closure of a nested seq / map) and we continue.
+					// Otherwise it crossed the item boundary — break
+					// and let the enclosing parser see the dedent.
+					itemCol := savedKey.Col
 					for {
 						for p.current.Type == TokenNewline || p.current.Type == TokenIndent {
 							p.advance()
@@ -415,8 +427,15 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 							break
 						}
 						if p.current.Type == TokenDedent {
-							p.advance()
-							continue
+							next := p.peek()
+							if next.Type == TokenString && next.Col >= itemCol {
+								// Internal dedent — absorb and continue.
+								p.advance()
+								continue
+							}
+							// Crossed the item boundary; leave dedent
+							// for the enclosing parser.
+							break
 						}
 						if p.current.Type != TokenString {
 							break
@@ -538,7 +557,10 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 					Col:      savedKey.Col,
 					Children: []*Node{savedKey, valNode},
 				}
-				// Parse additional key-value pairs
+				// Parse additional key-value pairs that belong to THIS
+				// sequence-item mapping. See sibling loop above for the
+				// column-based dedent handling rationale.
+				itemCol := savedKey.Col
 				for {
 					for p.current.Type == TokenNewline || p.current.Type == TokenIndent {
 						p.advance()
@@ -547,8 +569,12 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 						break
 					}
 					if p.current.Type == TokenDedent {
-						p.advance()
-						continue
+						next := p.peek()
+						if next.Type == TokenString && next.Col >= itemCol {
+							p.advance()
+							continue
+						}
+						break
 					}
 					if p.current.Type != TokenString {
 						break
@@ -619,6 +645,30 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 		// Skip newlines
 		for p.current.Type == TokenNewline {
 			p.advance()
+		}
+
+		// The inline-mapping continuation loops break on Dedent without
+		// consuming it (so the enclosing parser sees the dedent when an
+		// item ends). Between two items of THIS sequence the dedents
+		// are internal closure of nested content — absorb them as long
+		// as a Dash at THIS sequence's column waits behind them. A Dash
+		// at a different column belongs to an enclosing sequence and we
+		// leave the dedent(s) for the enclosing parser to see.
+		for p.current.Type == TokenDedent {
+			next := p.peek()
+			if next.Type == TokenDash && next.Col == sequenceDashCol {
+				// Consume this Dedent and check the next one.
+				p.hasPeek = false
+				p.current = next
+				break
+			}
+			// Peek further: maybe another Dedent stacks before the dash.
+			if next.Type == TokenDedent {
+				p.hasPeek = false
+				p.current = next
+				continue
+			}
+			break
 		}
 
 		// Continue if we see another dash at same level

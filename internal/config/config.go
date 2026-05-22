@@ -978,7 +978,12 @@ func isAlphaNum(c byte) bool {
 // typo — we warn so operators don't silently lose configuration
 // (e.g. mis-spelling "blocklist" as "blocklists" used to start the
 // server with blocklist disabled and zero indication of the typo).
+//
+// The list is the union of: sections referenced by node.Get(...) in
+// unmarshalToConfig and sections present at the document root in
+// config.example.yaml (which is the canonical reference layout).
 var knownTopLevelConfigKeys = map[string]struct{}{
+	// Core sections wired through unmarshalToConfig.
 	"server": {}, "resolution": {}, "upstream": {}, "cache": {},
 	"logging": {}, "metrics": {}, "dnssec": {}, "zones": {},
 	"zone_dir": {}, "blocklist": {}, "cluster": {}, "tls": {},
@@ -989,6 +994,10 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 	"quic": {}, "signing": {}, "rpc": {}, "seed_nodes": {},
 	"odoh": {}, "idna": {}, "otel": {}, "tracing": {},
 	"catalog": {}, "mdns": {}, "load": {}, "filter": {},
+
+	// Documented in config.example.yaml at the document root.
+	"api": {}, "auth": {}, "ddns": {}, "dso": {},
+	"resolver": {}, "security": {}, "transfer": {}, "zonemd": {},
 }
 
 // unmarshalToConfig unmarshals a node tree into a Config struct.

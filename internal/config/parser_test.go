@@ -1183,3 +1183,81 @@ func TestParserFlowMappingMissingColon(t *testing.T) {
 		t.Error("expected error for missing colon in flow mapping")
 	}
 }
+
+// TestParser_BlockSeqOfInlineMaps_ThenSiblingKey is a regression for
+// the parser bug where a sibling mapping key (like `signing:` after
+// a `trust_anchors:` block-sequence in config.example.yaml) was
+// greedily consumed by the LAST sequence item's inline mapping. The
+// fix is: break out of the inline-map continuation loop on Dedent
+// without consuming it, so the enclosing mapping sees the dedent
+// and continues parsing its own keys.
+func TestParser_BlockSeqOfInlineMaps_ThenSiblingKey(t *testing.T) {
+	input := `parent:
+  list_field:
+    - sub_key: value
+      another_inline: 42
+  next_field:
+    nested: yes
+  trailing_scalar: done
+`
+	parser := NewParser(input)
+	node, err := parser.ParseMapping()
+	if err != nil {
+		t.Fatalf("ParseMapping: %v", err)
+	}
+	// Top-level mapping has one key: parent.
+	parentNode := node.Get("parent")
+	if parentNode == nil || parentNode.Type != NodeMapping {
+		t.Fatalf("parent missing or not mapping")
+	}
+	// parent should have THREE keys (list_field, next_field, trailing_scalar).
+	keys := parentNode.Keys()
+	wantKeys := []string{"list_field", "next_field", "trailing_scalar"}
+	if len(keys) != len(wantKeys) {
+		t.Fatalf("parent keys = %v, want %v", keys, wantKeys)
+	}
+	for i, want := range wantKeys {
+		if keys[i] != want {
+			t.Errorf("parent.Keys()[%d] = %q, want %q", i, keys[i], want)
+		}
+	}
+	// list_field is a sequence with one item (a 2-key mapping).
+	lf := parentNode.Get("list_field")
+	if lf == nil || lf.Type != NodeSequence || len(lf.Children) != 1 {
+		t.Fatalf("list_field = %+v, want 1-item sequence", lf)
+	}
+	item := lf.Children[0]
+	if item.Type != NodeMapping {
+		t.Fatalf("sequence item is not a mapping")
+	}
+	itemKeys := item.Keys()
+	wantItemKeys := []string{"sub_key", "another_inline"}
+	if len(itemKeys) != len(wantItemKeys) {
+		t.Errorf("item keys = %v, want %v", itemKeys, wantItemKeys)
+	}
+	// next_field should be a mapping with one key (nested).
+	nf := parentNode.Get("next_field")
+	if nf == nil || nf.Type != NodeMapping {
+		t.Fatalf("next_field missing or not mapping")
+	}
+	if !sliceEqual(nf.Keys(), []string{"nested"}) {
+		t.Errorf("next_field keys = %v, want [nested]", nf.Keys())
+	}
+	// trailing_scalar should be the scalar "done".
+	ts := parentNode.Get("trailing_scalar")
+	if ts == nil || ts.Type != NodeScalar || ts.Value != "done" {
+		t.Errorf("trailing_scalar = %+v, want scalar 'done'", ts)
+	}
+}
+
+func sliceEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
