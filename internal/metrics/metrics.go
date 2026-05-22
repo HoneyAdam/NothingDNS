@@ -104,7 +104,14 @@ type Config struct {
 	Enabled   bool
 	Bind      string
 	Path      string
-	AuthToken string // If set, requires ?token= on /metrics requests
+	// AuthToken, when non-empty, requires an `Authorization: Bearer <token>`
+	// header on every /metrics and /health request. Previously the comment
+	// here claimed "?token=" query-param auth — which the code never
+	// implemented — so operators configuring AuthToken and then scraping
+	// with the documented form got back nothing but 401s. The actual
+	// scrape config must use Prometheus's standard `bearer_token` directive
+	// (or equivalent) to send the header.
+	AuthToken string
 }
 
 // New creates a new metrics collector.
