@@ -10,6 +10,7 @@ const (
 	OpcodeStatus = 2 // Server status request
 	OpcodeNotify = 4 // Zone change notification (RFC 1996)
 	OpcodeUpdate = 5 // Dynamic update (RFC 2136)
+	OpcodeDSO    = 6 // DNS Stateful Operations (RFC 8490)
 )
 
 // DNS Response Codes (RCODE) defined in RFC 1035 and extensions.

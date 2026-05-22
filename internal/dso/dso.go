@@ -560,23 +560,25 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 	return response, nil
 }
 
-// extractTLVs extracts the TLV data carried by a DSO message.
+// extractTLVs returns the TLV bytes carried by a DSO message body.
 //
-// F127: DSO wire format (RFC 8490 §5.2) does not place TLVs in OPT records
-// in the Additional section. A DSO message uses OPCODE 6, an empty
-// Question/Answer/Authority/Additional set, and an unframed TLV stream
-// directly in the message body. NothingDNS still routes incoming queries
-// through the standard DNS message parser, which discards anything that
-// isn't a recognised section — so by the time HandleDSORequest sees the
-// *protocol.Message there is no body buffer to read TLVs from.
+// RFC 8490 §5.2 puts the TLV stream directly after the header, not inside
+// a Question/Additional section. NothingDNS's UnpackMessage detects
+// OPCODE 6 and stashes the body in msg.RawBody; we just hand that back.
 //
-// Implementing real DSO parsing requires plumbing the raw wire bytes
-// through ServeDNS as well as a proper DSO-mode message decoder. Until
-// that lands, this function fails loud so HandleDSORequest cannot pretend
-// to have processed an empty TLV list and silently no-op every request.
+// A DSO message MUST have all section counts equal to zero (RFC 8490
+// §5.2). Reject messages that violate this so a buggy or malicious peer
+// can't smuggle records past the DSO handler.
 func (m *Manager) extractTLVs(msg *protocol.Message) ([]byte, error) {
-	_ = msg
-	return nil, fmt.Errorf("dso: TLV extraction not implemented (RFC 8490 §5.2 requires raw-body parsing path; tracked as F127)")
+	if msg.Header.Flags.Opcode != protocol.OpcodeDSO {
+		return nil, fmt.Errorf("dso: not a DSO message (opcode=%d)", msg.Header.Flags.Opcode)
+	}
+	if msg.Header.QDCount != 0 || msg.Header.ANCount != 0 ||
+		msg.Header.NSCount != 0 || msg.Header.ARCount != 0 {
+		return nil, fmt.Errorf("dso: RFC 8490 §5.2 requires all section counts to be zero (got Q=%d A=%d NS=%d AR=%d)",
+			msg.Header.QDCount, msg.Header.ANCount, msg.Header.NSCount, msg.Header.ARCount)
+	}
+	return msg.RawBody, nil
 }
 
 // buildDSOResponse builds a DSO response message.
@@ -595,22 +597,77 @@ func (m *Manager) buildDSOResponse(request *protocol.Message, tlvs []*TLV) *prot
 	return response
 }
 
-// SendKeepalive would send an unsolicited DSO keepalive on the session.
+// SendKeepalive sends an unsolicited DSO keepalive TLV on the session
+// per RFC 8490 §6.5. It is a "unidirectional message" (DNS header ID = 0,
+// QR = 1, OPCODE = 6) carrying a single Keepalive TLV that advertises the
+// inactivity- and keepalive-intervals the server is willing to honour.
 //
-// F129: the previous implementation built a TLV and a message header, then
-// silently dropped both — no bytes were actually written to session.Conn.
-// Pretending to send a keepalive while doing nothing causes any
-// inactivity-timeout countdown the peer is running to expire and tear
-// down the session shortly after we claim to keep it alive.
+// Wire layout (RFC 8490 §5.1, §5.2, §6.5.1):
 //
-// A correct implementation requires the DSO wire-format serialiser
-// (paired with the parser tracked as F127). Until that lands, fail loud
-// so callers cannot rely on a phantom keepalive.
+//	+----- DNS header (12 bytes) -----+--- TLV stream ---+
+//	| ID=0 | QR=1 OPCODE=6 ...        | KEEPALIVE TLV    |
+//	|     0 in QD/AN/NS/AR counts      | (Type=1, Len=8) |
+//	+---------------------------------+------------------+
+//
+// The TLV body is two uint32 milliseconds values: inactivity timeout and
+// keepalive interval.
 func (m *Manager) SendKeepalive(session *Session) error {
 	if session.IsClosed() {
 		return fmt.Errorf("session closed")
 	}
-	return fmt.Errorf("dso: SendKeepalive not implemented (no DSO wire-format serialiser yet; tracked as F129)")
+	if session.Conn == nil {
+		return fmt.Errorf("dso: session %d has no connection", session.ID)
+	}
+
+	// Build the keepalive TLV (Type=1, two uint32 ms values).
+	tlv := NewKeepaliveTLV(m.inactivityTimeout, session.KeepaliveTime)
+	tlvBytes := make([]byte, tlv.Size())
+	if _, err := tlv.Pack(tlvBytes, 0); err != nil {
+		return fmt.Errorf("dso: pack keepalive TLV: %w", err)
+	}
+
+	// Build the message: 12-byte DNS header + TLV stream.
+	body := tlvBytes
+	frame := make([]byte, protocol.HeaderLen+len(body))
+
+	// Header: ID=0 (unidirectional per RFC 8490 §5.4), QR=1, OPCODE=6,
+	// all section counts = 0.
+	hdr := protocol.Header{
+		ID: 0,
+		Flags: protocol.Flags{
+			QR:     true,
+			Opcode: protocol.OpcodeDSO,
+		},
+	}
+	if err := hdr.Pack(frame[:protocol.HeaderLen]); err != nil {
+		return fmt.Errorf("dso: pack header: %w", err)
+	}
+	copy(frame[protocol.HeaderLen:], body)
+
+	// DSO runs over TCP (RFC 8490 §5.1); messages are length-prefixed per
+	// RFC 1035 §4.2.2 (2-octet big-endian length).
+	out := make([]byte, 2+len(frame))
+	out[0] = byte(len(frame) >> 8)
+	out[1] = byte(len(frame))
+	copy(out[2:], frame)
+
+	// Set a write deadline so a stuck peer can't hang us forever.
+	deadline := time.Now().Add(5 * time.Second)
+	if err := session.Conn.SetWriteDeadline(deadline); err != nil {
+		// Non-fatal: continue and let Write block on the underlying timeout.
+		_ = err
+	}
+	if _, err := session.Conn.Write(out); err != nil {
+		return fmt.Errorf("dso: write keepalive: %w", err)
+	}
+	// Reset write deadline.
+	_ = session.Conn.SetWriteDeadline(time.Time{})
+
+	session.UpdateActivity()
+	if m.logger != nil {
+		m.logger.Debugf("DSO keepalive sent for session %d", session.ID)
+	}
+	return nil
 }
 
 // IsDSOMessage checks if a message is a DSO message.

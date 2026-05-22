@@ -17,12 +17,21 @@ const (
 )
 
 // Message represents a complete DNS message (RFC 1035).
+//
+// RawBody is only populated for DSO messages (OPCODE 6, RFC 8490 §5.2),
+// whose body is an opaque TLV stream sitting directly after the header
+// rather than the conventional Question / Answer / Authority / Additional
+// sections. For all other opcodes RawBody is nil.
 type Message struct {
 	Header      Header
 	Questions   []*Question
 	Answers     []*ResourceRecord
 	Authorities []*ResourceRecord
 	Additionals []*ResourceRecord
+
+	// RawBody is the byte slice of the DSO TLV stream (header excluded).
+	// Populated by UnpackMessage when Header.Flags.Opcode == OpcodeDSO.
+	RawBody []byte
 }
 
 // NewMessage creates a new DNS message with the given header.
@@ -292,6 +301,7 @@ func UnpackMessage(buf []byte) (*Message, error) {
 	}
 
 	msg := messagePool.Get().(*Message)
+	msg.RawBody = nil
 
 	// Unpack header
 	if err := msg.Header.Unpack(buf[:HeaderLen]); err != nil {
@@ -299,6 +309,20 @@ func UnpackMessage(buf []byte) (*Message, error) {
 		return nil, fmt.Errorf("unpacking header: %w", err)
 	}
 	offset := HeaderLen
+
+	// RFC 8490 §5.2: DSO messages do not use the conventional QD/AN/NS/AR
+	// sections. The body that follows the header is an opaque TLV stream.
+	// Capture it as RawBody and return early; section counts MUST be zero
+	// for a conformant DSO message but we don't enforce that here — strict
+	// validation is the DSO layer's responsibility.
+	if msg.Header.Flags.Opcode == OpcodeDSO {
+		if len(buf) > HeaderLen {
+			body := make([]byte, len(buf)-HeaderLen)
+			copy(body, buf[HeaderLen:])
+			msg.RawBody = body
+		}
+		return msg, nil
+	}
 
 	// Pooled section slices already exist (zero-length, with backing array
 	// from the previous Release or the pool's New func). append() grows
