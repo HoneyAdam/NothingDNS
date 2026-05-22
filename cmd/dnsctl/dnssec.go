@@ -1161,6 +1161,60 @@ func parseRDataFromZone(rrtype uint16, rdata, origin string) (protocol.RData, er
 			Signature:   signature,
 		}, nil
 
+	case protocol.TypeSOA:
+		// Presentation format (RFC 1035 §3.3.13):
+		//   MNAME RNAME ( SERIAL REFRESH RETRY EXPIRE MINIMUM )
+		// Parens are stripped by the line-by-line reader upstream;
+		// fields here are space-separated.
+		fields := strings.Fields(rdata)
+		if len(fields) < 7 {
+			return nil, fmt.Errorf("invalid SOA record: need 7 fields, got %d", len(fields))
+		}
+		mname, err := protocol.ParseName(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("SOA MNAME: %w", err)
+		}
+		rname, err := protocol.ParseName(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("SOA RNAME: %w", err)
+		}
+		serial, _ := strconv.ParseUint(fields[2], 10, 32)
+		refresh, _ := strconv.ParseUint(fields[3], 10, 32)
+		retry, _ := strconv.ParseUint(fields[4], 10, 32)
+		expire, _ := strconv.ParseUint(fields[5], 10, 32)
+		minimum, _ := strconv.ParseUint(fields[6], 10, 32)
+		return &protocol.RDataSOA{
+			MName:   mname,
+			RName:   rname,
+			Serial:  uint32(serial),
+			Refresh: uint32(refresh),
+			Retry:   uint32(retry),
+			Expire:  uint32(expire),
+			Minimum: uint32(minimum),
+		}, nil
+
+	case protocol.TypeNSEC:
+		// Presentation format (RFC 4034 §4.1.2):
+		//   NEXT-NAME TYPE1 TYPE2 ...
+		fields := strings.Fields(rdata)
+		if len(fields) < 1 {
+			return nil, fmt.Errorf("invalid NSEC record: missing next-name")
+		}
+		next, err := protocol.ParseName(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("NSEC next-name: %w", err)
+		}
+		types := make([]uint16, 0, len(fields)-1)
+		for _, t := range fields[1:] {
+			if code, ok := protocol.StringToType[strings.ToUpper(t)]; ok {
+				types = append(types, code)
+			}
+		}
+		return &protocol.RDataNSEC{
+			NextDomain: next,
+			TypeBitMap: types,
+		}, nil
+
 	default:
 		return &protocol.RDataRaw{TypeVal: rrtype, Data: []byte(rdata)}, nil
 	}
