@@ -730,12 +730,19 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 		n.advanceTermLocked(req.Term)
 	}
 
-	// If we have a state machine and snapshot data, restore it
+	// If we have a state machine and snapshot data, restore it.
+	// On Restore failure, we MUST NOT advance the snapshot indices
+	// or clear the log: committing to a state we couldn't load means
+	// the node now claims `lastApplied=N` while the state machine is
+	// still at `M < N`. The follower silently diverges from the rest
+	// of the cluster and there is no recovery path — the leader
+	// won't re-send a snapshot it already thinks we acknowledged.
+	// The right behavior is to refuse the install; the leader's
+	// next AppendEntries / snapshot retry will try again.
 	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
-			// Log error but continue with snapshot install
-			// The snapshot install still updates indices even if state restore fails
 			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+			return
 		}
 	}
 
@@ -790,10 +797,16 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 		n.advanceTermLocked(req.Term)
 	}
 
-	// If we have a state machine and snapshot data, restore it
+	// If we have a state machine and snapshot data, restore it.
+	// On Restore failure, we MUST NOT update the snapshot indices or
+	// clear the log: doing so would commit to a state we couldn't
+	// actually load, leaving the node permanently divergent from the
+	// rest of the cluster. The leader will retry the snapshot install
+	// on its next AppendEntries; that's the standard recovery path.
 	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
 			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+			return
 		}
 	}
 

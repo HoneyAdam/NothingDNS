@@ -192,6 +192,61 @@ func TestHandleSnapshotRequestValidInstall(t *testing.T) {
 	}
 }
 
+// failingStateMachine returns an error from Restore so we can exercise
+// the snapshot-install failure path.
+type failingStateMachine struct{}
+
+func (failingStateMachine) Apply(_ entry) error       { return nil }
+func (failingStateMachine) Snapshot() ([]byte, error) { return nil, nil }
+func (failingStateMachine) Restore(_ []byte) error    { return fmt.Errorf("simulated restore failure") }
+
+// TestHandleSnapshotRequest_RestoreFailureKeepsLog verifies that when
+// the state machine's Restore returns an error during snapshot
+// install, the node does NOT commit to the snapshot indices and does
+// NOT clear its log. The leader retries on the next AppendEntries;
+// if we'd already trashed our local state we couldn't recover.
+//
+// Pre-fix the failure was logged-and-ignored, then the node went on
+// to set lastSnapshot/lastApplied/commitIndex and wipe the log,
+// leaving it permanently divergent (state machine still at the old
+// snapshot, indices claiming a newer one we couldn't actually load).
+func TestHandleSnapshotRequest_RestoreFailureKeepsLog(t *testing.T) {
+	n := NewNode(Config{NodeID: "n1"}, nil, &mockTransport{})
+	defer n.Stop()
+	n.SetStateMachine(failingStateMachine{})
+	n.mu.Lock()
+	n.currentTerm = 1
+	originalLog := []entry{{Index: 1, Term: 1}, {Index: 2, Term: 1}}
+	n.log = append([]entry{}, originalLog...)
+	n.lastSnapshot = 0
+	n.lastApplied = 0
+	n.commitIndex = 0
+	n.mu.Unlock()
+
+	n.HandleSnapshotRequest(SnapshotRequest{
+		Term: 2, LeaderID: "leader", LastIndex: 99, LastTerm: 2,
+		Data: []byte("anything-non-empty"),
+	})
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.currentTerm != 2 {
+		t.Errorf("term should still advance on snapshot-with-higher-term, got %d", n.currentTerm)
+	}
+	if n.lastSnapshot != 0 {
+		t.Errorf("lastSnapshot = %d, want 0 (Restore failed — indices must NOT advance)", n.lastSnapshot)
+	}
+	if n.lastApplied != 0 {
+		t.Errorf("lastApplied = %d, want 0", n.lastApplied)
+	}
+	if n.commitIndex != 0 {
+		t.Errorf("commitIndex = %d, want 0", n.commitIndex)
+	}
+	if len(n.log) != len(originalLog) {
+		t.Errorf("log was cleared despite Restore failure: len = %d, want %d", len(n.log), len(originalLog))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 7. HandleAppendRequest: commit index advancement and term update
 // ---------------------------------------------------------------------------
