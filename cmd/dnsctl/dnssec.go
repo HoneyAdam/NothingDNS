@@ -321,6 +321,23 @@ func cmdDNSSECSignZone(args []string) error {
 }
 
 // parseZoneRecords parses a BIND-format zone file into resource records.
+//
+// KNOWN LIMITATION: this is a deliberately minimal line-by-line parser
+// for sign-zone / validate-zone. It ignores `$TTL`, `$ORIGIN`,
+// `$GENERATE`, and multi-line parens — every record must be on one
+// line with explicit `name TTL IN TYPE rdata` columns. For BIND zone
+// files that rely on those directives, pre-expand the file with
+// `named-checkzone -D <origin> <zonefile>` (or any other YAML/zone
+// expander) and feed the result here.
+//
+// The daemon's loader (internal/zone.ParseFile) supports the full
+// BIND grammar; switching this CLI to it would change the behavior
+// asserted by ~14 existing unit tests, so the migration is its own
+// task. Smoke-tested 2026-05-22: dnsctl dnssec sign-zone on a vanilla
+// `$ORIGIN example.com. / $TTL 3600 / @ IN SOA ...` zone file errors
+// with "no valid records found" because the `$` directives and the
+// explicit-TTL-less SOA fail this parser's `name TTL IN TYPE rdata`
+// format check.
 func parseZoneRecords(data, origin string) ([]*protocol.ResourceRecord, error) {
 	var records []*protocol.ResourceRecord
 	lines := strings.Split(data, "\n")
