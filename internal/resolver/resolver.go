@@ -974,7 +974,18 @@ func (t *StdioTransport) queryUDP(ctx context.Context, msg *protocol.Message, ad
 		return nil, fmt.Errorf("resolver: UDP write: %w", err)
 	}
 
-	recvBuf := make([]byte, 4096)
+	// Read buffer size honors the EDNS0 bufsize we advertised in the
+	// outgoing query (OPT.Class). If we asked the server for 4096 we
+	// must be ready to receive 4096; if a future caller dials this
+	// transport with a larger configured EDNS0BufSize the read here
+	// would otherwise truncate at 4096 and reject every full-size
+	// response. Fallback: hard floor at 4096 so very small or absent
+	// OPT classes still leave room for typical responses.
+	recvBufSize := 4096
+	if opt := msg.GetOPT(); opt != nil && int(opt.Class) > recvBufSize {
+		recvBufSize = int(opt.Class)
+	}
+	recvBuf := make([]byte, recvBufSize)
 	rn, err := conn.Read(recvBuf)
 	if err != nil {
 		return nil, fmt.Errorf("resolver: UDP read: %w", err)
