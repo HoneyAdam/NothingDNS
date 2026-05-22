@@ -973,10 +973,39 @@ func isAlphaNum(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
+// knownTopLevelConfigKeys is the set of YAML keys the config loader
+// recognises at the document root. Anything outside this set is a
+// typo — we warn so operators don't silently lose configuration
+// (e.g. mis-spelling "blocklist" as "blocklists" used to start the
+// server with blocklist disabled and zero indication of the typo).
+var knownTopLevelConfigKeys = map[string]struct{}{
+	"server": {}, "resolution": {}, "upstream": {}, "cache": {},
+	"logging": {}, "metrics": {}, "dnssec": {}, "zones": {},
+	"zone_dir": {}, "blocklist": {}, "cluster": {}, "tls": {},
+	"http": {}, "rules": {}, "memory_limit_mb": {}, "shutdown_timeout": {},
+	"rpz": {}, "geodns": {}, "anycast_groups": {}, "topology": {},
+	"views": {}, "acl": {}, "rrl": {}, "ratelimit": {}, "audit": {},
+	"slave_zones": {}, "dns64": {}, "cookie": {}, "xot": {},
+	"quic": {}, "signing": {}, "rpc": {}, "seed_nodes": {},
+	"odoh": {}, "idna": {}, "otel": {}, "tracing": {},
+	"catalog": {}, "mdns": {}, "load": {}, "filter": {},
+}
+
 // unmarshalToConfig unmarshals a node tree into a Config struct.
 func unmarshalToConfig(node *Node, cfg *Config) error {
 	if node.Type != NodeMapping {
 		return fmt.Errorf("expected mapping at root")
+	}
+
+	// Warn (don't error) on top-level keys we don't know — wrong
+	// section names are a common foot-gun and silently ignoring them
+	// means an operator can deploy a "validated" config that does the
+	// wrong thing. Stop short of erroring because future versions may
+	// add new sections that an older binary doesn't recognise.
+	for _, k := range node.Keys() {
+		if _, ok := knownTopLevelConfigKeys[k]; !ok {
+			util.Warnf("config: unknown top-level key %q — ignored (typo?)", k)
+		}
 	}
 
 	// Server config

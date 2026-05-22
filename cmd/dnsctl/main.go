@@ -58,10 +58,25 @@ func runMain(args []string) int {
 	// Global flags
 	fs.StringVar(&globalFlags.Server, "server", "http://localhost:8080", "NothingDNS API server URL")
 	fs.StringVar(&globalFlags.APIKey, "api-key", "", "API key for authentication")
+	// --version / -version: match the daemon binary so both tools
+	// answer the standard CLI question the same way.
+	showVersion := fs.Bool("version", false, "Show version and exit")
+	// --help / -help: print the usage block instead of bailing out
+	// with "flag: help requested" from flag.ContinueOnError.
+	showHelp := fs.Bool("help", false, "Show usage and exit")
 
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		return 1
+	}
+
+	if *showVersion {
+		fmt.Printf("%s version %s\n", Name, util.Version)
+		return 0
+	}
+	if *showHelp {
+		printUsage()
+		return 0
 	}
 
 	parsedArgs := fs.Args()
@@ -72,13 +87,13 @@ func runMain(args []string) int {
 
 	cmdName := parsedArgs[0]
 
-	// Handle version
+	// Handle version (positional form — kept for back-compat).
 	if cmdName == "version" {
 		fmt.Printf("%s version %s\n", Name, util.Version)
 		return 0
 	}
 
-	// Handle help
+	// Handle help (positional form).
 	if cmdName == "help" {
 		if len(parsedArgs) > 1 {
 			return printCommandHelp(parsedArgs[1])
