@@ -712,9 +712,17 @@ func (c *Cluster) handleNodeJoin(node *Node) {
 // JoinSeed attempts to join an existing cluster via a seed node.
 // In SWIM/gossip mode, uses the gossip protocol.
 // In Raft consensus mode, dynamic joining is not supported.
+//
+// The cluster MUST be started (so the UDP listener is bound) before
+// calling JoinSeed. Calling it on a non-started cluster used to
+// nil-deref inside the gossip layer (gp.conn = nil before Start).
+// We now return a clear error instead.
 func (c *Cluster) JoinSeed(seedAddr string) error {
 	if c.consensus == ConsensusRaft {
 		return fmt.Errorf("dynamic node joining not supported in Raft consensus mode; use static cluster configuration")
+	}
+	if c.gossip == nil || !c.started {
+		return fmt.Errorf("cluster must be started before JoinSeed")
 	}
 	return c.gossip.Join(seedAddr)
 }

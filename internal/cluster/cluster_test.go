@@ -757,3 +757,73 @@ func TestCluster_Stats_Started(t *testing.T) {
 		t.Errorf("Expected NodeID test-node, got %s", stats.NodeID)
 	}
 }
+
+// AddNodeViaLeader / RemoveNodeViaLeader / LeaveCluster / JoinSeed tests:
+// cover the non-Raft / non-started error paths so the public surface
+// has at least one test against each.
+
+func TestCluster_AddNodeViaLeader_NotRaft(t *testing.T) {
+	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
+	dnsCache := cache.New(cache.Config{Capacity: 100})
+	cfg := Config{
+		Enabled:              true,
+		AllowInsecureCluster: true,
+		NodeID:               "n1",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           17950,
+		ConsensusMode:        ConsensusSWIM,
+	}
+	c, err := New(cfg, logger, dnsCache)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Non-Raft → error.
+	if err := c.AddNodeViaLeader("n2", "127.0.0.1:7000"); err == nil {
+		t.Error("expected error for non-Raft AddNodeViaLeader")
+	}
+	if err := c.RemoveNodeViaLeader("n2"); err == nil {
+		t.Error("expected error for non-Raft RemoveNodeViaLeader")
+	}
+}
+
+func TestCluster_JoinSeed_NotStarted(t *testing.T) {
+	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
+	dnsCache := cache.New(cache.Config{Capacity: 100})
+	cfg := Config{
+		Enabled:              true,
+		AllowInsecureCluster: true,
+		NodeID:               "n1",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           17951,
+	}
+	c, err := New(cfg, logger, dnsCache)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Cluster not started → JoinSeed must surface an error rather
+	// than silently failing to broadcast.
+	if err := c.JoinSeed("203.0.113.1:7000"); err == nil {
+		t.Error("expected error when calling JoinSeed before Start")
+	}
+}
+
+func TestCluster_LeaveCluster_NotStarted(t *testing.T) {
+	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
+	dnsCache := cache.New(cache.Config{Capacity: 100})
+	cfg := Config{
+		Enabled:              true,
+		AllowInsecureCluster: true,
+		NodeID:               "n1",
+		BindAddr:             "127.0.0.1",
+		GossipPort:           17952,
+	}
+	c, err := New(cfg, logger, dnsCache)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// LeaveCluster on a non-started cluster: StartDraining may noop,
+	// CompleteDraining(true) does shutdown work; should return nil
+	// for the noop-shutdown case or a definite error — both are
+	// acceptable, but it must not panic.
+	_ = c.LeaveCluster()
+}
