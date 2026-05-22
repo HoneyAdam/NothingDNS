@@ -251,12 +251,23 @@ func run() error {
 		}
 	}
 
-	// Warn if using legacy single-token auth without multi-user auth
-	// In this mode, RBAC is not enforced - token holders have full access to all endpoints
+	// Warn if using legacy single-token auth without multi-user auth.
+	// Since VULN-003 (CVE-2025-pending), the legacy token binds to the
+	// role configured by `auth_token_role` (default: viewer). Reflect
+	// the actual bound role in the warning so operators don't think
+	// the token grants more than it does.
 	if cfg.Server.HTTP.AuthToken != "" && len(cfg.Server.HTTP.Users) == 0 {
-		logger.Warnf("AUTH: Using legacy single-token auth (auth_token configured, no users). " +
-			"Note: RBAC is not enforced in this mode - all token holders have operator-level access. " +
-			"Consider configuring multi-user auth (users) for production deployments requiring RBAC.")
+		boundRole := strings.ToLower(strings.TrimSpace(cfg.Server.HTTP.AuthTokenRole))
+		if boundRole == "" {
+			boundRole = "viewer"
+		}
+		if boundRole != "admin" && boundRole != "operator" && boundRole != "viewer" {
+			boundRole = "viewer"
+		}
+		logger.Warnf("AUTH: Using legacy single-token auth (auth_token configured, no users). "+
+			"All requests bearing this token are bound to role %q (set via auth_token_role; default \"viewer\"). "+
+			"For per-user RBAC, configure multi-user auth via the `users` block.",
+			boundRole)
 	}
 
 	// Initialize audit logger
