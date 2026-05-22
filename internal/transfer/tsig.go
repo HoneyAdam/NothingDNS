@@ -514,8 +514,13 @@ func verifyWithKey(msg *protocol.Message, key *TSIGKey, previousMAC []byte) erro
 		return fmt.Errorf("invalid TSIG data type")
 	}
 
-	// Check algorithm matches
-	if tsigs.Algorithm != key.Algorithm {
+	// Check algorithm matches. RFC 8945 §4.3.3 (referencing RFC 1035 §2.3.3)
+	// makes the algorithm a DNS name, which is case-insensitive. A peer
+	// sending "HMAC-SHA256." with our configured "hmac-sha256" otherwise
+	// fails this strict equality check before we even attempt the MAC,
+	// which the cryptographic verification would have accepted because
+	// PackName canonicalizes to lowercase when building the signed-data.
+	if !strings.EqualFold(tsigs.Algorithm, key.Algorithm) {
 		return fmt.Errorf("algorithm mismatch: got %s, expected %s", tsigs.Algorithm, key.Algorithm)
 	}
 

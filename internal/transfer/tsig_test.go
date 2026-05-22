@@ -253,6 +253,67 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVerify_AlgorithmCaseInsensitive checks that a TSIG record
+// whose wire-format algorithm name differs only in case from the
+// configured key still verifies. RFC 8945 §4.3.3 inherits domain-name
+// case-insensitivity from RFC 1035, so "HMAC-SHA256" and "hmac-sha256"
+// MUST be treated as the same algorithm. Pre-fix the equality check
+// rejected case-mismatched algorithm names even though the MAC was
+// correct (PackName lowercases when building the signed data).
+func TestVerify_AlgorithmCaseInsensitive(t *testing.T) {
+	// Sign with one case…
+	signerKey := &TSIGKey{
+		Name:      "test-key.example.com.",
+		Algorithm: "HMAC-SHA256", // uppercase as some peers send
+		Secret:    []byte("a-256-bit-secret-key-for-testing!"),
+	}
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:      0x1234,
+			Flags:   protocol.Flags{RD: true},
+			QDCount: 1,
+		},
+		Questions: []*protocol.Question{
+			{
+				Name:   mustParseName("example.com."),
+				QType:  protocol.TypeA,
+				QClass: protocol.ClassIN,
+			},
+		},
+	}
+	tsigRR, err := SignMessage(msg, signerKey, 300)
+	if err != nil {
+		t.Fatalf("SignMessage: %v", err)
+	}
+	msg.Additionals = append(msg.Additionals, tsigRR)
+
+	// …verify with the same secret but the canonical-lowercase
+	// algorithm name. The MAC is cryptographically valid because
+	// the wire encoding canonicalizes case; only the strict-equality
+	// check in verifyWithKey would reject this.
+	verifierKey := &TSIGKey{
+		Name:      "test-key.example.com.",
+		Algorithm: "hmac-sha256", // lowercase
+		Secret:    signerKey.Secret,
+	}
+	if err := VerifyMessage(msg, verifierKey, nil); err != nil {
+		t.Fatalf("VerifyMessage with case-different algorithm: %v", err)
+	}
+
+	// Also exercise the reverse direction: wire arrives lowercased
+	// (the canonical form) but the *configured* verifier key uses
+	// uppercase. Without the fold-compare, this branch failed with
+	// "algorithm mismatch: got hmac-sha256, expected HMAC-SHA256".
+	verifierKeyUpper := &TSIGKey{
+		Name:      "test-key.example.com.",
+		Algorithm: "HMAC-SHA256",
+		Secret:    signerKey.Secret,
+	}
+	if err := VerifyMessage(msg, verifierKeyUpper, nil); err != nil {
+		t.Fatalf("VerifyMessage with uppercase configured algo: %v", err)
+	}
+}
+
 func TestVerifyWithTimeSkew(t *testing.T) {
 	key := &TSIGKey{
 		Name:      "test-key.example.com.",
