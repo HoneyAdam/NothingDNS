@@ -17,18 +17,25 @@ func cmdDig(args []string) error {
 	var wantDNSSEC bool
 
 	for _, arg := range args {
-		if strings.HasPrefix(arg, "@") {
+		switch {
+		case strings.HasPrefix(arg, "@"):
 			server = arg[1:]
-		} else if strings.HasPrefix(arg, "+") {
+		case strings.HasPrefix(arg, "+"):
 			switch strings.ToLower(arg) {
 			case "+dnssec":
 				wantDNSSEC = true
 			case "+cd":
 				// checking disabled - ignored for now
 			}
-		} else if qname == "" {
+		case strings.HasPrefix(arg, "-"):
+			// dig uses positional @server / +flag syntax — not GNU long
+			// flags. Catching this here avoids a confusing
+			// "unsupported query type: --server" later on when a user
+			// reaches for the flag form by reflex.
+			return fmt.Errorf("dig uses positional syntax — try @%s instead of %s", strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-")+"=value", arg)
+		case qname == "":
 			qname = arg
-		} else if qtypeStr == "" {
+		case qtypeStr == "":
 			qtypeStr = strings.ToUpper(arg)
 		}
 	}

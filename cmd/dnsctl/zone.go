@@ -8,7 +8,7 @@ import (
 
 func cmdZone(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("zone subcommand required (list, add, remove, reload)")
+		return fmt.Errorf("zone subcommand required (list, add, remove, reload, export)")
 	}
 
 	switch args[0] {
