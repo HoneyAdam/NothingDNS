@@ -45,7 +45,9 @@ go mod init github.com/nothingdns/nothingdns
 ```go
 module github.com/nothingdns/nothingdns
 
-go 1.22
+go 1.25.0
+
+toolchain go1.26.3
 ```
 
 ### 1.2 Binary Entry Points

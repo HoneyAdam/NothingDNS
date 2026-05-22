@@ -230,15 +230,20 @@ Düşük priority önce çalışır. Aksiyonlar: NXDOMAIN, NODATA, redirect, DRO
 
 ## `odoh`
 
+Oblivious DNS over HTTPS (RFC 9230), conformant with RFC 9180 HPKE
+base mode. The HPKE math is validated byte-for-byte against the
+RFC 9180 §A.1 test vectors. KEM/KDF/AEAD selection is currently
+fixed by the implementation; only the values below are accepted.
+
 | Alan | Tip | Varsayılan | Hot-reload | Açıklama |
 |---|---|---|---|---|
 | `enabled` | bool | `false` | hayır | Oblivious DoH proxy/target |
 | `bind` | string | `:8080` | hayır | ODoH dinleme adresi |
 | `target_url` | string | — | evet | ODoH target endpoint URL'i |
 | `proxy_url` | string | — | evet | ODoH proxy URL'i |
-| `kem` | int | `4` | hayır | HPKE KEM (1=P-256, 2=P-384, 3=P-521, 4=X25519) |
-| `kdf` | int | `0` | hayır | HPKE KDF (0=HKDF-SHA256, 1=HKDF-SHA512) |
-| `aead` | int | `3` | hayır | HPKE AEAD (1=AES-128-GCM, 2=AES-256-GCM, 3=ChaCha20-Poly1305) |
+| `kem` | int | `4` | hayır | HPKE KEM — yalnızca `4` (DHKEM X25519, HKDF-SHA256) destekleniyor |
+| `kdf` | int | `1` | hayır | HPKE KDF — yalnızca `1` (HKDF-SHA256) destekleniyor |
+| `aead` | int | `1` | hayır | HPKE AEAD — `1` (AES-256-GCM, varsayılan) veya `3` (AES-128-GCM). ChaCha20-Poly1305 stdlib dışı olduğu için desteklenmiyor. |
 
 ## Üst Seviye Alanlar
 

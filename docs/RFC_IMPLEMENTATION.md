@@ -246,7 +246,14 @@ func (c *ObliviousClient) Query(query []byte) ([]byte, error) {
 }
 ```
 
-**Bağımlılık:** HPKE implementation gerekiyor (Go stdlib crypto olabilir veya hand-rolled)
+**Durum:** RFC 9180 base-mode HPKE hand-rolled (stdlib-only: `crypto/ecdh` X25519 + `crypto/hkdf` HKDF-SHA256 + `crypto/aes`+`crypto/cipher` AES-GCM) ve RFC 9230 wire-format şu konumlarda implement edildi:
+- `internal/odoh/hpke.go` — RFC 9180 LabeledExtract/Expand + KeySchedule + Setup/Open
+- `internal/odoh/rfc9230.go` — KeyConfig wire format, query/response framing, response-key derivation
+- `internal/odoh/odoh.go` — `ObliviousClient.Query` / `ObliviousProxy.ServeHTTP` / `ObliviousTarget.ServeHTTP`
+
+HPKE math `internal/odoh/hpke_vectors_test.go` ile RFC 9180 §A.1 vector'larına karşı doğrulanmış (DHKEM shared_secret, KeySchedule base_nonce, ilk AEAD seal byte-for-byte eşleşiyor). End-to-end client→proxy→target→handler round-trip test'i `internal/odoh/rfc9230_test.go::TestRFC9230_ClientProxyTargetRoundTrip` içinde.
+
+ChaCha20-Poly1305 stdlib dışı olduğu için (`golang.org/x/crypto/chacha20poly1305` zero-deps politikasına aykırı) AEAD setinde sadece AES-128-GCM ve AES-256-GCM destekleniyor.
 
 ---
 
@@ -821,8 +828,8 @@ zones:
 - [ ] RFC 8976 ZONEMD
 
 ### Sprint 3 (2-3 hafta)
-- [ ] RFC 9230 ODoH
-- [ ] RFC 8490 DSO
+- [x] RFC 9230 ODoH — `internal/odoh/`, RFC 9180 vector-validated
+- [x] RFC 8490 DSO — `internal/dso/`, real TLV wire format pipeline
 
 ### Sprint 4 (1-2 hafta)
 - [ ] RFC 2931 SIG(0)
@@ -835,7 +842,12 @@ zones:
 
 ## OPEN ISSUES & RISKS
 
-1. **HPKE implementation** - ODoH (RFC 9230) için HPKE kütüphanesi gerekiyor. Go stdlib'de yok, ya hand-rolled ya da minimal dependency gerekecek.
+1. ~~**HPKE implementation**~~ - **Çözüldü.** RFC 9180 base-mode HPKE
+   `internal/odoh/hpke.go` içinde Go stdlib ile hand-rolled
+   (`crypto/ecdh` X25519 + `crypto/hkdf` HKDF-SHA256 +
+   `crypto/aes`+`crypto/cipher` AES-GCM). RFC 9180 §A.1 vector'larına
+   karşı byte-for-byte doğrulanmış. ChaCha20-Poly1305 zero-deps
+   politikası nedeniyle desteklenmiyor (stdlib dışı).
 
 2. **Catalog Zones** - Draft aşamasında, RFC 9432 olarak yayınlandı ama değişebilir.
 
@@ -843,7 +855,9 @@ zones:
 
 4. **mDNS** - UDP multicast, network interface handling gerektirir. Test zorluğu yüksek.
 
-5. **Zero dependencies policy** - Bazı RFC'ler için cryptographic primitive'ler stdlib'de mevcut (HMAC, AES-GCM, ChaCha20), ancak HPKE tam desteklenmiyor.
+5. **Zero dependencies policy** - HPKE'nin AES-GCM varyantı stdlib'de
+   tam destekleniyor; ChaCha20-Poly1305 için `golang.org/x/crypto` gerekli
+   olacağı için kapsam dışı bırakıldı.
 
 ---
 
