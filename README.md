@@ -7,6 +7,7 @@
 [![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nothingdns/nothingdns)](https://goreportcard.com/report/github.com/nothingdns/nothingdns)
+[![CI](https://github.com/NothingDNS/NothingDNS/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/NothingDNS/NothingDNS/actions/workflows/go.yml)
 
 A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be lightweight, fast, and self-contained with minimal external dependencies.
 
