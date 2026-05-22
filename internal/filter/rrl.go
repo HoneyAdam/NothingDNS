@@ -3,6 +3,7 @@ package filter
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,13 +32,16 @@ type rrlBucket struct {
 // responses to detect when a client is receiving disproportionate answers
 // relative to the configured rate. This catches reflected amplification floods
 // where the attacker spoofs the victim's source IP.
+//
+// enabled is atomic.Bool because Allow/LogResponse read it on the hot
+// path without taking rrl.mu, while SetEnabled writes it.
 type RRL struct {
 	mu      sync.Mutex
 	buckets map[string]*rrlBucket
 	rate    float64
 	burst   int
 	window  time.Duration
-	enabled bool
+	enabled atomic.Bool
 	stopCh  chan struct{}
 
 	maxBuckets int
@@ -109,12 +113,12 @@ func NewRRL(cfg RRLConfig) *RRL {
 		rate:       float64(cfg.Rate),
 		burst:      cfg.Burst,
 		window:     time.Duration(cfg.Window) * time.Second,
-		enabled:    cfg.Enabled,
 		stopCh:     make(chan struct{}),
 		maxBuckets: cfg.MaxBuckets,
 	}
+	rrl.enabled.Store(cfg.Enabled)
 
-	if rrl.enabled {
+	if rrl.enabled.Load() {
 		go rrl.cleanup()
 	}
 
@@ -125,7 +129,7 @@ func NewRRL(cfg RRLConfig) *RRL {
 // Returns (allowed, isSuppressed). When isSuppressed is true, the caller
 // should return REFUSED without sending a real response.
 func (rrl *RRL) Allow(clientIP net.IP, qtype uint16, rcode uint8) (allowed, suppressed bool) {
-	if !rrl.enabled {
+	if !rrl.enabled.Load() {
 		return true, false
 	}
 
@@ -181,7 +185,7 @@ func (rrl *RRL) Allow(clientIP net.IP, qtype uint16, rcode uint8) (allowed, supp
 // query bytes) exceeds ratio, the bucket is immediately suppressed.
 // This is a best-effort signal; RRL Allow still governs rate.
 func (rrl *RRL) LogSuperlative(clientIP net.IP, qtype uint16, rcode uint8, queryLen, responseLen int) {
-	if !rrl.enabled || queryLen == 0 {
+	if !rrl.enabled.Load() || queryLen == 0 {
 		return
 	}
 	// Amplification is measured per (qtype, rcode) so a multi-qtype flood
@@ -223,11 +227,9 @@ func (rrl *RRL) Stop() {
 	close(rrl.stopCh)
 }
 
-// SetEnabled toggles RRL at runtime.
+// SetEnabled toggles RRL at runtime. Wait-free for readers.
 func (rrl *RRL) SetEnabled(enabled bool) {
-	rrl.mu.Lock()
-	defer rrl.mu.Unlock()
-	rrl.enabled = enabled
+	rrl.enabled.Store(enabled)
 }
 
 // cleanup periodically removes stale buckets.

@@ -3,18 +3,25 @@ package filter
 import (
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/config"
 )
 
 // RateLimiter implements per-client rate limiting using token buckets.
+//
+// enabled is an atomic.Bool because Allow() reads it on the hot
+// request path without taking rl.mu, while Reload/SetEnabled write
+// it. Mixing locked writes with unlocked reads on a plain bool would
+// be a data race; atomic.Bool gives us a wait-free fast path plus
+// safe visibility on writes.
 type RateLimiter struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
 	rate    float64 // tokens per second
 	burst   int
-	enabled bool
+	enabled atomic.Bool
 	stopCh  chan struct{}
 
 	// Memory protection: max buckets to prevent unbounded growth during attacks
@@ -47,10 +54,10 @@ func NewRateLimiter(cfg config.RRLConfig) *RateLimiter {
 		buckets:    make(map[string]*bucket),
 		rate:       rate,
 		burst:      burst,
-		enabled:    true,
 		stopCh:     make(chan struct{}),
 		maxBuckets: maxBuckets,
 	}
+	rl.enabled.Store(true)
 
 	// Start background cleanup goroutine
 	go rl.cleanup()
@@ -60,7 +67,7 @@ func NewRateLimiter(cfg config.RRLConfig) *RateLimiter {
 
 // Allow checks if a client IP is allowed to make a request.
 func (rl *RateLimiter) Allow(clientIP net.IP) bool {
-	if !rl.enabled {
+	if !rl.enabled.Load() {
 		return true
 	}
 
@@ -125,18 +132,14 @@ func (rl *RateLimiter) SetBurst(burst int) {
 	}
 }
 
-// SetEnabled toggles rate limiting at runtime.
+// SetEnabled toggles rate limiting at runtime. Wait-free for readers.
 func (rl *RateLimiter) SetEnabled(enabled bool) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.enabled = enabled
+	rl.enabled.Store(enabled)
 }
 
 // Reload updates rate limiter settings from config.
 func (rl *RateLimiter) Reload(cfg config.RRLConfig) {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
 	if cfg.Rate > 0 {
 		rl.rate = float64(cfg.Rate)
 	}
@@ -146,7 +149,8 @@ func (rl *RateLimiter) Reload(cfg config.RRLConfig) {
 	if cfg.MaxBuckets > 0 {
 		rl.maxBuckets = cfg.MaxBuckets
 	}
-	rl.enabled = cfg.Enabled
+	rl.mu.Unlock()
+	rl.enabled.Store(cfg.Enabled)
 }
 
 // cleanup periodically removes stale buckets.

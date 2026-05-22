@@ -138,11 +138,7 @@ func TestRateLimiter_SetEnabled_True(t *testing.T) {
 	rl.SetEnabled(false)
 	rl.SetEnabled(true)
 
-	rl.mu.Lock()
-	enabled := rl.enabled
-	rl.mu.Unlock()
-
-	if !enabled {
+	if !rl.enabled.Load() {
 		t.Error("expected enabled=true after SetEnabled(true)")
 	}
 }

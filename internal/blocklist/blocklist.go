@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,12 +23,17 @@ type Entry struct {
 }
 
 // Blocklist manages blocked domains.
+//
+// enabled is atomic.Bool because IsBlocked reads it on the hot request
+// path without taking bl.mu, while SetEnabled used to write it under
+// the lock — a textbook data race. atomic.Bool is wait-free for
+// readers and gives visibility guarantees on writes.
 type Blocklist struct {
 	mu              sync.RWMutex
 	entries         map[string]Entry
 	files           []string
 	urls            []string
-	enabled         bool
+	enabled         atomic.Bool
 	httpClient      *http.Client
 	sourceEntries   map[string]map[string]Entry // source → domain → Entry
 	disabledSources map[string]bool             // source → disabled
@@ -60,7 +66,6 @@ func New(cfg Config) *Blocklist {
 		manualEntries:   make(map[string]Entry),
 		files:           cfg.Files,
 		urls:            cfg.URLs,
-		enabled:         cfg.Enabled,
 		baseDir:         cfg.BaseDir,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
@@ -79,6 +84,7 @@ func New(cfg Config) *Blocklist {
 			},
 		},
 	}
+	bl.enabled.Store(cfg.Enabled)
 	return bl
 }
 
@@ -92,7 +98,7 @@ func (bl *Blocklist) Close() error {
 
 // Load loads all configured blocklist files and URLs.
 func (bl *Blocklist) Load() error {
-	if !bl.enabled {
+	if !bl.enabled.Load() {
 		return nil
 	}
 
@@ -379,7 +385,7 @@ func (bl *Blocklist) loadFile(path string) error {
 // IsBlocked checks if a domain is blocked.
 // Uses efficient suffix matching with minimal allocations.
 func (bl *Blocklist) IsBlocked(domain string) bool {
-	if !bl.enabled {
+	if !bl.enabled.Load() {
 		return false
 	}
 
@@ -430,7 +436,7 @@ func (bl *Blocklist) Stats() Stats {
 	defer bl.mu.RUnlock()
 
 	return Stats{
-		Enabled:     bl.enabled,
+		Enabled:     bl.enabled.Load(),
 		TotalBlocks: len(bl.entries),
 		Files:       len(bl.files),
 		URLs:        len(bl.urls),
@@ -519,11 +525,9 @@ func (bl *Blocklist) RemoveFile(path string) error {
 	return nil
 }
 
-// SetEnabled enables or disables the blocklist.
+// SetEnabled enables or disables the blocklist. Wait-free for readers.
 func (bl *Blocklist) SetEnabled(enabled bool) {
-	bl.mu.Lock()
-	defer bl.mu.Unlock()
-	bl.enabled = enabled
+	bl.enabled.Store(enabled)
 }
 
 // SourceInfo describes a blocklist source (file or URL).
