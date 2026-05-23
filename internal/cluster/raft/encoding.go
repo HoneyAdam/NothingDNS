@@ -520,6 +520,16 @@ func decodeEntrySlice(entries *[]entry, data []byte) error {
 	}
 	count := binary.BigEndian.Uint32(data[:4])
 	off := 4
+	// Bound count by remaining data. Each entry consumes at least 25
+	// bytes (8 Index + 8 Term + 1 Type + 4 cmdLen + 0+ cmd + 8 Commitment).
+	// A peer sending count = 2^32-1 with no actual entry bytes would
+	// otherwise have us \`make([]entry, 0, count)\` — ~160 GB up front
+	// for the ~40-byte entry struct — OOM-panic the Raft member.
+	const minEntryBytes = 25
+	maxPossible := uint32(len(data)-off) / minEntryBytes
+	if count > maxPossible {
+		return fmt.Errorf("entry slice: count %d exceeds possible %d in %d remaining bytes", count, maxPossible, len(data)-off)
+	}
 	*entries = make([]entry, 0, count)
 	for i := uint32(0); i < count; i++ {
 		if off+25 > len(data) {
