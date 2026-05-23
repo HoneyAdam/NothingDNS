@@ -764,6 +764,31 @@ func (c *Cache) SetPrefetchFunc(fn func(key string, qtype uint16)) {
 
 // UpdateConfig updates the runtime cache configuration.
 // This allows changing cache behavior without restarting the server.
+// GetConfig returns a snapshot of the cache's current runtime
+// configuration. Used by callers that want to honor "patch
+// semantics" — read current, modify, UpdateConfig — without
+// reset-to-zero pitfalls on omitted fields. Locking matches the
+// surrounding "reads are lock-free" pattern: take cfgMu just long
+// enough to read each field, accepting that an in-flight
+// UpdateConfig may interleave (the worst case is a snapshot
+// mixing two configs, which is no worse than the existing
+// lock-free read paths that already see the same possibility).
+func (c *Cache) GetConfig() Config {
+	c.cfgMu.Lock()
+	defer c.cfgMu.Unlock()
+	return Config{
+		Capacity:          c.capacity,
+		MinTTL:            c.minTTL,
+		MaxTTL:            c.maxTTL,
+		DefaultTTL:        c.defaultTTL,
+		NegativeTTL:       c.negativeTTL,
+		PrefetchEnabled:   c.prefetchEnabled,
+		PrefetchThreshold: c.prefetchThreshold,
+		ServeStale:        c.serveStale,
+		StaleGrace:        c.staleGrace,
+	}
+}
+
 func (c *Cache) UpdateConfig(cfg Config) {
 	c.cfgMu.Lock()
 	c.capacity = cfg.Capacity

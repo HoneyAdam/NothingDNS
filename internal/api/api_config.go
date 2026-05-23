@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
 
@@ -161,10 +160,17 @@ func (s *Server) handleConfigRRL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pointer fields let us distinguish "omitted" from "set to zero
+	// value". The previous \`Enabled bool\` declaration meant a PUT
+	// of \`{"rate": 100}\` (intending only to tweak the rate) was
+	// indistinguishable from \`{"enabled": false, "rate": 100}\` —
+	// the former silently disabled rate limiting because Go's JSON
+	// unmarshal zeroes missing fields. \`SetEnabled\` only runs
+	// when the JSON actually carries the key.
 	var req struct {
-		Enabled bool    `json:"enabled"`
-		Rate    float64 `json:"rate"`
-		Burst   int     `json:"burst"`
+		Enabled *bool    `json:"enabled"`
+		Rate    *float64 `json:"rate"`
+		Burst   *int     `json:"burst"`
 	}
 	// VULN-071: use MaxBytesReader to prevent unbounded body reading on config PUT
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
@@ -172,12 +178,14 @@ func (s *Server) handleConfigRRL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.rateLimiter.SetEnabled(req.Enabled)
-	if req.Rate > 0 {
-		s.rateLimiter.SetRate(req.Rate)
+	if req.Enabled != nil {
+		s.rateLimiter.SetEnabled(*req.Enabled)
 	}
-	if req.Burst > 0 {
-		s.rateLimiter.SetBurst(req.Burst)
+	if req.Rate != nil && *req.Rate > 0 {
+		s.rateLimiter.SetRate(*req.Rate)
+	}
+	if req.Burst != nil && *req.Burst > 0 {
+		s.rateLimiter.SetBurst(*req.Burst)
 	}
 
 	s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "RRL configuration updated"})
@@ -198,17 +206,24 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Pointer fields enable patch-semantics: only apply what the
+	// caller actually set. The previous \`bool\`/\`int\` fields treated
+	// omitted JSON keys as zero values and \`UpdateConfig\` then
+	// replaced every cache parameter with those zeros — a PUT of
+	// \`{"size": 100000}\` (intending to bump capacity) would have
+	// also disabled serve-stale, set every TTL to zero, and turned
+	// prefetch off in one shot.
 	var req struct {
-		Enabled           bool `json:"enabled"`
-		Size              int  `json:"size"`
-		DefaultTTL        int  `json:"default_ttl"`
-		MaxTTL            int  `json:"max_ttl"`
-		MinTTL            int  `json:"min_ttl"`
-		NegativeTTL       int  `json:"negative_ttl"`
-		Prefetch          bool `json:"prefetch"`
-		PrefetchThreshold int  `json:"prefetch_threshold"`
-		ServeStale        bool `json:"serve_stale"`
-		StaleGraceSecs    int  `json:"stale_grace_secs"`
+		Enabled           *bool `json:"enabled"`
+		Size              *int  `json:"size"`
+		DefaultTTL        *int  `json:"default_ttl"`
+		MaxTTL            *int  `json:"max_ttl"`
+		MinTTL            *int  `json:"min_ttl"`
+		NegativeTTL       *int  `json:"negative_ttl"`
+		Prefetch          *bool `json:"prefetch"`
+		PrefetchThreshold *int  `json:"prefetch_threshold"`
+		ServeStale        *bool `json:"serve_stale"`
+		StaleGraceSecs    *int  `json:"stale_grace_secs"`
 	}
 	// VULN-071: use MaxBytesReader to prevent unbounded body reading on config PUT
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
@@ -216,18 +231,40 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build cache config from request
-	cfg := cache.Config{
-		Capacity:          req.Size,
-		MinTTL:            time.Duration(req.MinTTL) * time.Second,
-		MaxTTL:            time.Duration(req.MaxTTL) * time.Second,
-		DefaultTTL:        time.Duration(req.DefaultTTL) * time.Second,
-		NegativeTTL:       time.Duration(req.NegativeTTL) * time.Second,
-		PrefetchEnabled:   req.Prefetch,
-		PrefetchThreshold: time.Duration(req.PrefetchThreshold) * time.Second,
-		ServeStale:        req.ServeStale,
-		StaleGrace:        time.Duration(req.StaleGraceSecs) * time.Second,
+	// Merge over the existing config so omitted fields keep their
+	// current values.
+	cfg := s.cache.GetConfig()
+	if req.Size != nil {
+		cfg.Capacity = *req.Size
 	}
+	if req.MinTTL != nil {
+		cfg.MinTTL = time.Duration(*req.MinTTL) * time.Second
+	}
+	if req.MaxTTL != nil {
+		cfg.MaxTTL = time.Duration(*req.MaxTTL) * time.Second
+	}
+	if req.DefaultTTL != nil {
+		cfg.DefaultTTL = time.Duration(*req.DefaultTTL) * time.Second
+	}
+	if req.NegativeTTL != nil {
+		cfg.NegativeTTL = time.Duration(*req.NegativeTTL) * time.Second
+	}
+	if req.Prefetch != nil {
+		cfg.PrefetchEnabled = *req.Prefetch
+	}
+	if req.PrefetchThreshold != nil {
+		cfg.PrefetchThreshold = time.Duration(*req.PrefetchThreshold) * time.Second
+	}
+	if req.ServeStale != nil {
+		cfg.ServeStale = *req.ServeStale
+	}
+	if req.StaleGraceSecs != nil {
+		cfg.StaleGrace = time.Duration(*req.StaleGraceSecs) * time.Second
+	}
+	// \`Enabled\` has no corresponding field on cache.Config; the
+	// cache's lifecycle is owned by the manager. Accept it on input
+	// (for future symmetry) but no-op for now.
+	_ = req.Enabled
 
 	s.cache.UpdateConfig(cfg)
 
