@@ -383,7 +383,19 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 		if _, err = io.ReadFull(c.conn, ext); err != nil {
 			return false, 0, nil, err
 		}
-		payloadLen = int(binary.BigEndian.Uint64(ext))
+		raw := binary.BigEndian.Uint64(ext)
+		// L-1: bound the uint64 BEFORE narrowing to int. On 64-bit
+		// platforms `int(uint64)` for values ≥ 2^63 sign-flips to a
+		// negative number; the `> 16*1024` check below then sees a
+		// negative value and passes, and make([]byte, N) panics with
+		// "makeslice: len out of range". RFC 6455 also says the MSB
+		// MUST be zero, so reject the whole upper half plus anything
+		// above our frame cap in one check.
+		const maxFrame = 16 * 1024
+		if raw > maxFrame {
+			return false, 0, nil, errors.New("websocket: frame too large")
+		}
+		payloadLen = int(raw)
 	}
 
 	if payloadLen > 16*1024 { // 16KB max frame (DNS messages are typically < 4KB)
