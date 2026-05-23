@@ -7,7 +7,7 @@
 
 ## Status update (post-audit fixes applied 2026-05-23)
 
-**All 2 HIGHs + all 12 MEDIUMs FIXED same-day, each with a verified regression test.** Commit graph:
+**2 HIGHs + 12 MEDIUMs + 15 of 16 LOWs FIXED same-day, each Go fix with a verified regression test.** Commit graph:
 
 | # | Commit | Fix |
 |---|---|---|
@@ -16,15 +16,24 @@
 | M-3 | `9e78726` | Raft mTLS dialer sets RootCAs |
 | M-6 | `59311b4` | DDNS prereq check inside zone lock + typed error |
 | M-7 | `5c0b955` | DoWS per-connection rate limit (100 q/s) |
-| M-5 | `77c60ef` | rate-limit eviction by lastTime (true LRU) |
+| M-5 | `77c60ef` | rate-limit + RRL eviction by lastTime (true LRU) |
 | M-2 | `7baf246` | cache long-name key uses process-seeded maphash |
 | M-1 | `a19c373` | KVStore TLV payloadLen capped at 64 MiB |
 | M-4 | `c9111b9` | API blocklist error messages sanitized |
 | M-8…12 | `a0c2999` | docker-compose hardening + healthcheck + CI pinning |
+| L-1 | `bb16cd8` | websocket extended-length uint64 bound before int narrowing |
+| L-2 | `141c530` | TCP+UDP per-message panic recovery |
+| L-3 | `755598c` | RevokeToken session-counter decrement gate |
+| L-4 | `bf0cbfc` | token-persistence-without-auth_secret fail-fast |
+| L-5 | `a169a8d` | auth_secret min-entropy enforce |
+| L-7 | `954a25b` | blocklist trailing-dot normalised at load |
+| L-8 | `f33aee6` | RPZ CIDR rules honour priority |
+| L-9 | `1c4aefb` | TSIG malformed AllowedCIDR skipped, not fatal |
+| L-10 | `3cff9c2` | records list pagination cap + Total/Truncated |
+| L-11 | `1d8131f` | dashboard data endpoints require GET |
+| L-12…16 | `7f678d8` | Dockerfile + CI hygiene bundle |
 
-Each Go-level fix includes a regression test that was verified to FAIL with the bug restored and PASS with the fix in place. Infrastructure fixes (M-8 through M-12) are non-code changes with no regression-test surface; the diff itself is the audit artifact.
-
-The 16 LOW findings remain open as roadmap items.
+**Open: L-6** (Raft snapshots + KV WAL unencrypted at rest). Defence-in-depth gap — operator-trust boundary covers the on-disk surface today. Requires real engineering work (key management, on-disk format versioning, deployment-side migration) and is therefore tracked as a follow-up rather than a same-day fix.
 
 ---
 
