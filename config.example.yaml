@@ -69,12 +69,26 @@ cluster:
   # or "raft" (strong consistency, requires explicit peers)
   consensus_mode: "swim"
 
-  # Encryption key (REQUIRED for multi-node, 32 bytes, base64 encoded)
-  # Generate with: openssl rand -base64 32
-  # encryption_key: "YOUR_32_BYTE_BASE64_KEY_HERE"
+  # Encryption key (REQUIRED for multi-node, 32 bytes, hex encoded)
+  # Generate with: openssl rand -hex 32
+  # encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE"
+
+  # SECURITY-REPORT.md L-6: Optional at-rest encryption for Raft
+  # snapshot files. Independent 32-byte hex key. MUST differ from
+  # encryption_key above (key separation enforced by config.Validate).
+  # snapshot_encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE_DIFFERENT_FROM_ABOVE"
 
   # Enable cache synchronization across nodes
   cache_sync: true
+
+# =============================================================================
+# STORAGE CONFIGURATION
+# =============================================================================
+# storage:
+#   # SECURITY-REPORT.md L-6: Optional at-rest encryption for the KV
+#   # data file (zone state, etc.). 32-byte hex key. MUST differ from
+#   # cluster.encryption_key and cluster.snapshot_encryption_key.
+#   encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE_DIFFERENT_FROM_OTHERS"
 
 # =============================================================================
 # ZONE CONFIGURATION

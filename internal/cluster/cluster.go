@@ -72,7 +72,11 @@ type Config struct {
 	SeedNodes     []string
 	CacheSync     bool
 	HTTPAddr      string
-	EncryptionKey string // hex-encoded 32-byte AES-256 key
+	EncryptionKey string // hex-encoded 32-byte AES-256 key (gossip + Raft RPC)
+	// SnapshotEncryptionKey, when set, AES-256-GCM-encrypts Raft
+	// snapshot files at rest. hex-encoded 32-byte key, validated by
+	// config.Validate to be different from EncryptionKey (L-6).
+	SnapshotEncryptionKey string
 	// AllowInsecureCluster, when true, permits cluster startup without an
 	// EncryptionKey. The default is false: gossip messages carry zone updates
 	// and config sync, so plaintext on the cluster plane means a network
@@ -294,13 +298,15 @@ func (c *Cluster) initRaft() error {
 	// Determine Raft bind address
 	raftAddr := fmt.Sprintf("%s:%d", c.config.BindAddr, c.config.GossipPort)
 
-	// Create Raft cluster integration
+	// Create Raft cluster integration. L-6 added the optional
+	// snapshot-at-rest key as the trailing arg.
 	raftNode, err := raft.NewClusterIntegration(
 		raft.NodeID(c.config.NodeID),
 		peerIDs,
 		raftAddr,
 		dataDir,
 		c.config.EncryptionKey,
+		c.config.SnapshotEncryptionKey,
 	)
 	if err != nil {
 		return fmt.Errorf("creating Raft node: %w", err)

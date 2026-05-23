@@ -43,8 +43,9 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 		SeedNodes:            cfg.Cluster.SeedNodes,
 		CacheSync:            cfg.Cluster.CacheSync,
 		HTTPAddr:             cfg.Server.HTTP.Bind,
-		EncryptionKey:        cfg.Cluster.EncryptionKey,
-		AllowInsecureCluster: cfg.Cluster.AllowInsecureCluster,
+		EncryptionKey:         cfg.Cluster.EncryptionKey,
+		SnapshotEncryptionKey: cfg.Cluster.SnapshotEncryptionKey,
+		AllowInsecureCluster:  cfg.Cluster.AllowInsecureCluster,
 		ZoneManager:          zoneMgr,
 		ConsensusMode:        cluster.ConsensusMode(cfg.Cluster.ConsensusMode),
 	}

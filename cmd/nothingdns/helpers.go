@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -16,6 +17,22 @@ import (
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+// decodeHex32 decodes a hex string into a 32-byte slice. Used by the
+// L-6 at-rest encryption wiring (storage.encryption_key,
+// cluster.snapshot_encryption_key). config.Validate has already
+// enforced the same shape, so this is a defensive belt-and-braces
+// decode at the consumption site.
+func decodeHex32(s string) ([]byte, error) {
+	raw, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("hex decode: %w", err)
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("expected 32 bytes, got %d", len(raw))
+	}
+	return raw, nil
+}
 
 // resolveDashboardBearer picks the static bearer the dashboard server
 // will accept (when authenticateRequest's legacy-token branch fires).

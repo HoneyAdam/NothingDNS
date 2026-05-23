@@ -102,14 +102,30 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 	if kvDataDir == "" {
 		kvDataDir = "."
 	}
-	kvStore, err := storage.OpenKVStore(kvDataDir)
+	// L-6: pass the optional at-rest AEAD key. config.Validate has
+	// already enforced 32-byte hex + key-separation, so a hex decode
+	// failure here would be a bug, not a misconfig.
+	var aeadKey []byte
+	if hexKey := cfg.Storage.EncryptionKey; hexKey != "" {
+		decoded, decErr := decodeHex32(hexKey)
+		if decErr != nil {
+			logger.Warnf("Storage encryption key invalid (%v); KV will open in plaintext mode", decErr)
+		} else {
+			aeadKey = decoded
+		}
+	}
+	kvStore, err := storage.OpenKVStoreEncrypted(kvDataDir, nil, aeadKey)
 	if err != nil {
 		logger.Warnf("Failed to initialize KV store: %v", err)
 	} else {
 		mgr.result.KVStore = kvStore
 		mgr.result.KVPersistence = zone.NewKVPersistence(zoneManager, kvStore)
 		mgr.result.KVPersistence.Enable()
-		logger.Infof("KV store and KVPersistence initialized at %s", kvDataDir)
+		if aeadKey != nil {
+			logger.Infof("KV store and KVPersistence initialized at %s (AES-256-GCM at rest)", kvDataDir)
+		} else {
+			logger.Infof("KV store and KVPersistence initialized at %s", kvDataDir)
+		}
 	}
 
 	return mgr, nil

@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -38,6 +39,9 @@ type Config struct {
 
 	// DNSSEC configuration
 	DNSSEC DNSSECConfig `yaml:"dnssec"`
+
+	// Storage layer configuration (KV store at-rest encryption etc.)
+	Storage StorageConfig `yaml:"storage"`
 
 	// Zone files to load
 	Zones []string `yaml:"zones"`
@@ -399,6 +403,19 @@ type XoTConfig struct {
 }
 
 // ClusterConfig contains cluster settings.
+// StorageConfig groups the at-rest data-store settings the daemon
+// understands. SECURITY-REPORT.md L-6 added EncryptionKey here so
+// operators can opt the on-disk KV file into AES-256-GCM
+// confidentiality without touching any other subsystem's keys.
+type StorageConfig struct {
+	// EncryptionKey, when set, AES-256-GCM-encrypts the KV data file
+	// at rest (32 bytes, hex-encoded). Empty disables encryption
+	// (existing plain on-disk files keep loading). Use a DIFFERENT
+	// key from cluster.encryption_key and cluster.snapshot_encryption_key
+	// — those protect different data classes.
+	EncryptionKey string `yaml:"encryption_key"`
+}
+
 type ClusterConfig struct {
 	// Enable clustering
 	Enabled bool `yaml:"enabled"`
@@ -430,6 +447,16 @@ type ClusterConfig struct {
 	// Encryption key for gossip traffic (32 bytes, hex-encoded).
 	// When set, all inter-node communication is encrypted with AES-256-GCM.
 	EncryptionKey string `yaml:"encryption_key"`
+
+	// SnapshotEncryptionKey, when set, AES-256-GCM-encrypts Raft
+	// snapshot files at rest (32 bytes, hex-encoded — same format
+	// as EncryptionKey above). See SECURITY-REPORT.md L-6 and
+	// internal/cluster/raft/snapshot.go NewSnapshotterEncrypted.
+	// Must be a DIFFERENT key from EncryptionKey (key separation:
+	// gossip is a network-channel key, snapshots are an at-rest
+	// data-encryption key; conflating them widens the leak blast
+	// radius if either is compromised). Validated at config-load.
+	SnapshotEncryptionKey string `yaml:"snapshot_encryption_key"`
 
 	// AllowInsecureCluster permits starting a cluster without encryption_key.
 	// Default: false. Only enable for single-node dev setups; the gossip
@@ -1164,6 +1191,11 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		}
 	}
 
+	// Storage config (L-6)
+	if storageNode := node.Get("storage"); storageNode != nil {
+		cfg.Storage.EncryptionKey = storageNode.GetString("encryption_key")
+	}
+
 	// Slave zones config
 	if slaveZonesNode := node.Get("slave_zones"); slaveZonesNode != nil && slaveZonesNode.Type == NodeSequence {
 		for _, slaveNode := range slaveZonesNode.Children {
@@ -1596,6 +1628,7 @@ func unmarshalCluster(node *Node, cfg *ClusterConfig) error {
 	cfg.Weight = getInt(node, "weight", cfg.Weight)
 	cfg.CacheSync = getBool(node, "cache_sync", cfg.CacheSync)
 	cfg.EncryptionKey = node.GetString("encryption_key")
+	cfg.SnapshotEncryptionKey = node.GetString("snapshot_encryption_key")
 	cfg.AllowInsecureCluster = getBool(node, "allow_insecure", cfg.AllowInsecureCluster)
 
 	// Parse consensus mode (default: raft)
@@ -1786,6 +1819,20 @@ func looksLikePlaceholderSecret(s string) string {
 
 // secretHasMinEntropy returns an error if the secret is below 32 bytes or
 // appears to be low-entropy (detectable via Shannon entropy heuristic).
+// validateHex32 checks that name's value is exactly 64 hex chars
+// (i.e. 32 bytes when decoded). Used by the L-6 at-rest encryption
+// keys (storage.encryption_key, cluster.snapshot_encryption_key).
+func validateHex32(name, value string) error {
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("%s is not valid hex: %v", name, err)
+	}
+	if len(raw) != 32 {
+		return fmt.Errorf("%s must decode to 32 bytes (got %d)", name, len(raw))
+	}
+	return nil
+}
+
 func secretHasMinEntropy(name, secret string) error {
 	if len(secret) < 32 {
 		return fmt.Errorf("%s is too short: %d bytes (minimum 32)", name, len(secret))
@@ -1876,6 +1923,33 @@ func (c *Config) validateSecrets() []string {
 		if err := secretHasMinEntropy("cluster.encryption_key", c.Cluster.EncryptionKey); err != nil {
 			errors = append(errors, err.Error())
 		}
+	}
+
+	// L-6: validate the new at-rest encryption keys. Both must be
+	// 32-byte hex (64 hex chars) when set. Reject equal-to-other
+	// keys to keep the gossip / KV / snapshot trust domains
+	// separate; if one leaks, the blast radius stays bounded.
+	storageEnc := strings.TrimSpace(c.Storage.EncryptionKey)
+	if storageEnc != "" {
+		if err := validateHex32("storage.encryption_key", storageEnc); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	snapEnc := strings.TrimSpace(c.Cluster.SnapshotEncryptionKey)
+	if snapEnc != "" {
+		if err := validateHex32("cluster.snapshot_encryption_key", snapEnc); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	gossipEnc := strings.TrimSpace(c.Cluster.EncryptionKey)
+	if storageEnc != "" && storageEnc == gossipEnc {
+		errors = append(errors, "storage.encryption_key must differ from cluster.encryption_key (key separation)")
+	}
+	if snapEnc != "" && snapEnc == gossipEnc {
+		errors = append(errors, "cluster.snapshot_encryption_key must differ from cluster.encryption_key (key separation)")
+	}
+	if storageEnc != "" && snapEnc != "" && storageEnc == snapEnc {
+		errors = append(errors, "storage.encryption_key must differ from cluster.snapshot_encryption_key (key separation)")
 	}
 
 	// Validate per-slave TSIG secrets
