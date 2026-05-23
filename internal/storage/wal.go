@@ -680,6 +680,17 @@ func (wal *WAL) Truncate(segmentID uint64) error {
 		}
 	}
 
+	// Re-sort by ID. The "move active out of removed" branch above can
+	// append the active segment to the end of `keep`, but `keep` may
+	// already contain segments with higher IDs. ReadAll iterates
+	// `wal.segments` in slice order to replay entries oldest-first, so
+	// any out-of-order entry here would scramble the recovery sequence
+	// — older entries returned after newer ones, breaking the WAL's
+	// commit-order invariant.
+	sort.Slice(keep, func(i, j int) bool {
+		return keep[i].ID < keep[j].ID
+	})
+
 	wal.segments = keep
 	return nil
 }
