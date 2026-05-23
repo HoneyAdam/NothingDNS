@@ -666,6 +666,18 @@ func (gp *GossipProtocol) handleElection(msg Message, from *net.UDPAddr) {
 }
 
 // handleLeader handles leader announcement messages.
+//
+// Mirrors the same-term hardening already applied to
+// handleHeartbeat: do NOT swap a known leader for a *different*
+// leader claiming the same term. The previous code adopted any
+// payload with Term >= leaderTerm, so a peer (or off-path
+// attacker with the AEAD key) could send a Leader announcement
+// at our current term naming a different LeaderID and flip the
+// cluster's view of leadership without an election. Split-brain
+// territory: leave the existing leader alone until a strictly
+// higher term resolves the conflict. Adopt on (a) strictly
+// higher term, or (b) we have no current leader yet (first
+// announce after start or after a step-down).
 func (gp *GossipProtocol) handleLeader(msg Message, from *net.UDPAddr) {
 	var payload LeaderPayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -675,13 +687,29 @@ func (gp *GossipProtocol) handleLeader(msg Message, from *net.UDPAddr) {
 	gp.leaderMu.Lock()
 	defer gp.leaderMu.Unlock()
 
-	// Accept leader if term is >= our term
-	if payload.Term >= gp.leaderTerm {
-		gp.currentLeader = payload.LeaderID
-		gp.isLeader = false
-		gp.leaderTerm = payload.Term
-		gp.lastHeartbeat = time.Now()
+	// Stale terms ignored.
+	if payload.Term < gp.leaderTerm {
+		return
 	}
+
+	adopt := false
+	if payload.Term > gp.leaderTerm {
+		adopt = true
+	} else if gp.currentLeader == "" {
+		adopt = true
+	} else if payload.LeaderID == gp.currentLeader {
+		// Same term, same leader: refresh lastHeartbeat below.
+		adopt = true
+	}
+	if !adopt {
+		// Same term, different leader: don't switch (split-brain hazard).
+		return
+	}
+
+	gp.currentLeader = payload.LeaderID
+	gp.leaderTerm = payload.Term
+	gp.isLeader = (payload.LeaderID == gp.nodeList.GetSelf().ID)
+	gp.lastHeartbeat = time.Now()
 }
 
 // handleHeartbeat handles leader heartbeat messages.
