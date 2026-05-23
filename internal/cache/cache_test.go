@@ -150,6 +150,52 @@ func TestCacheLRUEviction(t *testing.T) {
 	}
 }
 
+// TestCacheRefreshExistingKeyAtCapacityDoesNotEvict regresses fc40eb7:
+// when a shard is at capacity and the caller re-sets an existing key,
+// the net entry count is unchanged so no eviction should occur.
+// Before the fix, addEntry left the stale map entry in place while
+// removing it from the LRU list — the eviction loop then saw
+// len == capacity and dropped an unrelated victim every time the hot
+// key refreshed.
+func TestCacheRefreshExistingKeyAtCapacityDoesNotEvict(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = numShards * 3
+	c := New(config)
+
+	keys := keysForShard(0, 3)
+	a, b, cKey := keys[0], keys[1], keys[2]
+
+	c.SetNegative(a, 3)
+	c.SetNegative(b, 3)
+	c.SetNegative(cKey, 3)
+
+	if got := c.Size(); got != 3 {
+		t.Fatalf("setup: expected size 3, got %d", got)
+	}
+	if pre := c.Stats().Evictions; pre != 0 {
+		t.Fatalf("setup: expected 0 evictions, got %d", pre)
+	}
+
+	// Refresh: same key set again. Should overwrite in place.
+	c.SetNegative(a, 3)
+
+	if got := c.Size(); got != 3 {
+		t.Errorf("after refresh: expected size 3, got %d", got)
+	}
+	if ev := c.Stats().Evictions; ev != 0 {
+		t.Errorf("after refresh: expected 0 evictions, got %d (regression: refresh evicted unrelated victim)", ev)
+	}
+	if c.Get(a) == nil {
+		t.Error("expected a still present after refresh")
+	}
+	if c.Get(b) == nil {
+		t.Error("expected b still present (would have been evicted before fix)")
+	}
+	if c.Get(cKey) == nil {
+		t.Error("expected cKey still present (would have been evicted before fix)")
+	}
+}
+
 func TestCacheNegative(t *testing.T) {
 	config := DefaultConfig()
 	config.MinTTL = 50 * time.Millisecond
