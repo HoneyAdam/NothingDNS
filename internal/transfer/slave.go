@@ -149,6 +149,7 @@ type SlaveManager struct {
 	clients    map[string]*IXFRClient // zone name -> IXFR client
 	notifyChan chan *NOTIFYRequest
 	stopChan   chan struct{}
+	stopOnce   sync.Once // guards Stop() against second-call panic
 	keyStore   *KeyStore
 	mu         sync.RWMutex
 	wg         sync.WaitGroup
@@ -262,9 +263,16 @@ func (sm *SlaveManager) Start() {
 	go sm.notifyListener()
 }
 
-// Stop stops the slave manager.
+// Stop stops the slave manager. Idempotent.
 func (sm *SlaveManager) Stop() {
-	close(sm.stopChan)
+	closed := false
+	sm.stopOnce.Do(func() {
+		close(sm.stopChan)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	sm.wg.Wait()
 }
 
