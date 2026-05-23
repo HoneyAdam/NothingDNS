@@ -79,8 +79,9 @@ type Responder struct {
 	logger *util.Logger
 
 	// Control channels
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Stop() against the second-call panic
+	wg       sync.WaitGroup
 
 	// Probe state for hostname claiming
 	probedHostnames map[string]bool
@@ -166,9 +167,18 @@ func (r *Responder) Start() error {
 	return nil
 }
 
-// Stop stops the mDNS responder.
+// Stop stops the mDNS responder. Idempotent — a second call is a
+// no-op rather than the close-of-closed-channel panic the bare
+// close(r.stopCh) used to produce.
 func (r *Responder) Stop() {
-	close(r.stopCh)
+	closed := false
+	r.stopOnce.Do(func() {
+		close(r.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	r.wg.Wait()
 
 	if r.conn != nil {

@@ -20,13 +20,14 @@ type ExporterConfig struct {
 
 // OTLPExporter exports spans to an OTLP collector.
 type OTLPExporter struct {
-	config  ExporterConfig
-	client  *http.Client
-	batch   []*Span
-	batchMu sync.Mutex
-	ticker  *time.Ticker
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	config   ExporterConfig
+	client   *http.Client
+	batch    []*Span
+	batchMu  sync.Mutex
+	ticker   *time.Ticker
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Close() against second-call panic
+	wg       sync.WaitGroup
 }
 
 // NewOTLPExporter creates a new OTLP exporter.
@@ -176,9 +177,18 @@ func (e *OTLPExporter) sendPayload(payload []byte) error {
 	return nil
 }
 
-// Close shuts down the exporter gracefully.
+// Close shuts down the exporter gracefully. Idempotent: a second
+// call returns without re-closing the stop channel (would panic) or
+// re-stopping the ticker (no-op but unnecessary).
 func (e *OTLPExporter) Close() {
-	close(e.stopCh)
+	closed := false
+	e.stopOnce.Do(func() {
+		close(e.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	e.ticker.Stop()
 	e.Flush() // Final flush
 	e.wg.Wait()
