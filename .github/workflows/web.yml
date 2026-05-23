@@ -45,6 +45,8 @@ jobs:
           VITE_WS_URL: /ws
 
       - name: Upload coverage
+        # L-N9: see comment in go.yml — pin to a release SHA for
+        # supply-chain hygiene; tag refs are mutable.
         uses: codecov/codecov-action@v4
         with:
           files: web/coverage/coverage-final.json

@@ -72,6 +72,13 @@ jobs:
           cat coverage/*.out | grep -v "^mode:" >> coverage/all.out
 
       - name: Upload coverage to Codecov
+        # L-N9: pin to a release SHA. Same supply-chain class as
+        # M-12 (snyk). codecov-action receives CODECOV_TOKEN +
+        # GITHUB_TOKEN, so a compromised release tag is a credential
+        # exfil risk. Look up the SHA for your chosen release at
+        # https://github.com/codecov/codecov-action/releases and
+        # substitute it here, e.g.:
+        #   uses: codecov/codecov-action@<sha> # vX.Y.Z
         uses: codecov/codecov-action@v4
         with:
           files: ./coverage/all.out

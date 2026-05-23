@@ -7,12 +7,16 @@ version: "3.8"
 
 services:
   nothingdns:
-    # M-8: pin to a release tag for reproducibility and pull an image
-    # digest for production. Floating `:latest` lets ghcr.io re-publish
-    # under the same tag without notice. Replace the example tag below
-    # with the digest your operator has reviewed:
-    #   image: ghcr.io/nothingdns/nothingdns:v1.0.0@sha256:<digest>
-    image: ghcr.io/nothingdns/nothingdns:latest
+    # L-N8: M-8 added the digest-pin comment but left `:latest` as the
+    # default active value, so an operator who copy-pastes this file
+    # still ships with a floating tag. Switched to an env-var fallback
+    # — production deployments should set NOTHINGDNS_IMAGE to a
+    # specific tag PLUS digest, e.g.
+    #   export NOTHINGDNS_IMAGE="ghcr.io/nothingdns/nothingdns:v1.0.0@sha256:<digest>"
+    # The :latest fallback only fires for `docker compose up` with no
+    # env, which is acceptable for the dev-compose use case this file
+    # documents at L2-L3.
+    image: ${NOTHINGDNS_IMAGE:-ghcr.io/nothingdns/nothingdns:latest}
     container_name: nothingdns
     restart: unless-stopped
 
