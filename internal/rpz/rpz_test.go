@@ -273,6 +273,45 @@ func TestClientIPPolicy(t *testing.T) {
 	}
 }
 
+// TestClientIPPolicy_HonorsPriority regresses SECURITY-REPORT.md L-8.
+// CIDR-based RPZ rules previously returned the first slice-order match,
+// ignoring Rule.Priority — so a high-priority "PassThru" rule added
+// AFTER a low-priority "NXDomain" rule for an overlapping range got
+// shadowed silently. QNAME rules already honoured priority; CIDR rules
+// were the asymmetric case.
+func TestClientIPPolicy_HonorsPriority(t *testing.T) {
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
+
+	// Both rules match 192.168.0.5/24; the SECOND one is higher
+	// priority (lower numeric value). Pre-fix the first-inserted
+	// low-priority rule wins; post-fix the second-inserted
+	// high-priority rule wins.
+	_, cidrLow, _ := net.ParseCIDR("192.168.0.0/16")
+	e.mu.Lock()
+	e.clientIPRules = append(e.clientIPRules, cidrLow)
+	e.clientActions = append(e.clientActions, &Rule{
+		Pattern:  "192.168.0.0/16",
+		Action:   ActionNXDOMAIN,
+		Priority: 50,
+	})
+	_, cidrHigh, _ := net.ParseCIDR("192.168.0.0/24")
+	e.clientIPRules = append(e.clientIPRules, cidrHigh)
+	e.clientActions = append(e.clientActions, &Rule{
+		Pattern:  "192.168.0.0/24",
+		Action:   ActionPassThrough,
+		Priority: 10,
+	})
+	e.mu.Unlock()
+
+	rule := e.ClientIPPolicy(net.ParseIP("192.168.0.5"))
+	if rule == nil {
+		t.Fatal("expected a match, got nil")
+	}
+	if rule.Action != ActionPassThrough {
+		t.Errorf("L-8 regression: low-priority insertion-order winner returned (Action=%v); priority-aware lookup should return the Priority=10 ActionPassThrough rule", rule.Action)
+	}
+}
+
 func TestResponseIPPolicy(t *testing.T) {
 	dir := t.TempDir()
 	rpzFile := filepath.Join(dir, "rpz-zone")
