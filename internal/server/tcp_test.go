@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,10 +108,10 @@ func TestTCPServerBasicQuery(t *testing.T) {
 
 // TestTCPServerMultipleQueries tests multiple queries on same connection.
 func TestTCPServerMultipleQueries(t *testing.T) {
-	requestCount := 0
+	var requestCount atomic.Int32
 
 	handler := HandlerFunc(func(w ResponseWriter, req *protocol.Message) {
-		requestCount++
+		requestCount.Add(1)
 		resp := &protocol.Message{
 			Header: protocol.Header{
 				ID:    req.Header.ID,
@@ -161,8 +162,8 @@ func TestTCPServerMultipleQueries(t *testing.T) {
 		}
 	}
 
-	if requestCount != 5 {
-		t.Errorf("Expected 5 requests, got %d", requestCount)
+	if got := requestCount.Load(); got != 5 {
+		t.Errorf("Expected 5 requests, got %d", got)
 	}
 }
 
