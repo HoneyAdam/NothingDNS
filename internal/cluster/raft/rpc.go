@@ -311,6 +311,16 @@ func (t *TCPTransport) SendSnapshot(peerID NodeID, req SnapshotRequest) error {
 }
 
 // getConn gets or creates a connection to a peer.
+//
+// Two goroutines (e.g., a heartbeat ticker and a follower-replication
+// call) can both reach this with no existing conn entry: both
+// observe ok=false under RLock, both dial, both then take the
+// write lock and store — the second store overwrites the first,
+// orphaning the earlier dialed conn (and any background goroutine
+// that may already be reading from it on the peer side once Raft
+// starts using the new one). Re-check under the write lock and,
+// if another goroutine raced ahead of us, close our duplicate and
+// return the winner.
 func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 	// Check for existing connection
 	t.mu.RLock()
@@ -338,8 +348,16 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
-	// Store connection
+	// Store connection — but re-check under the write lock to handle
+	// the race where another goroutine dialed and stored concurrently.
 	t.mu.Lock()
+	if existing, found := t.conns[peerID]; found && existing != nil {
+		// Lost the race. Close our duplicate and return the winner so
+		// the rest of the transport doesn't see two live conns to one peer.
+		t.mu.Unlock()
+		_ = dialConn.Close()
+		return existing, nil
+	}
 	t.conns[peerID] = dialConn
 	t.mu.Unlock()
 
