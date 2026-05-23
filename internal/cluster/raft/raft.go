@@ -211,8 +211,9 @@ type Node struct {
 	leadershipCh chan LeadershipState
 
 	// Control
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Stop() against second-call panic
+	wg       sync.WaitGroup
 
 	// RNG for election timeout randomization
 	rng *LockedRand
@@ -397,9 +398,18 @@ func (n *Node) Start() {
 	go n.run()
 }
 
-// Stop stops the Raft node.
+// Stop stops the Raft node. Idempotent — a second call is a no-op
+// instead of the close-of-closed-channel panic the bare close would
+// produce.
 func (n *Node) Stop() {
-	close(n.stopCh)
+	closed := false
+	n.stopOnce.Do(func() {
+		close(n.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	n.wg.Wait()
 }
 

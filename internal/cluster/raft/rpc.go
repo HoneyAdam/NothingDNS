@@ -47,6 +47,7 @@ type RPCServer struct {
 	conns     map[NodeID]net.Conn
 	mu        sync.RWMutex
 	stopCh    chan struct{}
+	stopOnce  sync.Once // guards Stop() against second-call panic
 	wg        sync.WaitGroup
 	tlsConfig *tls.Config // nil means plain TCP (dev-only; AEAD must be set in production)
 	aead      cipher.AEAD // AEAD for encrypted framing; nil is plaintext
@@ -81,9 +82,16 @@ func (s *RPCServer) Start() {
 	go s.acceptLoop()
 }
 
-// Stop stops the RPC server.
+// Stop stops the RPC server. Idempotent.
 func (s *RPCServer) Stop() {
-	close(s.stopCh)
+	closed := false
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	s.listener.Close()
 
 	s.mu.Lock()

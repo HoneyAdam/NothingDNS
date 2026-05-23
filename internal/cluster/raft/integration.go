@@ -33,8 +33,9 @@ type ClusterIntegration struct {
 	appliedIndex    Index
 	lastAppliedTerm Term
 
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Stop() against second-call panic
+	wg       sync.WaitGroup
 }
 
 // NewClusterIntegration creates a new Raft cluster integration.
@@ -142,9 +143,18 @@ func (ci *ClusterIntegration) Start() error {
 	return nil
 }
 
-// Stop stops the Raft integration.
+// Stop stops the Raft integration. Idempotent — subsequent calls
+// return nil without re-closing ci.stopCh (which would panic) or
+// re-stopping the child components.
 func (ci *ClusterIntegration) Stop() error {
-	close(ci.stopCh)
+	closed := false
+	ci.stopOnce.Do(func() {
+		close(ci.stopCh)
+		closed = true
+	})
+	if !closed {
+		return nil
+	}
 	ci.node.Stop()
 	ci.rpcServer.Stop()
 	ci.wal.Close()
