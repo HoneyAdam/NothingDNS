@@ -1,10 +1,13 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +64,40 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("View: %v", err)
+	}
+}
+
+// TestReadTLV_RejectsOversizedPayloadLen regresses SECURITY-REPORT.md
+// M-1. readTLV used to read a uint32 payloadLen from the data file
+// and immediately allocate make([]byte, payloadLen + hmacLenBytes)
+// with no upper bound. An attacker with write access to the data
+// file — per architecture.md this is an enumerated on-disk attack
+// surface (container escape, shared mount, restored backup) — could
+// plant payloadLen = 0xFFFFFFFF and OOM-kill the process at startup.
+// Same shape as the recently-fixed Raft snapshot OOM (b9f0ed5) and
+// raft entry-slice OOM (e9687fe); the cap pattern here mirrors
+// kvjournal.go's maxJournalPayload.
+func TestReadTLV_RejectsOversizedPayloadLen(t *testing.T) {
+	store := &KVStore{}
+
+	// Build a TLV header with payloadLen = 64 MiB + 1 (one byte over
+	// the cap). No payload bytes follow — readTLV must error out at
+	// the cap check before attempting to allocate.
+	var buf bytes.Buffer
+	buf.WriteByte(0xDB) // fileMagic
+	versionBytes := []byte{0, 0}
+	binary.BigEndian.PutUint16(versionBytes, 1) // fileVersion
+	buf.Write(versionBytes)
+	payloadLenBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(payloadLenBytes, (64<<20)+1)
+	buf.Write(payloadLenBytes)
+
+	err := store.readTLV(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized payloadLen, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max' (the cap guard message)", err)
 	}
 }
 

@@ -216,6 +216,17 @@ func (s *KVStore) readTLV(r io.Reader) error {
 		return fmt.Errorf("unsupported TLV version: %d", version)
 	}
 	payloadLen := binary.BigEndian.Uint32(hdr[3:7])
+	// M-1: cap the wire-supplied payload length before allocating.
+	// The data file lives on disk and an attacker with write access
+	// (container escape, shared mount, restored backup) could plant
+	// payloadLen = 0xFFFFFFFF — make([]byte, 4 GiB) instantly OOM-
+	// kills the process at startup. 64 MiB matches the WAL cap and
+	// is well above any realistic real KV record while keeping the
+	// upper bound far below the uint32 ceiling.
+	const maxKVPayload = 64 << 20 // 64 MiB
+	if payloadLen > maxKVPayload {
+		return fmt.Errorf("kvstore: TLV payload %d exceeds max %d", payloadLen, maxKVPayload)
+	}
 
 	// Read payload + HMAC in one read.
 	recordLen := int(payloadLen) + hmacLenBytes
