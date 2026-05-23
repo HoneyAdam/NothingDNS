@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
@@ -39,6 +40,14 @@ type Result struct {
 }
 
 // Runner executes load tests.
+//
+// success / errors / timeouts are incremented from every worker
+// goroutine; they must be touched only through sync/atomic. A
+// previous version used naked ++ on these int64 fields and lost
+// updates under load (and tripped the race detector) — silently
+// undercounting whichever counter was hottest at the moment of
+// contention. The latencies slice is still serialised through
+// mu because append must keep the slice header consistent.
 type Runner struct {
 	cfg       Config
 	latencies []time.Duration
@@ -90,7 +99,7 @@ func (r *Runner) runWorker(ctx context.Context, workerID int) {
 
 	conn, err = net.DialTimeout(proto, r.cfg.Server, r.cfg.Timeout)
 	if err != nil {
-		r.errors += int64(r.cfg.Queries)
+		atomic.AddInt64(&r.errors, int64(r.cfg.Queries))
 		return
 	}
 	defer conn.Close()
@@ -109,7 +118,7 @@ func (r *Runner) sendQuery(conn net.Conn) {
 	// Build DNS query
 	qname, err := protocol.ParseName(r.cfg.Name)
 	if err != nil {
-		r.errors++
+		atomic.AddInt64(&r.errors, 1)
 		return
 	}
 
@@ -127,7 +136,7 @@ func (r *Runner) sendQuery(conn net.Conn) {
 	buf := make([]byte, 512)
 	n, err := msg.Pack(buf)
 	if err != nil {
-		r.errors++
+		atomic.AddInt64(&r.errors, 1)
 		return
 	}
 
@@ -137,7 +146,7 @@ func (r *Runner) sendQuery(conn net.Conn) {
 	conn.SetDeadline(queryStart.Add(r.cfg.Timeout))
 	_, err = conn.Write(buf[:n])
 	if err != nil {
-		r.timeouts++
+		atomic.AddInt64(&r.timeouts, 1)
 		return
 	}
 
@@ -147,18 +156,18 @@ func (r *Runner) sendQuery(conn net.Conn) {
 	latency := time.Since(queryStart)
 
 	if err != nil {
-		r.timeouts++
+		atomic.AddInt64(&r.timeouts, 1)
 		return
 	}
 
 	// Unpack to validate
 	_, err = protocol.UnpackMessage(resp)
 	if err != nil {
-		r.errors++
+		atomic.AddInt64(&r.errors, 1)
 		return
 	}
 
-	r.success++
+	atomic.AddInt64(&r.success, 1)
 
 	r.mu.Lock()
 	r.latencies = append(r.latencies, latency)
@@ -166,18 +175,24 @@ func (r *Runner) sendQuery(conn net.Conn) {
 }
 
 func (r *Runner) computeResult(total time.Duration) *Result {
+	// Workers have all returned (Run() wg.Waited before calling us), so
+	// these atomic loads are paired with the atomic stores on the worker
+	// side via the wg.Wait happens-before edge — no torn reads possible.
+	success := atomic.LoadInt64(&r.success)
+	errors := atomic.LoadInt64(&r.errors)
+	timeouts := atomic.LoadInt64(&r.timeouts)
 
 	latencies := r.latencies
 	if len(latencies) == 0 {
 		return &Result{
-			Success:       r.success,
-			Errors:        r.errors,
-			Timeouts:      r.timeouts,
+			Success:       success,
+			Errors:        errors,
+			Timeouts:      timeouts,
 			TotalDuration: total,
 			QPS:           0,
 			ErrorsDetail: map[string]int64{
-				"protocol": r.errors,
-				"timeout":  r.timeouts,
+				"protocol": errors,
+				"timeout":  timeouts,
 			},
 		}
 	}
@@ -198,9 +213,9 @@ func (r *Runner) computeResult(total time.Duration) *Result {
 
 	n := len(latencies)
 	result := &Result{
-		Success:       r.success,
-		Errors:        r.errors,
-		Timeouts:      r.timeouts,
+		Success:       success,
+		Errors:        errors,
+		Timeouts:      timeouts,
 		TotalDuration: total,
 		LatencyMin:    latencies[0],
 		LatencyMax:    latencies[n-1],
@@ -210,8 +225,8 @@ func (r *Runner) computeResult(total time.Duration) *Result {
 		LatencyP99:    latencies[int(float64(n)*0.99)],
 		QPS:           float64(n) / total.Seconds(),
 		ErrorsDetail: map[string]int64{
-			"protocol": r.errors,
-			"timeout":  r.timeouts,
+			"protocol": errors,
+			"timeout":  timeouts,
 		},
 	}
 
