@@ -955,12 +955,20 @@ func (n *Node) sendCommitted() {
 	entries := make([]entry, endIdx-startIdx)
 	copy(entries, n.log[startIdx:endIdx])
 
-	n.lastApplied = n.commitIndex
-
+	// Only advance lastApplied AFTER the commit goes through. The
+	// previous code bumped lastApplied before the channel send and
+	// then fell into a default branch on a full commitCh — so on the
+	// next sendCommitted call, the start/end window had already moved
+	// past these entries and they were skipped forever. State machine
+	// never saw them and the cluster silently lost commits. With this
+	// ordering, a dropped send leaves lastApplied where it was; the
+	// next maybeAdvanceCommitIndex / commit tick retries the same
+	// window.
 	select {
 	case n.commitCh <- Commit{Entries: entries}:
+		n.lastApplied = n.commitIndex
 	default:
-		// Channel full — will retry
+		// Channel full — will retry on the next commit tick.
 	}
 }
 
