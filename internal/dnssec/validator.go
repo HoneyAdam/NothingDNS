@@ -149,10 +149,33 @@ func (v *Validator) ValidateResponse(ctx context.Context, msg *protocol.Message,
 		qtype = msg.Questions[0].QType
 	}
 
-	// Check validation cache
+	// Cache short-circuit: deliberately DISABLED for ValidationSecure.
+	//
+	// The previous design cached the outcome (Secure/Insecure/Bogus)
+	// keyed by (queryName, qtype) for ValidationCacheTTL (5m default)
+	// and returned the cached value before checking the *current*
+	// message's signatures. That's a validation bypass: an attacker
+	// who can deliver a forged response for (queryName, qtype) within
+	// the cache window — having an ID-and-port-matched response
+	// already passed the transport layer — would inherit the
+	// previously-cached "Secure" verdict without their forged RRSIG
+	// being checked at all.
+	//
+	// Safe-to-cache outcomes are limited to "no trust anchor / chain
+	// definitively broken" — properties of the zone hierarchy that
+	// don't depend on the specific RRSet+RRSIG in `msg`. Keep that
+	// caching; drop the post-validateMessage cache write below.
 	if v.validationCache != nil && qtype != 0 {
 		if result, ok := v.validationCache.Get(queryName, qtype); ok {
-			return result, nil
+			// Only honor cached Insecure (no DNSSEC for this name) or
+			// Bogus-from-chain-build entries. A cached Secure here
+			// would be the bypass.
+			if result == ValidationInsecure {
+				return result, nil
+			}
+			// Bogus from chain build (no anchor / chain-walk failure)
+			// is also stable per-zone for the cache window. Per-msg
+			// Bogus from validateMessage we DON'T cache below.
 		}
 	}
 
@@ -175,14 +198,9 @@ func (v *Validator) ValidateResponse(ctx context.Context, msg *protocol.Message,
 		return ValidationBogus, fmt.Errorf("building validation chain: %w", err)
 	}
 
-	// Validate the answer
+	// Validate the answer against THIS message's signatures. Always.
+	// Do not cache the per-message outcome — see comment above.
 	result := v.validateMessage(ctx, msg, queryName, chain)
-
-	// Cache the result
-	if v.validationCache != nil && qtype != 0 {
-		v.validationCache.Set(queryName, qtype, result)
-	}
-
 	return result, nil
 }
 
