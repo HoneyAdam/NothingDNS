@@ -270,6 +270,8 @@ type Manager struct {
 
 	// startOnce guards Start() from racy double-fires
 	startOnce sync.Once
+	// stopOnce guards Stop() from a double close(stopCh) panic
+	stopOnce sync.Once
 
 	// Logger
 	logger *util.Logger
@@ -342,7 +344,16 @@ func (m *Manager) Start() {
 
 // Stop stops the DSO manager.
 func (m *Manager) Stop() {
-	close(m.stopCh)
+	// Idempotent close. A second Stop call would otherwise panic on
+	// the close(m.stopCh) — symmetric with the startOnce guard above.
+	closed := false
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 
 	// Close all sessions
 	m.sessionsMu.Lock()
