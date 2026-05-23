@@ -33,7 +33,16 @@
 | L-11 | `1d8131f` | dashboard data endpoints require GET |
 | L-12…16 | `7f678d8` | Dockerfile + CI hygiene bundle |
 
-**Open: L-6** (Raft snapshots + KV WAL unencrypted at rest). Defence-in-depth gap — operator-trust boundary covers the on-disk surface today. Requires real engineering work (key management, on-disk format versioning, deployment-side migration) and is therefore tracked as a follow-up rather than a same-day fix.
+**L-6 FIXED in two commits**:
+
+| # | Commit | Fix |
+|---|---|---|
+| L-6 (KV) | `df697ac` | KVStore optional AES-256-GCM (magic 0xE0); `OpenKVStoreEncrypted(path, hmacKey, aeadKey)` |
+| L-6 (Raft) | `a76db8c` | Snapshotter optional AES-256-GCM (magic 0xE0); `NewSnapshotterEncrypted(dir, aeadKey)` |
+
+Both subsystems keep the plain on-disk format when the aead key is nil (no operator-visible change) and dispatch on the leading magic byte at read time — old files load unchanged, new files written with a configured key are unreadable without that key. Wire-format threat tested by asserting the on-disk bytes do not contain known plaintext substrings.
+
+**All 30 verified findings (2 HIGH + 12 MED + 16 LOW) are now closed.**
 
 ---
 
