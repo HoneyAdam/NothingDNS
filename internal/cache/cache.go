@@ -509,9 +509,16 @@ func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, tt
 // addEntry adds an entry to the shard, handling eviction if needed.
 // Must be called with s.mu held for writing.
 func (s *cacheShard) addEntry(key string, entry *Entry) {
-	// Check if key already exists
+	// Check if key already exists. If it does we're replacing the
+	// value at this key, so the net entry count is unchanged — drop
+	// the old map entry too BEFORE the eviction loop, otherwise the
+	// loop sees len == capacity and evicts an unrelated victim every
+	// time a hot entry refreshes (a steady stream of upstream-served
+	// refreshes for the same name would silently churn through the
+	// rest of the shard).
 	if oldEntry, exists := s.entries[key]; exists {
 		s.intrusiveRemove(oldEntry)
+		delete(s.entries, key)
 	}
 
 	// Evict oldest entries if at capacity
