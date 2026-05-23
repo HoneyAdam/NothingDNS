@@ -820,7 +820,7 @@ func TestFetchDS_ResolverError(t *testing.T) {
 	mock := &errorMockResolver{err: fmt.Errorf("connection refused")}
 	v := NewValidator(DefaultValidatorConfig(), nil, mock)
 
-	_, err := v.fetchDS(context.Background(), "example.com.")
+	_, _, err := v.fetchDS(context.Background(), "example.com.")
 	if err == nil {
 		t.Error("expected error when resolver fails for DS query")
 	}

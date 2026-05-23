@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -505,7 +506,7 @@ func TestValidatorFetchDS(t *testing.T) {
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 
 	// Test with nil resolver
-	records, err := v.fetchDS(context.Background(), "example.com.")
+	records, _, err := v.fetchDS(context.Background(), "example.com.")
 	if err == nil {
 		t.Error("Expected error with nil resolver")
 	}
@@ -517,7 +518,7 @@ func TestValidatorFetchDS(t *testing.T) {
 	mock := &mockResolver{responses: make(map[string]*protocol.Message)}
 	v.resolver = mock
 
-	records, err = v.fetchDS(context.Background(), "example.com.")
+	records, _, err = v.fetchDS(context.Background(), "example.com.")
 	// With mock resolver returning empty response, records might be empty but not nil
 	if err != nil {
 		t.Errorf("fetchDS() error = %v", err)
@@ -1088,6 +1089,18 @@ func TestBuildChainWithDelegation(t *testing.T) {
 	}
 }
 
+// TestBuildChain_EmptyDSNoProof_IsDowngradeAttack pins SECURITY-REPORT.md
+// H-2: an empty DS answer with no NSEC/NSEC3 denial proof (and no
+// RRSIG over that proof) must NOT be silently accepted as a "genuine
+// unsigned delegation." Pre-fix, buildChain treated len(dsRecords)==0
+// as Insecure outright — exactly the on-path DS-strip downgrade
+// attack DNSSEC was meant to prevent. Post-fix the chain builder
+// returns an error containing "downgrade-attack guard".
+//
+// (Historical name: this test was TestBuildChainUnsignedDelegation
+// and asserted the buggy behaviour. The mock here is identical to
+// the original — empty Answer for the DS query, no Authority NSEC,
+// no RRSIG — because that mock IS the downgrade vector.)
 func TestBuildChainUnsignedDelegation(t *testing.T) {
 	// Create trust anchor for parent
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -1138,14 +1151,15 @@ func TestBuildChainUnsignedDelegation(t *testing.T) {
 	config := DefaultValidatorConfig()
 	v := NewValidator(config, store, mock)
 
-	// Build chain - should stop at unsigned delegation
-	chain, err := v.buildChain(context.Background(), anchor, []string{"example"})
-	if err != nil {
-		t.Fatalf("buildChain with unsigned delegation failed: %v", err)
+	// Build chain — must reject the empty-DS response because the
+	// parent supplied no authenticated denial proof. Silently
+	// breaking the chain here is the H-2 downgrade vector.
+	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	if err == nil {
+		t.Fatal("expected downgrade-attack guard to reject empty DS with no denial proof, got nil error")
 	}
-	// Should have 1 link (just the anchor zone, delegation stops)
-	if len(chain) != 1 {
-		t.Errorf("Expected 1 chain link for unsigned delegation, got %d", len(chain))
+	if !strings.Contains(err.Error(), "downgrade-attack guard") {
+		t.Errorf("expected error to mention downgrade-attack guard, got: %v", err)
 	}
 }
 
@@ -1974,7 +1988,7 @@ func TestFetchDSWithResults(t *testing.T) {
 	}
 
 	v := NewValidator(DefaultValidatorConfig(), nil, mock)
-	records, err := v.fetchDS(context.Background(), "example.com.")
+	records, _, err := v.fetchDS(context.Background(), "example.com.")
 	if err != nil {
 		t.Fatalf("fetchDS failed: %v", err)
 	}
