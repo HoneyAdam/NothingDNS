@@ -192,6 +192,23 @@ func (s *Snapshotter) writeSnapshot(w io.Writer, snap *Snapshot) error {
 	return nil
 }
 
+// Snapshot wire-format limits. These cap untrusted on-disk fields so
+// a corrupt or attacker-planted snapshot file can't drive
+// runaway allocations during Load.
+//
+//   - maxSnapshotDataBytes: state-machine payload. 1 GiB is well
+//     above any realistic DNS zone aggregate; well below the
+//     uint64 ceiling where make() would OOM the process.
+//   - maxSnapshotMembership: number of NodeIDs. 1024 peers is
+//     several orders of magnitude beyond any practical Raft cluster.
+//   - maxNodeIDBytes: per-NodeID byte length. NodeIDs are short
+//     identifiers; 256 bytes is generous.
+const (
+	maxSnapshotDataBytes  = 1 << 30 // 1 GiB
+	maxSnapshotMembership = 1024
+	maxNodeIDBytes        = 256
+)
+
 // readSnapshot reads a snapshot from a reader.
 func (s *Snapshotter) readSnapshot(r io.Reader) (*Snapshot, error) {
 	snap := &Snapshot{}
@@ -227,6 +244,9 @@ func (s *Snapshotter) readSnapshot(r io.Reader) (*Snapshot, error) {
 		return nil, fmt.Errorf("read datalen: %w", err)
 	}
 	dataLen := binary.BigEndian.Uint64(buf)
+	if dataLen > maxSnapshotDataBytes {
+		return nil, fmt.Errorf("snapshot dataLen %d exceeds max %d", dataLen, maxSnapshotDataBytes)
+	}
 	snap.Data = make([]byte, dataLen)
 	if _, err := io.ReadFull(r, snap.Data); err != nil {
 		return nil, fmt.Errorf("read data: %w", err)
@@ -238,12 +258,18 @@ func (s *Snapshotter) readSnapshot(r io.Reader) (*Snapshot, error) {
 		return nil, fmt.Errorf("read membershiplen: %w", err)
 	}
 	mCount := binary.BigEndian.Uint32(membershipLen)
+	if mCount > maxSnapshotMembership {
+		return nil, fmt.Errorf("snapshot membership count %d exceeds max %d", mCount, maxSnapshotMembership)
+	}
 	for i := uint32(0); i < mCount; i++ {
 		lenBytes := make([]byte, 4)
 		if _, err := io.ReadFull(r, lenBytes); err != nil {
 			return nil, fmt.Errorf("read peerlen: %w", err)
 		}
 		peerLen := binary.BigEndian.Uint32(lenBytes)
+		if peerLen > maxNodeIDBytes {
+			return nil, fmt.Errorf("snapshot peerLen %d exceeds max %d", peerLen, maxNodeIDBytes)
+		}
 		peerBytes := make([]byte, peerLen)
 		if _, err := io.ReadFull(r, peerBytes); err != nil {
 			return nil, fmt.Errorf("read peer: %w", err)
