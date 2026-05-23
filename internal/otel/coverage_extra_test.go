@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -158,23 +159,21 @@ func TestJaegerExporter_Close(t *testing.T) {
 }
 
 func TestJaegerExporter_BatchFlusherPeriodic(t *testing.T) {
-	flushCount := 0
+	var flushCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		flushCount++
+		flushCount.Add(1)
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
 
-	e := NewJaegerExporter(srv.URL)
-	e.ticker.Stop()
-	e.ticker = time.NewTicker(50 * time.Millisecond)
+	e := newJaegerExporterWithInterval(srv.URL, 50*time.Millisecond)
 	defer e.Close()
 
 	e.Export(&Span{TraceID: [16]byte{1}, SpanID: [8]byte{2}, Name: "test"})
 
 	time.Sleep(150 * time.Millisecond)
 
-	if flushCount == 0 {
+	if flushCount.Load() == 0 {
 		t.Error("expected periodic flush to fire")
 	}
 }

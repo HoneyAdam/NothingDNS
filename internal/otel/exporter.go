@@ -231,13 +231,19 @@ type JaegerExporter struct {
 
 // NewJaegerExporter creates a Jaeger exporter with background flushing.
 func NewJaegerExporter(endpoint string) *JaegerExporter {
+	return newJaegerExporterWithInterval(endpoint, 5*time.Second)
+}
+
+// newJaegerExporterWithInterval lets tests pick a short flush interval
+// without mutating e.ticker after the batchFlusher goroutine has
+// started — which would race against the goroutine's select.
+func newJaegerExporterWithInterval(endpoint string, flushInterval time.Duration) *JaegerExporter {
 	e := &JaegerExporter{
 		endpoint: endpoint,
 		client:   &http.Client{Timeout: 10 * time.Second},
 		stopCh:   make(chan struct{}),
-		ticker:   time.NewTicker(5 * time.Second), // Flush every 5 seconds
+		ticker:   time.NewTicker(flushInterval),
 	}
-	// Start background batch flusher
 	e.wg.Add(1)
 	go e.batchFlusher()
 	return e
