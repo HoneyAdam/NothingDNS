@@ -466,8 +466,17 @@ func (r *RDataTXT) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 		slen := int(buf[offset])
 		offset++
 
-		if offset+slen > len(buf) {
-			return 0, ErrBufferTooSmall
+		// SECURITY: enforce the rdlength boundary, not just the
+		// overall buffer. A malicious peer that claims string
+		// length N at the tail of a TXT RDATA whose true rdlength
+		// only contains N-K bytes would read K bytes from the
+		// FOLLOWING resource record into this TXT's data. Worse,
+		// we'd then return n = offset-startOffset > rdlength to
+		// UnpackResourceRecord, which would advance its own offset
+		// past the next RR's bytes — corrupting every subsequent
+		// record parse in the message.
+		if offset+slen > endOffset {
+			return 0, fmt.Errorf("TXT string length %d exceeds rdlength boundary", slen)
 		}
 		r.Strings = append(r.Strings, string(buf[offset:offset+slen]))
 		offset += slen
