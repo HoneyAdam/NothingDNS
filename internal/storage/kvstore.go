@@ -364,14 +364,23 @@ func (s *KVStore) save() error {
 		}
 	}()
 
-	if s.hmacKey != nil {
-		// Write TLV+HMAC format: [magic(1) version(2) payloadLen(4) payload(n) hmac(32)]
+	// NEW-H1: dispatch to writeTLV when EITHER protection key is
+	// configured. The aead branch lives inside writeTLV, so gating
+	// only on hmacKey silently dropped aeadKey-only deployments back
+	// to the legacy JSON path — and the startup log still claimed
+	// "AES-256-GCM at rest". With this gate, an aead-only config
+	// writes through writeTLV (which then encrypts the whole post-
+	// magic body); the embedded HMAC computed with a nil key is
+	// redundant under AEAD but doesn't harm anything.
+	if s.hmacKey != nil || s.aeadKey != nil {
+		// Write TLV+HMAC format: [magic(1) version(2) payloadLen(4) payload(n) hmac(32)],
+		// optionally wrapped in AES-256-GCM if aeadKey is set.
 		if err := s.writeTLV(tmpFile); err != nil {
 			tmpFile.Close()
 			return fmt.Errorf("write tlv: %w", err)
 		}
 	} else {
-		// Legacy JSON format (no HMAC)
+		// Legacy JSON format (no HMAC, no encryption).
 		encoder := json.NewEncoder(tmpFile)
 		if err := encoder.Encode(s.root); err != nil {
 			tmpFile.Close()

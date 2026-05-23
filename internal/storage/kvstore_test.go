@@ -67,6 +67,82 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKVStore_EncryptedAeadOnly_NoPlaintextOnDisk regresses
+// SECURITY-REPORT-2026-05-23 NEW-H1. The original L-6 wiring at
+// zone_manager.go passes nil hmacKey + aeadKey to OpenKVStoreEncrypted,
+// but save()'s dispatch was `if s.hmacKey != nil { writeTLV } else
+// { writeJSON }` — so aead-only deployments silently wrote PLAIN
+// JSON despite the startup log claiming "AES-256-GCM at rest". The
+// earlier TestKVStore_EncryptedRoundTrip passed only because it
+// supplied BOTH keys, which doesn't match production wiring shape.
+//
+// This test pins the production shape: nil hmacKey + aeadKey, write
+// a known-secret value, assert the on-disk file starts with the
+// encrypted magic 0xE0 and does NOT contain the cleartext value.
+func TestKVStore_EncryptedAeadOnly_NoPlaintextOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	aeadKey := make([]byte, 32)
+	for i := range aeadKey {
+		aeadKey[i] = byte(7*i + 3)
+	}
+
+	const (
+		bkt    = "prod-shape-bucket"
+		k      = "prod-shape-key"
+		secret = "this-must-never-appear-in-the-data-file"
+	)
+
+	store, err := OpenKVStoreEncrypted(dir, nil, aeadKey) // production shape
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (write, nil hmac): %v", err)
+	}
+	if err := store.Update(func(tx *Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(bkt))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(k), []byte(secret))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, DataFile))
+	if err != nil {
+		t.Fatalf("read on-disk file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("NEW-H1 regression: data file magic = 0x%x, want 0xE0 (encrypted) — save() dispatch silently fell back to plain JSON", raw[0])
+	}
+	for _, needle := range []string{bkt, k, secret} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("NEW-H1 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the same aead key must recover the value.
+	store2, err := OpenKVStoreEncrypted(dir, nil, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (read): %v", err)
+	}
+	defer store2.Close()
+	if err := store2.View(func(tx *Tx) error {
+		b := tx.Bucket([]byte(bkt))
+		if b == nil {
+			return fmt.Errorf("bucket missing")
+		}
+		got := b.Get([]byte(k))
+		if string(got) != secret {
+			return fmt.Errorf("got %q, want %q", got, secret)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
 // TestKVStore_EncryptedRoundTrip regresses SECURITY-REPORT.md L-6.
 // When OpenKVStoreEncrypted is configured with a 32-byte aeadKey,
 // the on-disk data file must be AES-256-GCM encrypted: a re-open
