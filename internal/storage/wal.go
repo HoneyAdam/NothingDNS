@@ -267,9 +267,17 @@ func (wal *WAL) createNewSegment() error {
 		id = wal.segments[len(wal.segments)-1].ID + 1
 	}
 
-	// Seal the current active segment
+	// Seal the current active segment AND release its file descriptor.
+	// Sealed segments are read-only and read paths (readSegment) reopen
+	// from disk anyway — keeping the original Append-side handle open
+	// just pinned one FD per rotation until Truncate eventually removed
+	// the segment, which under steady-state writes is a slow leak.
 	if wal.active != nil {
 		wal.active.sealed = true
+		if wal.active.file != nil {
+			_ = wal.active.file.Close()
+			wal.active.file = nil
+		}
 	}
 
 	// Create new segment file
