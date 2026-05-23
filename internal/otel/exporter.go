@@ -224,6 +224,7 @@ type JaegerExporter struct {
 	batch    []*Span
 	batchMu  sync.Mutex
 	stopCh   chan struct{}
+	stopOnce sync.Once // guards Close() against second-call panic
 	ticker   *time.Ticker
 	wg       sync.WaitGroup
 }
@@ -283,9 +284,22 @@ func (e *JaegerExporter) Flush() {
 	e.batch = e.batch[:0]
 }
 
-// Close flushes and closes the exporter.
+// Close flushes and closes the exporter. Idempotent: a second call
+// returns without re-closing the stop channel (would panic) or
+// double-flushing. Also stops the background ticker so the time.Ticker
+// goroutine isn't leaked when callers Close before process exit.
 func (e *JaegerExporter) Close() {
-	close(e.stopCh)
+	closed := false
+	e.stopOnce.Do(func() {
+		close(e.stopCh)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	e.wg.Wait()
+	if e.ticker != nil {
+		e.ticker.Stop()
+	}
 	e.Flush()
 }
