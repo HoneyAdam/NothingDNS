@@ -11,10 +11,22 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+// resolveDashboardBearer picks the static bearer the dashboard server
+// will accept (when authenticateRequest's legacy-token branch fires).
+// It returns the explicitly-configured AuthToken and NOTHING ELSE —
+// in particular it must never return AuthSecret, which is the
+// HMAC-SHA512 session-signing key. Leaking the dashboard bearer would
+// otherwise leak the key needed to forge arbitrary session tokens.
+// See SECURITY-REPORT.md H-1.
+func resolveDashboardBearer(httpCfg config.HTTPConfig) string {
+	return httpCfg.AuthToken
+}
 
 // isSubdomain checks if child is a subdomain of parent.
 func isSubdomain(child, parent string) bool {
