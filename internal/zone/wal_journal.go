@@ -91,17 +91,22 @@ func (zj *ZoneJournal) Replay() ([]ZoneWALEntry, error) {
 		if e.Type != ZoneWALEntryType {
 			continue
 		}
-		// SECURITY: Limit replayed entries to prevent memory exhaustion
-		count++
-		if count > MaxWALReplayEntries {
-			return nil, fmt.Errorf("WAL replay exceeded %d entries — journal may be corrupted or oversized", MaxWALReplayEntries)
-		}
 		var entry ZoneWALEntry
 		if err := json.Unmarshal(e.Data, &entry); err != nil {
 			continue // Skip corrupt entries
 		}
+		// Filter by zone BEFORE counting toward the replay cap — the cap
+		// protects against unbounded growth for *this* zone, not the
+		// total Z-type traffic across every zone sharing the WAL. Counting
+		// before the zone filter meant a server hosting many zones would
+		// trip the cap for an innocent zone whose own journal was tiny,
+		// just because other zones had been busy.
 		if entry.Zone != zj.zone {
 			continue
+		}
+		count++
+		if count > MaxWALReplayEntries {
+			return nil, fmt.Errorf("WAL replay exceeded %d entries for zone %s — journal may be corrupted or oversized", MaxWALReplayEntries, zj.zone)
 		}
 		zoneEntries = append(zoneEntries, entry)
 	}
