@@ -440,6 +440,20 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 }
 
 // findRRSIG finds an RRSIG record for the given name and type.
+//
+// DNS owner names are case-insensitive per RFC 1035 §2.3.3. The
+// previous \`rr.Name.String() == name\` used Go string equality
+// (case-sensitive), so an RRSIG whose owner was "Example.com." but
+// whose covering RRset's owner came back as "example.com." would
+// be silently skipped. The matching RRSIG existed in the response;
+// the validator just couldn't find it — so the RRset reported
+// "no signature" and the whole response went Bogus under
+// RequireDNSSEC, or Insecure-equivalent without it.
+//
+// In practice authoritative servers return lowercase, so the bug
+// stayed dormant — but DNSSEC validation MUST not depend on a
+// server choosing to send canonical case. strings.EqualFold handles
+// the ASCII case-folding RFC 1035 requires.
 func (v *Validator) findRRSIG(answers []*protocol.ResourceRecord, name string, rrtype uint16) *protocol.RDataRRSIG {
 	for _, rr := range answers {
 		if rr.Type != protocol.TypeRRSIG {
@@ -449,7 +463,7 @@ func (v *Validator) findRRSIG(answers []*protocol.ResourceRecord, name string, r
 		if !ok {
 			continue
 		}
-		if rrsig.TypeCovered == rrtype && rr.Name.String() == name {
+		if rrsig.TypeCovered == rrtype && strings.EqualFold(rr.Name.String(), name) {
 			return rrsig
 		}
 	}
