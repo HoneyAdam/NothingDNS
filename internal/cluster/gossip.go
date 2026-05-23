@@ -975,6 +975,13 @@ func (gp *GossipProtocol) BroadcastDraining(draining bool, inFlightReq int) erro
 }
 
 // handleNodeStats processes node health statistics received via gossip.
+//
+// SECURITY: only a node may report its own stats. msg.From is the
+// authenticated AEAD sender; payload.NodeID is the node the stats
+// claim to describe. If the two diverge, a compromised peer inside
+// the gossip keyring could broadcast forged stats for any other
+// node — e.g., mark a healthy node as overloaded so health-based
+// routing steers traffic away from it. Reject mismatches.
 func (gp *GossipProtocol) handleNodeStats(msg Message, from *net.UDPAddr) {
 	var payload NodeStatsPayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -983,6 +990,12 @@ func (gp *GossipProtocol) handleNodeStats(msg Message, from *net.UDPAddr) {
 
 	// Ignore messages from self
 	if payload.NodeID == gp.nodeList.GetSelf().ID {
+		return
+	}
+
+	// Reject if the payload tries to update a node other than the sender.
+	if msg.From != payload.NodeID {
+		util.Warnf("gossip: dropped NodeStats for %s from impostor %s", payload.NodeID, msg.From)
 		return
 	}
 
@@ -1032,6 +1045,11 @@ func (gp *GossipProtocol) BroadcastNodeStats(stats NodeHealthStats) error {
 }
 
 // handleClusterMetrics processes cluster metrics received via gossip.
+//
+// Same impostor protection as handleNodeStats: only the named node
+// is allowed to report its own metrics. Without this, a compromised
+// gossip peer could rewrite any other node's cluster metrics in
+// every observer's view.
 func (gp *GossipProtocol) handleClusterMetrics(msg Message, from *net.UDPAddr) {
 	var payload ClusterMetricsPayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -1040,6 +1058,11 @@ func (gp *GossipProtocol) handleClusterMetrics(msg Message, from *net.UDPAddr) {
 
 	// Ignore messages from self
 	if payload.NodeID == gp.nodeList.GetSelf().ID {
+		return
+	}
+
+	if msg.From != payload.NodeID {
+		util.Warnf("gossip: dropped ClusterMetrics for %s from impostor %s", payload.NodeID, msg.From)
 		return
 	}
 
