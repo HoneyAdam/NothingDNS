@@ -287,7 +287,18 @@ func (c *Client) selectServer() *Server {
 }
 
 // selectRandom selects a random healthy server.
+//
+// Holds c.mu.RLock while iterating c.servers — AddServer and
+// RemoveServer reassign that slice under c.mu.Lock(), so a
+// concurrent mutation between the range loop and the index-into
+// healthy[] (or the fallback c.servers[0] read) was a textbook
+// data race: Go's race detector flagged it and a sufficiently
+// busy admin could trigger an index-out-of-range panic if
+// RemoveServer shrank c.servers between our two reads.
 func (c *Client) selectRandom() *Server {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	// Get list of healthy servers
 	var healthy []*Server
 	for _, s := range c.servers {
@@ -311,7 +322,13 @@ func (c *Client) selectRandom() *Server {
 }
 
 // selectRoundRobin selects the next server in round-robin order.
+//
+// See selectRandom for the rationale on the RLock — same race
+// against concurrent AddServer/RemoveServer.
 func (c *Client) selectRoundRobin() *Server {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	servers := c.servers
 	if len(servers) == 0 {
 		return nil
@@ -347,6 +364,11 @@ func (c *Client) selectRoundRobin() *Server {
 // If no measured server is healthy, fall back to the first healthy
 // (unmeasured) server, then finally to c.servers[0].
 func (c *Client) selectFastest() *Server {
+	// See selectRandom for the c.mu.RLock rationale: AddServer/
+	// RemoveServer rewrite c.servers under the write lock.
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	var fastest *Server
 	var lowestLatency time.Duration = -1
 
