@@ -1755,6 +1755,17 @@ func TestValidateNegativeResponseNoRecords(t *testing.T) {
 	}
 }
 
+// TestValidateNegativeResponseWithNSECProvesNonExistence regresses
+// SECURITY-REPORT-2026-05-23 NEW-H2: validateNegativeResponse must
+// REJECT NSEC denial proofs that lack a verified RRSIG. The mock
+// below supplies two well-formed NSEC range claims but no RRSIG
+// and an empty-key chainLink — exactly the on-path-forgery shape
+// the fix closes. Pre-fix this test asserted ValidationSecure
+// (embedded the downgrade vector); post-fix it correctly asserts
+// ValidationBogus.
+//
+// A separate "with valid signatures" test would need a full signed
+// fixture (RRSIG generation, DNSKEY chain) — tracked as follow-up.
 func TestValidateNegativeResponseWithNSECProvesNonExistence(t *testing.T) {
 	// RFC 4035 §5.4 requires TWO NSEC proofs for NXDOMAIN: one that covers
 	// the queried name AND one that covers the closest-encloser's wildcard
@@ -1794,10 +1805,12 @@ func TestValidateNegativeResponseWithNSECProvesNonExistence(t *testing.T) {
 		},
 	}
 
+	// chainLink with no DNSKEYs — authenticatedDenialRRs cannot
+	// validate any RRSIG, so every NSEC in Authority is dropped.
 	chain := []*chainLink{{zone: "example.com.", validated: true}}
 	result := v.validateNegativeResponse(msg, "b.example.com.", chain)
-	if result != ValidationSecure {
-		t.Errorf("Expected SECURE for NSEC-proved non-existence with both name-cover and wildcard-cover NSECs, got %s", result)
+	if result != ValidationBogus {
+		t.Errorf("NEW-H2 regression: unsigned NSEC denial accepted as %s, expected BOGUS", result)
 	}
 }
 

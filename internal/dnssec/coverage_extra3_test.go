@@ -684,10 +684,14 @@ func TestValidateMessage_EmptyAnswersNegativeWithNSEC(t *testing.T) {
 		},
 	}
 
+	// NEW-H2: chainLink has no DNSKEYs, so the unsigned NSEC
+	// Authority RRs cannot be authenticated and the response must be
+	// rejected as BOGUS. Pre-fix this test asserted SECURE — exactly
+	// the on-path NSEC-forgery vector the fix closes.
 	chain := []*chainLink{{zone: "example.com.", validated: true}}
 	result := v.validateMessage(context.Background(), msg, "c.example.com.", chain)
-	if result != ValidationSecure {
-		t.Errorf("expected SECURE for NSEC-proved negative response, got %s", result)
+	if result != ValidationBogus {
+		t.Errorf("NEW-H2 regression: unsigned NSEC negative response accepted as %s, expected BOGUS", result)
 	}
 }
 
@@ -1384,10 +1388,16 @@ func TestValidateNegativeResponse_NSEC3Secure(t *testing.T) {
 		},
 	}
 
+	// NEW-H2: chainLink has no DNSKEYs, so the unsigned NSEC3
+	// Authority RRs cannot be authenticated and the response must
+	// be rejected as BOGUS regardless of how well the closest-
+	// encloser arithmetic matches. The earlier test treated the
+	// wire-format proof as sufficient — exactly the on-path NSEC3
+	// forgery vector the fix closes.
 	chain := []*chainLink{{zone: "example.com.", validated: true}}
 	result := v.validateNegativeResponse(msg, queryName, chain)
-	if result != ValidationSecure {
-		t.Errorf("expected SECURE for NSEC3 closest-encloser proof, got %s", result)
+	if result != ValidationBogus {
+		t.Errorf("NEW-H2 regression: unsigned NSEC3 closest-encloser proof accepted as %s, expected BOGUS", result)
 	}
 }
 
