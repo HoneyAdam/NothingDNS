@@ -108,12 +108,25 @@ func encodeRecordChanges(buf []byte, offset int, changes []zone.RecordChange) in
 	return offset
 }
 
+// maxJournalRecordChanges caps the change count we'll accept per
+// journal-entry section. A corrupt or attacker-planted journal could
+// otherwise carry count = 2^32-1 and \`make([]zone.RecordChange, 0,
+// count)\` would request ~128 GB up front — instant OOM. The cap is
+// well above any plausible IXFR diff (a real master would split into
+// multiple journals long before reaching this many changes in one
+// version step).
+const maxJournalRecordChanges = 1_000_000
+
 func decodeRecordChanges(data []byte, offset int) ([]zone.RecordChange, int, error) {
 	if offset+4 > len(data) {
 		return nil, offset, fmt.Errorf("truncated at change count")
 	}
 	count := int(binary.BigEndian.Uint32(data[offset:]))
 	offset += 4
+
+	if count < 0 || count > maxJournalRecordChanges {
+		return nil, offset, fmt.Errorf("journal change count %d out of bounds (max %d)", count, maxJournalRecordChanges)
+	}
 
 	changes := make([]zone.RecordChange, 0, count)
 	for i := 0; i < count; i++ {
