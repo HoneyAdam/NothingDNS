@@ -920,6 +920,14 @@ func (gp *GossipProtocol) BroadcastConfigUpdate(payload ConfigSyncPayload) error
 }
 
 // handleDraining processes a draining state message from another node.
+//
+// Same impostor protection rationale as handleNodeStats: only the
+// node itself is allowed to announce its draining state. A
+// compromised gossip peer could otherwise broadcast
+// payload.NodeID="victim" with Draining=true and remove the victim
+// from every other node's query-routing pool — a DoS vector that
+// requires no protocol-level forgery, just a self-declared NodeID
+// inside an otherwise valid frame.
 func (gp *GossipProtocol) handleDraining(msg Message, from *net.UDPAddr) {
 	var payload DrainingPayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -928,6 +936,11 @@ func (gp *GossipProtocol) handleDraining(msg Message, from *net.UDPAddr) {
 
 	// Ignore messages from self
 	if payload.NodeID == gp.nodeList.GetSelf().ID {
+		return
+	}
+
+	if msg.From != payload.NodeID {
+		util.Warnf("gossip: dropped Draining state for %s from impostor %s", payload.NodeID, msg.From)
 		return
 	}
 
