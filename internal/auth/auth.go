@@ -287,7 +287,14 @@ func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, er
 		return nil, fmt.Errorf("user not found")
 	}
 
-	// Enforce session limit: revoke oldest token if at capacity
+	// Enforce session limit: revoke oldest token if at capacity. When
+	// we evict, decrement the counter first — the unconditional
+	// increment below otherwise drives \`activeSessions[username]\`
+	// past maxSessionsPerUser (active=5 + evict + ++ → 6) and the
+	// counter drifts upward by 1 on every eviction-triggered login.
+	// After enough churn the apparent count exceeds the actual token
+	// population, which manifests as users being unable to log in
+	// even though their sessions are well under the cap.
 	if s.maxSessionsPerUser > 0 {
 		if count := s.activeSessions[username]; count >= s.maxSessionsPerUser {
 			oldestToken := ""
@@ -300,6 +307,9 @@ func (s *Store) GenerateToken(username string, expiry time.Duration) (*Token, er
 			}
 			if oldestToken != "" {
 				delete(s.tokens, oldestToken)
+				if s.activeSessions[username] > 0 {
+					s.activeSessions[username]--
+				}
 			}
 		}
 		s.activeSessions[username]++
