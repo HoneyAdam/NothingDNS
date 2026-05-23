@@ -36,6 +36,15 @@ func NewSnapshotter(dir string) (*Snapshotter, error) {
 }
 
 // Save saves a snapshot to disk.
+//
+// Durability: fsync the temp file before rename and fsync the
+// snapshots directory after rename so the new file's dirent
+// reaches stable storage. Without either, a crash between the
+// write and the directory flush could leave Raft believing it
+// has a durable snapshot at index N while the file is empty,
+// truncated, or absent on next start — and Raft uses the
+// snapshot to decide which WAL segments are safe to truncate,
+// so a missing snapshot turns into permanent log loss.
 func (s *Snapshotter) Save(snap *Snapshot) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,6 +63,15 @@ func (s *Snapshotter) Save(snap *Snapshot) error {
 		return err
 	}
 
+	// fsync the file's data and metadata before rename — closing
+	// alone flushes user-space buffers but does NOT guarantee the
+	// bytes reach the disk platter.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpFile)
+		return fmt.Errorf("sync: %w", err)
+	}
+
 	if err := f.Close(); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("close: %w", err)
@@ -62,6 +80,14 @@ func (s *Snapshotter) Save(snap *Snapshot) error {
 	if err := os.Rename(tmpFile, filename); err != nil {
 		os.Remove(tmpFile)
 		return fmt.Errorf("rename: %w", err)
+	}
+
+	// fsync the directory so the rename's dirent commit reaches
+	// stable storage. Best-effort: tmpfs and a few exotic FSes
+	// don't support dir fsync, so log-and-ignore an error here.
+	if dirFd, derr := os.Open(s.snapshotsDir); derr == nil {
+		_ = dirFd.Sync()
+		_ = dirFd.Close()
 	}
 
 	return nil
