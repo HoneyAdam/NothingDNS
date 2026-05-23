@@ -19,6 +19,7 @@ type ReloadHandler struct {
 	reloadSig chan os.Signal
 	enabled   atomic.Bool
 	wg        sync.WaitGroup
+	stopOnce  sync.Once // guards Stop() against close-of-closed panic
 }
 
 // ReloadCallback is called on configuration reload
@@ -91,11 +92,23 @@ func (h *ReloadHandler) Start() {
 	}()
 }
 
-// Stop stops listening for reload signals
+// Stop stops listening for reload signals. Idempotent — a second
+// call returns without re-closing h.reloadSig (which would panic
+// with "close of closed channel"). Daemon shutdown paths sometimes
+// call Stop twice (an explicit teardown plus a deferred safety
+// net in test setup); without the sync.Once guard the second
+// close took the process down.
 func (h *ReloadHandler) Stop() {
-	h.enabled.Store(false)
-	signal.Stop(h.reloadSig)
-	close(h.reloadSig)
+	closed := false
+	h.stopOnce.Do(func() {
+		h.enabled.Store(false)
+		signal.Stop(h.reloadSig)
+		close(h.reloadSig)
+		closed = true
+	})
+	if !closed {
+		return
+	}
 	h.wg.Wait()
 }
 
