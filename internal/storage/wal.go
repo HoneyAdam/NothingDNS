@@ -800,6 +800,22 @@ func (wal *WAL) NewReader() *WALReader {
 }
 
 // Next reads the next entry from the WAL
+//
+// IMPORTANT: bytes.Buffer.Truncate(n) keeps the first n unread bytes
+// and DISCARDS the tail. The previous code used
+//
+//	r.buf.Truncate(r.buf.Len() - int(length))
+//
+// to "consume" the just-decoded payload, but this kept the payload
+// (the front of the buffer) and dropped the tail — corrupting every
+// subsequent header read. A single-entry stream limped along because
+// the buffer drained to empty before the bug had anything to chew
+// on; any multi-entry stream returned garbage from the second
+// Next() onward.
+//
+// Use bytes.Buffer.Next(length), which reads and advances past
+// `length` bytes from the front — exactly what we want after the
+// header+payload was decoded.
 func (r *WALReader) Next() (*WALEntry, error) {
 	for {
 		// Try to read from current buffer
@@ -815,7 +831,8 @@ func (r *WALReader) Next() (*WALEntry, error) {
 				if err != nil {
 					return nil, err
 				}
-				r.buf.Truncate(r.buf.Len() - int(length))
+				// Advance past the payload bytes we just decoded.
+				r.buf.Next(int(length))
 				return entry, nil
 			}
 		}

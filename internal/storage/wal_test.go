@@ -248,6 +248,53 @@ func TestWALReader(t *testing.T) {
 	wal.Close()
 }
 
+// TestWALReader_MultiEntry guards against a regression where
+// WALReader.Next() used bytes.Buffer.Truncate to "consume" a
+// decoded payload — Truncate keeps the front and discards the
+// tail, so a stream containing more than one entry returned
+// garbage from the second call onward. Next() now uses
+// bytes.Buffer.Next() to advance past the payload bytes.
+func TestWALReader_MultiEntry(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultWALOptions()
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	const n = 5
+	payloads := [][]byte{
+		[]byte("alpha"),
+		[]byte("beta-payload"),
+		[]byte("gamma"),
+		[]byte("delta-payload-data"),
+		[]byte("epsilon"),
+	}
+	for i := 0; i < n; i++ {
+		if _, err := wal.Append(EntryTypePut, payloads[i]); err != nil {
+			t.Fatalf("Append %d failed: %v", i, err)
+		}
+	}
+	wal.Sync()
+
+	reader := wal.NewReader()
+	defer reader.Close()
+	defer wal.Close()
+
+	for i := 0; i < n; i++ {
+		entry, err := reader.Next()
+		if err != nil {
+			t.Fatalf("Next %d returned error: %v", i, err)
+		}
+		if entry == nil {
+			t.Fatalf("Next %d returned nil entry", i)
+		}
+		if string(entry.Data) != string(payloads[i]) {
+			t.Errorf("entry %d: expected payload %q, got %q", i, payloads[i], entry.Data)
+		}
+	}
+}
+
 func TestWALEntryEncoding(t *testing.T) {
 	wal := &WAL{}
 
