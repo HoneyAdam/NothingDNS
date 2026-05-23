@@ -490,6 +490,15 @@ func (lb *LoadBalancer) selectRoundRobin() *Server {
 }
 
 // selectFastest selects the server with the lowest latency.
+//
+// Servers are constructed with latency=0; the first real
+// measurement arrives later from a successful query. A naive
+// "min latency" comparison would treat 0 as the best possible
+// value and steer every query to an un-measured server until
+// its first measurement landed. Same root cause as the fix in
+// Client.selectFastest. Skip latency<=0 (un-measured) from the
+// main pick; fall back to any healthy server if no measured
+// server is healthy yet.
 func (lb *LoadBalancer) selectFastest() *Server {
 	var fastest *Server
 	var lowestLatency time.Duration = -1
@@ -503,17 +512,33 @@ func (lb *LoadBalancer) selectFastest() *Server {
 		latency := s.latency
 		s.mu.RUnlock()
 
+		// Un-measured: cannot honestly compete on speed yet.
+		if latency <= 0 {
+			continue
+		}
+
 		if lowestLatency < 0 || latency < lowestLatency {
 			lowestLatency = latency
 			fastest = s
 		}
 	}
 
-	if fastest == nil && len(lb.servers) > 0 {
-		return lb.servers[0]
+	if fastest != nil {
+		return fastest
 	}
 
-	return fastest
+	// No measured-healthy server — fall back to any healthy server
+	// so cold-start queries still get answered.
+	for _, s := range lb.servers {
+		if s.IsHealthy() {
+			return s
+		}
+	}
+
+	if len(lb.servers) > 0 {
+		return lb.servers[0]
+	}
+	return nil
 }
 
 // queryWithFailover performs a query with automatic failover.

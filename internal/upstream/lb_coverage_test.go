@@ -49,6 +49,12 @@ func TestLoadBalancer_SelectStandaloneTarget_RoundRobin(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadBalancer_SelectStandaloneTarget_Fastest(t *testing.T) {
+	// s1 has zero latency (un-measured); s2 has a measured 1ms.
+	// selectFastest now skips un-measured servers from the main pick
+	// — treating 0 as "the best possible value" would always steer
+	// every query at the most-recently-added node until its first
+	// measurement landed, which defeats the "fastest" promise. So
+	// we expect the measured s2 to win over the un-measured s1.
 	s1 := &Server{Address: "10.0.0.1:53", healthy: true}
 	s2 := &Server{Address: "10.0.0.2:53", healthy: true}
 	s2.latency = 1 * time.Millisecond
@@ -64,9 +70,35 @@ func TestLoadBalancer_SelectStandaloneTarget_Fastest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("selectStandaloneTarget() error = %v", err)
 	}
-	// s1 has 0 latency, which is the fastest
-	if target.Address != "10.0.0.1:53" {
-		t.Errorf("expected fastest server 10.0.0.1:53, got %s", target.Address)
+	// s2 is the only measured-healthy server; it must be selected.
+	if target.Address != "10.0.0.2:53" {
+		t.Errorf("expected measured server 10.0.0.2:53, got %s", target.Address)
+	}
+}
+
+// TestLoadBalancer_SelectStandaloneTarget_Fastest_AllUnmeasured guards
+// the cold-start fallback: when no healthy server has a positive
+// measured latency, selectFastest must still return *some* healthy
+// server (otherwise the first query after a restart fails outright
+// before any measurement could land).
+func TestLoadBalancer_SelectStandaloneTarget_Fastest_AllUnmeasured(t *testing.T) {
+	s1 := &Server{Address: "10.0.0.1:53", healthy: true}
+	s2 := &Server{Address: "10.0.0.2:53", healthy: true}
+
+	lb := &LoadBalancer{
+		servers:  []*Server{s1, s2},
+		strategy: Fastest,
+		udpPool:  make(map[string]*sync.Pool),
+		tcpPool:  make(map[string]*sync.Pool),
+	}
+
+	target, err := lb.selectStandaloneTarget()
+	if err != nil {
+		t.Fatalf("selectStandaloneTarget() error = %v", err)
+	}
+	// Either server is acceptable; the assertion is non-nil.
+	if target == nil {
+		t.Fatalf("expected a target on cold-start fallback, got nil")
 	}
 }
 
