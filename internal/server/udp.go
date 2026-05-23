@@ -339,6 +339,17 @@ func (s *UDPServer) worker(requestChan <-chan *udpRequest) {
 
 // handleRequest processes a single DNS request.
 func (s *UDPServer) handleRequest(req *udpRequest) {
+	// L-2: per-message recover so a panic in UnpackMessage / EDNS0
+	// parsing can't take down the UDP worker (which would then exit
+	// and crash the daemon at the next worker iteration). The
+	// integratedHandler's recover only covers the post-Unpack
+	// pipeline.
+	defer func() {
+		if r := recover(); r != nil {
+			atomic.AddUint64(&s.errors, 1)
+		}
+	}()
+
 	// Unpack the message
 	msg, err := protocol.UnpackMessage(req.data[:req.n])
 	if err != nil {

@@ -275,6 +275,16 @@ func (s *TCPServer) handleConnection(conn net.Conn) {
 // handleMessage processes a single DNS message over TCP.
 // writeMu serializes writes on the connection to prevent interleaving during pipelining.
 func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mutex) {
+	// L-2: per-goroutine recover so a panic in UnpackMessage / EDNS0
+	// parsing — both of which run before any ServeDNSWithRecovery
+	// wrapper sees the message — can't crash the daemon. The
+	// integratedHandler's recover only covers the post-Unpack pipeline.
+	defer func() {
+		if r := recover(); r != nil {
+			atomic.AddUint64(&s.errors, 1)
+		}
+	}()
+
 	// Unpack the message
 	msg, err := protocol.UnpackMessage(data)
 	if err != nil {
