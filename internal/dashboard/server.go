@@ -20,6 +20,7 @@ type Server struct {
 	mu             sync.RWMutex
 	clients        map[*Client]struct{}
 	broadcastChan  chan *QueryEvent
+	stopOnce       sync.Once // guards Stop() against second-call panic on broadcastChan
 	stats          *DashboardStats
 	enabled        bool
 	wg             sync.WaitGroup
@@ -529,24 +530,29 @@ func (s *Server) ClientLoop(client *Client) {
 	}
 }
 
-// Stop stops the dashboard server
+// Stop stops the dashboard server. Idempotent — a second call is
+// a no-op rather than the close-of-closed-channel panic the bare
+// close(s.broadcastChan) would produce.
 func (s *Server) Stop() {
-	s.mu.Lock()
-
-	s.enabled = false
-
-	if s.broadcastChan != nil {
-		close(s.broadcastChan)
-	}
-
-	// Close all clients
-	for client := range s.clients {
-		if client.conn != nil {
-			client.conn.Close()
+	closed := false
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		s.enabled = false
+		if s.broadcastChan != nil {
+			close(s.broadcastChan)
 		}
+		for client := range s.clients {
+			if client.conn != nil {
+				client.conn.Close()
+			}
+		}
+		s.clients = make(map[*Client]struct{})
+		s.mu.Unlock()
+		closed = true
+	})
+	if !closed {
+		return
 	}
-	s.clients = make(map[*Client]struct{})
-	s.mu.Unlock()
 
 	// Wait for broadcastLoop to finish
 	s.wg.Wait()
