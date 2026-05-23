@@ -333,13 +333,24 @@ func (c *Cache) Get(key string) *Entry {
 	// drop us back to the caller without ever firing prefetch on a hot
 	// entry. We extract qtype from the cached message's question section
 	// so the callback can re-resolve without re-parsing the key encoding.
-	if c.prefetchFunc != nil && entry.ShouldPrefetch(now) {
-		if atomic.CompareAndSwapUint32(&entry.prefetchFired, 0, 1) {
+	//
+	// Snapshot c.prefetchFunc under c.callbackMu — SetPrefetchFunc
+	// writes the field under that mutex, and the Delete/Invalidate
+	// paths in this file already use this exact lock-snapshot pattern
+	// for c.invalidateFunc. Reading the field unlocked was a data race
+	// (per Go's memory model) even though no real-world caller swaps
+	// the prefetch hook after startup. Use ShouldPrefetch first as a
+	// cheap unlocked filter so we only pay the lock on entries that
+	// actually crossed PrefetchDue.
+	if entry.ShouldPrefetch(now) {
+		c.callbackMu.Lock()
+		fn := c.prefetchFunc
+		c.callbackMu.Unlock()
+		if fn != nil && atomic.CompareAndSwapUint32(&entry.prefetchFired, 0, 1) {
 			qtype := uint16(0)
 			if entry.Message != nil && len(entry.Message.Questions) > 0 {
 				qtype = entry.Message.Questions[0].QType
 			}
-			fn := c.prefetchFunc
 			go fn(key, qtype)
 		}
 	}
