@@ -408,11 +408,23 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 }
 
 // RevokeToken invalidates a token.
+//
+// L-3: pair the decrement with the same gates used elsewhere — both
+// the maxSessionsPerUser > 0 condition (which gates the matching
+// increment in GenerateToken) and the > 0 sanity guard (which keeps
+// the expired-token cleanup path idempotent under concurrent
+// invalidation). Without these, a deployment that hasn't enabled
+// the session cap silently drives activeSessions[username] negative
+// on every revoke; if the operator later turns the cap on, the
+// negative counter masks the real session count and either locks
+// legitimate users out or lets them past the cap.
 func (s *Store) RevokeToken(tokenStr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if t, ok := s.tokens[tokenStr]; ok {
-		s.activeSessions[t.Username]--
+		if s.maxSessionsPerUser > 0 && s.activeSessions[t.Username] > 0 {
+			s.activeSessions[t.Username]--
+		}
 	}
 	delete(s.tokens, tokenStr)
 }

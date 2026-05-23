@@ -183,6 +183,37 @@ func TestRevokeToken(t *testing.T) {
 	}
 }
 
+// TestRevokeToken_DoesNotDriveSessionCounterNegative regresses
+// SECURITY-REPORT.md L-3. RevokeToken used to decrement
+// activeSessions[username] unconditionally, but GenerateToken's
+// matching increment only runs when maxSessionsPerUser > 0. In a
+// default deployment (cap disabled), every revoke drove the counter
+// to -1 / -2 / etc.; if an operator later enabled the cap, those
+// negatives masked the real session count and either locked
+// legitimate users out or let them past the cap on next login.
+//
+// Post-fix the decrement is gated on the same condition the increment
+// uses, plus a > 0 sanity guard for concurrent-revoke idempotency.
+func TestRevokeToken_DoesNotDriveSessionCounterNegative(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:             "test-secret",
+		Users:              []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry:        Duration{Duration: 24 * time.Hour},
+		// MaxSessionsPerUser deliberately left at 0 — this is the
+		// path where the unconditional decrement was a bug.
+	})
+
+	tok, _ := store.GenerateToken("admin", 1*time.Hour)
+	store.RevokeToken(tok.Token)
+
+	store.mu.RLock()
+	count := store.activeSessions["admin"]
+	store.mu.RUnlock()
+	if count < 0 {
+		t.Errorf("L-3 regression: activeSessions[admin] = %d (must not go negative with MaxSessionsPerUser=0)", count)
+	}
+}
+
 func TestRevokeAllTokens(t *testing.T) {
 	store, _ := NewStore(&Config{
 		Secret:      "test-secret",
