@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -241,8 +242,18 @@ func (s *XoTServer) handleConnection(conn net.Conn) {
 			return
 		}
 
+		// Use io.ReadFull for both length prefix and body. conn.Read
+		// may legally return short reads on TLS streams — a TLS
+		// record can deliver partial DNS messages. The previous
+		// conn.Read(lenBuf) could read only 1 of the 2 length-prefix
+		// bytes, leaving lenBuf[1] zero, and conn.Read(msg) could
+		// return fewer bytes than msgLen, both silently dropping or
+		// truncating the message and (worse) leaving the stream's
+		// read offset partway through a DNS message — every
+		// subsequent message on the same connection then parses
+		// from a wrong offset.
 		lenBuf := make([]byte, 2)
-		if _, err := conn.Read(lenBuf); err != nil {
+		if _, err := io.ReadFull(conn, lenBuf); err != nil {
 			return
 		}
 
@@ -252,8 +263,7 @@ func (s *XoTServer) handleConnection(conn net.Conn) {
 		}
 
 		msg := make([]byte, msgLen)
-		n, err := conn.Read(msg)
-		if err != nil || n != msgLen {
+		if _, err := io.ReadFull(conn, msg); err != nil {
 			return
 		}
 
