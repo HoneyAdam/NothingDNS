@@ -90,10 +90,13 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		if s.requireAdmin(w, r) {
 			return
 		}
-		stats := s.blocklist.Stats()
-		s.blocklist.SetEnabled(!stats.Enabled)
+		// Toggle() atomically flips the enabled state and returns the
+		// resulting value. Replaces the TOCTOU Stats()+SetEnabled
+		// pattern that could silently lose one of two simultaneous
+		// toggle clicks and report the wrong state back to the operator.
+		nowEnabled := s.blocklist.Toggle()
 		s.writeJSON(w, http.StatusOK, &MessageResponse{
-			Message: fmt.Sprintf("Blocklist %s", map[bool]string{true: "enabled", false: "disabled"}[!stats.Enabled]),
+			Message: fmt.Sprintf("Blocklist %s", map[bool]string{true: "enabled", false: "disabled"}[nowEnabled]),
 		})
 		return
 	}

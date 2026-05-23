@@ -530,6 +530,21 @@ func (bl *Blocklist) SetEnabled(enabled bool) {
 	bl.enabled.Store(enabled)
 }
 
+// Toggle atomically flips the enabled state and returns the new value.
+// Replaces the TOCTOU-prone Stats()+SetEnabled(!Stats.Enabled) pattern:
+// two concurrent toggles racing on the latter both observed the same
+// Stats().Enabled and both wrote the same !value — one of the toggles
+// was silently lost. CompareAndSwap loop guarantees exactly N flips
+// for N callers.
+func (bl *Blocklist) Toggle() bool {
+	for {
+		cur := bl.enabled.Load()
+		if bl.enabled.CompareAndSwap(cur, !cur) {
+			return !cur
+		}
+	}
+}
+
 // SourceInfo describes a blocklist source (file or URL).
 type SourceInfo struct {
 	ID      string `json:"id"`
