@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 func cmdCache(args []string) error {
 	if len(args) < 1 {
@@ -25,7 +28,13 @@ func cmdCache(args []string) error {
 	case "flush":
 		path := "/api/v1/cache/flush"
 		if len(args) > 1 {
-			path = "/api/v1/cache/flush?name=" + args[1]
+			// URL-encode the name so a record name containing query-string
+			// delimiters (?, &, =, #) or any other unsafe character doesn't
+			// fall outside its key=value slot and corrupt the request. The
+			// previous code just concatenated the raw arg, so a name like
+			// "evil.example?force=true" would smuggle an extra parameter
+			// past the API's flush handler.
+			path = "/api/v1/cache/flush?name=" + url.QueryEscape(args[1])
 		}
 		result, err := apiPost(path, "")
 		if err != nil {
