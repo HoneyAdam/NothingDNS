@@ -331,6 +331,21 @@ func (c *Client) selectRoundRobin() *Server {
 }
 
 // selectFastest selects the server with the lowest latency.
+//
+// Servers are created with latency=0 and healthy=true; the first
+// real measurement arrives later from markSuccess via the
+// queryUDP/queryTCP success path or the health-check loop. A naive
+// "min latency" comparison would treat the unmeasured zero as the
+// best possible value and always steer every query to the
+// most-recently-added server until its first measurement landed.
+// That bypasses the actual "fastest" selection promise: a freshly
+// added node, a node whose latency hasn't been refreshed since
+// startup, or any node whose markSuccess hasn't fired would always
+// win against measured peers — including measured-fast peers.
+//
+// Treat latency==0 as un-measured and skip those in the main pick.
+// If no measured server is healthy, fall back to the first healthy
+// (unmeasured) server, then finally to c.servers[0].
 func (c *Client) selectFastest() *Server {
 	var fastest *Server
 	var lowestLatency time.Duration = -1
@@ -344,18 +359,33 @@ func (c *Client) selectFastest() *Server {
 		latency := s.latency
 		s.mu.RUnlock()
 
+		// Un-measured: cannot honestly compete on speed yet.
+		if latency <= 0 {
+			continue
+		}
+
 		if lowestLatency < 0 || latency < lowestLatency {
 			lowestLatency = latency
 			fastest = s
 		}
 	}
 
-	if fastest == nil && len(c.servers) > 0 {
-		// Fallback to first server
-		return c.servers[0]
+	if fastest != nil {
+		return fastest
 	}
 
-	return fastest
+	// No measured-healthy server — fall back to any healthy server
+	// so cold-start queries still get answered.
+	for _, s := range c.servers {
+		if s.IsHealthy() {
+			return s
+		}
+	}
+
+	if len(c.servers) > 0 {
+		return c.servers[0]
+	}
+	return nil
 }
 
 // queryUDP sends a query via UDP.
