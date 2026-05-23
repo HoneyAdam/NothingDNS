@@ -1118,7 +1118,6 @@ func validateConfigOnly(path string) error {
 	return nil
 }
 
-// sdNotifySend sends a notification to systemd via unix sock.
 // bindEntryToAddr turns a `server.bind` list entry into a listener
 // address. The historical implementation always called
 // net.JoinHostPort(entry, port), which silently wrapped an entry
@@ -1141,6 +1140,9 @@ func bindEntryToAddr(entry string, port int) string {
 	return net.JoinHostPort(entry, fmt.Sprintf("%d", port))
 }
 
+// sdNotifySend sends a READY notification to systemd via the unix
+// datagram socket named in NOTIFY_SOCKET (or the explicit `socket`
+// arg, which takes precedence).
 func sdNotifySend(socket string) error {
 	// Try NOTIFY_SOCKET environment variable first, then explicit path
 	notifySocket := socket
