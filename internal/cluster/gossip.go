@@ -728,7 +728,42 @@ func (gp *GossipProtocol) handleHeartbeat(msg Message, from *net.UDPAddr) {
 	gp.leaderMu.Lock()
 	defer gp.leaderMu.Unlock()
 
-	if payload.Term >= gp.leaderTerm && payload.LeaderID == gp.currentLeader {
+	// Stale terms are ignored.
+	if payload.Term < gp.leaderTerm {
+		return
+	}
+
+	// A heartbeat from a strictly higher term — or from any leader
+	// when we don't yet know one — acts as an implicit leader
+	// announcement. The previous code only refreshed lastHeartbeat
+	// when the payload's LeaderID already matched our cached
+	// currentLeader, so if the explicit Announce frame was lost on
+	// the wire (UDP gossip is best-effort) the follower would wait
+	// for the next periodic announcement before recognizing the new
+	// leader — often dozens of seconds of "no leader known" during
+	// which every heartbeat from that leader was silently dropped.
+	//
+	// Same-term heartbeats from a *different* LeaderID are NOT
+	// adopted — that's split-brain territory and the safe move is
+	// to keep believing in our currently-known leader until a
+	// higher-term election resolves the conflict.
+	adopt := false
+	if payload.Term > gp.leaderTerm {
+		adopt = true
+	} else if gp.currentLeader == "" {
+		adopt = true
+	}
+	if adopt {
+		gp.currentLeader = payload.LeaderID
+		gp.leaderTerm = payload.Term
+		gp.isLeader = (payload.LeaderID == gp.nodeList.GetSelf().ID)
+		gp.lastHeartbeat = time.Now()
+		return
+	}
+
+	// Same-term, same-leader: ordinary refresh. Different leader at
+	// same term: keep the old state — don't touch lastHeartbeat.
+	if payload.LeaderID == gp.currentLeader {
 		gp.lastHeartbeat = time.Now()
 	}
 }
