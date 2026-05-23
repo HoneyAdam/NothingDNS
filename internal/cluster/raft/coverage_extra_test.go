@@ -2036,3 +2036,76 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestSnapshotterReadSnapshot_RejectsOversizedFields regresses b9f0ed5:
+// readSnapshot must reject wire-format length fields above their caps
+// before calling make(). Snapshot files live on disk and an attacker
+// with file-system access (container escape, mount, restored backup)
+// can plant a small file with absurd length fields. Without the caps
+// each make() OOM-panics the daemon on every restart.
+func TestSnapshotterReadSnapshot_RejectsOversizedFields(t *testing.T) {
+	snap, err := NewSnapshotter(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSnapshotter: %v", err)
+	}
+
+	// Common header: Index, Term, LastIndex, LastTerm — 4 × 8 bytes of zeros.
+	header := make([]byte, 32)
+
+	put64 := func(v uint64) []byte {
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, v)
+		return b
+	}
+	put32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, v)
+		return b
+	}
+
+	t.Run("dataLen above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(maxSnapshotDataBytes + 1))
+		// readSnapshot must error out before reading data, so no payload follows.
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized dataLen, got nil")
+		}
+		if !contains(err.Error(), "dataLen") {
+			t.Errorf("error %q should mention dataLen", err)
+		}
+	})
+
+	t.Run("membership count above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(0)) // dataLen = 0, no data bytes
+		buf.Write(put32(maxSnapshotMembership + 1))
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized membership count, got nil")
+		}
+		if !contains(err.Error(), "membership") {
+			t.Errorf("error %q should mention membership", err)
+		}
+	})
+
+	t.Run("peerLen above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(0))                       // dataLen = 0
+		buf.Write(put32(1))                       // mCount = 1
+		buf.Write(put32(uint32(maxNodeIDBytes + 1))) // peerLen above cap
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized peerLen, got nil")
+		}
+		if !contains(err.Error(), "peerLen") {
+			t.Errorf("error %q should mention peerLen", err)
+		}
+	})
+}
