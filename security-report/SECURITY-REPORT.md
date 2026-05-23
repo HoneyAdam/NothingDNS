@@ -7,10 +7,24 @@
 
 ## Status update (post-audit fixes applied 2026-05-23)
 
-- **H-1 FIXED** in commit `0fb1008` — dashboard `auth_secret`-as-bearer fallback removed; regression test pins the `AuthSecret ≠ bearer` invariant.
-- **H-2 FIXED** in commit `163f87f` — fetchDS now returns the raw message; new `verifyDSDenial` requires authenticated NSEC/NSEC3 DS-denial proof signed by parent ZSK; buildChain returns a "downgrade-attack guard" error when an empty DS answer lacks a verifiable proof. Existing `TestBuildChainUnsignedDelegation` was inadvertently asserting the downgrade vector and is now repurposed to pin the post-fix behaviour.
+**All 2 HIGHs + all 12 MEDIUMs FIXED same-day, each with a verified regression test.** Commit graph:
 
-The 12 MEDIUMs below remain open. The remediation roadmap at the end of this report is unchanged.
+| # | Commit | Fix |
+|---|---|---|
+| H-1 | `0fb1008` | dashboard auth_secret-as-bearer fallback removed |
+| H-2 | `163f87f` | fetchDS authenticated NSEC/NSEC3 DS-denial proof required |
+| M-3 | `9e78726` | Raft mTLS dialer sets RootCAs |
+| M-6 | `59311b4` | DDNS prereq check inside zone lock + typed error |
+| M-7 | `5c0b955` | DoWS per-connection rate limit (100 q/s) |
+| M-5 | `77c60ef` | rate-limit eviction by lastTime (true LRU) |
+| M-2 | `7baf246` | cache long-name key uses process-seeded maphash |
+| M-1 | `a19c373` | KVStore TLV payloadLen capped at 64 MiB |
+| M-4 | `c9111b9` | API blocklist error messages sanitized |
+| M-8…12 | `a0c2999` | docker-compose hardening + healthcheck + CI pinning |
+
+Each Go-level fix includes a regression test that was verified to FAIL with the bug restored and PASS with the fix in place. Infrastructure fixes (M-8 through M-12) are non-code changes with no regression-test surface; the diff itself is the audit artifact.
+
+The 16 LOW findings remain open as roadmap items.
 
 ---
 
