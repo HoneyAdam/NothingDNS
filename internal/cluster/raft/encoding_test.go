@@ -6,6 +6,7 @@ package raft
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -145,6 +146,33 @@ func TestDecodeEntrySlice_TruncatedHeader(t *testing.T) {
 	var got []entry
 	if err := decodeEntrySlice(&got, []byte{0}); err == nil {
 		t.Error("expected error for truncated count header")
+	}
+}
+
+// TestDecodeEntrySlice_RejectsAttackerCount regresses e9687fe:
+// decodeEntrySlice must cap the wire-supplied count against what the
+// remaining buffer could physically hold (>= minEntryBytes per entry),
+// rejecting before make([]entry, 0, count). Without the cap a peer
+// could pack count = 2^32-1 into a small frame and the cap-allocation
+// would request ~160 GB up front for the 40-byte entry struct, OOM-
+// panicking the Raft member.
+func TestDecodeEntrySlice_RejectsAttackerCount(t *testing.T) {
+	// 4-byte count of 1,000,000 followed by nothing — clearly cannot
+	// fit a million 25-byte entries in zero remaining bytes.
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, 1_000_000)
+
+	var got []entry
+	err := decodeEntrySlice(&got, buf)
+	if err == nil {
+		t.Fatal("expected error for impossible count, got nil")
+	}
+	// The regression test must hit the new make()-guard, NOT the
+	// per-iteration overflow inside the loop. Pin to the guard's
+	// distinctive wording so a future refactor that drops the cap
+	// (and falls back to "entry %d overflow") fails this test.
+	if !contains(err.Error(), "exceeds possible") {
+		t.Errorf("error %q should mention 'exceeds possible' (the make-guard message)", err)
 	}
 }
 
