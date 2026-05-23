@@ -516,22 +516,33 @@ func (e *Engine) Reload() error {
 }
 
 // Stats returns RPZ engine statistics.
+//
+// All map/slice length probes and lastReload reads happen under
+// the same RLock — Reload() takes the write lock and rewrites
+// every collection plus lastReload as a unit, so dropping the
+// lock between counts let Stats() observe a torn picture where
+// the summed TotalRules disagrees with the individual category
+// counters, or where lastReload reflected an in-flight reload.
 func (e *Engine) Stats() Stats {
 	e.mu.RLock()
-	ruleCount := len(e.qnameRules) + len(e.clientIPRules) + len(e.respIPRules)
+	qn := len(e.qnameRules)
+	ci := len(e.clientIPRules)
+	ri := len(e.respIPRules)
+	files := len(e.files)
+	lastReload := e.lastReload
 	e.mu.RUnlock()
 
 	return Stats{
 		Enabled:       e.enabled.Load(),
-		TotalRules:    ruleCount,
-		QNAMERules:    len(e.qnameRules),
-		ClientIPRules: len(e.clientIPRules),
-		RespIPRules:   len(e.respIPRules),
-		Files:         len(e.files),
+		TotalRules:    qn + ci + ri,
+		QNAMERules:    qn,
+		ClientIPRules: ci,
+		RespIPRules:   ri,
+		Files:         files,
 		TotalMatches:  atomic.LoadUint64(&e.matches),
 		TotalLookups:  atomic.LoadUint64(&e.lookups),
 		ParseErrors:   atomic.LoadUint64(&e.parseErrors),
-		LastReload:    e.lastReload,
+		LastReload:    lastReload,
 	}
 }
 
