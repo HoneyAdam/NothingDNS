@@ -188,7 +188,12 @@ func (nl *NodeList) Add(node *Node) bool {
 	return true
 }
 
-// UpdateState updates the state of a node.
+// UpdateState updates the state of a peer node (not self).
+// Returns false when the id is unknown OR matches our own self ID —
+// peers may not change OUR state via gossip frames. To update the
+// local node's own state (entering Draining, recovering from Draining,
+// etc.) call UpdateSelfState; that helper is the only valid path to
+// mutate self.
 func (nl *NodeList) UpdateState(id string, state NodeState) bool {
 	nl.mu.Lock()
 	defer nl.mu.Unlock()
@@ -202,6 +207,29 @@ func (nl *NodeList) UpdateState(id string, state NodeState) bool {
 	node.LastSeen = time.Now()
 	node.Version++
 	return true
+}
+
+// UpdateSelfState changes the local node's own state. Used by the
+// Cluster.StartDraining / CompleteDraining flow to flip self to
+// Draining (or back to Alive) without going through the peer-
+// authoritative UpdateState path (which intentionally refuses to
+// touch self). Pre-fix, StartDraining called UpdateState(self.ID,
+// Draining) — silently returned false, and the local node kept
+// reporting Alive while telling every peer it was draining.
+func (nl *NodeList) UpdateSelfState(state NodeState) {
+	nl.mu.Lock()
+	defer nl.mu.Unlock()
+	if nl.self == nil {
+		return
+	}
+	nl.self.State = state
+	nl.self.LastSeen = time.Now()
+	nl.self.Version++
+	if node, ok := nl.nodes[nl.self.ID]; ok {
+		node.State = state
+		node.LastSeen = nl.self.LastSeen
+		node.Version = nl.self.Version
+	}
 }
 
 // MarkSeen updates the last seen time for a node.

@@ -584,9 +584,13 @@ func (c *Cluster) StartDraining() error {
 	}
 	c.mu.Unlock()
 
-	// Update local node state to draining
-	self := c.nodeList.GetSelf()
-	c.nodeList.UpdateState(self.ID, NodeStateDraining)
+	// Update local node state to draining. Must go through
+	// UpdateSelfState — UpdateState rejects mutations of self (that's
+	// the peer-authoritative path and shouldn't accept a remote-
+	// requested self-state change). Pre-fix the local self.State
+	// silently stayed Alive, while every peer got told we were
+	// Draining.
+	c.nodeList.UpdateSelfState(NodeStateDraining)
 
 	// Broadcast draining state to all peers
 	if c.gossip != nil {
@@ -615,9 +619,9 @@ func (c *Cluster) CompleteDraining(leaveCluster bool) error {
 		c.nodeList.Remove(self.ID)
 		c.logger.Infof("Node left the cluster after draining")
 	} else {
-		// Exit draining state — back to alive
-		self := c.nodeList.GetSelf()
-		c.nodeList.UpdateState(self.ID, NodeStateAlive)
+		// Exit draining state — back to alive. Same UpdateSelfState
+		// requirement as StartDraining; UpdateState refuses self.
+		c.nodeList.UpdateSelfState(NodeStateAlive)
 		if c.gossip != nil {
 			if err := c.gossip.BroadcastDraining(false, 0); err != nil {
 				c.logger.Warnf("Failed to broadcast draining exit: %v", err)
