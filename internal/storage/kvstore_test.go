@@ -67,6 +67,88 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKVStore_EncryptedRoundTrip regresses SECURITY-REPORT.md L-6.
+// When OpenKVStoreEncrypted is configured with a 32-byte aeadKey,
+// the on-disk data file must be AES-256-GCM encrypted: a re-open
+// with the same key recovers the value, and a hex dump of the file
+// must not contain the cleartext bucket / key / value bytes that
+// the JSON serializer would otherwise emit verbatim. Plain mode
+// (aeadKey nil) and HMAC-only mode keep working unchanged.
+func TestKVStore_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	hmacKey := make([]byte, 32)
+	aeadKey := make([]byte, 32)
+	for i := range hmacKey {
+		hmacKey[i] = byte(i + 1)
+		aeadKey[i] = byte(255 - i)
+	}
+
+	const (
+		secretBucket = "secret-bucket"
+		secretKey    = "the-secret-key"
+		secretValue  = "extremely-confidential-payload"
+	)
+
+	store, err := OpenKVStoreEncrypted(dir, hmacKey, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (write): %v", err)
+	}
+	if err := store.Update(func(tx *Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(secretBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(secretKey), []byte(secretValue))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// On-disk file must NOT contain the plaintext bucket/key/value.
+	raw, err := os.ReadFile(filepath.Join(dir, DataFile))
+	if err != nil {
+		t.Fatalf("read on-disk file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("L-6 regression: data file magic = 0x%x, want 0xE0 (encrypted)", raw[0])
+	}
+	for _, needle := range []string{secretBucket, secretKey, secretValue} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("L-6 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the SAME aead key must recover the value.
+	store2, err := OpenKVStoreEncrypted(dir, hmacKey, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (re-open): %v", err)
+	}
+	defer store2.Close()
+	if err := store2.View(func(tx *Tx) error {
+		b := tx.Bucket([]byte(secretBucket))
+		if b == nil {
+			return fmt.Errorf("bucket missing")
+		}
+		got := b.Get([]byte(secretKey))
+		if string(got) != secretValue {
+			return fmt.Errorf("got %q, want %q", got, secretValue)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+
+	// Re-open WITHOUT the aead key must refuse to load (clear error,
+	// not silent empty store).
+	store3, err := OpenKVStore(dir, hmacKey)
+	if err == nil {
+		_ = store3.Close()
+		t.Error("L-6 regression: plain-mode open succeeded on an encrypted file — should have refused with a clear error")
+	}
+}
+
 // TestReadTLV_RejectsOversizedPayloadLen regresses SECURITY-REPORT.md
 // M-1. readTLV used to read a uint32 payloadLen from the data file
 // and immediately allocate make([]byte, payloadLen + hmacLenBytes)
