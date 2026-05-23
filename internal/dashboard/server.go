@@ -374,7 +374,15 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := websocket.Handshake(w, r, s.allowedOrigins...)
+	// Snapshot allowedOrigins under the lock so a concurrent
+	// SetAllowedOrigins can't race on the slice header. The
+	// websocket.Handshake variadic call must not see a torn slice
+	// during reslicing.
+	s.mu.RLock()
+	origins := s.allowedOrigins
+	s.mu.RUnlock()
+
+	conn, err := websocket.Handshake(w, r, origins...)
 	if err != nil {
 		util.Warnf("dashboard: websocket handshake failed: %v", err)
 		return
