@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -18,7 +19,7 @@ func cmdRecord(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl record list <zone>")
 		}
 		zoneName := args[1]
-		result, err := apiGet("/api/v1/zones/" + zoneName + "/records")
+		result, err := apiGet("/api/v1/zones/" + url.PathEscape(zoneName) + "/records")
 		if err != nil {
 			return err
 		}
@@ -72,7 +73,7 @@ func cmdRecord(args []string) error {
 			"ttl":  ttl,
 		}
 		b, _ := json.Marshal(body)
-		result, err := apiPost("/api/v1/zones/"+zone+"/records", string(b))
+		result, err := apiPost("/api/v1/zones/"+url.PathEscape(zone)+"/records", string(b))
 		if err != nil {
 			return err
 		}
@@ -92,7 +93,7 @@ func cmdRecord(args []string) error {
 			"type": rtype,
 		}
 		b, _ := json.Marshal(body)
-		result, err := apiDelete("/api/v1/zones/"+zone+"/records", string(b))
+		result, err := apiDelete("/api/v1/zones/"+url.PathEscape(zone)+"/records", string(b))
 		if err != nil {
 			return err
 		}
@@ -128,7 +129,7 @@ func cmdRecord(args []string) error {
 			"ttl":      ttl,
 		}
 		b, _ := json.Marshal(body)
-		result, err := apiPut("/api/v1/zones/"+zone+"/records", string(b))
+		result, err := apiPut("/api/v1/zones/"+url.PathEscape(zone)+"/records", string(b))
 		if err != nil {
 			return err
 		}

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 )
@@ -65,7 +66,7 @@ func cmdZone(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl zone remove <zone>")
 		}
 		zoneName := args[1]
-		result, err := apiDelete("/api/v1/zones/"+zoneName, "")
+		result, err := apiDelete("/api/v1/zones/"+url.PathEscape(zoneName), "")
 		if err != nil {
 			return err
 		}
@@ -78,7 +79,7 @@ func cmdZone(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl zone reload <zone>")
 		}
 		zoneName := args[1]
-		result, err := apiPost("/api/v1/zones/reload?zone="+zoneName, "")
+		result, err := apiPost("/api/v1/zones/reload?zone="+url.QueryEscape(zoneName), "")
 		if err != nil {
 			return err
 		}
@@ -91,7 +92,7 @@ func cmdZone(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl zone export <zone>")
 		}
 		zoneName := args[1]
-		body, err := apiGetRaw("/api/v1/zones/" + zoneName + "/export")
+		body, err := apiGetRaw("/api/v1/zones/" + url.PathEscape(zoneName) + "/export")
 		if err != nil {
 			return err
 		}
