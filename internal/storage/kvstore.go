@@ -313,6 +313,16 @@ func (s *KVStore) save() error {
 	}
 	renamed = true
 
+	// fsync the parent directory so the rename's dirent reaches stable
+	// storage. Without this step, a power loss between rename and
+	// directory flush can leave the old data file visible (the
+	// inode entry for the new file exists but the dirent rebind hasn't
+	// committed yet). Best-effort: tmpfs and a few exotic FSes don't
+	// support dir fsync, so an error here is logged-and-ignored.
+	if dirFd, err := os.Open(dir); err == nil {
+		_ = dirFd.Sync()
+		_ = dirFd.Close()
+	}
 	return nil
 }
 
