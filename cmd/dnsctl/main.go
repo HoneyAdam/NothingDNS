@@ -55,9 +55,21 @@ func runMain(args []string) int {
 	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
+	// Env-variable defaults — flags override when set explicitly.
+	// Operators commonly script dnsctl from CI pipelines and shell
+	// rc files; pinning the API key to every invocation via --api-key
+	// puts it in process listings and shell history. NOTHINGDNS_API_KEY
+	// keeps it out of argv. NOTHINGDNS_SERVER mirrors the same
+	// convention for the server URL.
+	defaultServer := os.Getenv("NOTHINGDNS_SERVER")
+	if defaultServer == "" {
+		defaultServer = "http://localhost:8080"
+	}
+	defaultAPIKey := os.Getenv("NOTHINGDNS_API_KEY")
+
 	// Global flags
-	fs.StringVar(&globalFlags.Server, "server", "http://localhost:8080", "NothingDNS API server URL")
-	fs.StringVar(&globalFlags.APIKey, "api-key", "", "API key for authentication")
+	fs.StringVar(&globalFlags.Server, "server", defaultServer, "NothingDNS API server URL (env: NOTHINGDNS_SERVER)")
+	fs.StringVar(&globalFlags.APIKey, "api-key", defaultAPIKey, "API key for authentication (env: NOTHINGDNS_API_KEY)")
 	// --version / -version: match the daemon binary so both tools
 	// answer the standard CLI question the same way.
 	showVersion := fs.Bool("version", false, "Show version and exit")
