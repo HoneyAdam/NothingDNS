@@ -67,8 +67,18 @@ func (s *Server) handleRPZRules(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		rules := s.rpzEngine.ListQNAMERules()
-		resp := make([]RPZRuleResponse, 0, len(rules))
-		for _, r := range rules {
+		// L-N5: cap response to RPZRulesMaxResults. Real malware-feed
+		// RPZ ships millions of rules; even an admin shouldn't
+		// accidentally fetch them all in one JSON document.
+		total := len(rules)
+		limit := total
+		truncated := false
+		if limit > RPZRulesMaxResults {
+			limit = RPZRulesMaxResults
+			truncated = true
+		}
+		resp := make([]RPZRuleResponse, 0, limit)
+		for _, r := range rules[:limit] {
 			resp = append(resp, RPZRuleResponse{
 				Pattern:      r.Pattern,
 				Action:       actionToString(r.Action),
@@ -78,7 +88,11 @@ func (s *Server) handleRPZRules(w http.ResponseWriter, r *http.Request) {
 				Priority:     r.Priority,
 			})
 		}
-		s.writeJSON(w, http.StatusOK, &RPZRulesResponse{Rules: resp})
+		s.writeJSON(w, http.StatusOK, &RPZRulesResponse{
+			Rules:     resp,
+			Total:     total,
+			Truncated: truncated,
+		})
 	case http.MethodPost:
 		// RPZ rewrites can redirect arbitrary zones (e.g. bank.com →
 		// attacker.example), so admin-only (VULN-009).

@@ -76,9 +76,19 @@ type ZoneSummary struct {
 }
 
 // ZoneListResponse is returned by GET /api/v1/zones.
+//
+// Zones holds at most ZoneListMaxResults entries; Total is the
+// unfiltered count, Truncated true when capped. L-N5 generalises
+// the L-10 cap pattern to the sibling list endpoint.
 type ZoneListResponse struct {
-	Zones []ZoneSummary `json:"zones"`
+	Zones     []ZoneSummary `json:"zones"`
+	Total     int           `json:"total"`
+	Truncated bool          `json:"truncated,omitempty"`
 }
+
+// ZoneListMaxResults caps the zone list response. Same rationale as
+// RecordListMaxResults.
+const ZoneListMaxResults = 5000
 
 // SOADetail represents SOA record details in a zone detail response.
 type SOADetail struct {
@@ -364,9 +374,20 @@ type RPZRuleResponse struct {
 }
 
 // RPZRulesResponse is returned by GET /api/v1/rpz/rules.
+//
+// Rules holds at most RPZRulesMaxResults entries; Total is the
+// unfiltered count, Truncated true when capped. L-N5 generalises
+// the L-10 cap pattern to the sibling list endpoint. Real-world
+// malware feeds ship millions of rules; even an admin operator
+// shouldn't accidentally fetch them all in one response.
 type RPZRulesResponse struct {
-	Rules []RPZRuleResponse `json:"rules"`
+	Rules     []RPZRuleResponse `json:"rules"`
+	Total     int               `json:"total"`
+	Truncated bool              `json:"truncated,omitempty"`
 }
+
+// RPZRulesMaxResults caps the rpz rules list response.
+const RPZRulesMaxResults = 5000
 
 // RPZAddRuleRequest is the request body for POST /api/v1/rpz/rules.
 type RPZAddRuleRequest struct {

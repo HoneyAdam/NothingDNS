@@ -10,6 +10,14 @@ import (
 )
 
 func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
+	// L-N6: method gate, mirroring the sibling handleDashboardQueries
+	// / handleDashboardZones handlers in this file. The L-11 fix
+	// gated the dashboard package's stats endpoint; this API-package
+	// sibling was missed in that sweep.
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
 	if s.requireOperator(w, r) {
 		return
 	}

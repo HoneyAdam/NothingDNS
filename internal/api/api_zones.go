@@ -31,7 +31,17 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListZones(w http.ResponseWriter, _ *http.Request) {
 	resp := &ZoneListResponse{Zones: []ZoneSummary{}}
 	if s.zoneManager != nil {
-		for name, z := range s.zoneManager.List() {
+		zones := s.zoneManager.List()
+		resp.Total = len(zones)
+		// L-N5: cap the response to ZoneListMaxResults. An operator
+		// with thousands of zones would otherwise build a
+		// proportional JSON document and freeze the dashboard.
+		count := 0
+		for name, z := range zones {
+			if count >= ZoneListMaxResults {
+				resp.Truncated = true
+				break
+			}
 			z.RLock()
 			recordCount := 0
 			for _, records := range z.Records {
@@ -47,6 +57,7 @@ func (s *Server) handleListZones(w http.ResponseWriter, _ *http.Request) {
 				Serial:  serial,
 				Records: recordCount,
 			})
+			count++
 		}
 	}
 
