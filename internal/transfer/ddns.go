@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -201,12 +202,10 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 		return h.createUpdateResponse(req, protocol.RcodeRefused), nil
 	}
 
-	// Check prerequisites
-	if err := h.checkPrerequisites(z, req.Answers); err != nil {
-		return h.createUpdateResponse(req, protocol.RcodeNXRRSet), nil
-	}
-
-	// Parse and apply updates
+	// Parse the wire RRs into typed update + prerequisite structs.
+	// Prerequisite *checking* happens later, inside ApplyUpdate, under
+	// z.Lock() — see M-6. The earlier unlocked check at this site
+	// raced concurrent updates AND read z.Records without z.RLock().
 	updates, err := h.parseUpdates(req.Authorities)
 	if err != nil {
 		return h.createUpdateResponse(req, protocol.RcodeFormatError), nil
@@ -227,15 +226,19 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 		}
 	}
 
-	// SECURITY (V-06 fix): Apply update synchronously to prevent TOCTOU race.
-	// Previously, updates were queued to a channel and applied asynchronously,
-	// allowing two concurrent updates with conflicting prerequisites to both pass.
-	// Now we apply the update immediately within the handler while holding zone state,
-	// then notify the channel for audit/logging purposes only.
+	// SECURITY (V-06 fix + M-6): Apply update synchronously to prevent
+	// TOCTOU race. ApplyUpdate now also re-checks prerequisites under
+	// the same z.Lock() that gates the mutating operations, so two
+	// concurrent UPDATEs with mutually-exclusive prereqs can't both
+	// pass. Prereq failures return ErrPrereqFailed → NXRRSET RCODE;
+	// any other error → ServFail.
 	h.zonesMu.Lock()
 	err = ApplyUpdate(z, updateReq)
 	h.zonesMu.Unlock()
 	if err != nil {
+		if errors.Is(err, ErrPrereqFailed) {
+			return h.createUpdateResponse(req, protocol.RcodeNXRRSet), nil
+		}
 		return h.createUpdateResponse(req, protocol.RcodeServerFailure), nil
 	}
 
@@ -386,15 +389,29 @@ func IsUpdateResponse(msg *protocol.Message) bool {
 	return msg.Header.Flags.Opcode == protocol.OpcodeUpdate && msg.Header.Flags.QR
 }
 
-// ApplyUpdate applies an update to a zone
+// ErrPrereqFailed is returned by ApplyUpdate when an RFC 2136
+// prerequisite does not hold against the current zone state. The
+// handler maps it to the appropriate NXRRSet/YXRRSet/NXDomain/
+// YXDomain RCODE rather than the generic ServFail it returns for
+// other errors.
+var ErrPrereqFailed = errors.New("ddns: prerequisite failed")
+
+// ApplyUpdate applies an update to a zone. The prerequisite check and
+// the mutating operations run under a single z.Lock() acquisition so
+// concurrent UPDATEs with mutually-exclusive prerequisites can't both
+// pass — fixing the TOCTOU window the handler used to leave open by
+// doing an extra unlocked prereq check before calling here (M-6).
 func ApplyUpdate(z *zone.Zone, update *UpdateRequest) error {
 	z.Lock()
 	defer z.Unlock()
 
-	// Check prerequisites again before applying
+	// Check prerequisites under the same lock that protects the apply
+	// loop below. Any failure here is reported as ErrPrereqFailed so
+	// the handler can return the RFC 2136 prereq RCODE; bare error
+	// wrapping is fine because errors.Is unwraps fmt.Errorf chains.
 	for _, precond := range update.Prerequisites {
 		if err := checkPrerequisiteOnZone(z, precond); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", ErrPrereqFailed, err)
 		}
 	}
 
