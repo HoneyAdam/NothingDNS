@@ -182,7 +182,9 @@ func TestNewKeyStoreWithEncryption_DefensiveCopy(t *testing.T) {
 func TestKeyStore_SetEncryptionKey(t *testing.T) {
 	ks := NewKeyStore(newMockBackend())
 	key := make([]byte, 32)
-	ks.SetEncryptionKey(key)
+	if err := ks.SetEncryptionKey(key); err != nil {
+		t.Fatalf("SetEncryptionKey(32 bytes) unexpected error: %v", err)
+	}
 
 	ks.mu.RLock()
 	hasKey := ks.encryptionKey != nil
@@ -190,6 +192,22 @@ func TestKeyStore_SetEncryptionKey(t *testing.T) {
 
 	if !hasKey {
 		t.Error("expected encryption key to be set")
+	}
+
+	// Reject non-32-byte keys.
+	if err := ks.SetEncryptionKey(make([]byte, 16)); err == nil {
+		t.Error("SetEncryptionKey(16 bytes) should have errored")
+	}
+
+	// Empty key disables encryption (legacy mode).
+	if err := ks.SetEncryptionKey(nil); err != nil {
+		t.Fatalf("SetEncryptionKey(nil) unexpected error: %v", err)
+	}
+	ks.mu.RLock()
+	stillSet := ks.encryptionKey != nil
+	ks.mu.RUnlock()
+	if stillSet {
+		t.Error("expected encryption key to be nil after disable")
 	}
 }
 

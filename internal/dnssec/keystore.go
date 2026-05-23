@@ -101,11 +101,30 @@ func NewKeyStoreWithEncryption(store KeyStoreBackend, encryptionKey []byte) (*Ke
 }
 
 // SetEncryptionKey enables or changes the encryption key for private keys at rest.
-func (ks *KeyStore) SetEncryptionKey(key []byte) {
+//
+// Returns an error if key is non-empty but not the 32 bytes AES-256 demands.
+// NewKeyStoreWithEncryption already validates length at construction; this
+// dynamic setter must enforce the same invariant or it can silently store a
+// short/long key that fails every subsequent encrypt/decrypt at runtime
+// (aes.NewCipher returns "invalid key size") — turning all signing-key
+// persistence operations into errors with no diagnostic at the configure-key
+// step.
+//
+// Passing an empty key disables encryption (legacy mode); we keep that path
+// available for operators rolling encryption back during incident response.
+func (ks *KeyStore) SetEncryptionKey(key []byte) error {
+	if len(key) != 0 && len(key) != 32 {
+		return fmt.Errorf("encryption key must be 32 bytes for AES-256, got %d", len(key))
+	}
 	ks.mu.Lock()
 	defer ks.mu.Unlock()
+	if len(key) == 0 {
+		ks.encryptionKey = nil
+		return nil
+	}
 	ks.encryptionKey = make([]byte, len(key))
 	copy(ks.encryptionKey, key)
+	return nil
 }
 
 // encryptPrivateKey encrypts private key data using AES-256-GCM.
