@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"hash/maphash"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -838,27 +839,40 @@ func TestEntryShouldPrefetch(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// crc32Hash, EvictPercent, UpdateConfig, Save/Load tests
+// MakeKey hash (M-2), EvictPercent, UpdateConfig, Save/Load tests
 // ---------------------------------------------------------------------------
 
-func TestCRC32Hash(t *testing.T) {
-	// Deterministic
-	h1 := crc32Hash("example.com:A")
-	h2 := crc32Hash("example.com:A")
-	if h1 != h2 {
-		t.Errorf("Same input should produce same hash: %d != %d", h1, h2)
+// TestMakeKey_LongName_KnownPolynomialCollisionDoesNotCollide regresses
+// SECURITY-REPORT.md M-2. The pre-fix long-name hash was a Java-style
+// polynomial (`h*31 + byte`, mislabelled crc32Hash). It has a well-
+// known 2-byte collision pair ("Aa" / "BB") that generalises to any
+// length by appending the same suffix — so an attacker could craft a
+// second name that hashed to the cache key of a victim's long name
+// and inject poisoned RDATA. Replaced with a keyed maphash whose seed
+// is process-random; the same name pair must now produce distinct
+// keys.
+//
+// The pair below is over the 128-byte threshold (130 bytes each)
+// where MakeKey switches to the hashed path. The suffix "x"*128 is
+// the same for both names, so polynomial-hash equality of the 2-byte
+// prefixes ("Aa" vs "BB" both hash to 2112) carried into the full
+// strings — that was the bug. The keyed hash breaks the carry.
+func TestMakeKey_LongName_KnownPolynomialCollisionDoesNotCollide(t *testing.T) {
+	suffix := strings.Repeat("x", 128)
+	name1 := "Aa" + suffix // 130 bytes, > 128 → hashed path
+	name2 := "BB" + suffix
+
+	// Sanity-check the precondition: both names are long enough to
+	// hit the hashed branch.
+	if len(name1) <= 128 || len(name2) <= 128 {
+		t.Fatalf("test setup error: names must be > 128 bytes; got %d / %d", len(name1), len(name2))
 	}
 
-	// Different inputs should produce different hashes
-	h3 := crc32Hash("other.com:A")
-	if h1 == h3 {
-		t.Error("Different inputs should produce different hashes")
-	}
+	k1 := MakeKey(name1, 1, false)
+	k2 := MakeKey(name2, 1, false)
 
-	// Empty string
-	h4 := crc32Hash("")
-	if h4 != 0 {
-		t.Errorf("Empty string should hash to 0, got %d", h4)
+	if k1 == k2 {
+		t.Errorf("M-2 regression: known polynomial-collision pair produced identical cache keys %q — attacker can poison victim name's cache entry", k1)
 	}
 }
 
