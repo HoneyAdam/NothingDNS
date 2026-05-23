@@ -1059,11 +1059,19 @@ func (v *Validator) validateNSEC3(owner, queryName string, qtype uint16, nsec3 *
 		return false
 	}
 
-	hashedNameStr := protocol.Base32Encode(hashedName)
-	ownerHash := extractNSEC3Hash(owner)
+	// NSEC3 owner hashes are base32 (RFC 5155 §1.3) — base32 alphabet is
+	// case-insensitive but ASCII lexical comparisons are not. Base32Encode
+	// emits uppercase; servers can legally serve the NSEC3 owner in any
+	// case. Normalize both to uppercase before comparing so a mixed-case
+	// owner name doesn't trip nameInRange's < / > boundary check or the
+	// equality check below — either would silently reject a valid NSEC3
+	// proof and turn the response Bogus.
+	hashedNameStr := strings.ToUpper(protocol.Base32Encode(hashedName))
+	ownerHash := strings.ToUpper(extractNSEC3Hash(owner))
+	nextHashStr := strings.ToUpper(protocol.Base32Encode(nsec3.NextHashed))
 
 	// Check if hashed query name falls in the range [ownerHash, nextHashed)
-	if !nameInRange(hashedNameStr, ownerHash, protocol.Base32Encode(nsec3.NextHashed)) {
+	if !nameInRange(hashedNameStr, ownerHash, nextHashStr) {
 		return false
 	}
 
