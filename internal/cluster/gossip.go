@@ -524,11 +524,25 @@ func (gp *GossipProtocol) handleMessage(data []byte, from *net.UDPAddr) {
 }
 
 // handlePing handles a ping message.
+//
+// Impostor protection: ping.NodeID is the ping sender's claimed
+// identity and MUST match the AEAD-authenticated msg.From. Without
+// this check, a compromised gossip-keyring peer could keep
+// reporting "victim sent a ping" frames; we'd keep refreshing
+// victim's LastSeen even after victim actually died, and SWIM's
+// failure detector would never tip the cluster's view of victim
+// to Suspect/Dead. The cluster would route queries into a black
+// hole indefinitely.
 func (gp *GossipProtocol) handlePing(msg Message, from *net.UDPAddr) {
 	atomic.AddUint64(&gp.pingReceived, 1)
 
 	var ping PingPayload
 	if err := decodePayload(msg.Payload, &ping); err != nil {
+		return
+	}
+
+	if msg.From != ping.NodeID {
+		util.Warnf("gossip: dropped Ping from impostor %s claiming to be %s", msg.From, ping.NodeID)
 		return
 	}
 
@@ -552,9 +566,21 @@ func (gp *GossipProtocol) handlePing(msg Message, from *net.UDPAddr) {
 }
 
 // handleAck handles an ack message.
+//
+// Same impostor protection as handlePing: ack.NodeID is the ack
+// sender's claimed identity. If an impostor sent acks claiming to
+// be the victim, we'd reanimate the victim from NodeStateDead /
+// NodeStateSuspect back to NodeStateAlive every time. SWIM relies
+// on "ack proves liveness" — that proof MUST come from the actual
+// peer, not just anyone with the AEAD key.
 func (gp *GossipProtocol) handleAck(msg Message, from *net.UDPAddr) {
 	var ack AckPayload
 	if err := decodePayload(msg.Payload, &ack); err != nil {
+		return
+	}
+
+	if msg.From != ack.NodeID {
+		util.Warnf("gossip: dropped Ack from impostor %s claiming to be %s", msg.From, ack.NodeID)
 		return
 	}
 

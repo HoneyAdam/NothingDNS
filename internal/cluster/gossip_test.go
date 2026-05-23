@@ -512,7 +512,10 @@ func TestGossipProtocol_handleAck(t *testing.T) {
 
 	gp, _ := NewGossipProtocol(cfg, nl, true)
 
-	// Create an ack message
+	// Create an ack message. handleAck now enforces
+	// msg.From == ack.NodeID — set both so this represents the
+	// legitimate flow (impostor coverage lives in
+	// TestGossipProtocol_handleAck_Impostor below).
 	ack := AckPayload{
 		NodeID:  "other",
 		Version: 2,
@@ -520,6 +523,7 @@ func TestGossipProtocol_handleAck(t *testing.T) {
 	ackBytes, _ := encodePayload(ack)
 	msg := Message{
 		Type:    MessageTypeAck,
+		From:    "other",
 		Payload: ackBytes,
 	}
 
@@ -533,6 +537,41 @@ func TestGossipProtocol_handleAck(t *testing.T) {
 	}
 	if node.State != NodeStateAlive {
 		t.Errorf("Expected node state Alive, got %v", node.State)
+	}
+}
+
+// TestGossipProtocol_handleAck_Impostor guards the fix for the
+// impostor reanimation vector: handleAck must reject an Ack whose
+// payload claims a different node than the AEAD-authenticated
+// msg.From. Without that check, a compromised gossip-keyring peer
+// could keep "victim" pinned to NodeStateAlive even after it
+// actually died, defeating SWIM failure detection.
+func TestGossipProtocol_handleAck_Impostor(t *testing.T) {
+	self := &Node{ID: "self", State: NodeStateAlive, Addr: "127.0.0.1"}
+	other := &Node{ID: "other", State: NodeStateSuspect, Addr: "127.0.0.1"}
+	nl := NewNodeList(self)
+	nl.Add(other)
+
+	gp, _ := NewGossipProtocol(DefaultGossipConfig(), nl, true)
+
+	ack := AckPayload{NodeID: "other"}
+	ackBytes, _ := encodePayload(ack)
+	msg := Message{
+		Type:    MessageTypeAck,
+		From:    "impostor", // claims to be "other" but isn't
+		Payload: ackBytes,
+	}
+
+	from, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
+	gp.handleAck(msg, from)
+
+	// other should NOT have been reanimated from Suspect to Alive.
+	node, ok := nl.Get("other")
+	if !ok {
+		t.Fatal("Node should exist")
+	}
+	if node.State == NodeStateAlive {
+		t.Errorf("Impostor Ack was accepted: state moved to Alive")
 	}
 }
 
