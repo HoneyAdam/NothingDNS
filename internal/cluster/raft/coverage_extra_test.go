@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -2035,6 +2036,91 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestSnapshotter_EncryptedRoundTrip regresses SECURITY-REPORT.md
+// L-6 (Raft snapshot portion). NewSnapshotterEncrypted writes
+// AES-256-GCM-wrapped files (leading magic 0xE0) and a re-open with
+// the same key recovers the original Snapshot. The on-disk bytes
+// must not contain the cleartext state-machine payload, and a plain
+// Snapshotter (no aead key) must refuse to load an encrypted file
+// with a clear error.
+func TestSnapshotter_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	aeadKey := make([]byte, 32)
+	for i := range aeadKey {
+		aeadKey[i] = byte(i + 1)
+	}
+
+	original := &Snapshot{
+		Index:      42,
+		Term:       7,
+		LastIndex:  41,
+		LastTerm:   7,
+		Data:       []byte("zone-state-machine-payload-confidential"),
+		Membership: []NodeID{"node-alpha", "node-bravo"},
+	}
+
+	encSnap, err := NewSnapshotterEncrypted(dir, aeadKey)
+	if err != nil {
+		t.Fatalf("NewSnapshotterEncrypted (write): %v", err)
+	}
+	if err := encSnap.Save(original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// On-disk file: magic 0xE0, no plaintext membership / payload.
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var snapPath string
+	for _, fi := range files {
+		if !fi.IsDir() {
+			snapPath = filepath.Join(dir, fi.Name())
+			break
+		}
+	}
+	if snapPath == "" {
+		t.Fatal("no snapshot file written")
+	}
+	raw, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatalf("read snapshot file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("L-6 regression: magic = 0x%x, want 0xE0", raw[0])
+	}
+	for _, needle := range []string{"zone-state-machine-payload-confidential", "node-alpha", "node-bravo"} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("L-6 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the SAME aead key must recover the snapshot.
+	encSnap2, err := NewSnapshotterEncrypted(dir, aeadKey)
+	if err != nil {
+		t.Fatalf("NewSnapshotterEncrypted (read): %v", err)
+	}
+	loaded, err := encSnap2.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("Load returned nil snapshot")
+	}
+	if loaded.Index != original.Index || string(loaded.Data) != string(original.Data) {
+		t.Errorf("round-trip mismatch: got Index=%d Data=%q", loaded.Index, loaded.Data)
+	}
+
+	// Re-open WITHOUT the aead key must refuse to load.
+	plainSnap, err := NewSnapshotter(dir)
+	if err != nil {
+		t.Fatalf("NewSnapshotter (plain): %v", err)
+	}
+	if _, err := plainSnap.Load(); err == nil {
+		t.Error("L-6 regression: plain Snapshotter loaded an encrypted file without erroring")
+	}
 }
 
 // TestSnapshotterReadSnapshot_RejectsOversizedFields regresses b9f0ed5:
