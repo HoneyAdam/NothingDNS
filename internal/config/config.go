@@ -2408,7 +2408,16 @@ func (c *RPCConfig) NewTLSConfig() (*tls.Config, error) {
 		if !caCertPool.AppendCertsFromPEM(caCert) {
 			return nil, fmt.Errorf("parse RPC CA certificate: %w", err)
 		}
+		// ClientCAs gates incoming Raft RPC connections (server side).
+		// RootCAs gates outgoing peer dials (client side); without it
+		// tls.Dial falls back to the host's system trust store, so any
+		// cert chained to a public CA (Let's Encrypt, DigiCert, etc.)
+		// whose SAN matches a peer address could impersonate that peer
+		// and inject log entries. The same private CA pool is correct
+		// for both directions — Raft peers authenticate each other
+		// against the cluster-operator-issued CA only.
 		config.ClientCAs = caCertPool
+		config.RootCAs = caCertPool
 		config.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 
