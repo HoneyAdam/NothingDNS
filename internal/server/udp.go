@@ -141,8 +141,15 @@ type UDPServer struct {
 	bufferPool sync.Pool
 	// Pool for response buffers (zero-alloc hot path)
 	responsePool sync.Pool
-	// Per-IP rate limiter
-	rateLimiter *rateLimiter
+	// Per-IP rate limiter. atomic.Pointer because SetRateLimit
+	// reassigns it from operator-controlled paths (config reload,
+	// admin API) while the reader/pruner goroutines read it on the
+	// hot DNS path. Pointer reads on common architectures are
+	// already word-atomic, but the Go memory model requires explicit
+	// synchronization for cross-goroutine visibility; without it the
+	// race detector flagged this site and a CompareAndSwap-style
+	// reassignment could expose readers to a stale pointer.
+	rateLimiter atomic.Pointer[rateLimiter]
 }
 
 // NewUDPServer creates a new UDP DNS server.
@@ -179,8 +186,8 @@ func NewUDPServerWithWorkers(addr string, handler Handler, workers int) *UDPServ
 				return make([]byte, MaxUDPPayloadSize)
 			},
 		},
-		rateLimiter: newRateLimiter(UDPRateLimitWindow, UDPRateLimitMaxQueries),
 	}
+	s.rateLimiter.Store(newRateLimiter(UDPRateLimitWindow, UDPRateLimitMaxQueries))
 
 	return s
 }
@@ -257,7 +264,7 @@ func (s *UDPServer) pruner() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.rateLimiter.Prune()
+			s.rateLimiter.Load().Prune()
 		}
 	}
 }
@@ -303,7 +310,7 @@ func (s *UDPServer) reader(requestChan chan<- *udpRequest, readerWg *sync.WaitGr
 		atomic.AddUint64(&s.packetsReceived, 1)
 
 		// Check per-IP rate limit
-		if !s.rateLimiter.Allow(addr.IP.String()) {
+		if !s.rateLimiter.Load().Allow(addr.IP.String()) {
 			s.bufferPool.Put(bufPtr)
 			continue
 		}
@@ -518,12 +525,17 @@ func (s *UDPServer) Addr() net.Addr {
 
 // SetRateLimit configures the per-IP rate limit. Use 0 to disable.
 // Intended for testing and operational configuration.
+//
+// The reader and pruner goroutines read s.rateLimiter on the hot
+// DNS path. Use atomic.Pointer.Store so the swap is visible
+// without locking the readers; the previous pointer is dropped
+// for GC after no more references remain.
 func (s *UDPServer) SetRateLimit(maxQueriesPerSecond int) {
 	if maxQueriesPerSecond <= 0 {
-		s.rateLimiter = newRateLimiter(UDPRateLimitWindow, 1000000) // effectively unlimited
+		s.rateLimiter.Store(newRateLimiter(UDPRateLimitWindow, 1000000)) // effectively unlimited
 		return
 	}
-	s.rateLimiter = newRateLimiter(UDPRateLimitWindow, maxQueriesPerSecond)
+	s.rateLimiter.Store(newRateLimiter(UDPRateLimitWindow, maxQueriesPerSecond))
 }
 
 // Stats returns server statistics.

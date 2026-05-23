@@ -319,11 +319,12 @@ func TestUDPServer_SetRateLimit_Positive(t *testing.T) {
 
 	s.SetRateLimit(500)
 
-	if s.rateLimiter == nil {
+	rl := s.rateLimiter.Load()
+	if rl == nil {
 		t.Fatal("rateLimiter should not be nil")
 	}
-	if s.rateLimiter.maxCount != 500 {
-		t.Errorf("maxCount = %d, want 500", s.rateLimiter.maxCount)
+	if rl.maxCount != 500 {
+		t.Errorf("maxCount = %d, want 500", rl.maxCount)
 	}
 }
 
@@ -333,11 +334,12 @@ func TestUDPServer_SetRateLimit_Zero(t *testing.T) {
 
 	s.SetRateLimit(0)
 
-	if s.rateLimiter == nil {
+	rl := s.rateLimiter.Load()
+	if rl == nil {
 		t.Fatal("rateLimiter should not be nil")
 	}
-	if s.rateLimiter.maxCount != 1000000 {
-		t.Errorf("maxCount = %d, want 1000000 (unlimited)", s.rateLimiter.maxCount)
+	if rl.maxCount != 1000000 {
+		t.Errorf("maxCount = %d, want 1000000 (unlimited)", rl.maxCount)
 	}
 }
 
@@ -347,7 +349,8 @@ func TestUDPServer_SetRateLimit_Negative(t *testing.T) {
 
 	s.SetRateLimit(-1)
 
-	if s.rateLimiter.maxCount != 1000000 {
-		t.Errorf("maxCount = %d, want 1000000 for negative input", s.rateLimiter.maxCount)
+	rl := s.rateLimiter.Load()
+	if rl.maxCount != 1000000 {
+		t.Errorf("maxCount = %d, want 1000000 for negative input", rl.maxCount)
 	}
 }
