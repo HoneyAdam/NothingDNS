@@ -211,6 +211,12 @@ func (z *ZoneStateMachine) Restore(data []byte) error {
 }
 
 // OnUpdate sets a callback for zone updates.
+// Mutates z.onUpdate under the state-machine lock so it can be called
+// safely while applyCommand goroutines are reading the field. Without
+// this guard a SetOnUpdate racing with an in-flight Apply would
+// be a Go data race (the function-value word is non-atomic).
 func (z *ZoneStateMachine) OnUpdate(fn func(zone string, cmd ZoneCommand)) {
+	z.mu.Lock()
+	defer z.mu.Unlock()
 	z.onUpdate = fn
 }
