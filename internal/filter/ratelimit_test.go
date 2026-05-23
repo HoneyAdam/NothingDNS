@@ -258,3 +258,45 @@ func TestRateLimiter_EvictOldest(t *testing.T) {
 		t.Error("new bucket should exist after eviction")
 	}
 }
+
+// TestRateLimiter_EvictOldest_UsesLastTimeNotCreatedAt regresses
+// SECURITY-REPORT.md M-5. evictOldest used to key on bucket.createdAt
+// (creation time). An attacker spraying source IPs would churn through
+// fresh buckets while the eviction loop dropped the longest-tenured
+// legitimate clients first; when those legitimate clients next showed
+// up they got a brand-new bucket with full burst, effectively
+// resetting the per-IP cap cluster-wide. Switching the sort key to
+// lastTime gives true LRU: a steady legitimate client whose bucket
+// stays warm outlives cold attacker buckets whose first request
+// happened minutes ago.
+func TestRateLimiter_EvictOldest_UsesLastTimeNotCreatedAt(t *testing.T) {
+	rl := NewRateLimiter(config.RRLConfig{Rate: 5, Burst: 20, MaxBuckets: 100})
+	defer rl.Stop()
+
+	now := time.Now()
+	legitKey := "203.0.113.1"
+	attackerKey := "198.51.100.1"
+
+	rl.mu.Lock()
+	// Legitimate client: bucket has been around a long time but is
+	// actively kept warm — should NOT be the eviction victim.
+	rl.buckets[legitKey] = &bucket{tokens: 10, lastTime: now.Add(-2 * time.Second)}
+	// Attacker bucket: just created during a spray, used once, then
+	// abandoned. lastTime is older than the legit client's last use.
+	rl.buckets[attackerKey] = &bucket{tokens: 10, lastTime: now.Add(-1 * time.Minute)}
+	rl.mu.Unlock()
+
+	rl.evictOldest(1)
+
+	rl.mu.Lock()
+	_, legitStillPresent := rl.buckets[legitKey]
+	_, attackerStillPresent := rl.buckets[attackerKey]
+	rl.mu.Unlock()
+
+	if !legitStillPresent {
+		t.Error("M-5 regression: legitimate (warmest lastTime) bucket was evicted")
+	}
+	if attackerStillPresent {
+		t.Error("M-5 regression: stale-lastTime attacker bucket survived eviction — limit can be bypassed by IP rotation")
+	}
+}

@@ -31,9 +31,8 @@ type RateLimiter struct {
 
 // bucket holds token bucket state for a single client.
 type bucket struct {
-	tokens    float64
-	lastTime  time.Time
-	createdAt time.Time // for LRU eviction when maxBuckets exceeded
+	tokens   float64
+	lastTime time.Time // also drives LRU eviction when maxBuckets exceeded
 }
 
 // NewRateLimiter creates a rate limiter from config.
@@ -86,9 +85,8 @@ func (rl *RateLimiter) Allow(clientIP net.IP) bool {
 		}
 
 		b = &bucket{
-			tokens:    float64(rl.burst) - 1, // consume one token for this request
-			lastTime:  now,
-			createdAt: now,
+			tokens:   float64(rl.burst) - 1, // consume one token for this request
+			lastTime: now,
 		}
 		rl.buckets[key] = b
 		return true
@@ -189,44 +187,50 @@ func (rl *RateLimiter) pruneStale() {
 	}
 }
 
-// evictOldest removes the oldest n buckets by creation time.
-// Called when bucket count approaches maxBuckets during attacks.
+// evictOldest removes n least-recently-used buckets.
+//
+// Originally keyed on bucket.createdAt (creation time), which let an
+// attacker spraying source IPs bypass the limit (M-5): fresh attacker
+// buckets started with burst-1 tokens, and the longest-tenured
+// legitimate clients — who were quietly under-limit — became the
+// eviction targets. When those legitimate clients next showed up
+// they got a brand-new bucket with full burst, so the per-IP cap
+// effectively reset cluster-wide under churn.
+//
+// Switching the sort key to lastTime makes this true LRU: a steady
+// legitimate client who keeps the bucket warm via recent traffic
+// outlives the cold attacker buckets whose first burst was minutes
+// ago, and the burst-reset trick stops working.
+//
+// The sampling approach (peek up to 2*n entries, drop the n with the
+// oldest lastTime) is unchanged.
 func (rl *RateLimiter) evictOldest(n int) {
 	if n <= 0 || len(rl.buckets) == 0 {
 		return
 	}
 
-	// Simple eviction: remove n oldest by creation time
-	// For efficiency with large maps, we use a sampling approach
-	// rather than sorting all entries
 	type entry struct {
-		key       string
-		createdAt time.Time
+		key      string
+		lastTime time.Time
 	}
 
-	// Sample up to 2*n entries and remove the oldest n
-	// This is O(n) instead of O(n log n) for full sort
 	samples := make([]entry, 0, n*2)
 	for key, b := range rl.buckets {
-		samples = append(samples, entry{key: key, createdAt: b.createdAt})
+		samples = append(samples, entry{key: key, lastTime: b.lastTime})
 		if len(samples) >= n*2 {
 			break
 		}
 	}
 
-	// Find and delete n oldest from sample
 	deleted := 0
 	for deleted < n && len(samples) > 0 {
-		// Find oldest in sample
 		oldestIdx := 0
 		for i := 1; i < len(samples); i++ {
-			if samples[i].createdAt.Before(samples[oldestIdx].createdAt) {
+			if samples[i].lastTime.Before(samples[oldestIdx].lastTime) {
 				oldestIdx = i
 			}
 		}
-		// Delete it
 		delete(rl.buckets, samples[oldestIdx].key)
-		// Remove from sample slice
 		samples[oldestIdx] = samples[len(samples)-1]
 		samples = samples[:len(samples)-1]
 		deleted++
