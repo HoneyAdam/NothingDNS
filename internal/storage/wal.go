@@ -611,8 +611,20 @@ func (wal *WAL) syncLocked() error {
 	if wal.active.file == nil {
 		return nil
 	}
+	if err := wal.active.file.Sync(); err != nil {
+		// Don't clear syncPending on error — the next tick / explicit
+		// Sync call should retry. Previously this cleared the flag
+		// *before* calling Sync, so a transient EIO would silently
+		// drop the pending durability promise (the buffer was still
+		// in the page cache, but the next Append-bumped syncPending
+		// would happily get cleared by the next tick again). Worst
+		// case the daemon crashes between the failed Sync and the
+		// next Append; with the old ordering nothing remembered
+		// "we still owe a sync."
+		return err
+	}
 	wal.syncPending = false
-	return wal.active.file.Sync()
+	return nil
 }
 
 // syncLoop periodically syncs the WAL
