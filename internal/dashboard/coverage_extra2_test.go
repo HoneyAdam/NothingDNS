@@ -252,6 +252,18 @@ func TestRecordQuery_TrimRecentQueries(t *testing.T) {
 // Additional coverage: ServeHTTP with different HTTP methods
 // ============================================================================
 
+// TestServeHTTP_PostRequest regresses SECURITY-REPORT.md L-11. The
+// dashboard data endpoints previously accepted any HTTP method —
+// POST to /api/dashboard/stats returned 200 with the stats payload,
+// silently bypassing the safe-method discipline that the main API
+// uses for cookie-CSRF defense. The endpoints are read-only today,
+// so the misbehaviour wasn't itself an exploit, but any future
+// state-mutating side effect added to handleStats / handleZones /
+// handleQueryStream would have inherited the looseness. Post-fix
+// only GET is accepted; other verbs get 405 with an Allow header.
+//
+// (Historical name: this test asserted the buggy "POST → 200"
+// behaviour. The mock is unchanged; only the assertion flipped.)
 func TestServeHTTP_PostRequest(t *testing.T) {
 	server := NewServer()
 	server.SetAuthToken("test-token")
@@ -262,7 +274,10 @@ func TestServeHTTP_PostRequest(t *testing.T) {
 	w := httptest.NewRecorder()
 	server.ServeHTTP(w, req)
 
-	if w.Code != http.StatusOK {
-		t.Errorf("Expected status 200, got %d", w.Code)
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("L-11 regression: POST should return 405, got %d", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "GET" {
+		t.Errorf("L-11 regression: Allow header should be \"GET\", got %q", got)
 	}
 }
