@@ -142,6 +142,39 @@ func TestEncodeDecodeEntrySlice_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecodeAppendRequest_TruncatedLeaderCommit pins the trailing-field
+// bound check added alongside encoding.go:353. A peer that packs
+// entriesLen to consume every remaining byte leaves data[off:] empty
+// at the LeaderCommit read site — without the guard, the Uint64 call
+// panics with index-out-of-range, giving any keyring peer a one-message
+// DoS against every Raft member. The corpus seed
+// FuzzDecodeAppendRequest/8a11b8a6ad0520c7 originally tripped this.
+func TestDecodeAppendRequest_TruncatedLeaderCommit(t *testing.T) {
+	// Build a minimal AppendRequest body where entries fill the buffer.
+	//   Term(8) + leaderLen(4)=0 + LeaderID(0) + PrevLogIndex(8) +
+	//   PrevLogTerm(8) + entriesLen(4) + entries(N) — and NO LeaderCommit.
+	// Set entriesLen = 4 and use 4 trailing bytes that decodeEntrySlice
+	// accepts (count=0 → empty entries), so the trailing slice is fully
+	// consumed before the LeaderCommit read.
+	buf := make([]byte, 0, 36)
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 1) // Term = 1
+	buf = append(buf, 0, 0, 0, 0)             // leaderLen = 0
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0) // PrevLogIndex
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0) // PrevLogTerm
+	buf = append(buf, 0, 0, 0, 4)             // entriesLen = 4 (consumes all remaining)
+	buf = append(buf, 0, 0, 0, 0)             // entries body: count=0
+	// LeaderCommit deliberately omitted.
+
+	var a AppendRequest
+	err := decodeAppendRequest(&a, buf)
+	if err == nil {
+		t.Fatal("expected error for truncated LeaderCommit, got nil")
+	}
+	if !contains(err.Error(), "LeaderCommit") {
+		t.Errorf("error %q should mention LeaderCommit", err)
+	}
+}
+
 func TestDecodeEntrySlice_TruncatedHeader(t *testing.T) {
 	var got []entry
 	if err := decodeEntrySlice(&got, []byte{0}); err == nil {

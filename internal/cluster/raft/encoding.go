@@ -350,6 +350,13 @@ func decodeAppendRequest(a *AppendRequest, data []byte) error {
 		return err
 	}
 	off = entriesEnd
+	// Trailing LeaderCommit. A peer that packs entriesLen to consume
+	// every remaining byte would leave data[off:] empty, and the
+	// Uint64 read below would panic with index-out-of-range — a
+	// single-message DoS primitive against any Raft member.
+	if off+8 > len(data) {
+		return fmt.Errorf("AppendRequest: truncated LeaderCommit")
+	}
 	a.LeaderCommit = Index(binary.BigEndian.Uint64(data[off:]))
 	return nil
 }
