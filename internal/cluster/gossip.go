@@ -790,8 +790,16 @@ func (gp *GossipProtocol) handleZoneUpdate(msg Message, from *net.UDPAddr) {
 		return
 	}
 
-	// Optionally verify the message came from the leader via from address
-	// For now we trust the message type + leader state
+	// Verify the sender IS the current leader. The gossip AEAD prevents
+	// off-path attackers from injecting frames, but a compromised peer
+	// inside the keyring would otherwise be able to overwrite every
+	// other node's zone data by broadcasting forged ZoneUpdate frames
+	// with action=full and an attacker-controlled RawZone. Reject any
+	// update whose msg.From doesn't match the known leader ID.
+	if msg.From != currentLeader {
+		util.Warnf("gossip: dropped zone update from %s; current leader is %s", msg.From, currentLeader)
+		return
+	}
 
 	gp.callbacksMu.RLock()
 	onZoneUpdate := gp.onZoneUpdate
@@ -824,6 +832,14 @@ func (gp *GossipProtocol) handleConfigSync(msg Message, from *net.UDPAddr) {
 	}
 
 	if currentLeader == "" {
+		return
+	}
+
+	// Same sender-is-leader check as handleZoneUpdate. A compromised
+	// peer with the gossip key could otherwise force every follower to
+	// reload a forged configuration by sending a ConfigSync frame.
+	if msg.From != currentLeader {
+		util.Warnf("gossip: dropped config sync from %s; current leader is %s", msg.From, currentLeader)
 		return
 	}
 
