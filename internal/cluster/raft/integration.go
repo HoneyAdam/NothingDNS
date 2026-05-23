@@ -338,6 +338,16 @@ func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
 }
 
 // Stats returns cluster statistics.
+//
+// ci.appliedIndex is written by applyLoop under ci.node.mu.Lock();
+// reading it outside that lock was a data race against the
+// concurrent commit applier. While uint64 stores are atomic at the
+// hardware level on every platform we target, the Go memory model
+// still requires synchronization for cross-goroutine visibility,
+// and the race detector flagged this site. Snapshot appliedIndex
+// inside the same ci.node.mu critical section that captures
+// state and commitIndex — those three values are then a coherent
+// view of the same instant.
 func (ci *ClusterIntegration) Stats() ClusterStats {
 	ci.mu.RLock()
 	isLeader := ci.isLeader
@@ -347,6 +357,7 @@ func (ci *ClusterIntegration) Stats() ClusterStats {
 	ci.node.mu.Lock()
 	state := ci.node.state
 	commitIdx := ci.node.commitIndex
+	applied := ci.appliedIndex
 	ci.node.mu.Unlock()
 
 	return ClusterStats{
@@ -354,7 +365,7 @@ func (ci *ClusterIntegration) Stats() ClusterStats {
 		State:        state.String(),
 		Term:         int64(term),
 		CommitIndex:  int64(commitIdx),
-		AppliedIndex: int64(ci.appliedIndex),
+		AppliedIndex: int64(applied),
 		IsLeader:     isLeader,
 	}
 }
