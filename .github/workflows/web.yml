@@ -76,7 +76,11 @@ jobs:
           retire --path web/src --ignorefile retire.json
 
       - name: Run Snyk
-        uses: snyk/actions/node@master
+        # M-12: pin to a release commit SHA, not @master. With @master
+        # any push to snyk/actions runs against our SNYK_TOKEN and the
+        # GitHub OIDC token this workflow holds. Refresh this SHA when
+        # Snyk publishes a verified release.
+        uses: snyk/actions/node@cdb760004ba9ea4d525f2e043745dfe85bb9077e # v0.4.0
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:

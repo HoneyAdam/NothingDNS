@@ -7,6 +7,11 @@ version: "3.8"
 
 services:
   nothingdns:
+    # M-8: pin to a release tag for reproducibility and pull an image
+    # digest for production. Floating `:latest` lets ghcr.io re-publish
+    # under the same tag without notice. Replace the example tag below
+    # with the digest your operator has reviewed:
+    #   image: ghcr.io/nothingdns/nothingdns:v1.0.0@sha256:<digest>
     image: ghcr.io/nothingdns/nothingdns:latest
     container_name: nothingdns
     restart: unless-stopped
@@ -42,9 +47,14 @@ services:
       # Data directory (cache, sessions, etc.)
       - nothingdns-data:/data
 
-    # Health check using the API endpoint
+    # Health check. M-9: the final image is FROM scratch and has no
+    # shell, no wget, no curl — the previous wget probe was always
+    # unhealthy. dnsctl ships in the same image and `server health`
+    # exits non-zero on failure, so it is the only viable in-image
+    # probe. K8s / Swarm operators may prefer to wire the HTTP /health
+    # endpoint directly via a livenessProbe.
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      test: ["CMD", "/usr/local/bin/dnsctl", "server", "health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -66,6 +76,18 @@ services:
     # Network capabilities (required for binding to port 53)
     cap_add:
       - NET_BIND_SERVICE
+    # M-10: defense-in-depth hardening. The Go binary only needs
+    # NET_BIND_SERVICE; drop everything else and refuse privilege
+    # escalation. read_only makes the rootfs immutable (writes go to
+    # the /data volume only), and pids_limit caps fork-bomb damage.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    pids_limit: 512
 
     # Network mode
     networks:
