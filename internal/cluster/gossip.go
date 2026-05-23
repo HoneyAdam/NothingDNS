@@ -546,23 +546,9 @@ func (gp *GossipProtocol) handlePing(msg Message, from *net.UDPAddr) {
 		util.Warnf("gossip: failed to encode ack payload: %v", err)
 		return
 	}
-	data, err := encodeMessage(MessageTypeAck, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, ackBytes)
-	if err != nil {
-		util.Warnf("gossip: failed to encode ack message: %v", err)
-		return
-	}
-	// Encrypt if enabled
-	if gp.aead != nil {
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt ack: %v", err)
-			return
-		}
-	}
-	if _, err := gp.conn.WriteToUDP(data, from); err != nil {
+	if err := gp.sendMessage(MessageTypeAck, ackBytes, from); err != nil {
 		util.Warnf("gossip: failed to send ack to %s: %v", from, err)
 	}
-	atomic.AddUint64(&gp.messagesSent, 1)
 }
 
 // handleAck handles an ack message.
@@ -946,30 +932,15 @@ func (gp *GossipProtocol) BroadcastDraining(draining bool, inFlightReq int) erro
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeDraining, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return err
-		}
-	}
-
+	self := gp.nodeList.GetSelf()
 	for _, node := range gp.nodeList.GetAll() {
-		if node.ID == gp.nodeList.GetSelf().ID {
+		if node.ID == self.ID {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeDraining, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send draining message to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
@@ -1018,30 +989,15 @@ func (gp *GossipProtocol) BroadcastNodeStats(stats NodeHealthStats) error {
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeNodeStats, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return err
-		}
-	}
-
+	self := gp.nodeList.GetSelf()
 	for _, node := range gp.nodeList.GetAll() {
-		if node.ID == gp.nodeList.GetSelf().ID {
+		if node.ID == self.ID {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeNodeStats, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send node stats to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
@@ -1204,28 +1160,13 @@ func (gp *GossipProtocol) muLeaderSendHeartbeat() {
 		return
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeHeartbeat, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return
-		}
-	}
-
 	for _, node := range gp.nodeList.GetAll() {
 		if node.ID == self.ID || node.State != NodeStateAlive {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
-			util.Warnf("gossip: failed to broadcast message to %s: %v", addr, err)
+		if err := gp.sendMessage(MessageTypeHeartbeat, payloadBytes, addr); err != nil {
+			util.Warnf("gossip: failed to send heartbeat to %s: %v", addr, err)
 		}
 	}
 }
@@ -1387,20 +1328,7 @@ func (gp *GossipProtocol) gossip() {
 		return
 	}
 
-	data, err := encodeMessage(MessageTypeGossip, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return
-	}
-
-	// Encrypt if enabled
-	if gp.aead != nil {
-		data, err = gp.encrypt(data)
-		if err != nil {
-			return
-		}
-	}
-
-	// Send to random nodes
+	// Send to random nodes via sendMessage for proper sequencing + AAD.
 	for i := 0; i < gp.config.GossipNodes; i++ {
 		target := gp.nodeList.GetRandom(nil)
 		if target == nil {
@@ -1412,10 +1340,9 @@ func (gp *GossipProtocol) gossip() {
 			util.Warnf("gossip: failed to resolve address for %s: %v", target.Addr, err)
 			continue
 		}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeGossip, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send gossip to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 }
 
@@ -1492,26 +1419,14 @@ func (gp *GossipProtocol) sendPing(node *Node) {
 		util.Warnf("gossip: failed to encode ping payload: %v", err)
 		return
 	}
-	data, err := encodeMessage(MessageTypePing, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, pingBytes)
-	if err != nil {
-		util.Warnf("gossip: failed to encode ping message: %v", err)
-		return
-	}
-	// Encrypt if enabled
-	if gp.aead != nil {
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt ping: %v", err)
-			return
-		}
-	}
 	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", node.Addr, gp.config.BindPort))
 	if err != nil {
 		util.Warnf("gossip: failed to resolve address for %s: %v", node.Addr, err)
 		return
 	}
-	if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+	if err := gp.sendMessage(MessageTypePing, pingBytes, addr); err != nil {
 		util.Warnf("gossip: failed to send ping to %s: %v", addr, err)
+		return
 	}
 	atomic.AddUint64(&gp.pingSent, 1)
 }
@@ -1699,8 +1614,11 @@ func (gp *GossipProtocol) sendMessage(msgType MessageType, payload []byte, addr 
 		}
 	}
 
-	_, err = gp.conn.WriteToUDP(data, addr)
-	return err
+	if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		return err
+	}
+	atomic.AddUint64(&gp.messagesSent, 1)
+	return nil
 }
 
 // encryptWithAAD encrypts with additional authenticated data for replay/cross-peer protection.
