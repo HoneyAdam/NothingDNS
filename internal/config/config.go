@@ -1852,6 +1852,16 @@ func (c *Config) validateSecrets() []string {
 		errors = append(errors, fmt.Sprintf(
 			"http.auth_secret still contains placeholder %q — set it via ${NOTHINGDNS_AUTH_SECRET} or replace with a real 32-byte random secret before starting",
 			token))
+	} else if c.Server.HTTP.AuthSecret != "" {
+		// L-5: AuthSecret is the HMAC-SHA512 session-signing key — a
+		// short / low-entropy value lets an attacker brute-force token
+		// forgery. The placeholder branch above already short-circuits
+		// the obvious "REPLACEME" mistakes; this branch catches the
+		// less obvious "I picked a short word" mistake. Same gate the
+		// auth_token block above uses.
+		if err := secretHasMinEntropy("http.auth_secret", c.Server.HTTP.AuthSecret); err != nil {
+			errors = append(errors, err.Error())
+		}
 	}
 	for i, user := range c.Server.HTTP.Users {
 		if token := looksLikePlaceholderSecret(user.Password); token != "" {

@@ -659,6 +659,42 @@ func TestValidateSecrets_AcceptsEmptyAndRealSecrets(t *testing.T) {
 	}
 }
 
+// TestValidate_AuthSecret_RejectsShortString regresses SECURITY-REPORT.md
+// L-5. http.auth_secret had a placeholder-check but no entropy check,
+// so a config with auth_secret: "x" or auth_secret: "short" passed
+// validation despite being a uselessly short HMAC-SHA512 signing
+// key. Post-fix it runs through the same secretHasMinEntropy gate the
+// auth_token block uses (>= 32 bytes, >= 3 character classes).
+func TestValidate_AuthSecret_RejectsShortString(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		secret    string
+		wantError bool
+	}{
+		{"empty — allowed (per-run random)", "", false},
+		{"5 bytes — too short", "short", true},
+		{"31 bytes — one below minimum", "abcdefghij1234567890ABCDEFGHIJ", true},
+		{"32 bytes, 3 classes — accepted", "abcdefghij1234567890ABCDEFGHIJKL", false},
+		{"32 bytes, only lowercase — too few classes", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Server.HTTP.AuthSecret = tc.secret
+			errors := c.Validate()
+			gotHit := false
+			for _, e := range errors {
+				if strings.Contains(e, "http.auth_secret") {
+					gotHit = true
+					break
+				}
+			}
+			if gotHit != tc.wantError {
+				t.Errorf("got hit=%v wantError=%v; errors=%v", gotHit, tc.wantError, errors)
+			}
+		})
+	}
+}
+
 func TestLooksLikePlaceholderSecret(t *testing.T) {
 	for _, tc := range []struct {
 		in       string
