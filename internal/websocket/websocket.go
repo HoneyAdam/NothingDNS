@@ -174,7 +174,19 @@ func (c *Conn) SetRateLimit(maxMessages int, window time.Duration) {
 }
 
 // checkRateLimit returns true if the connection is within rate limits.
+//
+// Reads/writes the rate-limit fields under c.mu — SetRateLimit
+// holds c.mu while resetting these same fields, and ReadMessage
+// releases c.mu before calling us (to avoid holding the lock
+// across I/O). Without locking here, the post-unlock checkRateLimit
+// raced with any operator-initiated SetRateLimit on the same Conn:
+// rateMax could be read as the old value while rateWindow/rateCount
+// were already reset, or rateCount could overflow past the new
+// rateMax without being noticed. Take the lock for the brief
+// state mutation.
 func (c *Conn) checkRateLimit() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.rateMax == 0 {
 		return true
 	}
