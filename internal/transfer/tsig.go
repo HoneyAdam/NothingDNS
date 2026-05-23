@@ -155,14 +155,27 @@ func (ks *KeyStore) ValidateKeySource(keyName string, clientIP net.IP) error {
 	if len(key.AllowedCIDRs) == 0 {
 		return nil // No IP restriction on this key
 	}
+	// L-9: skip malformed CIDR entries instead of returning an error
+	// outright. The earlier short-circuit silently dropped every key
+	// whose AllowedCIDRs list contained a typo in any position — even
+	// if the operator-intended CIDR was present and would have matched
+	// the request. Log a warning per malformed entry so the misconfig
+	// is visible, then fall through to the "no match" error below if
+	// none of the valid CIDRs contained the client IP.
+	matched := false
 	for _, cidr := range key.AllowedCIDRs {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {
-			return fmt.Errorf("invalid TSIG key %s AllowedCIDR %q: %w", keyName, cidr, err)
+			util.Warnf("TSIG key %s AllowedCIDR %q is malformed (%v); skipping this entry", keyName, cidr, err)
+			continue
 		}
 		if ipNet.Contains(clientIP) {
-			return nil
+			matched = true
+			break
 		}
+	}
+	if matched {
+		return nil
 	}
 	return fmt.Errorf("client IP %s not in TSIG key %s allowed list", clientIP, keyName)
 }

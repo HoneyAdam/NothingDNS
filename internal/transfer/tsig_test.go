@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"bytes"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -582,5 +583,32 @@ func TestRDataTSIG_String_Invalid(t *testing.T) {
 	str := rdata.String()
 	if !strings.Contains(str, "invalid") {
 		t.Errorf("Expected string to contain 'invalid', got %s", str)
+	}
+}
+
+// TestValidateKeySource_SkipsMalformedCIDRs regresses SECURITY-REPORT.md
+// L-9. ValidateKeySource used to bail out with an error on the first
+// malformed AllowedCIDR entry, silently dropping every key whose list
+// contained a typo even if a later valid CIDR would have matched. The
+// fix skips malformed entries (with a util.Warnf for operator
+// visibility) and keeps checking the rest.
+func TestValidateKeySource_SkipsMalformedCIDRs(t *testing.T) {
+	ks := NewKeyStore()
+	ks.AddKey(&TSIGKey{
+		Name:      "k.example.com.",
+		Algorithm: HmacSHA256,
+		Secret:    []byte("test-secret-key-data"),
+		// First entry is intentionally garbage; second is the real
+		// allowlist. Pre-fix the function returned early on the typo
+		// and the valid CIDR was never checked.
+		AllowedCIDRs: []string{"not-a-cidr-at-all", "192.0.2.0/24"},
+	})
+
+	if err := ks.ValidateKeySource("k.example.com.", net.ParseIP("192.0.2.5")); err != nil {
+		t.Errorf("L-9 regression: malformed first CIDR blocked a valid second match: %v", err)
+	}
+	// And confirm the "no valid match" path still errors correctly.
+	if err := ks.ValidateKeySource("k.example.com.", net.ParseIP("198.51.100.5")); err == nil {
+		t.Error("expected error for IP outside all valid CIDRs")
 	}
 }
