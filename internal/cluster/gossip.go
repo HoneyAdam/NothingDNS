@@ -639,6 +639,16 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 }
 
 // handleCacheInvalidate handles cache invalidation messages.
+//
+// Impostor protection: payload.Source declares which node "owns"
+// this invalidation; msg.From is the AEAD-authenticated sender.
+// Without checking equality, a compromised gossip-keyring peer
+// could spoof CacheInvalidatePayload{Source: "victim", Keys: ["
+// bank.com:A", ...]} and force every observer to evict targeted
+// entries from its DNS cache — a chosen-prefix cache-bust that
+// pushes the next query for those names back through the upstream/
+// resolver path, useful as a stepping stone for slow MITM attacks.
+// Same defense as ZoneUpdate, ConfigSync, NodeStats, etc.
 func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) {
 	var payload CacheInvalidatePayload
 	if err := decodePayload(msg.Payload, &payload); err != nil {
@@ -647,6 +657,11 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 
 	// Ignore messages from self
 	if payload.Source == gp.nodeList.GetSelf().ID {
+		return
+	}
+
+	if msg.From != payload.Source {
+		util.Warnf("gossip: dropped CacheInvalidate from impostor %s claiming source %s", msg.From, payload.Source)
 		return
 	}
 

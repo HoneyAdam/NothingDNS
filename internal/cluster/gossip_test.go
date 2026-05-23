@@ -683,7 +683,10 @@ func TestGossipProtocol_handleCacheInvalidate(t *testing.T) {
 		nil, nil,
 	)
 
-	// Create cache invalidate message
+	// Create cache invalidate message. handleCacheInvalidate now
+	// enforces msg.From == payload.Source — set both so this
+	// represents the legitimate flow (impostor coverage lives in
+	// TestGossipProtocol_handleCacheInvalidate_Impostor below).
 	cachePayload := CacheInvalidatePayload{
 		Keys:      []string{"key1", "key2"},
 		Source:    "other-node",
@@ -692,6 +695,7 @@ func TestGossipProtocol_handleCacheInvalidate(t *testing.T) {
 	payloadBytes, _ := encodePayload(cachePayload)
 	msg := Message{
 		Type:    MessageTypeCacheInvalidate,
+		From:    "other-node",
 		Payload: payloadBytes,
 	}
 
@@ -700,6 +704,38 @@ func TestGossipProtocol_handleCacheInvalidate(t *testing.T) {
 
 	if len(cacheInvalidKeys) != 2 {
 		t.Errorf("Expected 2 keys, got %d", len(cacheInvalidKeys))
+	}
+}
+
+// TestGossipProtocol_handleCacheInvalidate_Impostor guards the
+// chosen-prefix cache-bust path: handleCacheInvalidate must reject
+// any CacheInvalidate frame whose payload.Source disagrees with the
+// AEAD-authenticated msg.From. Without that check, a compromised
+// gossip-keyring peer could spoof Source="victim" and force every
+// observer to evict targeted DNS cache entries.
+func TestGossipProtocol_handleCacheInvalidate_Impostor(t *testing.T) {
+	self := &Node{ID: "self", State: NodeStateAlive, Addr: "127.0.0.1"}
+	nl := NewNodeList(self)
+	gp, _ := NewGossipProtocol(DefaultGossipConfig(), nl, true)
+
+	var called bool
+	gp.SetCallbacks(nil, nil, nil, func(keys []string) { called = true }, nil, nil)
+
+	cachePayload := CacheInvalidatePayload{
+		Keys:   []string{"bank.com:A"},
+		Source: "other-node",
+	}
+	payloadBytes, _ := encodePayload(cachePayload)
+	msg := Message{
+		Type:    MessageTypeCacheInvalidate,
+		From:    "impostor", // claims Source="other-node" but isn't
+		Payload: payloadBytes,
+	}
+	from, _ := net.ResolveUDPAddr("udp", "127.0.0.1:12345")
+	gp.handleCacheInvalidate(msg, from)
+
+	if called {
+		t.Errorf("Impostor CacheInvalidate was accepted: callback fired")
 	}
 }
 
