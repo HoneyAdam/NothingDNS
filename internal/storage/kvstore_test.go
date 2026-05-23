@@ -10,6 +10,60 @@ import (
 	"time"
 )
 
+// TestKVStore_HMACRoundTrip guards against a regression where readTLV
+// computed expectedHMAC via hmac.New(...).Sum(payload), which appended
+// the empty-string MAC to the payload bytes instead of hashing the
+// payload. ConstantTimeCompare then always saw a length mismatch and
+// returned 0, so every TLV+HMAC file was rejected as tampered —
+// HMAC mode was effectively broken. This test writes a value with an
+// HMAC key, closes, re-opens with the SAME key, and reads back to
+// confirm the integrity check accepts genuine data.
+func TestKVStore_HMACRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hmac.db")
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+
+	store, err := OpenKVStore(path, key)
+	if err != nil {
+		t.Fatalf("OpenKVStore (write): %v", err)
+	}
+
+	if err := store.Update(func(tx *Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("bucket"))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte("key"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	store2, err := OpenKVStore(path, key)
+	if err != nil {
+		t.Fatalf("OpenKVStore (re-open with correct HMAC key): %v", err)
+	}
+	defer store2.Close()
+
+	if err := store2.View(func(tx *Tx) error {
+		b := tx.Bucket([]byte("bucket"))
+		if b == nil {
+			return fmt.Errorf("bucket missing")
+		}
+		got := b.Get([]byte("key"))
+		if string(got) != "value" {
+			return fmt.Errorf("expected %q, got %q", "value", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
 func TestKVStoreOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 

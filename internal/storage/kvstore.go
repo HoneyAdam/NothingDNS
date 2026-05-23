@@ -228,8 +228,24 @@ func (s *KVStore) readTLV(r io.Reader) error {
 	payload := record[:payloadLen]
 
 	// Verify HMAC if we have a key.
+	//
+	// hash.Hash.Sum(b) APPENDS the hash state to b and returns the
+	// result — it does NOT hash b. The previous call
+	//
+	//	expectedHMAC := hmac.New(sha256.New, s.hmacKey).Sum(payload)
+	//
+	// produced (payload || HMAC(key, "")) — payload bytes followed by
+	// the HMAC of an EMPTY string. That made expectedHMAC longer than
+	// storedHMAC (32 bytes) by exactly len(payload), so
+	// subtle.ConstantTimeCompare returned 0 every time (it returns 0
+	// immediately on length mismatch), and every TLV+HMAC file
+	// rejected as tampered. HMAC mode was completely broken: writeTLV
+	// (Write+Sum(nil)) wrote the correct MAC, but readTLV never
+	// accepted it.
 	if s.hmacKey != nil {
-		expectedHMAC := hmac.New(sha256.New, s.hmacKey).Sum(payload)
+		hm := hmac.New(sha256.New, s.hmacKey)
+		hm.Write(payload)
+		expectedHMAC := hm.Sum(nil)
 		if subtle.ConstantTimeCompare(storedHMAC, expectedHMAC) != 1 {
 			return ErrDataTampered
 		}
