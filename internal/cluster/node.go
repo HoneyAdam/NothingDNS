@@ -150,11 +150,24 @@ func NewNodeList(self *Node) *NodeList {
 	return nl
 }
 
-// GetSelf returns the local node.
+// GetSelf returns a value-copy of the local node.
+//
+// Returning the live pointer let callers read self.Version / self.State
+// AFTER releasing the read lock, racing UpdateSelfState's writes
+// (which mutate Version/State/LastSeen under nl.mu.Lock). The race
+// detector flagged the reads in handleHeartbeat / handlePing /
+// handleAck where gp.nodeList.GetSelf().Version is read on the
+// hot path while UpdateSelfState ticks Version on every Draining
+// transition. Returning a copy matches the discipline already
+// adopted by Get/GetAll/GetAlive in this file.
 func (nl *NodeList) GetSelf() *Node {
 	nl.mu.RLock()
 	defer nl.mu.RUnlock()
-	return nl.self
+	if nl.self == nil {
+		return nil
+	}
+	cp := *nl.self
+	return &cp
 }
 
 // Get returns a value copy of a node by ID.

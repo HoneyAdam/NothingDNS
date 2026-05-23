@@ -75,7 +75,7 @@ func TestNewNodeList(t *testing.T) {
 		t.Errorf("Expected 1 node, got %d", nl.Count())
 	}
 
-	if got := nl.GetSelf(); got != self {
+	if got := nl.GetSelf(); got == nil || got.ID != self.ID {
 		t.Error("GetSelf() did not return self node")
 	}
 }
@@ -347,9 +347,15 @@ func TestNodeList_Remove_Self(t *testing.T) {
 		t.Error("Self should be removed from nodes map")
 	}
 
-	// But GetSelf should still return the self pointer
-	if nl.GetSelf() != self {
-		t.Error("GetSelf() should still return self node")
+	// GetSelf returns a value copy now (so callers can read fields
+	// after releasing the lock without racing UpdateSelfState writers).
+	// We can no longer assert pointer identity — compare by ID instead.
+	got := nl.GetSelf()
+	if got == nil {
+		t.Fatal("GetSelf() should still return self node, got nil")
+	}
+	if got.ID != self.ID {
+		t.Errorf("GetSelf() returned ID %q, want %q", got.ID, self.ID)
 	}
 }
 
