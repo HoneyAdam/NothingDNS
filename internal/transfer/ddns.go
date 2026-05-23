@@ -539,7 +539,16 @@ func zoneDeleteRecord(z *zone.Zone, name string, rrType uint16, rdata string) {
 			newRecords = append(newRecords, r)
 		}
 	}
-	z.Records[name] = newRecords
+	// Remove the map key entirely when no records remain, matching the
+	// behavior of zone.Manager.DeleteRecord. Leaving an empty slice
+	// behind accumulates empty-name entries that the rest of the code
+	// has to defensively len()-check; they also leak into AXFR/IXFR
+	// enumerations and zone export.
+	if len(newRecords) == 0 {
+		delete(z.Records, name)
+	} else {
+		z.Records[name] = newRecords
+	}
 }
 
 // zoneDeleteRRSet deletes all records of a specific type at a name
@@ -560,7 +569,11 @@ func zoneDeleteRRSet(z *zone.Zone, name string, rrType uint16) {
 			newRecords = append(newRecords, r)
 		}
 	}
-	z.Records[name] = newRecords
+	if len(newRecords) == 0 {
+		delete(z.Records, name)
+	} else {
+		z.Records[name] = newRecords
+	}
 }
 
 // zoneDeleteName deletes all records at a name
