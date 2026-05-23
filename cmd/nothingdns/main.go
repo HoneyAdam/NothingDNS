@@ -232,9 +232,10 @@ func run() error {
 		cfg.Server.HTTP.Users[i].Password = strings.Repeat("\x00", len(cfg.Server.HTTP.Users[i].Password))
 	}
 	authStore, err := auth.NewStore(&auth.Config{
-		Secret:      cfg.Server.HTTP.AuthSecret,
-		Users:       authUsers,
-		TokenExpiry: auth.Duration{Duration: 24 * time.Hour},
+		Secret:             cfg.Server.HTTP.AuthSecret,
+		Users:              authUsers,
+		TokenExpiry:        auth.Duration{Duration: 24 * time.Hour},
+		MaxSessionsPerUser: cfg.Server.HTTP.MaxSessionsPerUser, // L-N10
 	})
 	if err != nil {
 		logger.Fatalf("Failed to initialize auth store: %v", err)

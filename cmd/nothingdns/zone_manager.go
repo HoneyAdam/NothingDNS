@@ -4,6 +4,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
 	"github.com/nothingdns/nothingdns/internal/storage"
@@ -103,16 +105,18 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 		kvDataDir = "."
 	}
 	// L-6: pass the optional at-rest AEAD key. config.Validate has
-	// already enforced 32-byte hex + key-separation, so a hex decode
-	// failure here would be a bug, not a misconfig.
+	// already enforced 32-byte hex + key-separation, so a decode
+	// failure here is either a bug or a Validate-bypass; either way,
+	// L-N11 says fail-fast — silently dropping to plaintext while
+	// the operator thinks encryption is on is the worst outcome
+	// (matches L-4's fail-fast pattern for token persistence).
 	var aeadKey []byte
 	if hexKey := cfg.Storage.EncryptionKey; hexKey != "" {
 		decoded, decErr := decodeHex32(hexKey)
 		if decErr != nil {
-			logger.Warnf("Storage encryption key invalid (%v); KV will open in plaintext mode", decErr)
-		} else {
-			aeadKey = decoded
+			return nil, fmt.Errorf("storage.encryption_key invalid (%v); refusing to start in plaintext mode (L-N11)", decErr)
 		}
+		aeadKey = decoded
 	}
 	kvStore, err := storage.OpenKVStoreEncrypted(kvDataDir, nil, aeadKey)
 	if err != nil {

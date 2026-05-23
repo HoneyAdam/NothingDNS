@@ -524,6 +524,13 @@ type HTTPConfig struct {
 	// in-memory only and all sessions are invalidated on restart.
 	TokenPersistencePath string `yaml:"token_persistence_path"`
 
+	// MaxSessionsPerUser caps the number of simultaneous tokens any
+	// single user may hold. 0 means unlimited. The auth.Store
+	// already implements the cap (with eviction-by-oldest semantics);
+	// L-N10 wired this field through to NewStore so operators can
+	// actually use it.
+	MaxSessionsPerUser int `yaml:"max_sessions_per_user"`
+
 	// DoH (DNS over HTTPS) settings
 	DoHEnabled bool   `yaml:"doh_enabled"` // Enable DoH endpoint
 	DoHPath    string `yaml:"doh_path"`    // DoH endpoint path (default: /dns-query)
@@ -1292,6 +1299,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.HTTP.AuthTokenRole = httpNode.GetString("auth_token_role")
 		cfg.HTTP.AuthSecret = httpNode.GetString("auth_secret")
 		cfg.HTTP.TokenPersistencePath = httpNode.GetString("token_persistence_path")
+		cfg.HTTP.MaxSessionsPerUser = getInt(httpNode, "max_sessions_per_user", cfg.HTTP.MaxSessionsPerUser)
 		cfg.HTTP.AllowedOrigins = getStringSlice(httpNode, "allowed_origins", cfg.HTTP.AllowedOrigins)
 		cfg.HTTP.DoHEnabled = getBool(httpNode, "doh_enabled", cfg.HTTP.DoHEnabled)
 		cfg.HTTP.DoHPath = httpNode.GetString("doh_path")
