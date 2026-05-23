@@ -142,10 +142,18 @@ func (r *RDataCNAME) Pack(buf []byte, offset int) (int, error) {
 }
 
 // Unpack deserializes the CNAME record.
+//
+// Verifies the consumed bytes don't exceed rdlength so a malformed
+// or attacker-crafted RDLENGTH can't desync UnpackResourceRecord's
+// offset cursor for the rest of the message. See the TXT/SOA
+// rdlength-bypass fixes for the broader class.
 func (r *RDataCNAME) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	name, n, err := UnpackName(buf, offset)
 	if err != nil {
 		return 0, err
+	}
+	if n > int(rdlength) {
+		return 0, fmt.Errorf("CNAME overflows rdlength (%d > %d)", n, rdlength)
 	}
 	r.CName = name
 	return n, nil
@@ -193,11 +201,15 @@ func (r *RDataDNAME) Pack(buf []byte, offset int) (int, error) {
 	return PackName(r.DName, buf, offset, nil)
 }
 
-// Unpack deserializes the DNAME record.
+// Unpack deserializes the DNAME record. See RDataCNAME.Unpack for the
+// rdlength-bypass rationale.
 func (r *RDataDNAME) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	name, n, err := UnpackName(buf, offset)
 	if err != nil {
 		return 0, err
+	}
+	if n > int(rdlength) {
+		return 0, fmt.Errorf("DNAME overflows rdlength (%d > %d)", n, rdlength)
 	}
 	r.DName = name
 	return n, nil
@@ -245,11 +257,15 @@ func (r *RDataNS) Pack(buf []byte, offset int) (int, error) {
 	return PackName(r.NSDName, buf, offset, nil)
 }
 
-// Unpack deserializes the NS record.
+// Unpack deserializes the NS record. See RDataCNAME.Unpack for the
+// rdlength-bypass rationale.
 func (r *RDataNS) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	name, n, err := UnpackName(buf, offset)
 	if err != nil {
 		return 0, err
+	}
+	if n > int(rdlength) {
+		return 0, fmt.Errorf("NS overflows rdlength (%d > %d)", n, rdlength)
 	}
 	r.NSDName = name
 	return n, nil
@@ -297,11 +313,15 @@ func (r *RDataPTR) Pack(buf []byte, offset int) (int, error) {
 	return PackName(r.PtrDName, buf, offset, nil)
 }
 
-// Unpack deserializes the PTR record.
+// Unpack deserializes the PTR record. See RDataCNAME.Unpack for the
+// rdlength-bypass rationale.
 func (r *RDataPTR) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	name, n, err := UnpackName(buf, offset)
 	if err != nil {
 		return 0, err
+	}
+	if n > int(rdlength) {
+		return 0, fmt.Errorf("PTR overflows rdlength (%d > %d)", n, rdlength)
 	}
 	r.PtrDName = name
 	return n, nil
@@ -366,13 +386,19 @@ func (r *RDataMX) Pack(buf []byte, offset int) (int, error) {
 	return offset - startOffset, nil
 }
 
-// Unpack deserializes the MX record.
+// Unpack deserializes the MX record. See RDataCNAME.Unpack for the
+// rdlength-bypass rationale; enforce that the 2-byte preference plus
+// the encoded Exchange name fit strictly within rdlength.
 func (r *RDataMX) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	startOffset := offset
+	endOffset := offset + int(rdlength)
+	if endOffset > len(buf) {
+		return 0, ErrBufferTooSmall
+	}
 
 	// Preference
-	if offset+2 > len(buf) {
-		return 0, ErrBufferTooSmall
+	if offset+2 > endOffset {
+		return 0, fmt.Errorf("MX preference overflows rdlength")
 	}
 	r.Preference = Uint16(buf[offset:])
 	offset += 2
@@ -384,6 +410,9 @@ func (r *RDataMX) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	}
 	r.Exchange = name
 	offset += n
+	if offset > endOffset {
+		return 0, fmt.Errorf("MX Exchange overflows rdlength")
+	}
 
 	return offset - startOffset, nil
 }
@@ -571,8 +600,20 @@ func (r *RDataSOA) Pack(buf []byte, offset int) (int, error) {
 }
 
 // Unpack deserializes the SOA record.
+//
+// Enforces the rdlength boundary so a peer cannot send an SOA whose
+// declared RDLENGTH disagrees with the actual MName+RName+fixed
+// fields. Without this check, a too-small RDLENGTH would let us
+// read 20 fixed bytes from the FOLLOWING resource record's wire
+// image as SOA fields, and we'd return n > rdlength to
+// UnpackResourceRecord — corrupting every subsequent record's
+// offset. Same class as the TXT rdlength-bypass fix.
 func (r *RDataSOA) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	startOffset := offset
+	endOffset := offset + int(rdlength)
+	if endOffset > len(buf) {
+		return 0, ErrBufferTooSmall
+	}
 
 	// MName
 	mname, n, err := UnpackName(buf, offset)
@@ -581,6 +622,9 @@ func (r *RDataSOA) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 	}
 	r.MName = mname
 	offset += n
+	if offset > endOffset {
+		return 0, fmt.Errorf("SOA MName overflows rdlength")
+	}
 
 	// RName
 	rname, n, err := UnpackName(buf, offset)
@@ -589,10 +633,14 @@ func (r *RDataSOA) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 	}
 	r.RName = rname
 	offset += n
+	if offset > endOffset {
+		return 0, fmt.Errorf("SOA RName overflows rdlength")
+	}
 
-	// Check space for fixed fields
-	if offset+20 > len(buf) {
-		return 0, ErrBufferTooSmall
+	// Check space for fixed fields against the rdlength boundary,
+	// not just the overall buffer.
+	if offset+20 > endOffset {
+		return 0, fmt.Errorf("SOA fixed fields overflow rdlength")
 	}
 
 	// Serial, Refresh, Retry, Expire, Minimum
@@ -699,12 +747,21 @@ func (r *RDataSRV) Pack(buf []byte, offset int) (int, error) {
 }
 
 // Unpack deserializes the SRV record.
+//
+// Enforces the rdlength boundary so a malicious peer cannot
+// declare a too-small RDLENGTH and have us advance past the
+// next RR's start while consuming the Target's name + compression
+// pointer bytes. Same rdlength-bypass class as the TXT / SOA fixes.
 func (r *RDataSRV) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 	startOffset := offset
+	endOffset := offset + int(rdlength)
+	if endOffset > len(buf) {
+		return 0, ErrBufferTooSmall
+	}
 
 	// Priority, Weight, Port
-	if offset+6 > len(buf) {
-		return 0, ErrBufferTooSmall
+	if offset+6 > endOffset {
+		return 0, fmt.Errorf("SRV fixed fields overflow rdlength")
 	}
 	r.Priority = Uint16(buf[offset:])
 	offset += 2
@@ -720,6 +777,9 @@ func (r *RDataSRV) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 	}
 	r.Target = target
 	offset += n
+	if offset > endOffset {
+		return 0, fmt.Errorf("SRV Target overflows rdlength")
+	}
 
 	return offset - startOffset, nil
 }
