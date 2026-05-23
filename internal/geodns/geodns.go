@@ -361,15 +361,22 @@ func (e *Engine) RemoveRule(domain, rtype string) {
 }
 
 // Stats returns GeoDNS engine statistics.
+//
+// mmdbLoaded is written under e.mu.Lock() by LoadMMDB; reading it
+// outside the lock raced with a concurrent reload and produced a
+// data race (and could observe mmdbLoaded=true while mmdbData was
+// still mid-swap). Snapshot mmdbLoaded together with the rule
+// count under the same RLock.
 func (e *Engine) Stats() Stats {
 	e.mu.RLock()
 	ruleCount := len(e.rules)
+	mmdbLoaded := e.mmdbLoaded
 	e.mu.RUnlock()
 
 	return Stats{
 		Enabled:    e.enabled,
 		Rules:      ruleCount,
-		MMDBLoaded: e.mmdbLoaded,
+		MMDBLoaded: mmdbLoaded,
 		Lookups:    atomic.LoadUint64(&e.lookups),
 		Hits:       atomic.LoadUint64(&e.hits),
 		Misses:     atomic.LoadUint64(&e.misses),
