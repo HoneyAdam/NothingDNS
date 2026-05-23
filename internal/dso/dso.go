@@ -537,18 +537,32 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 			if err != nil {
 				return nil, err
 			}
+			// Writes to session.KeepaliveTime / keepalivesEnabled race
+			// against SendKeepalive (which reads KeepaliveTime under no
+			// lock) and against any reader of keepalivesEnabled. Guard
+			// the field update with session.mu so the keepalive ticker
+			// and this handler stay coherent.
+			session.mu.Lock()
 			session.KeepaliveTime = primary
 			session.keepalivesEnabled = true
+			session.mu.Unlock()
 			responseTLVs = append(responseTLVs, NewKeepaliveTLV(primary, secondary))
 
 		case DSOTLVMaximumPayload:
 			// Acknowledge max payload
 			if len(tlv.Value) >= 2 {
 				maxPayload := binary.BigEndian.Uint16(tlv.Value)
+				// MaxPayload is read by every send path; mutation must
+				// be serialised. Read-update-read under the write lock,
+				// then capture the resulting value for the response TLV
+				// after dropping the lock.
+				session.mu.Lock()
 				if maxPayload > 0 && maxPayload < session.MaxPayload {
 					session.MaxPayload = maxPayload
 				}
-				responseTLVs = append(responseTLVs, NewMaximumPayloadTLV(session.MaxPayload))
+				cur := session.MaxPayload
+				session.mu.Unlock()
+				responseTLVs = append(responseTLVs, NewMaximumPayloadTLV(cur))
 			}
 
 		case DSOTLVPadding:
@@ -630,8 +644,14 @@ func (m *Manager) SendKeepalive(session *Session) error {
 		return fmt.Errorf("dso: session %d has no connection", session.ID)
 	}
 
+	// Snapshot KeepaliveTime under the session lock — it can be
+	// concurrently updated by HandleDSORequest when the peer renegotiates.
+	session.mu.RLock()
+	keepaliveTime := session.KeepaliveTime
+	session.mu.RUnlock()
+
 	// Build the keepalive TLV (Type=1, two uint32 ms values).
-	tlv := NewKeepaliveTLV(m.inactivityTimeout, session.KeepaliveTime)
+	tlv := NewKeepaliveTLV(m.inactivityTimeout, keepaliveTime)
 	tlvBytes := make([]byte, tlv.Size())
 	if _, err := tlv.Pack(tlvBytes, 0); err != nil {
 		return fmt.Errorf("dso: pack keepalive TLV: %w", err)
