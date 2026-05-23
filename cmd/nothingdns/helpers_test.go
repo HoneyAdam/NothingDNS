@@ -55,3 +55,44 @@ func TestResolveDashboardBearer_NeverReturnsAuthSecret(t *testing.T) {
 		})
 	}
 }
+
+// TestValidateAuthPersistenceConfig regresses SECURITY-REPORT.md L-4:
+// TokenPersistencePath without an explicit AuthSecret must fail at
+// startup, not silently boot with an empty token map.
+func TestValidateAuthPersistenceConfig(t *testing.T) {
+	cases := []struct {
+		name      string
+		cfg       config.HTTPConfig
+		wantError bool
+	}{
+		{
+			name:      "persistence path set, no auth_secret — must fail",
+			cfg:       config.HTTPConfig{TokenPersistencePath: "/var/lib/ndns/tokens", AuthSecret: ""},
+			wantError: true,
+		},
+		{
+			name:      "persistence path set, auth_secret set — ok",
+			cfg:       config.HTTPConfig{TokenPersistencePath: "/var/lib/ndns/tokens", AuthSecret: "stable-secret"},
+			wantError: false,
+		},
+		{
+			name:      "no persistence path — ok regardless of auth_secret",
+			cfg:       config.HTTPConfig{},
+			wantError: false,
+		},
+		{
+			name:      "no persistence path, auth_secret set — ok",
+			cfg:       config.HTTPConfig{AuthSecret: "stable-secret"},
+			wantError: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateAuthPersistenceConfig(tc.cfg)
+			if (err != nil) != tc.wantError {
+				t.Errorf("got err=%v, wantError=%v", err, tc.wantError)
+			}
+		})
+	}
+}

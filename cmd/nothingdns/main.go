@@ -241,7 +241,12 @@ func run() error {
 	}
 	logger.Infof("Auth store initialized with %d users", len(cfg.Server.HTTP.Users))
 
-	// Restore persistent tokens from file if configured
+	// Restore persistent tokens from file if configured. Validation
+	// lives in cmd/nothingdns/helpers.validateAuthPersistenceConfig
+	// so it's unit-testable (L-4).
+	if err := validateAuthPersistenceConfig(cfg.Server.HTTP); err != nil {
+		logger.Fatalf("%v", err)
+	}
 	if cfg.Server.HTTP.TokenPersistencePath != "" {
 		authStore.SetTokenFilePath(cfg.Server.HTTP.TokenPersistencePath)
 		if err := authStore.LoadTokensSigned(cfg.Server.HTTP.TokenPersistencePath); err != nil {
