@@ -110,9 +110,22 @@ type RecordItem struct {
 }
 
 // RecordListResponse is returned by GET /api/v1/zones/{name}/records.
+//
+// Records holds at most RecordListMaxResults entries; Total reflects
+// the unfiltered count regardless of truncation, and Truncated is
+// true when the response was capped. L-10 added the cap and the
+// Total/Truncated companions; older clients ignore the new fields.
 type RecordListResponse struct {
-	Records []RecordItem `json:"records"`
+	Records   []RecordItem `json:"records"`
+	Total     int          `json:"total"`
+	Truncated bool         `json:"truncated,omitempty"`
 }
+
+// RecordListMaxResults caps the records-list endpoint so a request
+// against a million-record reverse zone cannot allocate proportional
+// JSON or freeze the operator's browser. Operator-gated, so this is
+// defense-in-depth rather than a remote-DoS class.
+const RecordListMaxResults = 5000
 
 // CacheStatsResponse is returned by GET /api/v1/cache/stats.
 type CacheStatsResponse struct {

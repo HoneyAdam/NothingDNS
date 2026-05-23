@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -388,6 +389,50 @@ func TestHandleZoneActions_GetRecordsFiltered(t *testing.T) {
 	}
 	if resp.Records[0].Name != "www.example.com." {
 		t.Errorf("expected www.example.com., got %q", resp.Records[0].Name)
+	}
+}
+
+// TestHandleZoneActions_GetRecords_PaginationCap regresses
+// SECURITY-REPORT.md L-10. handleGetRecords used to return every
+// record in the zone unbounded — a million-record reverse zone built
+// a proportional JSON document and locked up the operator's browser.
+// The cap now lives in RecordListMaxResults; Total + Truncated tell
+// the client more exist.
+func TestHandleZoneActions_GetRecords_PaginationCap(t *testing.T) {
+	s, user := newServerWithAuthAndZones(t)
+	createTestZone(t, s.zoneManager, "example.com.")
+
+	// Insert RecordListMaxResults + 5 records so the cap fires.
+	for i := 0; i < RecordListMaxResults+5; i++ {
+		s.zoneManager.AddRecord("example.com.", zone.Record{
+			Name:  fmt.Sprintf("h%d.example.com.", i),
+			Type:  "A",
+			TTL:   300,
+			Class: "IN",
+			RData: "1.2.3.4",
+		})
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/zones/example.com./records", nil)
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+	s.handleZoneActions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp RecordListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Records) != RecordListMaxResults {
+		t.Errorf("L-10 regression: expected len(Records) == cap (%d), got %d", RecordListMaxResults, len(resp.Records))
+	}
+	if !resp.Truncated {
+		t.Errorf("L-10 regression: Truncated false but more records exist than the cap")
+	}
+	if resp.Total < RecordListMaxResults+5 {
+		t.Errorf("expected Total >= %d, got %d", RecordListMaxResults+5, resp.Total)
 	}
 }
 

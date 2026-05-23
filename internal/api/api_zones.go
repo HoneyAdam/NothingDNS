@@ -271,9 +271,23 @@ func (s *Server) handleGetRecords(w http.ResponseWriter, r *http.Request, zoneNa
 		return
 	}
 
-	// Convert to API response
-	resp := &RecordListResponse{Records: make([]RecordItem, 0, len(records))}
-	for _, r := range records {
+	// L-10: cap the response at RecordListMaxResults. Total reflects
+	// the unfiltered record count; Truncated tells the client more
+	// exist. A million-record reverse zone would otherwise build a
+	// proportional JSON document and lock up the operator's browser.
+	total := len(records)
+	limit := total
+	truncated := false
+	if limit > RecordListMaxResults {
+		limit = RecordListMaxResults
+		truncated = true
+	}
+	resp := &RecordListResponse{
+		Records:   make([]RecordItem, 0, limit),
+		Total:     total,
+		Truncated: truncated,
+	}
+	for _, r := range records[:limit] {
 		resp.Records = append(resp.Records, RecordItem{
 			Name:  r.Name,
 			Type:  r.Type,
