@@ -4726,8 +4726,11 @@ func TestProcessUpdateEvents(t *testing.T) {
 	h.zonesMu.RLock()
 	z := h.zones["example.com."]
 	h.zonesMu.RUnlock()
-	if len(z.Records["new.example.com."]) != 2 {
-		t.Errorf("expected record added twice (HandleUpdate + processUpdateEvents), got %d", len(z.Records["new.example.com."]))
+	z.RLock()
+	got := len(z.Records["new.example.com."])
+	z.RUnlock()
+	if got != 2 {
+		t.Errorf("expected record added twice (HandleUpdate + processUpdateEvents), got %d", got)
 	}
 }
 
