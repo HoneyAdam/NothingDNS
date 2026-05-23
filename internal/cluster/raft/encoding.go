@@ -222,8 +222,17 @@ func decodeVoteRequest(v *VoteRequest, data []byte) error {
 	off += 8
 	candLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
+	// Bound check: a peer (or inside-keyring attacker) could send
+	// candLen > available bytes, causing a slice-bounds panic. Reject
+	// rather than crash the Raft member.
+	if uint64(off)+uint64(candLen) > uint64(len(data)) {
+		return fmt.Errorf("VoteRequest: candLen %d overflows data", candLen)
+	}
 	v.CandidateID = NodeID(data[off : off+int(candLen)])
 	off += int(candLen)
+	if off+16 > len(data) {
+		return fmt.Errorf("VoteRequest: truncated trailing log fields")
+	}
 	v.LastLogIndex = Index(binary.BigEndian.Uint64(data[off:]))
 	off += 8
 	v.LastLogTerm = Term(binary.BigEndian.Uint64(data[off:]))
@@ -265,6 +274,9 @@ func decodeVoteResponse(v *VoteResponse, data []byte) error {
 	off++
 	fromLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
+	if uint64(off)+uint64(fromLen) > uint64(len(data)) {
+		return fmt.Errorf("VoteResponse: fromLen %d overflows data", fromLen)
+	}
 	v.From = NodeID(data[off : off+int(fromLen)])
 	return nil
 }
@@ -316,8 +328,14 @@ func decodeAppendRequest(a *AppendRequest, data []byte) error {
 	off += 8
 	leaderLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
+	if uint64(off)+uint64(leaderLen) > uint64(len(data)) {
+		return fmt.Errorf("AppendRequest: leaderLen %d overflows data", leaderLen)
+	}
 	a.LeaderID = NodeID(data[off : off+int(leaderLen)])
 	off += int(leaderLen)
+	if off+20 > len(data) {
+		return fmt.Errorf("AppendRequest: truncated after LeaderID")
+	}
 	a.PrevLogIndex = Index(binary.BigEndian.Uint64(data[off:]))
 	off += 8
 	a.PrevLogTerm = Term(binary.BigEndian.Uint64(data[off:]))
@@ -325,7 +343,7 @@ func decodeAppendRequest(a *AppendRequest, data []byte) error {
 	entriesLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
 	entriesEnd := off + int(entriesLen)
-	if entriesEnd > len(data) {
+	if entriesEnd > len(data) || entriesEnd < off {
 		return fmt.Errorf("AppendRequest: entries overflow")
 	}
 	if err := decodeEntrySlice(&a.Entries, data[off:entriesEnd]); err != nil {

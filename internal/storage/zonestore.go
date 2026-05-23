@@ -273,12 +273,24 @@ func encodeRecords(records []StoredRecord) []byte {
 	return buf
 }
 
+// maxStoredRecordsPerZone caps the per-zone record count we'll accept
+// from a stored KV blob. A corrupt or attacker-planted ZoneStore
+// blob carrying count = 2^32-1 would otherwise have us allocate a
+// ~96 GB StoredRecord slice up front. The cap is well above any
+// plausible zone — production deployments split very large zones
+// across multiple ZoneStore entries before reaching this many
+// records in one blob.
+const maxStoredRecordsPerZone = 5_000_000
+
 func decodeRecords(data []byte) ([]StoredRecord, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("data too short for record count")
 	}
 
 	count := binary.BigEndian.Uint32(data[0:4])
+	if count > maxStoredRecordsPerZone {
+		return nil, fmt.Errorf("stored record count %d exceeds max %d", count, maxStoredRecordsPerZone)
+	}
 	offset := 4
 	records := make([]StoredRecord, 0, count)
 
