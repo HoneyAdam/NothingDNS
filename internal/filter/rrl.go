@@ -36,13 +36,14 @@ type rrlBucket struct {
 // enabled is atomic.Bool because Allow/LogResponse read it on the hot
 // path without taking rrl.mu, while SetEnabled writes it.
 type RRL struct {
-	mu      sync.Mutex
-	buckets map[string]*rrlBucket
-	rate    float64
-	burst   int
-	window  time.Duration
-	enabled atomic.Bool
-	stopCh  chan struct{}
+	mu       sync.Mutex
+	buckets  map[string]*rrlBucket
+	rate     float64
+	burst    int
+	window   time.Duration
+	enabled  atomic.Bool
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Stop from panicking on a second call
 
 	maxBuckets int
 }
@@ -223,8 +224,12 @@ func (rrl *RRL) LogSuperlative(clientIP net.IP, qtype uint16, rcode uint8, query
 }
 
 // Stop terminates the background cleanup goroutine.
+// Stop terminates the background cleanup goroutine.
+// Idempotent — see RateLimiter.Stop.
 func (rrl *RRL) Stop() {
-	close(rrl.stopCh)
+	rrl.stopOnce.Do(func() {
+		close(rrl.stopCh)
+	})
 }
 
 // SetEnabled toggles RRL at runtime. Wait-free for readers.

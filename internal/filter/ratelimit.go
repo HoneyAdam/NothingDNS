@@ -17,12 +17,13 @@ import (
 // be a data race; atomic.Bool gives us a wait-free fast path plus
 // safe visibility on writes.
 type RateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	rate    float64 // tokens per second
-	burst   int
-	enabled atomic.Bool
-	stopCh  chan struct{}
+	mu       sync.Mutex
+	buckets  map[string]*bucket
+	rate     float64 // tokens per second
+	burst    int
+	enabled  atomic.Bool
+	stopCh   chan struct{}
+	stopOnce sync.Once // guards Stop from panicking on a second call
 
 	// Memory protection: max buckets to prevent unbounded growth during attacks
 	maxBuckets int
@@ -110,8 +111,15 @@ func (rl *RateLimiter) Allow(clientIP net.IP) bool {
 }
 
 // Stop terminates the background cleanup goroutine.
+// Idempotent: a second call is a no-op. Without the sync.Once
+// guard, the second close(rl.stopCh) panicked with "close of
+// closed channel" — easy to trigger from a daemon shutdown path
+// that runs Stop twice (e.g. defer in tests plus an explicit Stop
+// in the production cleanup).
 func (rl *RateLimiter) Stop() {
-	close(rl.stopCh)
+	rl.stopOnce.Do(func() {
+		close(rl.stopCh)
+	})
 }
 
 // SetRate updates the rate limit (tokens per second) at runtime.
