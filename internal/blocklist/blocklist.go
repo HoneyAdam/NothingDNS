@@ -266,7 +266,7 @@ func (bl *Blocklist) loadURL(url string) error {
 				if entryCount > maxEntries {
 					return fmt.Errorf("blocklist %s exceeds maximum entry count of %d", url, maxEntries)
 				}
-				domain := strings.ToLower(fields[0])
+				domain := normalizeDomain(fields[0])
 				bl.entries[domain] = Entry{
 					Domain:  domain,
 					Comment: "url:" + url,
@@ -285,7 +285,7 @@ func (bl *Blocklist) loadURL(url string) error {
 		if entryCount > maxEntries {
 			return fmt.Errorf("blocklist %s exceeds maximum entry count of %d", url, maxEntries)
 		}
-		domain := strings.ToLower(fields[1])
+		domain := normalizeDomain(fields[1])
 
 		// Extract comment if present
 		comment := ""
@@ -361,7 +361,7 @@ func (bl *Blocklist) loadFile(path string) error {
 
 		// fields[0] is IP (127.0.0.1, 0.0.0.0, etc.)
 		// fields[1] is the domain to block
-		domain := strings.ToLower(fields[1])
+		domain := normalizeDomain(fields[1])
 
 		// Extract comment if present
 		comment := ""
@@ -676,4 +676,14 @@ func (bl *Blocklist) ListFiles() []string {
 	files := make([]string, len(bl.files))
 	copy(files, bl.files)
 	return files
+}
+
+// normalizeDomain lowercases and strips the trailing root-zone dot
+// from a domain name. This is the on-load companion to the on-lookup
+// `strings.ToLower(strings.TrimSuffix(domain, "."))` pattern; without
+// it (L-7) a BIND-style source line ("example.com.") loaded as
+// "example.com." would never match a lookup for "example.com" — the
+// entry silently never blocked anything.
+func normalizeDomain(s string) string {
+	return strings.ToLower(strings.TrimSuffix(s, "."))
 }

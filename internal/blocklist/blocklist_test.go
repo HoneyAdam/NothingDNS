@@ -234,6 +234,31 @@ func TestBlocklistAddDomain(t *testing.T) {
 	}
 }
 
+// TestBlocklistAddFile_NormalizesTrailingDot regresses SECURITY-REPORT.md
+// L-7. BIND-style hosts files often write FQDNs with a trailing root
+// dot ("example.com."). The load path used to store the entry with
+// the dot in place, but the lookup path strips it — so the entry
+// silently never matched any query. Switched the load path through
+// normalizeDomain so the on-load and on-lookup forms agree.
+func TestBlocklistAddFile_NormalizesTrailingDot(t *testing.T) {
+	bl := New(Config{Enabled: true})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hosts.txt")
+	if err := os.WriteFile(path, []byte("0.0.0.0 example.com.\n0.0.0.0 fqdn-only.com.\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := bl.AddFile(path); err != nil {
+		t.Fatalf("AddFile: %v", err)
+	}
+
+	for _, q := range []string{"example.com", "fqdn-only.com"} {
+		if !bl.IsBlocked(q) {
+			t.Errorf("L-7 regression: IsBlocked(%q) = false — FQDN-form source entry didn't normalize", q)
+		}
+	}
+}
+
 func TestBlocklistRemoveDomain(t *testing.T) {
 	bl := New(Config{Enabled: true})
 
