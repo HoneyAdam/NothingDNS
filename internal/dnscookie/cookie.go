@@ -74,7 +74,20 @@ type CookieJar struct {
 // NewCookieJar creates a new CookieJar with a random initial secret and the
 // given rotation interval. The jar automatically rotates secrets when
 // GenerateServerCookie detects the interval has elapsed.
+//
+// A non-positive rotationInterval would make time.Since(lastRotation)
+// ≥ rotationInterval trivially true forever, so maybeRotate would churn
+// the secret on every GenerateServerCookie call, instantly invalidating
+// outstanding client cookies, burning crypto/rand entropy on the hot
+// DNS path, and serializing every cookie generation behind the jar's
+// write lock. Clamp to a single nanosecond as the minimum positive
+// duration — sub-second test intervals (1ms etc.) still pass through,
+// but zero/negative configs are normalized to "at least one tick must
+// elapse before another rotation."
 func NewCookieJar(rotationInterval time.Duration) (*CookieJar, error) {
+	if rotationInterval <= 0 {
+		rotationInterval = time.Nanosecond
+	}
 	jar := &CookieJar{
 		rotationInterval: rotationInterval,
 		lastRotation:     time.Now(),
