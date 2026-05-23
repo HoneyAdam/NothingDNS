@@ -174,7 +174,12 @@ func (j *CookieJar) ValidateServerCookie(clientCookie [ClientCookieLen]byte, ser
 func (j *CookieJar) RotateSecret() error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	return j.rotateLocked()
+}
 
+// rotateLocked performs the rotation work assuming j.mu is already held.
+// Used by RotateSecret and by maybeRotate's locked re-check.
+func (j *CookieJar) rotateLocked() error {
 	j.previous = j.current
 	j.hasPrevious = true
 	if _, err := io.ReadFull(rand.Reader, j.current[:]); err != nil {
@@ -186,16 +191,35 @@ func (j *CookieJar) RotateSecret() error {
 
 // maybeRotate checks whether the rotation interval has elapsed and
 // rotates if needed.
+//
+// Re-checks the deadline INSIDE the write lock to avoid a TOCTOU
+// race: under high concurrency, many goroutines could pass the
+// RLock check simultaneously, then queue up on the write lock and
+// each call RotateSecret in turn. Each rotation overwrites the
+// previous secret, shortening the grace window for outstanding
+// client cookies. The locked re-check ensures at most one rotation
+// fires per interval, even under contention.
 func (j *CookieJar) maybeRotate() {
 	j.mu.RLock()
 	needsRotation := time.Since(j.lastRotation) >= j.rotationInterval
 	j.mu.RUnlock()
 
-	if needsRotation {
-		// Rotation failure is logged but not fatal - old secret remains valid
-		if err := j.RotateSecret(); err != nil {
-			util.Warnf("dnscookie: secret rotation failed: %v", err)
-		}
+	if !needsRotation {
+		return
+	}
+
+	j.mu.Lock()
+	// Re-check under the write lock. If another goroutine rotated
+	// between our RUnlock and our Lock, lastRotation moved forward
+	// and we skip our own rotation.
+	if time.Since(j.lastRotation) < j.rotationInterval {
+		j.mu.Unlock()
+		return
+	}
+	err := j.rotateLocked()
+	j.mu.Unlock()
+	if err != nil {
+		util.Warnf("dnscookie: secret rotation failed: %v", err)
 	}
 }
 
