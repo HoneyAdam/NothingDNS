@@ -395,8 +395,14 @@ func decodeAppendResponse(a *AppendResponse, data []byte) error {
 	off++
 	fromLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
+	if uint64(off)+uint64(fromLen) > uint64(len(data)) {
+		return fmt.Errorf("AppendResponse: fromLen %d overflows data", fromLen)
+	}
 	a.From = NodeID(data[off : off+int(fromLen)])
 	off += int(fromLen)
+	if off+16 > len(data) {
+		return fmt.Errorf("AppendResponse: truncated trailing index fields")
+	}
 	a.MatchIndex = Index(binary.BigEndian.Uint64(data[off:]))
 	off += 8
 	a.Commitment = binary.BigEndian.Uint64(data[off:])
@@ -443,17 +449,34 @@ func decodeSnapshotRequest(s *SnapshotRequest, data []byte) error {
 	off += 8
 	leaderLen := binary.BigEndian.Uint32(data[off:])
 	off += 4
+	if uint64(off)+uint64(leaderLen) > uint64(len(data)) {
+		return fmt.Errorf("SnapshotRequest: leaderLen %d overflows data", leaderLen)
+	}
 	s.LeaderID = NodeID(data[off : off+int(leaderLen)])
 	off += int(leaderLen)
+	if off+8 > len(data) {
+		return fmt.Errorf("SnapshotRequest: truncated at data length")
+	}
 	dataLen := binary.BigEndian.Uint64(data[off:])
 	off += 8
+	// Bound the snapshot payload — the outer frame already caps total
+	// bytes at maxRPCMessageBytes, but a leader sending dataLen > MaxInt
+	// would wrap int(dataLen) negative, fall through the dataEnd check,
+	// and then \`make([]byte, dataLen)\` would request the full uint64
+	// → OOM panic. Bound dataLen against the remaining buffer.
+	if dataLen > uint64(len(data)-off) {
+		return fmt.Errorf("SnapshotRequest: dataLen %d exceeds remaining %d", dataLen, len(data)-off)
+	}
 	dataEnd := off + int(dataLen)
-	if dataEnd > len(data) {
+	if dataEnd > len(data) || dataEnd < off {
 		return fmt.Errorf("SnapshotRequest: data overflow")
 	}
 	s.Data = make([]byte, dataLen)
 	copy(s.Data, data[off:dataEnd])
 	off = dataEnd
+	if off+16 > len(data) {
+		return fmt.Errorf("SnapshotRequest: truncated trailing index fields")
+	}
 	s.LastIndex = Index(binary.BigEndian.Uint64(data[off:]))
 	off += 8
 	s.LastTerm = Term(binary.BigEndian.Uint64(data[off:]))
