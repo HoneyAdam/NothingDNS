@@ -42,14 +42,22 @@ func cmdZone(args []string) error {
 			return fmt.Errorf("zone name required: dnsctl zone add <zone> [nameserver]")
 		}
 		zoneName := args[1]
-		ns := "ns1." + zoneName + "."
+		// Normalize: drop any trailing dot before composing default
+		// nameserver / admin-email FQDNs. Pre-fix, calling
+		// `dnsctl zone add example.com.` produced a double-dotted
+		// ns/admin name like `ns1.example.com..` and the server's
+		// SOA validation rejected it; users who reflexively typed
+		// the absolute form got an unhelpful 400 instead of a
+		// working zone.
+		bareZone := strings.TrimSuffix(zoneName, ".")
+		ns := "ns1." + bareZone + "."
 		if len(args) > 2 {
 			ns = args[2]
 		}
 		body := map[string]interface{}{
 			"name":        zoneName,
 			"nameservers": []string{ns},
-			"admin_email": "admin." + zoneName + ".",
+			"admin_email": "admin." + bareZone + ".",
 			"ttl":         3600,
 		}
 		b, _ := json.Marshal(body)
