@@ -54,6 +54,11 @@ const (
 	// format conversion.
 	encryptedFileMagic = 0xE0
 	aeadNonceLen       = 12
+
+	// maxKVPayload caps untrusted on-disk TLV payload length before
+	// allocation. M-1 / L-N1. Package-level so both readTLV and
+	// readEncryptedTLV can reference it.
+	maxKVPayload = 64 << 20 // 64 MiB
 )
 
 // Store errors
@@ -275,10 +280,10 @@ func (s *KVStore) readTLV(r io.Reader) error {
 	// The data file lives on disk and an attacker with write access
 	// (container escape, shared mount, restored backup) could plant
 	// payloadLen = 0xFFFFFFFF — make([]byte, 4 GiB) instantly OOM-
-	// kills the process at startup. 64 MiB matches the WAL cap and
-	// is well above any realistic real KV record while keeping the
-	// upper bound far below the uint32 ceiling.
-	const maxKVPayload = 64 << 20 // 64 MiB
+	// kills the process at startup. maxKVPayload (package-level)
+	// matches the WAL cap and is well above any realistic real KV
+	// record while keeping the upper bound far below the uint32
+	// ceiling.
 	if payloadLen > maxKVPayload {
 		return fmt.Errorf("kvstore: TLV payload %d exceeds max %d", payloadLen, maxKVPayload)
 	}
@@ -485,14 +490,20 @@ func (s *KVStore) readEncryptedTLV(r io.Reader) error {
 	if _, err := io.ReadFull(r, nonce); err != nil {
 		return err
 	}
-	// Read the rest of the file (ciphertext + GCM tag). The frame is
-	// bounded by maxKVPayload via the underlying io.Reader (which is
-	// the data file); io.ReadAll is acceptable here because the data
-	// file is operator-trusted disk content. The post-decrypt TLV
-	// then re-applies the maxKVPayload cap on payloadLen.
-	ct, err := io.ReadAll(r)
+	// L-N1: bound the ciphertext read. The earlier comment claimed
+	// "the underlying io.Reader is bounded" but no LimitReader was
+	// actually applied — a disk-write attacker (the exact threat
+	// model L-6 targets) could plant a multi-GB file starting with
+	// 0xE0 and OOM startup before gcm.Open ever runs. Cap matches
+	// the inner maxKVPayload plus headroom for the GCM tag + a
+	// small fixed overhead.
+	const maxEncryptedKVBody = maxKVPayload + 1024 // payload cap + tag + tlv header
+	ct, err := io.ReadAll(io.LimitReader(r, maxEncryptedKVBody+1))
 	if err != nil {
 		return err
+	}
+	if len(ct) > maxEncryptedKVBody {
+		return fmt.Errorf("kvstore: encrypted body %d exceeds max %d", len(ct), maxEncryptedKVBody)
 	}
 	gcm, err := newGCM(s.aeadKey)
 	if err != nil {

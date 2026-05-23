@@ -2038,6 +2038,34 @@ func contains(s, sub string) bool {
 	return false
 }
 
+// TestReadEncryptedSnapshot_RejectsOversizedBody regresses
+// SECURITY-REPORT-2026-05-23-rescan L-N1 (Raft side). The encrypted
+// snapshot reader used to call io.ReadAll on the file with no cap;
+// a disk-write attacker could plant a multi-GB file starting with
+// 0xE0 and OOM startup before gcm.Open ran. The fix wraps the read
+// in io.LimitReader + a post-read sanity check.
+func TestReadEncryptedSnapshot_RejectsOversizedBody(t *testing.T) {
+	aead := make([]byte, 32)
+	snap := &Snapshotter{aeadKey: aead}
+
+	var buf bytes.Buffer
+	verBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(verBytes, encryptedSnapshotVersion)
+	buf.Write(verBytes)
+	buf.Write(make([]byte, snapAeadNonceLen))
+	// (1 GiB + 1 MiB headroom + 1) bytes — over cap.
+	body := make([]byte, (1<<30)+(1<<20)+1)
+	buf.Write(body)
+
+	_, err := snap.readEncryptedSnapshot(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized encrypted snapshot body, got nil")
+	}
+	if !contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max'", err)
+	}
+}
+
 // TestSnapshotter_EncryptedRoundTrip regresses SECURITY-REPORT.md
 // L-6 (Raft snapshot portion). NewSnapshotterEncrypted writes
 // AES-256-GCM-wrapped files (leading magic 0xE0) and a re-open with

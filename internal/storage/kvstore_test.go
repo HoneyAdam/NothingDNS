@@ -67,6 +67,38 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 	}
 }
 
+// TestReadEncryptedTLV_RejectsOversizedBody regresses
+// SECURITY-REPORT-2026-05-23-rescan L-N1. readEncryptedTLV used to
+// call io.ReadAll on the raw reader before any size check, so a
+// disk-write attacker (the L-6 threat model) could plant a multi-GB
+// file starting with 0xE0 and OOM startup before gcm.Open ran. The
+// fix wraps the read in io.LimitReader + a post-read sanity check.
+func TestReadEncryptedTLV_RejectsOversizedBody(t *testing.T) {
+	aead := make([]byte, 32)
+	store := &KVStore{aeadKey: aead}
+
+	// Header (magic + version + nonce) is fine; trailing bytes intentionally
+	// exceed the cap. We don't need valid ciphertext — the cap check fires
+	// before gcm.Open.
+	var buf bytes.Buffer
+	buf.WriteByte(encryptedFileMagic)
+	verBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(verBytes, fileVersion)
+	buf.Write(verBytes)
+	buf.Write(make([]byte, aeadNonceLen)) // nonce
+	// (64 MiB + headroom + 1) of body bytes — guaranteed over the cap.
+	body := make([]byte, (64<<20)+1024+1)
+	buf.Write(body)
+
+	err := store.readEncryptedTLV(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized encrypted body, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max' (the cap guard message)", err)
+	}
+}
+
 // TestKVStore_EncryptedAeadOnly_NoPlaintextOnDisk regresses
 // SECURITY-REPORT-2026-05-23 NEW-H1. The original L-6 wiring at
 // zone_manager.go passes nil hmacKey + aeadKey to OpenKVStoreEncrypted,

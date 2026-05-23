@@ -318,9 +318,18 @@ func (s *Snapshotter) readEncryptedSnapshot(r io.Reader) (*Snapshot, error) {
 	if _, err := io.ReadFull(r, nonce); err != nil {
 		return nil, fmt.Errorf("read nonce: %w", err)
 	}
-	ct, err := io.ReadAll(r)
+	// L-N1: bound the ciphertext read. A planted snapshot file
+	// starting with 0xE0 could otherwise be multi-GB and OOM startup
+	// before gcm.Open runs. Cap matches the inner maxSnapshotDataBytes
+	// plus generous headroom for the GCM tag, membership list, and
+	// other fixed-width fields.
+	const maxEncryptedSnapshotBody = maxSnapshotDataBytes + 1024*1024 // +1 MiB headroom
+	ct, err := io.ReadAll(io.LimitReader(r, maxEncryptedSnapshotBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("read ciphertext: %w", err)
+	}
+	if int64(len(ct)) > maxEncryptedSnapshotBody {
+		return nil, fmt.Errorf("snapshot: encrypted body %d exceeds max %d", len(ct), maxEncryptedSnapshotBody)
 	}
 	gcm, err := newSnapshotGCM(s.aeadKey)
 	if err != nil {
