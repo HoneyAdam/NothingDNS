@@ -258,10 +258,25 @@ func (s *Signer) SignZone(records []*protocol.ResourceRecord) ([]*protocol.Resou
 	inception := uint32(now.Add(-s.config.InceptionOffset).Unix())
 	expiration := uint32(now.Add(s.config.SignatureValidity).Unix())
 
-	// Sign DNSKEY RRSet with KSK
-	ksks := s.GetKSKs()
+	// Sign DNSKEY RRSet with active KSKs only.
+	//
+	// During a KSK rollover (RFC 7583) keys move through Pre-Published →
+	// Ready → Active → Retired states. ONLY keys in the Active state
+	// should be used to produce signatures: a Pre-Published key's
+	// DNSKEY may already be in the zone, but resolvers haven't yet
+	// established a chain of trust through it (parent DS not updated),
+	// and a Retired key should not produce new signatures.
+	//
+	// The previous code called GetKSKs() (all KSKs regardless of
+	// state), so any zone using the rollover scheduler would sign with
+	// not-yet-trusted or post-rollover keys — validators would see
+	// RRSIGs covered by a key they cannot verify and treat the zone
+	// as Bogus. GetActiveKSKs() filters by state, with the same
+	// "no timing = always active" backward-compat behaviour for zones
+	// that don't use the rollover scheduler.
+	ksks := s.GetActiveKSKs()
 	if len(ksks) == 0 {
-		return nil, fmt.Errorf("no KSK available for signing DNSKEY")
+		return nil, fmt.Errorf("no active KSK available for signing DNSKEY")
 	}
 
 	var signedRecords []*protocol.ResourceRecord
@@ -278,10 +293,14 @@ func (s *Signer) SignZone(records []*protocol.ResourceRecord) ([]*protocol.Resou
 	// Group other records by RRSet (name + type)
 	groups := groupRecordsByRRSet(otherRRs)
 
-	// Sign each RRSet with ZSK
-	zsks := s.GetZSKs()
+	// Sign each RRSet with active ZSKs only — same rollover-state
+	// rationale as KSKs above. A Pre-Published ZSK that isn't yet
+	// active should not produce signatures (validators won't see its
+	// DNSKEY as a valid signer until it transitions to Active).
+	zsks := s.GetActiveZSKs()
 	if len(zsks) == 0 {
-		// Use KSK as fallback
+		// Use active KSK as fallback (small zones often deploy a
+		// single combined-signing key with both KSK+ZSK roles).
 		zsks = ksks
 	}
 
