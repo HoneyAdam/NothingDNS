@@ -396,30 +396,21 @@ func (gp *GossipProtocol) BroadcastCacheInvalidation(keys []string) error {
 		return err
 	}
 
-	data, err := encodeMessage(MessageTypeCacheInvalidate, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	// Encrypt if enabled
-	if gp.aead != nil {
-		data, err = gp.encrypt(data)
-		if err != nil {
-			return err
-		}
-	}
-
-	// Send to all alive nodes
+	// Route per-peer through sendMessage — see BroadcastZoneUpdate for
+	// the sequence+AAD rationale. Cache invalidations are best-effort,
+	// but they still need to actually arrive at the peer's handler;
+	// the previous Sequence=0 broadcasts were dropped by replay
+	// protection at every peer that had ever exchanged any other
+	// gossip frame with us.
 	for _, node := range gp.nodeList.GetAlive() {
 		addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", node.Addr, gp.config.BindPort))
 		if err != nil {
 			util.Warnf("gossip: failed to resolve address for %s: %v", node.Addr, err)
 			continue
 		}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeCacheInvalidate, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send cache invalidation to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
@@ -441,31 +432,20 @@ func (gp *GossipProtocol) BroadcastZoneUpdate(payload ZoneUpdatePayload) error {
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeZoneUpdate, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return err
-		}
-	}
-
+	// Route through sendMessage — see AnnounceLeader/startElection fix
+	// for the rationale (Sequence=0 + plaintext-AAD encryption causes
+	// every receiver to drop these frames as replays or fail the
+	// integrity check). Each per-peer send gets a fresh sequence and
+	// AAD-bound ciphertext.
 	self := gp.nodeList.GetSelf()
 	for _, node := range gp.nodeList.GetAll() {
 		if node.ID == self.ID || node.State != NodeStateAlive {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeZoneUpdate, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send zone update to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
@@ -910,31 +890,16 @@ func (gp *GossipProtocol) BroadcastConfigUpdate(payload ConfigSyncPayload) error
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeConfigSync, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return err
-		}
-	}
-
+	// Route through sendMessage. See BroadcastZoneUpdate for rationale.
 	self := gp.nodeList.GetSelf()
 	for _, node := range gp.nodeList.GetAll() {
 		if node.ID == self.ID || node.State != NodeStateAlive {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeConfigSync, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send config sync to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
@@ -1111,30 +1076,16 @@ func (gp *GossipProtocol) BroadcastClusterMetrics(metrics ClusterMetricsPayload)
 		return err
 	}
 
-	msgBytes, err := encodeMessage(MessageTypeClusterMetrics, gp.nodeList.GetSelf().ID, gp.config.ProtocolVersion, payloadBytes)
-	if err != nil {
-		return err
-	}
-
-	data := msgBytes
-	if gp.aead != nil {
-		var err error
-		data, err = gp.encrypt(data)
-		if err != nil {
-			util.Warnf("gossip: failed to encrypt message: %v", err)
-			return err
-		}
-	}
-
+	// Route through sendMessage. See BroadcastZoneUpdate for rationale.
+	self := gp.nodeList.GetSelf()
 	for _, node := range gp.nodeList.GetAll() {
-		if node.ID == gp.nodeList.GetSelf().ID {
+		if node.ID == self.ID {
 			continue
 		}
 		addr := &net.UDPAddr{IP: net.ParseIP(node.Addr), Port: node.Port}
-		if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+		if err := gp.sendMessage(MessageTypeClusterMetrics, payloadBytes, addr); err != nil {
 			util.Warnf("gossip: failed to send cluster metrics to %s: %v", addr, err)
 		}
-		atomic.AddUint64(&gp.messagesSent, 1)
 	}
 
 	return nil
