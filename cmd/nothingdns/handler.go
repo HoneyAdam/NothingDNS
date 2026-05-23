@@ -994,15 +994,21 @@ func (h *integratedHandler) buildSignedResponse(query *protocol.Message, records
 		rrs = append(rrs, rr)
 	}
 
-	// Sign the RRSet and add RRSIG to answers
+	// Sign the RRSet and add RRSIG to answers.
+	//
+	// Use Active ZSKs only — same RFC 7583 rationale as Signer.SignZone:
+	// Pre-Published / Retired keys must not produce signatures because
+	// validators can't (or no longer should) trust them. GetZSKs returns
+	// keys regardless of state, which during a rollover would emit RRSIGs
+	// that fail chain-of-trust at the validator → response Bogus.
 	if len(rrs) > 0 {
 		inception := time.Now().UTC()
 		expiration := inception.Add(24 * time.Hour * 30) // 30 days
 
-		// Find ZSK for signing
-		zsks := signer.GetZSKs()
+		// Find an Active ZSK for signing.
+		zsks := signer.GetActiveZSKs()
 		if len(zsks) > 0 {
-			zsk := zsks[0] // Use first ZSK
+			zsk := zsks[0] // Use first Active ZSK
 			rrsig, err := signer.SignRRSet(
 				rrs,
 				zsk,
