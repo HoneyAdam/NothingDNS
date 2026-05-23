@@ -53,7 +53,12 @@ func NewSnapshotterEncrypted(dir string, aeadKey []byte) (*Snapshotter, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.aeadKey = aeadKey
+	// L-N3: copy the key so caller mutations don't bleed into our
+	// AEAD state. Snapshotter has no Close to zeroize the copy, but
+	// at least our state is decoupled from caller-held slices.
+	if len(aeadKey) > 0 {
+		s.aeadKey = append([]byte(nil), aeadKey...)
+	}
 	return s, nil
 }
 

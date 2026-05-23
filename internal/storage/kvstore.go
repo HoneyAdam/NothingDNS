@@ -170,6 +170,18 @@ func OpenKVStoreEncrypted(path string, hmacKey, aeadKey []byte) (*KVStore, error
 }
 
 func openKVStore(path string, hmacKey, aeadKey []byte) (*KVStore, error) {
+	// L-N3: copy keys so Close's zeroize doesn't blow away the
+	// caller's slice. Without the copy, the slice header is shared
+	// and zeroing the internal "copy" also zeroes whatever the
+	// caller still holds (and any future reopen with the same key).
+	hmCopy := append([]byte(nil), hmacKey...)
+	aeCopy := append([]byte(nil), aeadKey...)
+	if len(hmCopy) == 0 {
+		hmCopy = nil
+	}
+	if len(aeCopy) == 0 {
+		aeCopy = nil
+	}
 	store := &KVStore{
 		path:     path,
 		dataFile: filepath.Join(path, DataFile),
@@ -177,8 +189,8 @@ func openKVStore(path string, hmacKey, aeadKey []byte) (*KVStore, error) {
 			Entries: make(map[string][]byte),
 			Buckets: make(map[string]*bucketData),
 		},
-		hmacKey: hmacKey,
-		aeadKey: aeadKey,
+		hmacKey: hmCopy,
+		aeadKey: aeCopy,
 	}
 
 	// Create directory if needed
@@ -430,6 +442,14 @@ func (s *KVStore) writeTLV(w io.Writer) error {
 		return fmt.Errorf("json marshal: %w", err)
 	}
 
+	// L-N2: refuse to write a payload that the uint32 length field
+	// would silently truncate. maxKVPayload (64 MiB) is far below
+	// the uint32 ceiling so this is defensive against future buggy
+	// callers expanding the cap without re-checking the conversion.
+	if len(payload) > maxKVPayload {
+		return fmt.Errorf("kvstore: payload %d exceeds max %d", len(payload), maxKVPayload)
+	}
+
 	// Frame: magic + version + length + payload + hmac.
 	frameLen := 1 + 2 + 4 + len(payload) + hmacLenBytes
 	frame := make([]byte, frameLen)
@@ -650,6 +670,20 @@ func (s *KVStore) Close() error {
 	if err := s.save(); err != nil {
 		return err
 	}
+
+	// L-N3: best-effort key zeroize. Go GC means full eradication is
+	// impossible (the runtime may have copied the slice during stack
+	// growth or escape analysis), but overwriting the live header
+	// shrinks the post-Close window where a memory dump could
+	// recover the keys. Defensive, low-cost.
+	for i := range s.hmacKey {
+		s.hmacKey[i] = 0
+	}
+	for i := range s.aeadKey {
+		s.aeadKey[i] = 0
+	}
+	s.hmacKey = nil
+	s.aeadKey = nil
 	return nil
 }
 
