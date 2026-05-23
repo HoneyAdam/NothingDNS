@@ -54,8 +54,21 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          # L-15: GHA cache is scoped per-branch; mode=max stores all
+          # layers including any build-time secrets that may be added
+          # in the future. Today there are no --mount=type=secret or
+          # build-args carrying secrets, so this is safe. If that
+          # changes, drop mode=max for the secret-carrying layers or
+          # switch to a private OCI cache (type=registry,ref=…).
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # L-16 follow-up (deferred): generate SBOM + SLSA provenance
+          # and sign the image with cosign. The build-push-action
+          # supports `sbom: true` and `provenance: true`; signing
+          # needs sigstore/cosign-installer + a registry-side keyless
+          # signing step. Tracked separately so it can be reviewed
+          # against the deployment story rather than landing as a
+          # silent CI change.
 
       - name: Update repo description
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

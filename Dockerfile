@@ -3,7 +3,12 @@
 # Final image is FROM scratch with a stdlib-only static binary (no shared libraries)
 # Supports multi-arch builds via docker buildx
 
-# Build stage
+# Build stage. L-12: tag-pinned for readability; for reproducible
+# builds replace with a digest pin you've reviewed, e.g.
+#   FROM golang:1.26.3-alpine@sha256:<digest> AS builder
+# Renovate / Dependabot can keep a digest-pinned tag in sync. The
+# final image is FROM scratch so build-stage drift only affects the
+# binary, never the runtime surface.
 FROM golang:1.26.3-alpine AS builder
 
 # Install build dependencies (ca-certificates for TLS/DoH in final image)

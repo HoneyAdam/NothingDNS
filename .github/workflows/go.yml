@@ -9,7 +9,9 @@ on:
 permissions:
   contents: read
   security-events: write
-  pull-requests: write
+  # L-14: pull-requests permission was granted workflow-wide but no
+  # step writes PR comments / labels / status. Removed; restore as a
+  # job-scoped grant if a future step actually needs it.
 
 jobs:
   go:

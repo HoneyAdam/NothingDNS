@@ -25,7 +25,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
-        run: cd web && npm install
+        # L-13: `npm ci` is the deterministic install (errors on
+        # lockfile/dep mismatch) and is the right command for CI.
+        run: cd web && npm ci
 
       - name: Type check
         run: cd web && npx tsc --noEmit
@@ -65,7 +67,9 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Install dependencies
-        run: cd web && npm install
+        # L-13: `npm ci` is the deterministic install (errors on
+        # lockfile/dep mismatch) and is the right command for CI.
+        run: cd web && npm ci
 
       - name: Run npm audit
         run: cd web && npm audit --audit-level=moderate
