@@ -992,12 +992,30 @@ func nsecCoversWildcardOfAncestor(owner string, nsec *protocol.RDataNSEC, queryN
 }
 
 // validateNSEC validates an NSEC record for authenticated denial.
+//
+// DNS owner names are case-insensitive (RFC 1035 §2.3.3) and DNSSEC
+// canonical RR ordering (RFC 4034 §6.1) requires lowercase comparison.
+// The previous code compared owner, queryName, and nsec.NextDomain
+// with byte-equality and lexical `<` / `>` (inside nameInRange) —
+// any name returned by an authoritative server in mixed case would
+// fail to "exact-match" against owner (so the type-bitmap check
+// was skipped) and could fall in or out of the NSEC gap depending
+// on whether uppercase ASCII (0x41-0x5A) sorts before or after the
+// other endpoint's lowercase letters. Result: valid denial proofs
+// rejected or invalid proofs accepted, both Bad.
+//
+// Normalise both queryName and owner to lowercase here so the
+// downstream comparisons (== and nameInRange) operate on the same
+// case-folded form.
 func (v *Validator) validateNSEC(owner, queryName string, qtype uint16, nsec *protocol.RDataNSEC) bool {
 	// NSEC proves that the queried name doesn't exist or the type doesn't exist
 	// Owner < queryName < NextDomain
+	owner = strings.ToLower(owner)
+	queryName = strings.ToLower(queryName)
+	next := strings.ToLower(nsec.NextDomain.String())
 
 	// Check if query name is in the gap
-	if !nameInRange(queryName, owner, nsec.NextDomain.String()) {
+	if !nameInRange(queryName, owner, next) {
 		return false
 	}
 
