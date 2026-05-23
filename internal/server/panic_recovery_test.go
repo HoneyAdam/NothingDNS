@@ -37,6 +37,12 @@ func TestL2_PanicRecoveryPresent_InTCPAndUDP(t *testing.T) {
 			anchor: "func (s *UDPServer) handleRequest(",
 			needle: "if r := recover(); r != nil",
 		},
+		{
+			// L-N7: DoT sibling — same threat shape, was missed by L-2.
+			file:   "tls.go",
+			anchor: "func (s *TLSServer) processMessage(",
+			needle: "if r := recover(); r != nil",
+		},
 	}
 
 	for _, tc := range cases {

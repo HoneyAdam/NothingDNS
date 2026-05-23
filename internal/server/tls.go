@@ -411,6 +411,17 @@ func (s *TLSServer) handleMessage(conn *tls.Conn) bool {
 
 // processMessage unpacks and handles a DNS message.
 func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
+	// L-N7: per-message recover. UnpackMessage / EDNS0 parsing run
+	// before any ServeDNSWithRecovery wrapper sees the message, so
+	// the integratedHandler's recover at cmd/nothingdns/handler.go
+	// doesn't cover them. L-2 added this gate to TCP+UDP; DoT was
+	// the missed sibling.
+	defer func() {
+		if r := recover(); r != nil {
+			atomic.AddUint64(&s.errors, 1)
+		}
+	}()
+
 	// Unpack the message
 	msg, err := protocol.UnpackMessage(data)
 	if err != nil {
