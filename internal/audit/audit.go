@@ -192,10 +192,25 @@ func (a *AuditLogger) LogReload(entry ReloadAuditEntry) {
 }
 
 // Close closes the audit logger and flushes any buffered output.
+//
+// Without locking, Close raced with concurrent Log* callers: the
+// file.Close() ran while another goroutine was holding nothing and
+// calling a.output.Write on the same *os.File. Take a.mu so the
+// final close happens-after every in-flight write, and flip
+// a.enabled to false so subsequent Log* calls fast-path out
+// instead of trying to write into a closed descriptor (which
+// silently drops entries today).
+//
+// Idempotent: re-entry observes enabled=false and a.file==nil and
+// returns cleanly.
 func (a *AuditLogger) Close() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.file != nil {
 		a.file.Close()
+		a.file = nil
 	}
+	a.enabled = false
 }
 
 func formatQueryAuditLine(e QueryAuditEntry) string {
