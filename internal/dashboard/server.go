@@ -499,11 +499,29 @@ func (s *Server) broadcastLoop() {
 }
 
 // ClientLoop handles a client's read/write loops
+//
+// Defer order matters. broadcastLoop reads s.clients under s.mu.RLock
+// and uses a non-blocking
+//
+//	select { case client.send <- data: default: }
+//
+// to fan out events. If we close(client.send) while the client is
+// still in s.clients, an in-flight broadcastLoop iteration that
+// already passed the RLock'd map read can panic with
+// "send on closed channel" on its next iteration over this client —
+// the default branch only protects against a full buffer, not a
+// closed channel. RemoveClient takes s.mu.Lock and so naturally
+// serializes against broadcastLoop's RLock; once it returns, no
+// future broadcastLoop iteration can see this client, and the send
+// channel is safe to close.
+//
+// Order is therefore: signal write loop, drop from broadcast set,
+// then close the send channel and finally the conn.
 func (s *Server) ClientLoop(client *Client) {
 	defer func() {
 		close(client.closed) // Signal write loop to exit
-		client.closeSend.Do(func() { close(client.send) })
 		s.RemoveClient(client)
+		client.closeSend.Do(func() { close(client.send) })
 		client.conn.Close()
 	}()
 
