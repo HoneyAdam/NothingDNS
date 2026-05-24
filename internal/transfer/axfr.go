@@ -94,7 +94,7 @@ func NewAXFRServer(zones map[string]*zone.Zone, opts ...AXFRServerOption) *AXFRS
 		zones:     zones,
 		zonesMu:   &sync.RWMutex{},
 		keyStore:  NewKeyStore(),
-		allowList: nil, // nil means allow all
+		allowList: nil, // empty means deny all until explicitly configured
 	}
 	for _, opt := range opts {
 		opt(s)

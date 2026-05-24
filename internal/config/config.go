@@ -77,6 +77,9 @@ type Config struct {
 	// Slave zone configuration for automatic zone transfers
 	SlaveZones []SlaveZoneConfig `yaml:"slave_zones"`
 
+	// Transfer configuration for serving AXFR/IXFR to secondary servers
+	Transfer TransferConfig `yaml:"transfer"`
+
 	// Split-Horizon view configuration
 	Views []ViewConfig `yaml:"views"`
 
@@ -307,6 +310,17 @@ type SlaveZoneConfig struct {
 
 	// Maximum retry attempts (0 = unlimited)
 	MaxRetries int `yaml:"max_retries"`
+}
+
+// TransferConfig controls outbound-serving zone transfers.
+type TransferConfig struct {
+	// AllowList contains CIDR ranges permitted to request AXFR/IXFR.
+	// Empty means deny zone transfer requests.
+	AllowList []string `yaml:"allow_list"`
+
+	// RequireTSIG requires TSIG authentication for transfer requests even
+	// when the client IP is in AllowList.
+	RequireTSIG bool `yaml:"require_tsig"`
 }
 
 // ServerConfig contains server-level settings.
@@ -716,6 +730,9 @@ type MetricsConfig struct {
 
 	// Path for metrics endpoint
 	Path string `yaml:"path"`
+
+	// Bearer token required to scrape metrics and metrics health.
+	AuthToken string `yaml:"auth_token"`
 }
 
 // DNSSECConfig contains DNSSEC settings.
@@ -851,9 +868,10 @@ func DefaultConfig() *Config {
 			QueryLogFile: "",
 		},
 		Metrics: MetricsConfig{
-			Enabled: false,
-			Bind:    ":9153",
-			Path:    "/metrics",
+			Enabled:   false,
+			Bind:      ":9153",
+			Path:      "/metrics",
+			AuthToken: "",
 		},
 		DNSSEC: DNSSECConfig{
 			Enabled:     true, // Enable DNSSEC validation by default using built-in IANA root anchors
@@ -1013,26 +1031,24 @@ func isAlphaNum(c byte) bool {
 // (e.g. mis-spelling "blocklist" as "blocklists" used to start the
 // server with blocklist disabled and zero indication of the typo).
 //
-// The list is the union of: sections referenced by node.Get(...) in
-// unmarshalToConfig and sections present at the document root in
-// config.example.yaml (which is the canonical reference layout).
+// The list is limited to sections referenced by node.Get(...) in
+// unmarshalToConfig. Anything else should warn instead of being
+// silently accepted as configured.
 var knownTopLevelConfigKeys = map[string]struct{}{
 	// Core sections wired through unmarshalToConfig.
 	"server": {}, "resolution": {}, "upstream": {}, "cache": {},
 	"logging": {}, "metrics": {}, "dnssec": {}, "zones": {},
-	"zone_dir": {}, "blocklist": {}, "cluster": {}, "tls": {},
-	"http": {}, "rules": {}, "memory_limit_mb": {}, "shutdown_timeout": {},
-	"rpz": {}, "geodns": {}, "anycast_groups": {}, "topology": {},
-	"views": {}, "acl": {}, "rrl": {}, "ratelimit": {}, "audit": {},
-	"slave_zones": {}, "dns64": {}, "cookie": {}, "xot": {},
-	"quic": {}, "signing": {}, "rpc": {}, "seed_nodes": {},
-	"odoh": {}, "idna": {}, "otel": {}, "tracing": {},
-	"catalog": {}, "mdns": {}, "load": {}, "filter": {},
+	"zone_dir": {}, "zonemd": {}, "memory_limit_mb": {},
+	"shutdown_timeout": {}, "acl": {}, "rrl": {},
+	"blocklist": {}, "rpz": {}, "geodns": {}, "dns64": {},
+	"cookie": {}, "cluster": {}, "storage": {}, "slave_zones": {},
+	"transfer": {},
+	"views":    {},
 }
 
-// documentedButUnwiredKeys lists keys that appear at the document
-// root of config.example.yaml (so operators reasonably reach for
-// them) but have NO corresponding code path inside unmarshalToConfig.
+// documentedButUnwiredKeys lists stale documented keys that operators
+// may still have in existing config files but that have NO
+// corresponding code path inside unmarshalToConfig.
 // The settings inside them are silently dropped. Treating them like
 // any other unknown key would (rightly) flag them, but the warning
 // here is more actionable: it tells the operator the section was
@@ -1042,7 +1058,7 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 // actually wired through unmarshalToConfig.
 var documentedButUnwiredKeys = map[string]struct{}{
 	"api": {}, "auth": {}, "ddns": {}, "dso": {},
-	"resolver": {}, "security": {}, "transfer": {}, "zonemd": {},
+	"idna": {}, "mdns": {}, "odoh": {}, "resolver": {},
 }
 
 // unmarshalToConfig unmarshals a node tree into a Config struct.
@@ -1061,11 +1077,12 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 			continue
 		}
 		if _, ok := documentedButUnwiredKeys[k]; ok {
-			// Documented in config.example.yaml but the parser has no
-			// branch that reads it. Loud-by-default so the operator
-			// can't quietly deploy a config whose half is dead weight.
-			util.Warnf("config: section %q is documented in config.example.yaml "+
-				"but not yet wired into the daemon — its settings will be ignored", k)
+			// Stale documented examples used these names, but the
+			// parser has no branch that reads them. Loud-by-default so
+			// the operator can't quietly deploy config whose half is
+			// dead weight.
+			util.Warnf("config: section %q is a stale documented section "+
+				"but is not wired into the daemon — its settings will be ignored", k)
 			continue
 		}
 		util.Warnf("config: unknown top-level key %q — ignored (typo?)", k)
@@ -1130,6 +1147,9 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		cfg.ZoneDir = zdn.Value
 	}
 
+	cfg.ZONEMD = getBool(node, "zonemd", cfg.ZONEMD)
+	cfg.ShutdownTimeout = getString(node, "shutdown_timeout", cfg.ShutdownTimeout)
+
 	// Memory limit
 	if mlNode := node.Get("memory_limit_mb"); mlNode != nil && mlNode.Value != "" {
 		if v, err := strconv.Atoi(mlNode.Value); err == nil && v > 0 {
@@ -1153,6 +1173,13 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 				}
 				cfg.ACL = append(cfg.ACL, rule)
 			}
+		}
+	}
+
+	// RRL config
+	if rrlNode := node.Get("rrl"); rrlNode != nil {
+		if err := unmarshalRRL(rrlNode, &cfg.RRL); err != nil {
+			return fmt.Errorf("rrl: %w", err)
 		}
 	}
 
@@ -1239,6 +1266,12 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		}
 	}
 
+	// Transfer serving config
+	if transferNode := node.Get("transfer"); transferNode != nil {
+		cfg.Transfer.AllowList = getStringSlice(transferNode, "allow_list", cfg.Transfer.AllowList)
+		cfg.Transfer.RequireTSIG = getBool(transferNode, "require_tsig", cfg.Transfer.RequireTSIG)
+	}
+
 	// Parse views (split-horizon)
 	if viewsNode := node.Get("views"); viewsNode != nil && viewsNode.Type == NodeSequence {
 		for _, viewNode := range viewsNode.Children {
@@ -1266,6 +1299,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 	cfg.Port = getInt(node, "port", cfg.Port)
 	cfg.UDPWorkers = getInt(node, "udp_workers", cfg.UDPWorkers)
 	cfg.TCPWorkers = getInt(node, "tcp_workers", cfg.TCPWorkers)
+	cfg.PIDFile = node.GetString("pid_file")
 
 	if tlsNode := node.Get("tls"); tlsNode != nil {
 		cfg.TLS.Enabled = getBool(tlsNode, "enabled", cfg.TLS.Enabled)
@@ -1438,6 +1472,8 @@ func unmarshalCache(node *Node, cfg *CacheConfig) error {
 	cfg.NegativeTTL = getInt(node, "negative_ttl", cfg.NegativeTTL)
 	cfg.Prefetch = getBool(node, "prefetch", cfg.Prefetch)
 	cfg.PrefetchThreshold = getInt(node, "prefetch_threshold", cfg.PrefetchThreshold)
+	cfg.ServeStale = getBool(node, "serve_stale", cfg.ServeStale)
+	cfg.StaleGraceSecs = getInt(node, "stale_grace_secs", cfg.StaleGraceSecs)
 
 	return nil
 }
@@ -1479,6 +1515,7 @@ func unmarshalMetrics(node *Node, cfg *MetricsConfig) error {
 	if cfg.Path == "" {
 		cfg.Path = "/metrics"
 	}
+	cfg.AuthToken = node.GetString("auth_token")
 
 	return nil
 }
@@ -1524,6 +1561,23 @@ func unmarshalDNSSEC(node *Node, cfg *DNSSECConfig) error {
 	return nil
 }
 
+func unmarshalRRL(node *Node, cfg *RRLConfig) error {
+	if node.Type != NodeMapping {
+		return fmt.Errorf("expected mapping")
+	}
+
+	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
+	cfg.Rate = getInt(node, "rate", cfg.Rate)
+	cfg.Burst = getInt(node, "burst", cfg.Burst)
+	cfg.MaxBuckets = getInt(node, "max_buckets", cfg.MaxBuckets)
+
+	// Backward-compatible aliases used by earlier examples.
+	cfg.Rate = getInt(node, "rate_limit", cfg.Rate)
+	cfg.MaxBuckets = getInt(node, "max_table_size", cfg.MaxBuckets)
+
+	return nil
+}
+
 func unmarshalBlocklist(node *Node, cfg *BlocklistConfig) error {
 	if node.Type != NodeMapping {
 		return fmt.Errorf("expected mapping")
@@ -1531,6 +1585,7 @@ func unmarshalBlocklist(node *Node, cfg *BlocklistConfig) error {
 
 	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
 	cfg.Files = getStringSlice(node, "files", cfg.Files)
+	cfg.URLs = getStringSlice(node, "urls", cfg.URLs)
 
 	return nil
 }
@@ -1750,6 +1805,9 @@ func (c *Config) Validate() []string {
 	// Validate slave zones configuration
 	errors = append(errors, c.validateSlaveZones()...)
 
+	// Validate transfer serving configuration
+	errors = append(errors, c.validateTransfer()...)
+
 	// Validate views (split-horizon) configuration
 	errors = append(errors, c.validateViews()...)
 
@@ -1915,6 +1973,15 @@ func (c *Config) validateSecrets() []string {
 		// less obvious "I picked a short word" mistake. Same gate the
 		// auth_token block above uses.
 		if err := secretHasMinEntropy("http.auth_secret", c.Server.HTTP.AuthSecret); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	if token := looksLikePlaceholderSecret(c.Metrics.AuthToken); token != "" {
+		errors = append(errors, fmt.Sprintf(
+			"metrics.auth_token still contains placeholder %q — set it via ${NOTHINGDNS_METRICS_AUTH_TOKEN} or replace with a real secret before starting",
+			token))
+	} else if c.Metrics.AuthToken != "" {
+		if err := secretHasMinEntropy("metrics.auth_token", c.Metrics.AuthToken); err != nil {
 			errors = append(errors, err.Error())
 		}
 	}
@@ -2111,7 +2178,6 @@ func (c *Config) validateMetrics() []string {
 	if !strings.HasPrefix(c.Metrics.Path, "/") {
 		errors = append(errors, fmt.Sprintf("metrics: path '%s' must start with /", c.Metrics.Path))
 	}
-
 	return errors
 }
 
@@ -2317,6 +2383,18 @@ func (c *Config) validateSlaveZones() []string {
 		// Validate max retries
 		if slave.MaxRetries < 0 {
 			errors = append(errors, fmt.Sprintf("%s: max_retries cannot be negative", prefix))
+		}
+	}
+
+	return errors
+}
+
+func (c *Config) validateTransfer() []string {
+	var errors []string
+
+	for _, cidr := range c.Transfer.AllowList {
+		if !isValidCIDR(cidr) {
+			errors = append(errors, fmt.Sprintf("transfer.allow_list: invalid CIDR '%s'", cidr))
 		}
 	}
 

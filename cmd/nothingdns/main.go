@@ -141,9 +141,10 @@ func run() error {
 
 	// Initialize metrics collector
 	metricsCollector := metrics.New(metrics.Config{
-		Enabled: cfg.Metrics.Enabled,
-		Bind:    cfg.Metrics.Bind,
-		Path:    cfg.Metrics.Path,
+		Enabled:   cfg.Metrics.Enabled,
+		Bind:      cfg.Metrics.Bind,
+		Path:      cfg.Metrics.Path,
+		AuthToken: cfg.Metrics.AuthToken,
 	})
 	if err := metricsCollector.Start(); err != nil {
 		logger.Warnf("Failed to start metrics server: %v", err)

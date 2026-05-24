@@ -37,8 +37,13 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 		zonesMu: zonesMu,
 	}
 
+	axfrOptions := []transfer.AXFRServerOption{transfer.WithAllowList(cfg.Transfer.AllowList)}
+	if cfg.Transfer.RequireTSIG {
+		axfrOptions = append(axfrOptions, transfer.WithRequireTSIG())
+	}
+
 	// Initialize AXFR server for zone transfers
-	mgr.result.AXFRServer = transfer.NewAXFRServer(zones)
+	mgr.result.AXFRServer = transfer.NewAXFRServer(zones, axfrOptions...)
 	logger.Infof("AXFR server initialized with %d zones", len(zones))
 
 	// Initialize IXFR server for incremental zone transfers

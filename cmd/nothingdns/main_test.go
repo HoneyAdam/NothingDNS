@@ -4066,6 +4066,7 @@ func TestNewClusterManager_Disabled(t *testing.T) {
 
 func TestNewTransferManager(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Transfer.AllowList = []string{"192.0.2.0/24"}
 	zones := make(map[string]*zone.Zone)
 	zonesMu := &sync.RWMutex{}
 	mgr, err := NewTransferManager(cfg, zones, zonesMu, util.NewLogger(util.ERROR, util.TextFormat, nil))
@@ -4074,6 +4075,12 @@ func TestNewTransferManager(t *testing.T) {
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
+	}
+	if !mgr.Result().AXFRServer.IsAllowed(net.ParseIP("192.0.2.53")) {
+		t.Fatal("expected transfer.allow_list to permit configured AXFR client")
+	}
+	if mgr.Result().AXFRServer.IsAllowed(net.ParseIP("198.51.100.53")) {
+		t.Fatal("expected transfer.allow_list to reject unconfigured AXFR client")
 	}
 	mgr.SetZonesMu(zonesMu)
 	mgr.Stop()
