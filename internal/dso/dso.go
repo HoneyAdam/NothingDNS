@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+var sessionIDRandReader io.Reader = cryptorand.Reader
 
 // DSO Header constants per RFC 8490
 const (
@@ -264,10 +267,6 @@ type Manager struct {
 	allowPlainTCP     bool
 	maxPayloadSize    uint16
 
-	// Session ID generator (crypto/rand-backed; counter is a fallback only)
-	nextSessionID uint64
-	sessionIDMu   sync.Mutex
-
 	// startOnce guards Start() from racy double-fires
 	startOnce sync.Once
 	// stopOnce guards Stop() from a double close(stopCh) panic
@@ -395,7 +394,10 @@ func (m *Manager) CreateSession(conn net.Conn) (*Session, error) {
 		return nil, fmt.Errorf("maximum sessions reached: %d", m.maxSessions)
 	}
 
-	id := m.generateSessionID()
+	id, err := m.generateSessionID()
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now()
 
 	session := &Session{
@@ -453,28 +455,21 @@ func (m *Manager) SessionCount() int {
 // RFC 8490 §6.6.1.2 requires session identifiers to be unpredictable so an
 // off-path attacker cannot guess and hijack an active session. The previous
 // implementation just incremented a uint64 counter — that gave attackers the
-// next session's ID with zero work. We now draw from crypto/rand and fall
-// back to the counter only if the system entropy source is unavailable,
-// matching the defensive pattern used by the resolver's transaction-ID
-// generator.
-func (m *Manager) generateSessionID() uint64 {
+// next session's ID with zero work. We draw from crypto/rand and fail closed
+// if the system entropy source is unavailable.
+func (m *Manager) generateSessionID() (uint64, error) {
 	var b [8]byte
-	if _, err := cryptorand.Read(b[:]); err == nil {
+	for i := 0; i < 8; i++ {
+		if _, err := io.ReadFull(sessionIDRandReader, b[:]); err != nil {
+			return 0, fmt.Errorf("dso: generate unpredictable session ID: %w", err)
+		}
 		id := binary.BigEndian.Uint64(b[:])
 		// Reserve ID 0 as "unassigned" sentinel; redraw rather than return it.
 		if id != 0 {
-			return id
+			return id, nil
 		}
 	}
-	// crypto/rand failure: fall back to the monotonic counter so we still
-	// produce a unique (but predictable) ID. The keeper at least logs.
-	m.sessionIDMu.Lock()
-	defer m.sessionIDMu.Unlock()
-	m.nextSessionID++
-	if m.logger != nil {
-		m.logger.Warnf("crypto/rand unavailable; falling back to sequential session ID %d", m.nextSessionID)
-	}
-	return m.nextSessionID
+	return 0, fmt.Errorf("dso: crypto/rand returned reserved zero session ID repeatedly")
 }
 
 // cleanupLoop periodically removes expired sessions.

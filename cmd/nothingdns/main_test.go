@@ -4194,6 +4194,7 @@ func TestNewClusterManager_Enabled(t *testing.T) {
 	cfg.Cluster.BindAddr = "127.0.0.1"
 	cfg.Cluster.GossipPort = 0 // let OS assign
 	cfg.Cluster.NodeID = "test-node"
+	cfg.Cluster.AllowInsecureCluster = true
 	mgr, err := NewClusterManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -4930,13 +4931,12 @@ func TestClusterManager_Enabled_StartFail(t *testing.T) {
 
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewClusterManager(cfg, logger, cache.New(cache.Config{}), metrics.New(metrics.Config{}), nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for enabled cluster start failure")
 	}
-	if mgr.Cluster != nil {
-		t.Error("expected nil cluster after start failure")
+	if mgr != nil {
+		t.Fatal("expected nil manager after enabled cluster start failure")
 	}
-	mgr.Stop()
 }
 
 func TestClusterManager_Enabled(t *testing.T) {
@@ -6279,14 +6279,12 @@ func TestNewClusterManager_NewError(t *testing.T) {
 	cfg.Cluster.BindAddr = "invalid:bad:addr"
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewClusterManager(cfg, logger, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when cluster initialization fails")
 	}
-	// cluster.New fails -> warn and return with nil Cluster
-	if mgr.Cluster != nil {
-		t.Error("expected nil cluster when New fails")
+	if mgr != nil {
+		t.Fatal("expected nil manager when cluster initialization fails")
 	}
-	mgr.Stop()
 }
 
 func TestClusterManager_MetricsUpdater(t *testing.T) {

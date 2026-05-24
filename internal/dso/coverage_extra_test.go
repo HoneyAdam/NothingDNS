@@ -2,7 +2,10 @@ package dso
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -623,7 +626,15 @@ func TestManager_GetSession_NonExistent(t *testing.T) {
 
 // --- Manager.generateSessionID ---
 
-func TestManager_GenerateSessionID_Sequential(t *testing.T) {
+type failingReader struct {
+	err error
+}
+
+func (r failingReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestManager_GenerateSessionID_Unpredictable(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowPlainTCP = true
 	cfg.AllowPlainTCP = true
@@ -631,11 +642,78 @@ func TestManager_GenerateSessionID_Sequential(t *testing.T) {
 
 	ids := make(map[uint64]bool)
 	for i := 0; i < 100; i++ {
-		id := m.generateSessionID()
+		id, err := m.generateSessionID()
+		if err != nil {
+			t.Fatalf("generateSessionID failed: %v", err)
+		}
 		if ids[id] {
 			t.Errorf("duplicate session ID: %d", id)
 		}
 		ids[id] = true
+	}
+}
+
+func TestManager_GenerateSessionID_RandFailureFailsClosed(t *testing.T) {
+	prev := sessionIDRandReader
+	sessionIDRandReader = failingReader{err: errors.New("entropy unavailable")}
+	t.Cleanup(func() {
+		sessionIDRandReader = prev
+	})
+
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	m := NewManager(cfg, nil)
+	id, err := m.generateSessionID()
+	if err == nil {
+		t.Fatal("expected generateSessionID to fail when entropy source fails")
+	}
+	if id != 0 {
+		t.Fatalf("expected zero ID on failure, got %d", id)
+	}
+	if !strings.Contains(err.Error(), "generate unpredictable session ID") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestManager_CreateSession_RandFailureFailsClosed(t *testing.T) {
+	prev := sessionIDRandReader
+	sessionIDRandReader = failingReader{err: io.ErrUnexpectedEOF}
+	t.Cleanup(func() {
+		sessionIDRandReader = prev
+	})
+
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	m := NewManager(cfg, nil)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			conn.Close()
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	session, err := m.CreateSession(conn)
+	if err == nil {
+		t.Fatal("expected CreateSession to fail when session ID generation fails")
+	}
+	if session != nil {
+		t.Fatal("expected nil session on session ID generation failure")
+	}
+	if len(m.sessions) != 0 {
+		t.Fatalf("expected no stored sessions after failure, got %d", len(m.sessions))
 	}
 }
 

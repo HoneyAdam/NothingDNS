@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
@@ -33,41 +34,39 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 	}
 
 	clusterConfig := cluster.Config{
-		Enabled:              cfg.Cluster.Enabled,
-		NodeID:               cfg.Cluster.NodeID,
-		BindAddr:             cfg.Cluster.BindAddr,
-		GossipPort:           cfg.Cluster.GossipPort,
-		Region:               cfg.Cluster.Region,
-		Zone:                 cfg.Cluster.Zone,
-		Weight:               cfg.Cluster.Weight,
-		SeedNodes:            cfg.Cluster.SeedNodes,
-		CacheSync:            cfg.Cluster.CacheSync,
-		HTTPAddr:             cfg.Server.HTTP.Bind,
+		Enabled:               cfg.Cluster.Enabled,
+		NodeID:                cfg.Cluster.NodeID,
+		BindAddr:              cfg.Cluster.BindAddr,
+		GossipPort:            cfg.Cluster.GossipPort,
+		Region:                cfg.Cluster.Region,
+		Zone:                  cfg.Cluster.Zone,
+		Weight:                cfg.Cluster.Weight,
+		SeedNodes:             cfg.Cluster.SeedNodes,
+		CacheSync:             cfg.Cluster.CacheSync,
+		HTTPAddr:              cfg.Server.HTTP.Bind,
 		EncryptionKey:         cfg.Cluster.EncryptionKey,
 		SnapshotEncryptionKey: cfg.Cluster.SnapshotEncryptionKey,
 		AllowInsecureCluster:  cfg.Cluster.AllowInsecureCluster,
-		ZoneManager:          zoneMgr,
-		ConsensusMode:        cluster.ConsensusMode(cfg.Cluster.ConsensusMode),
+		ZoneManager:           zoneMgr,
+		ConsensusMode:         cluster.ConsensusMode(cfg.Cluster.ConsensusMode),
 	}
 
 	var err error
 	mgr.Cluster, err = cluster.New(clusterConfig, logger, dnsCache)
 	if err != nil {
-		logger.Warnf("Failed to initialize cluster: %v", err)
-		return mgr, nil
+		return nil, fmt.Errorf("initialize cluster: %w", err)
 	}
 
 	if err := mgr.Cluster.Start(); err != nil {
-		logger.Warnf("Failed to start cluster: %v", err)
 		mgr.Cluster = nil
-		return mgr, nil
+		return nil, fmt.Errorf("start cluster: %w", err)
 	}
 
 	logger.Infof("Cluster initialized with node ID %s", mgr.Cluster.GetNodeID())
 	logger.Infof("Cluster has %d nodes", mgr.Cluster.GetNodeCount())
 
 	// Set up cache invalidation callback for cluster sync
-	if cfg.Cluster.CacheSync {
+	if cfg.Cluster.CacheSync && dnsCache != nil {
 		dnsCache.SetInvalidateFunc(func(key string) {
 			if err := mgr.Cluster.InvalidateCache([]string{key}); err != nil {
 				logger.Debugf("Failed to broadcast cache invalidation: %v", err)

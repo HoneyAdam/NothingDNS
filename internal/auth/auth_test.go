@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
@@ -196,9 +197,9 @@ func TestRevokeToken(t *testing.T) {
 // uses, plus a > 0 sanity guard for concurrent-revoke idempotency.
 func TestRevokeToken_DoesNotDriveSessionCounterNegative(t *testing.T) {
 	store, _ := NewStore(&Config{
-		Secret:             "test-secret",
-		Users:              []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
-		TokenExpiry:        Duration{Duration: 24 * time.Hour},
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
 		// MaxSessionsPerUser deliberately left at 0 — this is the
 		// path where the unconditional decrement was a bug.
 	})
@@ -1647,8 +1648,10 @@ func TestSaveTokensSigned_LoadTokensSigned_RoundTrip(t *testing.T) {
 	if len(data) < 12+16+2 {
 		t.Errorf("encrypted file too small: %d bytes", len(data))
 	}
-	// Verify it's not plaintext JSON (should not start with '{')
-	if data[0] == '{' || data[12] == '{' {
+	// Verify the token map was not written as plaintext JSON. Individual
+	// ciphertext bytes are random and may equal '{', so check for a JSON key
+	// shape from the serialized token map instead of a single byte value.
+	if bytes.Contains(data, []byte(`{"`)) || bytes.Contains(data, []byte(tok.Token)) {
 		t.Error("token file appears to be plaintext JSON, not encrypted")
 	}
 
