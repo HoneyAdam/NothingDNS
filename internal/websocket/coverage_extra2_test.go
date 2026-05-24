@@ -662,7 +662,7 @@ func TestSetWriteDeadline_ErrorMessage(t *testing.T) {
 }
 
 // ============================================================================
-// Handshake — no allowed origins configured, origin present (fail-closed)
+// Handshake — no allowed origins configured, cross-origin present (fail-closed)
 // ============================================================================
 
 func TestHandshake_NoAllowedOriginsWithOriginHeader(t *testing.T) {
@@ -678,13 +678,30 @@ func TestHandshake_NoAllowedOriginsWithOriginHeader(t *testing.T) {
 		t.Error("expected nil conn")
 	}
 	if err == nil {
-		t.Error("expected error when no allowed origins configured")
+		t.Error("expected error for cross-origin request")
 	}
-	if !strings.Contains(err.Error(), "no allowed origins configured") {
-		t.Errorf("expected 'no allowed origins configured' error, got: %v", err)
+	if !strings.Contains(err.Error(), "origin not allowed") {
+		t.Errorf("expected 'origin not allowed' error, got: %v", err)
 	}
 	if w.Code != 403 {
 		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+func TestHandshake_NoAllowedOriginsSameOriginHeader(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	r.Header.Set("Origin", "http://example.com")
+
+	conn, err := Handshake(w, r) // no allowed origins
+	if conn != nil {
+		t.Error("expected nil conn (no hijack)")
+	}
+	if err != nil && strings.Contains(err.Error(), "origin") {
+		t.Errorf("same-origin request should pass origin check, got: %v", err)
 	}
 }
 

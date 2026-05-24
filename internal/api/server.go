@@ -731,14 +731,14 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		// Explicit CSP directives — default-src alone leaves base-uri,
 		// form-action, frame-ancestors, and object-src unrestricted (VULN-016).
 		// style-src keeps unsafe-inline for Radix UI inline styles; script-src
-		// stays strict. connect-src permits WebSocket to the same origin.
+		// stays strict. connect-src permits WebSocket dashboard streams.
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; "+
 				"script-src 'self'; "+
 				"style-src 'self' 'unsafe-inline'; "+
 				"img-src 'self' data:; "+
 				"font-src 'self' data:; "+
-				"connect-src 'self';"+
+				"connect-src 'self' ws: wss:; "+
 				"frame-ancestors 'none'; "+
 				"object-src 'none'; "+
 				"base-uri 'self'; "+
@@ -810,6 +810,20 @@ func isOriginAllowed(origin string, allowed []string) bool {
 	return false
 }
 
+func isSPAStaticAsset(path string) bool {
+	if strings.HasPrefix(path, "/assets/") {
+		return true
+	}
+
+	for _, suffix := range []string{".svg", ".png", ".ico", ".js", ".css", ".woff2"} {
+		if strings.HasSuffix(path, suffix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // authMiddleware adds authentication.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -826,8 +840,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Skip auth for static assets (React SPA) — let spaHandler serve them
-		if strings.HasPrefix(r.URL.Path, "/assets/") ||
-			r.URL.Path == "/favicon.svg" || r.URL.Path == "/favicon.ico" {
+		if isSPAStaticAsset(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

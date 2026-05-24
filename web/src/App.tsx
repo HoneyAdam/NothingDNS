@@ -44,7 +44,7 @@ function PageFallback() {
 
 function AppContent() {
   const { isAuthenticated, token } = useAuthStore();
-  const { connected } = useWebSocket('/ws');
+  const { connected } = useWebSocket('/ws', { enabled: isAuthenticated });
 
   useEffect(() => {
     // Validate token on mount if authenticated

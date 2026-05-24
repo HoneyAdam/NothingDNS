@@ -5,10 +5,11 @@ interface UseWebSocketOpts {
   onQuery?: (event: QueryEvent) => void;
   onError?: (error: string) => void;
   autoReconnect?: boolean;
+  enabled?: boolean;
 }
 
 export function useWebSocket(path: string, opts: UseWebSocketOpts = {}) {
-  const { onQuery, onError, autoReconnect = true } = opts;
+  const { onQuery, onError, autoReconnect = true, enabled = true } = opts;
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const onQueryRef = useRef(onQuery);
@@ -23,6 +24,14 @@ export function useWebSocket(path: string, opts: UseWebSocketOpts = {}) {
 
   useEffect(() => {
     let cancelled = false;
+
+    if (!enabled) {
+      setConnected(false);
+      setError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const connect = () => {
       if (cancelled) return;
@@ -72,7 +81,7 @@ export function useWebSocket(path: string, opts: UseWebSocketOpts = {}) {
       wsRef.current?.close();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     };
-  }, [path, autoReconnect]);
+  }, [path, autoReconnect, enabled]);
 
   return { connected, error };
 }

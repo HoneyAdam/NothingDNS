@@ -41,8 +41,8 @@ func IsWebSocketRequest(r *http.Request) bool {
 // Handshake performs the WebSocket upgrade handshake. On success the response
 // writer has been hijacked and the caller can use ReadMessage/WriteMessage.
 // If allowedOrigins is non-empty, the Origin header is validated against the list.
-// If allowedOrigins is empty and an Origin header is present, the connection is
-// rejected to prevent cross-site WebSocket hijacking.
+// If allowedOrigins is empty and an Origin header is present, only same-origin
+// browser upgrades are accepted.
 func Handshake(w http.ResponseWriter, r *http.Request, allowedOrigins ...string) (*Conn, error) {
 	if !IsWebSocketRequest(r) {
 		http.Error(w, "not a websocket request", http.StatusBadRequest)
@@ -53,10 +53,11 @@ func Handshake(w http.ResponseWriter, r *http.Request, allowedOrigins ...string)
 	origin := r.Header.Get("Origin")
 	if origin != "" {
 		if len(allowedOrigins) == 0 {
-			http.Error(w, "origin not allowed: configure allowed origins", http.StatusForbidden)
-			return nil, errors.New("websocket: origin rejected — no allowed origins configured")
-		}
-		if !isOriginAllowed(origin, allowedOrigins) {
+			if !isSameOrigin(origin, r) {
+				http.Error(w, "origin not allowed", http.StatusForbidden)
+				return nil, errors.New("websocket: origin not allowed")
+			}
+		} else if !isOriginAllowed(origin, allowedOrigins) {
 			http.Error(w, "origin not allowed", http.StatusForbidden)
 			return nil, errors.New("websocket: origin not allowed")
 		}
@@ -107,6 +108,14 @@ func Handshake(w http.ResponseWriter, r *http.Request, allowedOrigins ...string)
 	}
 
 	return &Conn{conn: conn}, nil
+}
+
+func isSameOrigin(origin string, r *http.Request) bool {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return origin == scheme+"://"+r.Host
 }
 
 // isOriginAllowed checks if the origin matches the allowed list.
