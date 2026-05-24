@@ -367,17 +367,18 @@ Full RFC 1035 ยง5 zone file format support:
 #### 4.1.3 Zone Loading
 ```yaml
 zones:
-  - name: "example.com"
-    file: "/etc/nothingdns/zones/example.com.zone"
-    type: primary          # primary | secondary
-    dnssec: true
-    notify:
-      - 10.0.0.2
-      - 10.0.0.3
-    allow-transfer:
-      - 10.0.0.0/24
-    allow-update:
-      - 10.0.0.1          # For dynamic DNS
+  - /etc/nothingdns/zones/example.com.zone
+
+transfer:
+  allow_list:
+    - 10.0.0.0/24
+  require_tsig: false
+
+slave_zones:
+  - zone_name: secondary.example.com.
+    masters:
+      - 10.0.0.2:53
+    transfer_type: ixfr
 ```
 
 ### 4.2 Query Resolution (Authoritative)
@@ -417,19 +418,17 @@ zones:
 - Per-zone forwarding rules
 
 ```yaml
-resolver:
-  mode: recursive          # recursive | forwarder | hybrid
-  forwarders:
-    - address: "1.1.1.1:53"
-      protocol: udp
-    - address: "https://dns.google/dns-query"
-      protocol: doh
-    - address: "9.9.9.9:853"
-      protocol: dot
-  forward-zones:
-    - zone: "internal.corp"
-      forwarders:
-        - "10.0.0.1:53"
+resolution:
+  recursive: true
+  timeout: 5s
+  max_depth: 10
+
+upstream:
+  servers:
+    - 1.1.1.1:53
+    - 8.8.8.8:53
+    - 9.9.9.9:53
+  strategy: round_robin
 ```
 
 #### 5.1.3 Hybrid Mode
@@ -575,17 +574,12 @@ Implementation: All using Go's `crypto/rsa`, `crypto/ecdsa`, `crypto/ed25519` โ€
 - Per-client/group allowlists
 
 ```yaml
-blocking:
+blocklist:
   enabled: true
-  lists:
-    - path: "/etc/nothingdns/blocklists/default.txt"
-      format: domains           # domains | hosts | adblock
-    - url: "https://example.com/blocklist.txt"
-      refresh: 24h
-  response: nxdomain             # nxdomain | zero | custom
-  custom-ip: "0.0.0.0"
-  allowlist:
-    - path: "/etc/nothingdns/allowlist.txt"
+  files:
+    - "/etc/nothingdns/blocklists/default.txt"
+  urls:
+    - "https://example.com/blocklist.txt"
 ```
 
 ### 9.2 GeoDNS
@@ -604,19 +598,13 @@ blocking:
 ```yaml
 geodns:
   enabled: true
-  database: "/etc/nothingdns/GeoLite2-Country.mmdb"
-  zones:
-    - name: "cdn.example.com"
-      records:
-        - region: "EU"
-          type: A
-          value: "185.0.0.1"
-        - region: "US"
-          type: A
-          value: "203.0.113.1"
-        - region: "default"
-          type: A
-          value: "198.51.100.1"
+  mmdb_file: "/etc/nothingdns/GeoLite2-Country.mmdb"
+  rules:
+    - domain: "cdn.example.com."
+      type: A
+      default: "198.51.100.1"
+      EU: "185.0.0.1"
+      US: "203.0.113.1"
 ```
 
 ### 9.3 Split-Horizon DNS (Views)
@@ -629,19 +617,17 @@ geodns:
 ```yaml
 views:
   - name: "internal"
-    match-clients:
+    match_clients:
       - "10.0.0.0/8"
       - "172.16.0.0/12"
       - "192.168.0.0/16"
-    zones:
-      - name: "example.com"
-        file: "/etc/nothingdns/zones/internal.example.com.zone"
+    zone_files:
+      - "/etc/nothingdns/zones/internal.example.com.zone"
   - name: "external"
-    match-clients:
+    match_clients:
       - "any"
-    zones:
-      - name: "example.com"
-        file: "/etc/nothingdns/zones/external.example.com.zone"
+    zone_files:
+      - "/etc/nothingdns/zones/external.example.com.zone"
 ```
 
 ### 9.4 EDNS Client Subnet (RFC 7871)
@@ -659,15 +645,10 @@ views:
 - Configurable window size and rates
 
 ```yaml
-ratelimit:
+rrl:
   enabled: true
-  responses-per-second: 10
-  nxdomains-per-second: 5
-  referrals-per-second: 10
-  slip: 2                       # Every Nth dropped response, send TC instead
-  window: 15                    # Seconds
-  ipv4-prefix-length: 24
-  ipv6-prefix-length: 56
+  rate: 10
+  burst: 20
 ```
 
 ---
@@ -708,17 +689,13 @@ Raft FSM applies these operations:
 ```yaml
 cluster:
   enabled: true
-  node-id: "node-1"
-  bind: "0.0.0.0:4222"
-  peers:
-    - id: "node-2"
-      address: "10.0.0.2:4222"
-    - id: "node-3"
-      address: "10.0.0.3:4222"
-  election-timeout: "1s"
-  heartbeat-interval: "150ms"
-  snapshot-interval: "5m"
-  snapshot-threshold: 10000      # Log entries before snapshot
+  node_id: "node-1"
+  bind_addr: "0.0.0.0"
+  gossip_port: 7946
+  seed_nodes:
+    - "10.0.0.2:7946"
+    - "10.0.0.3:7946"
+  cache_sync: true
 ```
 
 ### 10.3 gRPC Inter-Node Communication
@@ -969,24 +946,22 @@ server:
   max-udp-size: 4096
   tcp-idle-timeout: "30s"
 
-tls:
-  cert: "/etc/nothingdns/tls/cert.pem"
-  key: "/etc/nothingdns/tls/key.pem"
-  acme:
+server:
+  tls:
     enabled: true
-    email: "admin@example.com"
-    domains:
-      - "dns.example.com"
+    cert_file: "/etc/nothingdns/tls/cert.pem"
+    key_file: "/etc/nothingdns/tls/key.pem"
 
-resolver:
-  mode: hybrid                     # recursive | forwarder | hybrid
-  forwarders:
-    - address: "1.1.1.1:53"
-      protocol: udp
-    - address: "https://dns.google/dns-query"
-      protocol: doh
-  qname-minimization: true
-  zero-twenty-encoding: true       # 0x20 mixed-case defense
+resolution:
+  recursive: true
+  qname_minimization: true
+  use_0x20: true
+
+upstream:
+  servers:
+    - "1.1.1.1:53"
+    - "8.8.8.8:53"
+  strategy: round_robin
 
 cache:
   max-size: 100000
@@ -999,86 +974,61 @@ cache:
   prefetch-threshold: 10           # Percentage of TTL remaining
 
 zones:
-  - name: "example.com"
-    file: "/etc/nothingdns/zones/example.com.zone"
-    type: primary
-    dnssec:
-      enabled: true
-      algorithm: ECDSAP256SHA256
-      nsec3: true
-    notify:
-      - "10.0.0.2"
-    allow-transfer:
-      - "10.0.0.0/24"
-    allow-update:
-      - "10.0.0.1"
+  - /etc/nothingdns/zones/example.com.zone
 
-blocking:
+transfer:
+  allow_list:
+    - "10.0.0.0/24"
+  require_tsig: false
+
+blocklist:
   enabled: true
-  lists:
-    - path: "/etc/nothingdns/blocklists/default.txt"
-      format: domains
-  response: nxdomain
-  allowlist:
-    - path: "/etc/nothingdns/allowlist.txt"
+  files:
+    - "/etc/nothingdns/blocklists/default.txt"
 
 geodns:
   enabled: false
-  database: "/etc/nothingdns/GeoLite2-Country.mmdb"
+  mmdb_file: "/etc/nothingdns/GeoLite2-Country.mmdb"
 
 views:
   - name: "internal"
-    match-clients:
+    match_clients:
       - "10.0.0.0/8"
       - "192.168.0.0/16"
-    zones:
-      - name: "example.com"
-        file: "/etc/nothingdns/zones/internal.example.com.zone"
+    zone_files:
+      - "/etc/nothingdns/zones/internal.example.com.zone"
 
-ratelimit:
+rrl:
   enabled: true
-  responses-per-second: 10
-  nxdomains-per-second: 5
-  slip: 2
-  window: 15
+  rate: 10
+  burst: 20
 
 acl:
-  default: allow
-  rules:
-    - action: deny
-      source: "0.0.0.0/0"
-      zones:
-        - "internal.corp"
-    - action: allow
-      source: "10.0.0.0/8"
-      zones:
-        - "internal.corp"
+  - name: block-public
+    action: deny
+    networks:
+      - "0.0.0.0/0"
+    types:
+      - ANY
+  - name: allow-internal
+    action: allow
+    networks:
+      - "10.0.0.0/8"
+    types:
+      - ANY
 
 cluster:
   enabled: false
-  node-id: "node-1"
-  bind: "0.0.0.0:4222"
-  grpc: "0.0.0.0:4223"
-  peers:
-    - id: "node-2"
-      address: "10.0.0.2:4222"
-    - id: "node-3"
-      address: "10.0.0.3:4222"
-  election-timeout: "1s"
-  heartbeat-interval: "150ms"
-  snapshot-interval: "5m"
-  snapshot-threshold: 10000
+  node_id: "node-1"
+  bind_addr: "0.0.0.0"
+  gossip_port: 7946
+  seed_nodes: []
 
-api:
-  enabled: true
-  listen: "0.0.0.0:8080"
-  auth:
-    type: bearer                   # bearer | basic | none
-    token: "${NOTHINGDNS_API_TOKEN}"
-
-dashboard:
-  enabled: true
-  listen: "0.0.0.0:8080"          # Shared with API
+server:
+  http:
+    enabled: true
+    bind: "0.0.0.0:8080"
+    auth_token: "${NOTHINGDNS_API_TOKEN}"
   path: "/dashboard"
 
 metrics:

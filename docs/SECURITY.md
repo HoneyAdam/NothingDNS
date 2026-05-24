@@ -54,6 +54,12 @@ All cryptographic operations use Go's standard library `crypto/*` packages. No t
 - SO_REUSEPORT for multi-core scalability
 - No arbitrary code execution in zone files
 
+### Supply Chain
+- GitHub Actions are pinned by commit SHA instead of mutable tags where credentials are available
+- Container images are built with SBOM and SLSA provenance attestations
+- Published container image digests are keylessly signed with Sigstore cosign via GitHub OIDC
+- Operators should deploy immutable image digests and verify cosign signatures before promotion
+
 ### ACL
 - IP-based access control for queries and management
 - Rate limiting (RRL) for query amplification prevention

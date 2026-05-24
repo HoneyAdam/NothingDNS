@@ -132,7 +132,7 @@ cache:
 
   # Serve stale (RFC 8767) - serve expired cache during upstream failure
   serve_stale: true
-  serve_stale_ttl: 604800    # 7 days
+  stale_grace_secs: 604800    # 7 days
 ```
 
 **Tuning Guidelines**:
@@ -301,7 +301,6 @@ curl -X POST http://localhost:8080/api/v1/cache/warm \
 
 ```yaml
 cache:
-  negative_cache: true
   negative_ttl: 60    # NXDOMAIN cached for 1 minute
   # Too high = stale NXDOMAIN served
   # Too low = repeated upstream queries for non-existent domains
@@ -313,25 +312,23 @@ cache:
 
 ```yaml
 cache:
-  nsec_cache: true    # Enable RFC 8198
-  nsec_cache_ttl: 86400  # How long to cache NSEC records
+  enabled: true
+  negative_ttl: 60
 ```
 
-This synthesizes NXDOMAIN responses from cached NSEC records without upstream queries.
+DNSSEC validation can use cached denial-of-existence records; tune negative TTL
+conservatively so repeated NXDOMAIN traffic is absorbed without keeping stale
+denials too long.
 
 ### Minimize Response (RFC 6604)
 
-```yaml
-server:
-  minimize_response: true  # Strip unnecessary sections
-```
+Avoid unnecessary additional records in authoritative zone data and keep EDNS0
+payload sizing aligned with your client networks.
 
 ### Query ID Randomization
 
-```yaml
-security:
-  randomize_txid: true  # Re-randomize TXID before forwarding
-```
+NothingDNS randomizes outbound query IDs in protocol handling; there is no
+separate YAML switch for this behavior.
 
 ## 8. Transport Optimization
 
@@ -339,11 +336,13 @@ security:
 
 ```yaml
 server:
-  udp:
-    buffer_size: 65535        # Large receive buffer
-    max_size: 4096            # Maximum DNS payload (RFC 1035)
-    worker_pool: 32           # Worker goroutines
-    rate_limit: 100           # Per-IP qps
+  udp_workers: 32
+resolution:
+  edns0_buffer_size: 4096
+rrl:
+  enabled: true
+  rate: 100
+  burst: 200
 ```
 
 ### TCP Optimization

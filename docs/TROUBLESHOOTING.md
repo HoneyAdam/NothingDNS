@@ -165,19 +165,16 @@ cache:
 grep RRL /var/log/nothingdns/*.log
 
 # Check RRL configuration
-curl http://localhost:8080/api/v1/config | jq '.security.rrl'
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/v1/config | jq '.RRL'
 ```
 
 **Solution**:
-```yaml
-# Adjust RRL settings
-security:
-  rrl:
-    enabled: true
-    window: 5
-    rate_limit: 1000        # Increase from default 100
-    responses_per_window: 500
-    max_table_size: 100000
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/v1/config/rrl \
+  -d '{"enabled":true,"rate":1000,"burst":500}'
 ```
 
 ---
@@ -203,9 +200,8 @@ curl http://localhost:8080/api/v1/dnssec/status
 1. **Trust anchor missing**:
    ```yaml
    dnssec:
-     trust_anchors:
-       - type: hint
-         value: "20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+     # Empty uses the built-in IANA root trust anchor.
+     trust_anchor: ""
    ```
 
 2. **System time incorrect**: DNSSEC signatures have time validity
@@ -232,17 +228,11 @@ curl http://localhost:8080/api/v1/dnssec/status
 dnssec:
   signing:
     enabled: true
-    algorithm: rsasha256
-    ksk_size: 2048
-    zsk_size: 1024
     # Ensure keys are generated
     keys:
-      - algorithm: rsasha256
-        key_type: ksk
-        size: 2048
-      - algorithm: rsasha256
-        key_type: zsk
-        size: 1024
+      - private_key: /etc/nothingdns/dnssec/Kexample.com.+013+12345.private
+        type: zsk
+        algorithm: 13
 ```
 
 **Generate keys manually**:
@@ -261,9 +251,8 @@ dnssec:
 dnssec:
   signing:
     nsec3:
-      enabled: true
       iterations: 10
-      salt_length: 16
+      salt: ""
       opt_out: true    # Enable for large delegations
 ```
 
@@ -396,7 +385,7 @@ curl http://localhost:8080/metrics | grep nothingdns_latency
 3. **NSEC aggressive caching disabled**:
    ```yaml
    cache:
-     negative_cache: true
+     negative_ttl: 60
    ```
 
 4. **Too many zone lookups**:
@@ -493,21 +482,21 @@ curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/zones
 **Diagnosis**:
 ```bash
 # Check ACL config
-curl http://localhost:8080/api/v1/config | jq '.security.acl'
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/v1/acl | jq
 ```
 
 **Solution**:
 ```yaml
-security:
-  acl:
-    default_action: allow  # or deny
-    rules:
-      - action: allow
-        cidr: "10.0.0.0/8"
-      - action: allow
-        cidr: "172.16.0.0/12"
-      - action: allow
-        cidr: "192.168.0.0/16"
+acl:
+  - name: allow-private-networks
+    action: allow
+    networks:
+      - "10.0.0.0/8"
+      - "172.16.0.0/12"
+      - "192.168.0.0/16"
+    types:
+      - ANY
 ```
 
 ### Rate Limiting Triggered
@@ -517,15 +506,14 @@ security:
 **Solution**:
 ```bash
 # Check rate limit status
-curl http://localhost:8080/api/v1/config | jq '.security.rate_limit'
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/api/v1/config | jq '.RRL'
 
 # Increase limits
-```
-```yaml
-security:
-  rate_limit:
-    queries_per_second: 500
-    burst: 1000
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/v1/config/rrl \
+  -d '{"enabled":true,"rate":500,"burst":1000}'
 ```
 
 ---

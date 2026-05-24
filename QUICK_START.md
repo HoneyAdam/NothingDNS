@@ -122,10 +122,11 @@ server:
   http:
     enabled: true
     bind: "0.0.0.0:8080"
-    dashboard: true
+    auth_secret: "replace-with-32-byte-random-secret"
 ```
 
-Default login: `admin` / `admin` (change this!)
+Configure `server.http.users` for per-user dashboard login, or use the legacy
+`server.http.auth_token` mode for a single shared bearer token.
 
 ## Using the CLI
 
@@ -190,7 +191,7 @@ dig @localhost example.com TXT     # Text records
 dig @localhost example.com NS      # Nameservers
 dig @localhost example.com CNAME    # Alias
 dig @localhost example.com SOA     # Start of authority
-dig @localhost example.com AXFR     # Zone transfer
+dig @localhost example.com AXFR +tcp # Zone transfer; requires transfer.allow_list
 ```
 
 ### Options

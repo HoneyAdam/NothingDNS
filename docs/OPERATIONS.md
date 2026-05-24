@@ -316,27 +316,27 @@ curl http://localhost:8080/api/v1/status | jq '.config_hash'
 
 ```bash
 # Via CLI
-dnsctl zone add example.com --file=/etc/nothingdns/zones/example.com.zone
+dnsctl zone add example.com ns1.example.com.
 
 # Via API
 curl -X POST -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/zones \
-  -d '{"name":"example.com.","zone_file":"/etc/nothingdns/zones/example.com.zone"}'
+  -d '{"name":"example.com.","nameservers":["ns1.example.com."],"admin_email":"admin.example.com.","ttl":3600}'
 
 # Then reload
-dnsctl zone reload
+dnsctl zone reload example.com.
 ```
 
 ### Reloading Zones
 
 ```bash
 # Via CLI
-dnsctl zone reload
+dnsctl zone reload example.com.
 
 # Via API
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/zones/reload
+  http://localhost:8080/api/v1/zones/reload?zone=example.com.
 
 # Manual SIGHUP
 kill -HUP $(pidof nothingdns)
@@ -366,9 +366,8 @@ dig @localhost example.com DS +dnssec +ad
 curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/api/v1/zones/transfers | jq
 
-# Trigger AXFR from master (slave zone)
-# Master sends NOTIFY, slave fetches automatically
-# Manual trigger:
+# Slave zones fetch on startup/retry and when a valid NOTIFY arrives.
+# Verify that the master serves AXFR:
 dig @master-server example.com AXFR +tcp
 ```
 
@@ -635,11 +634,10 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/acl \
   -d '{
-    "default_action": "deny",
     "rules": [
-      {"action": "allow", "cidr": "10.0.0.0/8"},
-      {"action": "allow", "cidr": "172.16.0.0/12"},
-      {"action": "deny", "cidr": "192.0.2.0/24"}
+      {"name": "allow-rfc1918-a", "action": "allow", "networks": ["10.0.0.0/8"], "types": ["ANY"]},
+      {"name": "allow-rfc1918-b", "action": "allow", "networks": ["172.16.0.0/12"], "types": ["ANY"]},
+      {"name": "deny-test-net", "action": "deny", "networks": ["192.0.2.0/24"], "types": ["ANY"]}
     ]
   }'
 ```
@@ -649,13 +647,13 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
 ```bash
 # Check current limits
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/config | jq '.security.rate_limit'
+  http://localhost:8080/api/v1/config | jq '.RRL'
 
 # Update limits
 curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/config/rrl \
-  -d '{"enabled":true,"rate_limit":200,"window":5}'
+  -d '{"enabled":true,"rate":200,"burst":500}'
 
 # Check RRL stats
 curl -H "Authorization: Bearer $TOKEN" \
@@ -874,7 +872,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 # Check rate limiting
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/config | jq '.security.rate_limit'
+  http://localhost:8080/api/v1/config | jq '.RRL'
 ```
 
 ---
@@ -929,9 +927,9 @@ rm /data/nothingdns/*.wal
 # 3. Restart (will rebuild from zones)
 sudo systemctl start nothingdns
 
-# 4. Reload zones
+# 4. Reload any zone that was changed while the server was stopped
 curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/zones/reload
+  http://localhost:8080/api/v1/zones/reload?zone=example.com.
 
 # 5. Verify
 curl http://localhost:8080/api/v1/zones | jq
@@ -950,7 +948,7 @@ grep "ATTACKER_IP" /var/log/nothingdns/*.log | wc -l
 curl -X PUT -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   http://localhost:8080/api/v1/acl \
-  -d '{"default_action":"deny","rules":[{"action":"allow","cidr":"10.0.0.0/8"}]}'
+  -d '{"rules":[{"name":"allow-private","action":"allow","networks":["10.0.0.0/8"],"types":["ANY"]},{"name":"deny-ipv4","action":"deny","networks":["0.0.0.0/0"],"types":["ANY"]},{"name":"deny-ipv6","action":"deny","networks":["::/0"],"types":["ANY"]}]}'
 
 # 4. Reset any compromised credentials
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \

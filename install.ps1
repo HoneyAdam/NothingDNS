@@ -103,7 +103,6 @@ server:
   http:
     enabled: true
     bind: "0.0.0.0:8080"
-    dashboard: true
     auth_secret: "${AUTH_SECRET}"
 
 upstream:
@@ -124,6 +123,8 @@ cache:
   negative_ttl: 60
   prefetch: true
   prefetch_threshold: 60
+  serve_stale: true
+  stale_grace_secs: 86400
 
 dnssec:
   enabled: true
@@ -132,21 +133,25 @@ logging:
   level: info
   format: text
   output: stdout
+  query_log: false
 
 metrics:
   enabled: true
-  prometheus:
-    enabled: true
-    bind: ":9153"
-    path: /metrics
+  bind: ":9153"
+  path: /metrics
 
-security:
-  rate_limit:
-    enabled: true
-    rate: 100
-    burst: 200
+rrl:
+  enabled: true
+  rate: 100
+  burst: 200
+
+cookie:
+  enabled: true
 
 zones: []
+transfer:
+  allow_list: []
+  require_tsig: false
 cluster:
   enabled: false
 "@

@@ -79,10 +79,10 @@ dnsctl zone remove example.com
 
 ### zone reload
 
-Reload all zones from disk.
+Reload one zone from disk.
 
 ```bash
-dnsctl zone reload
+dnsctl zone reload <zone-name>
 ```
 
 ### zone export
@@ -664,8 +664,8 @@ dnsctl cluster status
 # Flush cache after config change
 dnsctl cache flush
 
-# Reload zones after editing zone file
-dnsctl zone reload
+# Reload a zone after editing its zone file
+dnsctl zone reload example.com
 
 # Verify DNSSEC is working
 dnsctl dig +dnssec +ad example.com DNSKEY

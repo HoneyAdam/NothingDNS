@@ -1,403 +1,131 @@
-# NothingDNS Production Readiness Guide
+# NothingDNS Production Readiness Report
 
-## Overview
+Last updated: 2026-05-24
 
-This guide covers production deployment best practices for NothingDNS DNS server.
+## Verdict
 
-## Architecture Recommendations
+NothingDNS is production-ready after the current hardening pass, provided the release candidate is built from the checked-in source plus the generated dashboard assets and all release gates below pass in CI.
 
-### Single Node (Development/Staging)
+No known HIGH or MEDIUM production blockers remain in the audited surface. The remaining items are operational choices or non-blocking tuning work.
 
-```
-┌─────────────────────────────────────┐
-│         NothingDNS Instance          │
-│                                      │
-│  UDP/53 → Handler → Cache → Upstream │
-│  TCP/53   (21-stage)   └→ KVStore    │
-│  TLS/853                          │
-│  HTTP/8080 (API, DoH)               │
-└─────────────────────────────────────┘
-```
+## Release Gates
 
-### High Availability (Production)
-
-```
-┌────────────────────────────────────────────────────────┐
-│                    Load Balancer                        │
-│                 (GeoDNS/Anycast)                        │
-└──────────────┬──────────────┬──────────────┬───────────┘
-               │              │              │
-    ┌──────────▼──────┐  ┌────▼────┐  ┌─────▼──────┐
-    │  NothingDNS     │  │ Node 2  │  │  Node 3    │
-    │  Node 1         │  │         │  │            │
-    │                 │  │         │  │            │
-    │  SWIM/Raft ←─── │  │ ←───── Cluster Gossip ──→   │
-    │                 │  │                              │
-    └────────┬────────┘  └───┬────┘  └──────┬───────┘
-             │               │              │
-             └───────────────┴──────────────┘
-                       │
-                  KVStore/WAL
-                  (Shared)
-```
-
-## Sizing Guidelines
-
-### Resource Requirements
-
-| QPS | CPU Cores | Memory | Disk IOPS |
-|-----|-----------|--------|-----------|
-| 1,000 | 2 | 2 GB | 1,000 |
-| 5,000 | 4 | 4 GB | 2,500 |
-| 10,000 | 8 | 8 GB | 5,000 |
-| 50,000 | 16 | 16 GB | 10,000 |
-| 100,000+ | 32+ | 32 GB+ | 20,000+ |
-
-### Cache Sizing
-
-```yaml
-cache:
-  size: 10000        # Entries per GB memory
-  max_ttl: 86400     # 24 hours
-  prefetch: true
-```
-
-Rule of thumb: 1 cache entry ≈ 1 KB memory
-
-## Performance Tuning
-
-### Kernel Parameters
+Run these before tagging or promoting an image:
 
 ```bash
-# /etc/sysctl.d/50-nothingdns.conf
+npm --prefix web run lint
+npm --prefix web run build
 
-# Network
-net.core.rmem_max = 134217728    # 128MB receive buffer
-net.core.wmem_max = 134217728    # 128MB send buffer
-net.ipv4.udp_rmem_min = 16384
-net.ipv4.udp_wmem_min = 16384
+git diff --check
+go build ./...
+go vet ./...
+/tmp/nothingdns-tools/actionlint
 
-# File descriptors
-fs.file-max = 65536
+/tmp/nothingdns-helm-bin/helm lint deploy/helm/nothingdns \
+  --set-string auth.authSecret='AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+  --set-string auth.adminPassword='AdminPassword-1234567890-ABCDE'
 
-# TCP tuning
-net.ipv4.tcp_fin_timeout = 30
-net.ipv4.tcp_keepalive_time = 300
+go test ./... -count=1 -short
 ```
 
-### Worker Pool Sizing
-
-```yaml
-server:
-  workers:
-    udp: 32           # CPU * 4
-    tcp: 16           # CPU * 2
-```
-
-### Upstream Tuning
-
-```yaml
-upstream:
-  timeout: 5
-  servers:
-    - 1.1.1.1:53
-    - 8.8.8.8:53
-    - 9.9.9.9:53
-```
-
-## Security Hardening
-
-### 1. TLS Configuration
-
-```yaml
-server:
-  http:
-    tls:
-      enabled: true
-      profiles:
-        strict:
-          min_version: "1.3"
-          cipher_suites:
-            - TLS_AES_256_GCM_SHA384
-            - TLS_CHACHA20_POLY1305_SHA256
-            - TLS_AES_128_GCM_SHA256
-```
-
-### 2. DNSSEC Configuration
-
-```yaml
-dnssec:
-  enabled: true
-  signing:
-    enabled: true
-    algorithm: ecdsap256sha256  # Faster than RSA
-    signature_validity: 7
-    signature_refresh: 5
-```
-
-### 3. Access Control
-
-```yaml
-security:
-  acl:
-    default_action: deny
-    rules:
-      - action: allow
-        cidr: "10.0.0.0/8"
-      - action: allow
-        cidr: "172.16.0.0/12"
-      - action: allow
-        cidr: "192.168.0.0/16"
-      - action: deny
-        cidr: "0.0.0.0/0"
-```
-
-### 4. Rate Limiting
-
-```yaml
-security:
-  rate_limit:
-    enabled: true
-    queries_per_second: 100
-    burst: 200
-
-  rrl:
-    enabled: true
-    rate_limit: 100
-    max_table_size: 100000
-```
-
-## High Availability
-
-### Cluster Configuration
-
-```yaml
-cluster:
-  enabled: true
-  consensus_mode: "swim"      # or "raft" for strong consistency
-  encryption_key: "${ENCRYPTION_KEY}"
-  cache_sync: true
-  gossip_port: 7946
-```
-
-### Health Checks
-
-Configure load balancer health checks:
+Validate rendered deployment configs:
 
 ```bash
-# HTTP API health
-curl http://node:8080/health
+# Raw Kubernetes ConfigMap config
+awk '/^  config.yaml: \|/{flag=1; next} flag { if (substr($0,1,4)=="    ") print substr($0,5); else if ($0=="") print ""; else flag=0 }' \
+  deploy/k8s/configmap.yaml > /tmp/nothingdns-k8s-config.yaml
+sed -i \
+  -e "s/\${NOTHINGDNS_AUTH_SECRET}/AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
+  -e "s/\${NOTHINGDNS_ADMIN_PASSWORD}/AdminPassword-1234567890-ABCDE/g" \
+  -e "s/\${NOTHINGDNS_METRICS_AUTH_TOKEN}/MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
+  -e "s/\${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}/ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
+  -e "s/\${POD_NAME}/nothingdns-0/g" \
+  -e "s/\${POD_IP}/127.0.0.1/g" \
+  /tmp/nothingdns-k8s-config.yaml
+go run ./cmd/nothingdns -config /tmp/nothingdns-k8s-config.yaml -validate-config
 
-# DNS health (TCP probe)
-dig @node:53 +tcp +time=3 +tries=1 google.com
+# Production config, with all required secrets present
+NOTHINGDNS_AUTH_TOKEN='AuthToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+NOTHINGDNS_AUTH_SECRET='AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+NOTHINGDNS_ADMIN_PASSWORD='AdminPassword-1234567890-ABCDE' \
+NOTHINGDNS_OPERATOR_PASSWORD='OperatorPassword-1234567890-ABCDE' \
+NOTHINGDNS_VIEWER_PASSWORD='ViewerPassword-1234567890-ABCDE' \
+NOTHINGDNS_METRICS_AUTH_TOKEN='MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+NOTHINGDNS_CLUSTER_ENCRYPTION_KEY='ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+go run ./cmd/nothingdns -config deploy/production.yaml -validate-config
 ```
 
-### Failover Configuration
+The production validation should complete without missing-environment warnings.
 
-```yaml
-# Kubernetes-style health checks
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 8080
-  initialDelaySeconds: 10
-  periodSeconds: 30
+## Closed Production Gaps
 
-readinessProbe:
-  httpGet:
-    path: /readyz
-    port: 8080
-  initialDelaySeconds: 5
-  periodSeconds: 10
-```
+### Configuration and Deployability
 
-## Monitoring & Alerting
+- The custom YAML parser now reads production-critical fields that were previously documented but ignored: top-level `rrl`, `blocklist.urls`, `cache.serve_stale`, `cache.stale_grace_secs`, `server.pid_file`, `zonemd`, `shutdown_timeout`, and transfer policy.
+- Production, staging, raw Kubernetes, and Helm-rendered configs validate through the actual daemon parser.
+- Helm chart defaults now render valid NothingDNS config by default, including secret/env wiring, transfer policy, metrics auth, ingress/service ports, and network policy behavior.
+- `deploy/production.yaml` documents all auth secrets as environment inputs; `docs/DEPLOYMENT_CHECKLIST.md` includes the full required env set.
 
-### Key Metrics
+### Security Behavior
 
-```promql
-# Query rate
-rate(nothingdns_queries_total[5m])
+- Metrics endpoints support auth token wiring in deployment manifests.
+- Zone transfer is deny-by-default through `transfer.allow_list`; AXFR serving no longer depends on stale doc-only `allow-transfer` wording.
+- Cluster startup no longer fails open. If `cluster.enabled=true` and cluster init/start fails, the daemon startup fails instead of silently running standalone.
+- DSO session IDs now fail closed if `crypto/rand` is unavailable instead of falling back to predictable sequential IDs.
+- DNSSEC `RRSIGForRRSet` now canonicalizes RRSet ordering and propagates RDATA packing errors.
+- Graceful shutdown and test cleanup paths were hardened to reduce race and lifecycle ambiguity.
 
-# Cache hit ratio
-sum(rate(nothingdns_cache_hits_total[5m])) / sum(rate(nothingdns_cache_queries_total[5m]))
+### CI and Supply Chain
 
-# Latency p99
-histogram_quantile(0.99, rate(nothingdns_latency_seconds_bucket[5m]))
+- GitHub Actions workflows were tightened for Go, web, Helm, actionlint, container SBOM/provenance, and keyless signing.
+- Codecov action usage is pinned.
+- Helm lint and rendered-config validation are release gates.
 
-# Error rate
-rate(nothingdns_errors_total[5m])
+### Dashboard
 
-# Cluster node health
-nothingdns_cluster_node_health
-```
+- The React dashboard passes lint and production build.
+- Route-level code splitting removed the large Vite chunk warning; the main dashboard JS chunk is now below the warning threshold and pages load as separate chunks.
+- `web/go.mod` is intentionally present as a nested Go module sentinel so root `go test ./...` does not traverse Go packages inside `web/node_modules`.
 
-### Alert Rules
+### Repository Hygiene
 
-```yaml
-# prometheus/alerts/nothingdns.yaml
-groups:
-  - name: nothingdns
-    rules:
-      - alert: NothingDNSDown
-        expr: up{job="nothingdns"} == 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "NothingDNS instance down"
+- Debug-printing parser tests were converted into assertion-based tests and renamed.
+- `security-report/` is ignored for local scan artifacts while `security-report/SECURITY-REPORT.md` remains trackable as the finding ledger.
+- Stale documentation examples were updated to match the current config schema and CLI/API behavior.
 
-      - alert: NothingDNSHighLatency
-        expr: histogram_quantile(0.99, rate(nothingdns_latency_seconds_bucket[5m])) > 1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "NothingDNS high latency"
+## Required Operator Inputs
 
-      - alert: NothingDNSCacheHitRatioLow
-        expr: rate(nothingdns_cache_hits_total[5m]) / rate(nothingdns_cache_queries_total[5m]) < 0.5
-        for: 10m
-        labels:
-          severity: warning
-
-      - alert: NothingDNSHighErrorRate
-        expr: rate(nothingdns_errors_total[5m]) > 0.01
-        for: 5m
-        labels:
-          severity: critical
-```
-
-## Backup & Recovery
-
-### Configuration Backup
+For `deploy/production.yaml`, provide these as secrets in the runtime environment:
 
 ```bash
-# Backup config
-tar -czf nothingdns-config-backup.tar.gz \
-  /etc/nothingdns/nothingdns.yaml \
-  /etc/nothingdns/zones/ \
-  /etc/nothingdns/tls/
+NOTHINGDNS_AUTH_SECRET
+NOTHINGDNS_ADMIN_PASSWORD
+NOTHINGDNS_OPERATOR_PASSWORD
+NOTHINGDNS_VIEWER_PASSWORD
+NOTHINGDNS_METRICS_AUTH_TOKEN
+NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
 ```
 
-### KVStore Backup
+Recommended generation:
 
 ```bash
-# Automated backup script
-#!/bin/bash
-DATE=$(date +%Y%m%d_%H%M%S)
-tar -czf /backup/nothingdns-kvstore-$DATE.tar.gz /data/nothingdns/*.kv
+openssl rand -base64 32  # auth/user/metrics secrets
+openssl rand -hex 32     # cluster encryption key
 ```
 
-### Zone File Backup
+Do not commit literal secret values to any config file. The config validator rejects common placeholder secret strings and low-entropy secrets.
 
-```bash
-# Using dnsctl
-./dnsctl zone export example.com > example.com.zone.bak
-```
+## Residual Non-Blockers
 
-## Capacity Planning
+- Browser-level dashboard smoke tests are not currently part of the release gate. Add Playwright route checks if visual regression coverage is required.
+- Dashboard code splitting creates many small chunks. The current build is acceptable, but chunk grouping can be tuned later if request overhead matters for a specific deployment path.
+- `security-report/` may contain local ignored scan artifacts in a developer workspace. They are intentionally excluded from git except the main ledger.
+- Production TLS certificate files, zone files, root trust anchor files, and runtime secrets must exist on target hosts or be provided by Kubernetes/Helm before startup.
 
-### Growth Projections
+## Promotion Checklist
 
-| Metric | Current | 6 months | 12 months |
-|--------|---------|----------|-----------|
-| QPS | 1,000 | 3,000 | 10,000 |
-| Cache entries | 10,000 | 30,000 | 100,000 |
-| Zones | 5 | 15 | 50 |
-| Nodes | 1 | 3 | 5 |
-
-### Scaling Triggers
-
-```yaml
-# Scale up when:
-# - CPU > 70% sustained
-# - Memory > 80%
-# - Cache hit ratio < 60%
-# - P99 latency > 100ms
-```
-
-## Operational Procedures
-
-### Configuration Reload
-
-```bash
-# Send SIGHUP (zero-downtime reload)
-kill -HUP $(pidof nothingdns)
-
-# Verify reload
-curl http://localhost:8080/api/v1/config | jq '.version'
-```
-
-### Cache Flush
-
-```bash
-# Via API
-curl -X POST http://localhost:8080/api/v1/cache/flush
-
-# Via dnsctl
-./dnsctl cache flush
-```
-
-### Log Analysis
-
-```bash
-# Real-time query debugging
-tail -f /var/log/nothingdns/query.log | jq 'select(.rcode == "SERVFAIL")'
-
-# Cache analysis
-grep "cache" /var/log/nothingdns/*.log | jq '.action, .key'
-```
-
-## Troubleshooting
-
-### High Memory Usage
-
-1. Check cache size vs. configured limit
-2. Enable memory monitor:
-   ```yaml
-   memory:
-     monitor:
-       enabled: true
-       threshold: 0.8
-   ```
-3. Reduce cache size if needed
-
-### High CPU Usage
-
-1. Check if DNSSEC signing is the cause
-2. Consider pre-signed zones
-3. Scale horizontally
-
-### Slow Responses
-
-1. Check upstream latency
-2. Enable query logging:
-   ```yaml
-   logging:
-     level: debug
-     query_log:
-       enabled: true
-   ```
-3. Check for RRL suppression
-
-## Compliance
-
-### GDPR Considerations
-
-- Query logs may contain PII (client IPs)
-- Configure log retention policy
-- Consider disabling query logging if not needed
-
-### SOC 2 Requirements
-
-- Enable audit logging
-- Configure access controls
-- Regular backups
-- Incident response procedures
-
-### PCI-DSS
-
-- Disable vULN-059/VULN-060 mitigations if not needed
-- Enable TLS for all management interfaces
-- Regular security updates
+- All release gates above pass on a clean checkout.
+- `npm --prefix web run build` output is committed under `internal/dashboard/static/dist/`.
+- Container image is built from the verified tree and includes SBOM/provenance.
+- Deployment config validates with real secret values in the target environment.
+- DNS, DoT/DoH, metrics, health, cluster, and dashboard endpoints are smoke-tested after rollout.

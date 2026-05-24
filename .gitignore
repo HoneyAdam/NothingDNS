@@ -84,7 +84,9 @@ debug
 __debug_bin
 
 # Security scan artifacts
-security-report/
+security-report/*
+!security-report/
+!security-report/SECURITY-REPORT.md
 
 # Playwright MCP artifacts
 .playwright-mcp/

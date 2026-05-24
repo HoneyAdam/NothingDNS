@@ -20,12 +20,9 @@ cp examples/zones/10.0.0.0-8.rev.zone /etc/nothingdns/zones/
 
 # Reference in config.yaml
 zones:
-  - name: example.com
-    file: /etc/nothingdns/zones/example.com.zone
-  - name: internal.example.com
-    file: /etc/nothingdns/zones/internal.example.com.zone
-  - name: 0.0.10.in-addr.arpa
-    file: /etc/nothingdns/zones/10.0.0.0-8.rev.zone
+  - /etc/nothingdns/zones/example.com.zone
+  - /etc/nothingdns/zones/internal.example.com.zone
+  - /etc/nothingdns/zones/10.0.0.0-8.rev.zone
 
 # Validate configuration
 ./nothingdns --config /etc/nothingdns/nothingdns.yaml --validate-config
@@ -82,15 +79,17 @@ Configure split-horizon views in `config.yaml`:
 ```yaml
 views:
   - name: internal
-    match-clients: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16]
-    zones:
-      - name: internal.example.com
-        file: /etc/nothingdns/zones/internal.example.com.zone
+    match_clients:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+    zone_files:
+      - /etc/nothingdns/zones/internal.example.com.zone
 ```
 
 ## Dynamic Updates
 
-Zone files support RFC 2136 Dynamic Updates. Use `dnsctl record add` for programmatic updates:
+Use the API-backed `dnsctl record` commands for programmatic record changes:
 
 ```bash
 # Add a record
@@ -100,7 +99,7 @@ dnsctl record add example.com newhost A 192.0.2.50
 dnsctl record remove example.com oldhost A
 
 # Update a record
-dnsctl record update example.com existinghost A 192.0.2.100
+dnsctl record update example.com existinghost A 192.0.2.50 192.0.2.100
 ```
 
 ## DNSSEC Signing
@@ -121,20 +120,18 @@ dnsctl dnssec ds-from-dnskey --zone example.com
 
 ## Zone Transfer (AXFR)
 
-NothingDNS supports AXFR (RFC 5936) for secondary nameservers:
+NothingDNS supports AXFR/IXFR for secondary zones:
 
-```bash
-# Allow transfer from secondary servers
-# In config.yaml:
-zones:
-  - name: example.com
-    file: /etc/nothingdns/zones/example.com.zone
-    allow-transfer:
-      - 198.51.100.0/24
-      - 203.0.113.0/24
-
-# Trigger a zone transfer
-dig @localhost example.com AXFR
+```yaml
+# Pull example.com. from the primary nameserver
+slave_zones:
+  - zone_name: example.com.
+    masters:
+      - 192.0.2.53:53
+    transfer_type: axfr
+    timeout: 30s
+    retry_interval: 5m
+    max_retries: 3
 ```
 
 ## Monitoring Zone Status

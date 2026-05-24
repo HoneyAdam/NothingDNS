@@ -14,10 +14,10 @@
 | Port | Protocol | Purpose | Required |
 |------|----------|---------|----------|
 | 53 | UDP/TCP | DNS queries | Yes |
-| 53 | TCP | Zone transfers (AXFR) | Yes |
+| 53 | TCP | DNS TCP fallback; AXFR only when `transfer.allow_list` permits it | Yes |
 | 853 | TCP | DNS over TLS (DoT) | Optional |
-| 443 | TCP | DNS over HTTPS (DoH) | Optional |
-| 8080 | TCP | HTTP API + Dashboard | Yes |
+| 8080 | TCP | HTTP API + Dashboard + DoH by default | Yes |
+| 443 | TCP | External HTTPS/DoH load balancer or ingress | Optional |
 | 7946 | UDP/TCP | Cluster gossip | Cluster only |
 | 9153 | TCP | Prometheus metrics | Optional |
 
@@ -27,7 +27,6 @@
 # DNS (required)
 sudo firewall-cmd --add-port=53/udp --add-port=53/tcp
 sudo firewall-cmd --add-port=853/tcp  # DoT
-sudo firewall-cmd --add-port=443/tcp  # DoH
 
 # API (required for management)
 sudo firewall-cmd --add-port=8080/tcp
@@ -76,9 +75,11 @@ helm repo update
 
 # Install
 helm install my-release nothingdns/nothingdns \
-  --set server.port=53 \
-  --set upstream.servers[0]=1.1.1.1:53 \
-  --set upstream.servers[1]=8.8.8.8:53
+  --set auth.authSecret="$(openssl rand -base64 32)" \
+  --set auth.adminPassword="$(openssl rand -base64 32)" \
+  --set config.server.port=53 \
+  --set config.upstream.servers[0]=1.1.1.1:53 \
+  --set config.upstream.servers[1]=8.8.8.8:53
 ```
 
 ### 4. Configuration
@@ -136,35 +137,33 @@ chmod 600 /etc/nothingdns/tls/*.key
 # /etc/nothingdns/nothingdns.yaml
 server:
   http:
-    tls:
-      enabled: true
-      cert_file: /etc/nothingdns/tls/server.crt
-      key_file: /etc/nothingdns/tls/server.key
+    tls_cert_file: /etc/nothingdns/tls/server.crt
+    tls_key_file: /etc/nothingdns/tls/server.key
+    doh_enabled: true
+    doh_path: /dns-query
 ```
 
 ### 3. Configure ACL
 
 ```yaml
-security:
-  acl:
-    default_action: deny
-    rules:
-      - action: allow
-        cidr: "10.0.0.0/8"
-      - action: allow
-        cidr: "172.16.0.0/12"
-      - action: allow
-        cidr: "192.168.0.0/16"
+acl:
+  - name: allow-private-networks
+    action: allow
+    networks:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+    types:
+      - ANY
 ```
 
-### 4. Enable Rate Limiting
+### 4. Tune Runtime RRL
 
-```yaml
-security:
-  rate_limit:
-    enabled: true
-    queries_per_second: 100
-    burst: 200
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/v1/config/rrl \
+  -d '{"enabled":true,"rate":100,"burst":200}'
 ```
 
 ### 5. Enable DNSSEC
@@ -172,9 +171,8 @@ security:
 ```yaml
 dnssec:
   enabled: true
-  trust_anchors:
-    - type: hint
-      value: "20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+  # Empty uses the built-in IANA root trust anchor.
+  trust_anchor: ""
 ```
 
 ## Monitoring Setup
@@ -184,9 +182,9 @@ dnssec:
 ```yaml
 metrics:
   enabled: true
-  prometheus:
-    enabled: true
-    path: /metrics
+  bind: ":9153"
+  path: /metrics
+  auth_token: "${NOTHINGDNS_METRICS_AUTH_TOKEN}"
 ```
 
 ### 2. Health Checks
@@ -221,6 +219,13 @@ curl http://localhost:8080/readyz
 ### 1. Configuration Validation
 
 ```bash
+export NOTHINGDNS_AUTH_SECRET="$(openssl rand -base64 32)"
+export NOTHINGDNS_ADMIN_PASSWORD="$(openssl rand -base64 32)"
+export NOTHINGDNS_OPERATOR_PASSWORD="$(openssl rand -base64 32)"
+export NOTHINGDNS_VIEWER_PASSWORD="$(openssl rand -base64 32)"
+export NOTHINGDNS_METRICS_AUTH_TOKEN="$(openssl rand -base64 32)"
+export NOTHINGDNS_CLUSTER_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+
 ./nothingdns -validate-config -config /etc/nothingdns/nothingdns.yaml
 ```
 
@@ -236,8 +241,8 @@ dig @localhost example.com +dnssec
 # Test TCP
 dig @localhost example.com +tcp
 
-# Test zone transfer
-dig @localhost example.com AXFR
+# Test zone transfer only after transfer.allow_list permits this client
+dig @localhost example.com AXFR +tcp
 ```
 
 ### 3. Check Logs
@@ -280,8 +285,8 @@ docker run -d \
   --cap-add NET_BIND_SERVICE \
   -p 53:53/udp -p 53:53/tcp \
   -p 853:853/tcp \
-  -p 443:443/tcp \
   -p 8080:8080 \
+  -p 9153:9153 \
   -v /etc/nothingdns:/etc/nothingdns:ro \
   -v /data:/data \
   ghcr.io/nothingdns/nothingdns:latest
@@ -302,7 +307,7 @@ dig @your-dns-server.com example.com +short
 dig @localhost wikipedia.org A +dnssec
 
 # Test DoH
-curl -H 'accept: application/dns-json' 'https://localhost/dns-query?name=example.com&type=A'
+curl -H 'accept: application/dns-json' 'https://localhost:8080/dns-query?name=example.com&type=A'
 ```
 
 ### 2. API Tests
@@ -315,7 +320,23 @@ curl http://localhost:8080/health
 curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/cache/stats
 
 # Check metrics
-curl http://localhost:8080/metrics | grep nothingdns_
+curl -H "Authorization: Bearer $NOTHINGDNS_METRICS_AUTH_TOKEN" \
+  http://localhost:9153/metrics | grep nothingdns_
+```
+
+### 3. Supply Chain Verification
+
+```bash
+# Verify keyless signature on published image digest
+cosign verify ghcr.io/nothingdns/nothingdns@sha256:<digest> \
+  --certificate-identity-regexp 'https://github.com/.*/.github/workflows/container.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Inspect SBOM/provenance attestations
+cosign verify-attestation ghcr.io/nothingdns/nothingdns@sha256:<digest> \
+  --type slsaprovenance \
+  --certificate-identity-regexp 'https://github.com/.*/.github/workflows/container.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
 ### 3. Load Testing (Optional)
@@ -336,7 +357,7 @@ cluster:
   bind_addr: "0.0.0.0"
   gossip_port: 7946
   consensus_mode: "swim"
-  encryption_key: "YOUR_32_BYTE_BASE64_KEY"
+  encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
   cache_sync: true
   seed_nodes: []
 ```
@@ -350,7 +371,7 @@ cluster:
   bind_addr: "0.0.0.0"
   gossip_port: 7946
   consensus_mode: "swim"
-  encryption_key: "YOUR_32_BYTE_BASE64_KEY"
+  encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
   cache_sync: true
   seed_nodes:
     - 172.28.0.10:7946

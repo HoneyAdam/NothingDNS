@@ -89,14 +89,14 @@ Default embedded root hints from IANA. Can override:
 type ResolverHint struct {
     Name string
     Type uint16
-   Addr string
+    Addr string
 }
 ```
 
 Or via config:
 ```yaml
-resolver:
-  root_hints_file: /etc/nothingdns/root.hints
+resolution:
+  root_hints: /etc/nothingdns/root.hints
 ```
 
 ## EDNS0 Handling
