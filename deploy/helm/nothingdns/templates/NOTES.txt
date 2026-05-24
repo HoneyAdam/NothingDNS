@@ -90,7 +90,7 @@ kubectl exec -n {{ .Release.Namespace }} deployment/{{ include "nothingdns.fulln
 
 1. Configure upstream DNS servers in `values.yaml` or ConfigMap
 2. Set up TLS certificates for DoT/DoH if needed
-3. Configure rate limiting and blocklists
+3. Configure blocklists, RPZ, and ACL rules if needed
 4. Set up monitoring with Prometheus/Grafana
 
 ## Documentation

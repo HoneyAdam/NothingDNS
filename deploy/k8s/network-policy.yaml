@@ -33,12 +33,12 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
-    # Allow DoT/DoH from any client
+    # Allow DoT and HTTP API/DoH from any client
     - ports:
         - protocol: TCP
           port: 853
         - protocol: TCP
-          port: 443
+          port: 8080
   egress:
     # Allow outbound DNS to upstream servers
     - ports:

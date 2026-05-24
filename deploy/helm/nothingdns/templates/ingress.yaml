@@ -1,6 +1,5 @@
 {{- if .Values.ingress.enabled -}}
 {{- $fullName := include "nothingdns.fullname" . -}}
-{{- $svcPortAPI := .Values.service.apiPort -}}
 apiVersion: {{ include "nothingdns.ingress.apiVersion" . }}
 kind: Ingress
 metadata:

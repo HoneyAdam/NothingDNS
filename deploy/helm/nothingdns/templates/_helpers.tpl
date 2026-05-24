@@ -62,18 +62,6 @@ Create the name of the service account to use
 {{- end }}
 
 {{/*
-Generate JWT secret
-*/}}
-{{- define "nothingdns.jwtSecret" -}}
-{{- $secret := lookup "v1" "Secret" .Release.Namespace (include "nothingdns.fullname" .) -}}
-{{- if and $secret (index $secret.data "jwt-secret") }}
-{{- index $secret.data "jwt-secret" | b64dec }}
-{{- else }}
-{{- fail "JWT secret is required: set jwtSecret value or provide a Secret with jwt-secret key. Generate with: openssl rand -base64 32" }}
-{{- end }}
-{{- end }}
-
-{{/*
 Return the appropriate apiVersion for ingress.
 */}}
 {{- define "nothingdns.ingress.apiVersion" -}}

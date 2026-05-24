@@ -28,19 +28,24 @@ spec:
       from: []
       {{- end }}
     # DoT
-    {{- if .Values.config.xot.enabled }}
+    {{- if and .Values.config.server.tls.cert_file .Values.config.server.tls.key_file }}
     - ports:
         - protocol: TCP
-          port: 853
+          port: {{ .Values.service.dotPort }}
       from: []
     {{- end }}
-    # API/Metrics
+    # API
     - ports:
         - protocol: TCP
-          port: 8080
-        - protocol: TCP
-          port: 9090
+          port: {{ .Values.service.apiPort }}
       from: []
+    {{- if .Values.config.metrics.enabled }}
+    # Metrics
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.config.metrics.port }}
+      from: []
+    {{- end }}
   egress:
     # DNS upstream (UDP/TCP port 53) and HTTPS for blocklists/DoH
     - to: []

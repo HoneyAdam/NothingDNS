@@ -20,7 +20,7 @@ spec:
       targetPort: dns-tcp
       protocol: TCP
       name: dns-tcp
-    {{- if .Values.config.xot.enabled }}
+    {{- if and .Values.config.server.tls.cert_file .Values.config.server.tls.key_file }}
     - port: {{ .Values.service.dotPort }}
       targetPort: dot
       protocol: TCP
@@ -43,9 +43,11 @@ spec:
       targetPort: api
       protocol: TCP
       name: api
+    {{- if .Values.config.metrics.enabled }}
     - port: {{ .Values.config.metrics.port }}
       targetPort: metrics
       protocol: TCP
       name: metrics
+    {{- end }}
   selector:
     {{- include "nothingdns.selectorLabels" . | nindent 4 }}

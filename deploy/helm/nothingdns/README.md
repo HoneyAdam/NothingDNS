@@ -6,7 +6,9 @@ A production-grade DNS server with support for all major DNS protocols.
 
 ```bash
 helm repo add nothingdns https://nothingdns.github.io/helm
-helm install my-release nothingdns/nothingdns
+helm install my-release nothingdns/nothingdns \
+  --set auth.authSecret="$(openssl rand -base64 32)" \
+  --set auth.adminPassword="$(openssl rand -base64 32)"
 ```
 
 ## Introduction
@@ -43,7 +45,9 @@ helm repo update
 ### Install Chart
 
 ```bash
-helm install my-release nothingdns/nothingdns
+helm install my-release nothingdns/nothingdns \
+  --set auth.authSecret="$(openssl rand -base64 32)" \
+  --set auth.adminPassword="$(openssl rand -base64 32)"
 ```
 
 ### Configuration
@@ -53,71 +57,72 @@ See [NothingDNS Configuration Reference](https://github.com/nothingdns/NothingDN
 #### Basic Configuration
 
 ```yaml
-server:
-  port: 53
-  bind:
-    - 0.0.0.0
+auth:
+  authSecret: "<32+ byte random value>"
+  adminPassword: "<admin password>"
 
-upstream:
-  servers:
-    - 1.1.1.1:53
-    - 8.8.8.8:53
-
-cache:
-  size: 10000
-  prefetch: true
+config:
+  server:
+    port: 53
+    bind:
+      - 0.0.0.0
+  http:
+    enabled: true
+    bind: "0.0.0.0:8080"
+  upstream:
+    servers:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  cache:
+    size: 10000
+    prefetch: true
 ```
+
+For pre-created Kubernetes Secrets, set `auth.existingSecret` to a Secret
+containing `auth-secret`, `admin-password`, and, when enabled,
+`metrics-auth-token` / `cluster-encryption-key`.
 
 #### Production Configuration with DNSSEC
 
 ```yaml
-server:
-  port: 53
+auth:
+  authSecret: "<32+ byte random value>"
+  adminPassword: "<admin password>"
+
+config:
+  server:
+    port: 53
   http:
     enabled: true
     bind: "0.0.0.0:8080"
-    dashboard: true
-
-upstream:
-  servers:
-    - 1.1.1.1:53
-    - 8.8.8.8:53
-
-dnssec:
-  enabled: true
-  signing:
+    tls_cert_file: /etc/nothingdns/tls/tls.crt
+    tls_key_file: /etc/nothingdns/tls/tls.key
+    doh_enabled: true
+    doh_path: /dns-query
+  upstream:
+    servers:
+      - 1.1.1.1:53
+      - 8.8.8.8:53
+  dnssec:
     enabled: true
-    algorithm: ecdsap256sha256
-
-zones:
-  - /etc/nothingdns/zones/example.com.zone
-
-security:
-  acl:
-    default_action: deny
-    rules:
-      - action: allow
-        cidr: "10.0.0.0/8"
-      - action: allow
-        cidr: "172.16.0.0/12"
-      - action: allow
-        cidr: "192.168.0.0/16"
+    validation: true
 ```
 
 #### High Availability Cluster
 
 ```yaml
-cluster:
-  enabled: true
-  node_id: "node-1"
-  bind_addr: "0.0.0.0"
-  gossip_port: 7946
-  consensus_mode: "swim"
-  encryption_key: "YOUR_32_BYTE_BASE64_KEY"
-  cache_sync: true
-  seed_nodes:
-    - 172.28.0.10:7946
-    - 172.28.0.11:7946
+auth:
+  clusterEncryptionKey: "<32+ byte random value>"
+
+config:
+  cluster:
+    enabled: true
+    gossip_port: 7946
+    consensus_mode: swim
+    cache_sync: true
+    seed_nodes:
+      - 172.28.0.10:7946
+      - 172.28.0.11:7946
 ```
 
 ## Parameters
@@ -135,44 +140,50 @@ cluster:
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `server.port` | DNS port | `53` |
-| `server.http.enabled` | Enable HTTP API | `true` |
-| `server.http.bind` | HTTP bind address | `0.0.0.0:8080` |
-| `server.http.dashboard` | Enable dashboard | `true` |
+| `config.server.port` | DNS port | `53` |
+| `config.http.enabled` | Enable HTTP API and dashboard | `true` |
+| `config.http.bind` | HTTP API / dashboard / DoH bind address | `0.0.0.0:8080` |
+| `config.http.doh_enabled` | Enable DoH on the HTTP bind | `false` |
+| `auth.authSecret` | HTTP session signing secret | required when HTTP is enabled |
+| `auth.adminPassword` | Default admin password when no explicit users are configured | required when HTTP is enabled |
 
 ### Upstream Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `upstream.strategy` | Load balancing strategy | `round_robin` |
-| `upstream.servers` | Upstream DNS servers | `[]` |
-| `upstream.timeout` | Query timeout (seconds) | `5` |
+| `config.upstream.servers` | Upstream DNS servers | `["1.1.1.1:53", "8.8.8.8:53"]` |
+| `config.upstream.timeout` | Query timeout | `5s` |
+| `config.upstream.attempts` | Retry attempts per query | `3` |
+| `config.upstream.health_check_interval` | Upstream health check interval | `30s` |
 
 ### Cache Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `cache.size` | Maximum cache entries | `10000` |
-| `cache.min_ttl` | Minimum TTL (seconds) | `300` |
-| `cache.max_ttl` | Maximum TTL (seconds) | `86400` |
-| `cache.prefetch` | Enable prefetch | `true` |
+| `config.cache.size` | Maximum cache entries | `10000` |
+| `config.cache.ttl` | Default TTL (seconds) | `300` |
+| `config.cache.negative_ttl` | Negative-cache TTL (seconds) | `60` |
+| `config.cache.stale_ttl` | Stale-cache TTL (seconds) | `86400` |
+| `config.cache.prefetch` | Enable prefetch | `true` |
 
 ### Security Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `security.acl.default_action` | Default ACL action | `allow` |
-| `security.rate_limit.enabled` | Enable rate limiting | `true` |
-| `security.rate_limit.queries_per_second` | Queries per second per IP | `100` |
+| `auth.existingSecret` | Existing Secret with chart auth keys | `""` |
+| `networkPolicy.enabled` | Restrict pod ingress/egress with NetworkPolicy | `true` |
+| `securityContext.readOnlyRootFilesystem` | Run container with read-only root filesystem | `true` |
+| `securityContext.runAsNonRoot` | Require non-root runtime user | `true` |
 
 ### Cluster Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
-| `cluster.enabled` | Enable clustering | `false` |
-| `cluster.node_id` | Unique node ID | `` |
-| `cluster.consensus_mode` | SWIM or Raft | `swim` |
-| `cluster.gossip_port` | Gossip port | `7946` |
+| `config.cluster.enabled` | Enable clustering | `false` |
+| `config.cluster.node_id` | Unique node ID; defaults to pod name when empty | `""` |
+| `config.cluster.consensus_mode` | SWIM or Raft | `swim` |
+| `config.cluster.gossip_port` | Gossip port | `7946` |
+| `auth.clusterEncryptionKey` | Cluster encryption key when clustering is enabled | required for cluster |
 
 ## Persistence
 
@@ -199,7 +210,10 @@ The embedded React dashboard is served at the HTTP port (default: 8080). It prov
 
 ## Metrics
 
-Prometheus metrics are exposed at `/metrics` on the HTTP port.
+Prometheus metrics use the dedicated metrics listener configured by
+`config.metrics.port` and `config.metrics.path`. When metrics are enabled,
+set `auth.metricsAuthToken` or provide `metrics-auth-token` in
+`auth.existingSecret`.
 
 ### Recommended Prometheus Rules
 
