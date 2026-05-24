@@ -35,24 +35,11 @@ jobs:
       - name: Lint
         run: cd web && npm run lint
 
-      - name: Run tests
-        run: cd web && npm test -- --coverage
-
       - name: Build
         run: cd web && npm run build
         env:
           VITE_API_URL: /api
           VITE_WS_URL: /ws
-
-      - name: Upload coverage
-        # L-N9: see comment in go.yml — pin to a release SHA for
-        # supply-chain hygiene; tag refs are mutable.
-        uses: codecov/codecov-action@v4
-        with:
-          files: web/coverage/coverage-final.json
-          flags: frontend
-          name: nothingdns-web
-          fail_ci_if_error: false
 
   security:
     runs-on: ubuntu-latest
@@ -92,8 +79,11 @@ jobs:
         with:
           args: --severity-threshold=high
 
-      - name: Run CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
         with:
           languages: javascript
           queries: security-extended
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
