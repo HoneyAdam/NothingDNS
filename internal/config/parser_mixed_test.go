@@ -1,11 +1,8 @@
 package config
 
-import (
-	"fmt"
-	"testing"
-)
+import "testing"
 
-func TestDebugMixedContent(t *testing.T) {
+func TestParserMixedMappingAndSequences(t *testing.T) {
 	input := `name: test
 values:
   - a
@@ -15,23 +12,17 @@ config:
   enabled: true
   count: 42`
 
-	fmt.Println("=== Tokens ===")
 	tokenizer := NewTokenizer(input)
 	tokens := tokenizer.TokenizeAll()
-	for i, tok := range tokens {
-		fmt.Printf("Token[%d]: Type=%s Value=%q Line=%d Col=%d\n", i, tok.Type, tok.Value, tok.Line, tok.Col)
+	if len(tokens) == 0 {
+		t.Fatal("expected tokenizer to return tokens")
 	}
-	fmt.Println("=============================")
 
 	parser := NewParser(input)
 	node, err := parser.ParseMapping()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	fmt.Println("=== Parsed Node Structure ===")
-	debugNode(node, 0)
-	fmt.Println("=============================")
 
 	if name := node.GetString("name"); name != "test" {
 		t.Errorf("expected name 'test', got %q", name)
