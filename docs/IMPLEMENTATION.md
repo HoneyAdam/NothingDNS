@@ -1200,7 +1200,7 @@ func Verify(key *SigningKey, data []byte, signature []byte) bool
 
 // AXFR Server (primary side):
 // 1. Receive AXFR query on TCP
-// 2. Check ACL (allow-transfer)
+// 2. Check ACL (transfer.allow_list)
 // 3. Check TSIG if configured
 // 4. Send: SOA → all records → SOA (bookend)
 // 5. Multiple DNS messages (each within TCP length-prefix framing)
@@ -1467,7 +1467,7 @@ type TokenBucket struct {
 }
 
 // Token bucket algorithm:
-// - Each bucket refills at `responses-per-second` rate
+// - Each bucket refills at `rrl.responses_per_second` rate
 // - If tokens < 1: drop response (or send TC if slip counter matches)
 // - Slip: every Nth dropped response, send truncated (TC=1) instead
 //   This hints client to retry over TCP (which is rate-limited differently)

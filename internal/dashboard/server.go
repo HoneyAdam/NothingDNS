@@ -252,14 +252,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch path {
 	case "/api/dashboard/stats":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if s.authenticateRequest(w, r) {
 			s.handleStats(w, r)
 		}
 	case "/api/dashboard/queries":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if s.authenticateRequest(w, r) {
 			s.handleQueryStream(w, r)
 		}
 	case "/api/dashboard/zones":
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
 		if s.authenticateRequest(w, r) {
 			s.handleZones(w, r)
 		}
@@ -268,6 +277,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// requireMethod returns true if the request matches one of the
+// allowed methods. Otherwise it writes 405 with an Allow header and
+// returns false. L-11: the dashboard's data endpoints previously
+// accepted any verb. They're read-only today (POST/PUT/DELETE just
+// invoked the read handler) so it wasn't an exploit, but the
+// missing check was a defense-in-depth regression risk — anyone
+// adding a state-mutating side effect to handleStats / handleZones /
+// handleQueryStream would silently expose it to verbs that bypass
+// the cookie-CSRF defense the main API uses.
+func requireMethod(w http.ResponseWriter, r *http.Request, allowed ...string) bool {
+	for _, m := range allowed {
+		if r.Method == m {
+			return true
+		}
+	}
+	w.Header().Set("Allow", strings.Join(allowed, ", "))
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	return false
 }
 
 // handleStats handles stats API requests

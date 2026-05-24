@@ -4066,6 +4066,7 @@ func TestNewClusterManager_Disabled(t *testing.T) {
 
 func TestNewTransferManager(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Transfer.AllowList = []string{"192.0.2.0/24"}
 	zones := make(map[string]*zone.Zone)
 	zonesMu := &sync.RWMutex{}
 	mgr, err := NewTransferManager(cfg, zones, zonesMu, util.NewLogger(util.ERROR, util.TextFormat, nil))
@@ -4074,6 +4075,12 @@ func TestNewTransferManager(t *testing.T) {
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
+	}
+	if !mgr.Result().AXFRServer.IsAllowed(net.ParseIP("192.0.2.53")) {
+		t.Fatal("expected transfer.allow_list to permit configured AXFR client")
+	}
+	if mgr.Result().AXFRServer.IsAllowed(net.ParseIP("198.51.100.53")) {
+		t.Fatal("expected transfer.allow_list to reject unconfigured AXFR client")
 	}
 	mgr.SetZonesMu(zonesMu)
 	mgr.Stop()
@@ -4187,6 +4194,7 @@ func TestNewClusterManager_Enabled(t *testing.T) {
 	cfg.Cluster.BindAddr = "127.0.0.1"
 	cfg.Cluster.GossipPort = 0 // let OS assign
 	cfg.Cluster.NodeID = "test-node"
+	cfg.Cluster.AllowInsecureCluster = true
 	mgr, err := NewClusterManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -4726,8 +4734,11 @@ func TestProcessUpdateEvents(t *testing.T) {
 	h.zonesMu.RLock()
 	z := h.zones["example.com."]
 	h.zonesMu.RUnlock()
-	if len(z.Records["new.example.com."]) != 2 {
-		t.Errorf("expected record added twice (HandleUpdate + processUpdateEvents), got %d", len(z.Records["new.example.com."]))
+	z.RLock()
+	got := len(z.Records["new.example.com."])
+	z.RUnlock()
+	if got != 2 {
+		t.Errorf("expected record added twice (HandleUpdate + processUpdateEvents), got %d", got)
 	}
 }
 
@@ -4920,13 +4931,12 @@ func TestClusterManager_Enabled_StartFail(t *testing.T) {
 
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewClusterManager(cfg, logger, cache.New(cache.Config{}), metrics.New(metrics.Config{}), nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error for enabled cluster start failure")
 	}
-	if mgr.Cluster != nil {
-		t.Error("expected nil cluster after start failure")
+	if mgr != nil {
+		t.Fatal("expected nil manager after enabled cluster start failure")
 	}
-	mgr.Stop()
 }
 
 func TestClusterManager_Enabled(t *testing.T) {
@@ -6269,14 +6279,12 @@ func TestNewClusterManager_NewError(t *testing.T) {
 	cfg.Cluster.BindAddr = "invalid:bad:addr"
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewClusterManager(cfg, logger, nil, nil, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected error when cluster initialization fails")
 	}
-	// cluster.New fails -> warn and return with nil Cluster
-	if mgr.Cluster != nil {
-		t.Error("expected nil cluster when New fails")
+	if mgr != nil {
+		t.Fatal("expected nil manager when cluster initialization fails")
 	}
-	mgr.Stop()
 }
 
 func TestClusterManager_MetricsUpdater(t *testing.T) {

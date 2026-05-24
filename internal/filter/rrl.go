@@ -265,20 +265,25 @@ func (rrl *RRL) pruneStale() {
 	}
 }
 
-// evictOldest removes n oldest buckets by creation time.
+// evictOldest removes n least-recently-used buckets. Same shape as
+// the ratelimit.go fix for M-5: keying on createdAt let an attacker
+// rotating source IPs evict the longest-tenured legitimate clients
+// first (whose fresh buckets then reset full-burst), defeating the
+// limit. lastTime gives true LRU and closes that bypass for the RRL
+// response-rate counter as well.
 func (rrl *RRL) evictOldest(n int) {
 	if n <= 0 || len(rrl.buckets) == 0 {
 		return
 	}
 
 	type entry struct {
-		key       string
-		createdAt time.Time
+		key      string
+		lastTime time.Time
 	}
 
 	samples := make([]entry, 0, n*2)
 	for key, b := range rrl.buckets {
-		samples = append(samples, entry{key: key, createdAt: b.createdAt})
+		samples = append(samples, entry{key: key, lastTime: b.lastTime})
 		if len(samples) >= n*2 {
 			break
 		}
@@ -288,7 +293,7 @@ func (rrl *RRL) evictOldest(n int) {
 	for deleted < n && len(samples) > 0 {
 		oldestIdx := 0
 		for i := 1; i < len(samples); i++ {
-			if samples[i].createdAt.Before(samples[oldestIdx].createdAt) {
+			if samples[i].lastTime.Before(samples[oldestIdx].lastTime) {
 				oldestIdx = i
 			}
 		}

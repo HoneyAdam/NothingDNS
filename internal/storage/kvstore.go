@@ -1,7 +1,11 @@
 package storage
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
@@ -34,6 +38,27 @@ const (
 	fileMagic    = 0xDB
 	fileVersion  = 1
 	hmacLenBytes = 32 // SHA-256 HMAC
+
+	// encryptedFileMagic identifies the AES-256-GCM-encrypted variant
+	// of the TLV format used when an aeadKey is configured (L-6).
+	// Layout:
+	//   byte 0:        0xE0
+	//   bytes 1-2:     version (big-endian uint16)
+	//   bytes 3-14:    12-byte nonce
+	//   bytes 15..end: AES-GCM(plaintext = plain-TLV-without-magic,
+	//                          AAD       = magic||version)
+	// Plain-TLV-without-magic = version(2) || payloadLen(4) || payload || hmac(32).
+	// The GCM tag already authenticates the payload, so the embedded
+	// HMAC is redundant under AES-GCM — it is preserved so that
+	// disabling encryption later reads back as plain-TLV without
+	// format conversion.
+	encryptedFileMagic = 0xE0
+	aeadNonceLen       = 12
+
+	// maxKVPayload caps untrusted on-disk TLV payload length before
+	// allocation. M-1 / L-N1. Package-level so both readTLV and
+	// readEncryptedTLV can reference it.
+	maxKVPayload = 64 << 20 // 64 MiB
 )
 
 // Store errors
@@ -69,6 +94,7 @@ type KVStore struct {
 	txs     []*Tx
 	stats   StoreStats
 	hmacKey []byte // nil means no integrity protection (legacy mode)
+	aeadKey []byte // L-6: nil means no at-rest encryption; non-nil = 32-byte AES-256-GCM key
 }
 
 // StoreStats contains database statistics
@@ -122,6 +148,40 @@ func OpenKVStore(path string, hmacKey ...[]byte) (*KVStore, error) {
 	if key != nil && len(key) != 32 {
 		return nil, fmt.Errorf("hmac key must be 32 bytes (%d provided)", len(key))
 	}
+	return openKVStore(path, key, nil)
+}
+
+// OpenKVStoreEncrypted opens a KV store with both integrity protection
+// (HMAC-SHA256, hmacKey) and at-rest confidentiality (AES-256-GCM,
+// aeadKey). Either or both may be nil — nil hmacKey skips the HMAC
+// frame, nil aeadKey writes plaintext TLV. Files written without
+// aeadKey can still be read with aeadKey set, and vice versa: format
+// is determined by the leading magic byte (0xDB plain, 0xE0
+// encrypted). L-6: addresses the on-disk confidentiality gap noted
+// in SECURITY-REPORT.md.
+func OpenKVStoreEncrypted(path string, hmacKey, aeadKey []byte) (*KVStore, error) {
+	if hmacKey != nil && len(hmacKey) != 32 {
+		return nil, fmt.Errorf("hmac key must be 32 bytes (%d provided)", len(hmacKey))
+	}
+	if aeadKey != nil && len(aeadKey) != 32 {
+		return nil, fmt.Errorf("aead key must be 32 bytes (%d provided)", len(aeadKey))
+	}
+	return openKVStore(path, hmacKey, aeadKey)
+}
+
+func openKVStore(path string, hmacKey, aeadKey []byte) (*KVStore, error) {
+	// L-N3: copy keys so Close's zeroize doesn't blow away the
+	// caller's slice. Without the copy, the slice header is shared
+	// and zeroing the internal "copy" also zeroes whatever the
+	// caller still holds (and any future reopen with the same key).
+	hmCopy := append([]byte(nil), hmacKey...)
+	aeCopy := append([]byte(nil), aeadKey...)
+	if len(hmCopy) == 0 {
+		hmCopy = nil
+	}
+	if len(aeCopy) == 0 {
+		aeCopy = nil
+	}
 	store := &KVStore{
 		path:     path,
 		dataFile: filepath.Join(path, DataFile),
@@ -129,7 +189,8 @@ func OpenKVStore(path string, hmacKey ...[]byte) (*KVStore, error) {
 			Entries: make(map[string][]byte),
 			Buckets: make(map[string]*bucketData),
 		},
-		hmacKey: key,
+		hmacKey: hmCopy,
+		aeadKey: aeCopy,
 	}
 
 	// Create directory if needed
@@ -194,6 +255,17 @@ func (s *KVStore) readFrom(f *os.File) error {
 		return nil
 	}
 
+	if n > 0 && header[0] == encryptedFileMagic {
+		// L-6: AES-256-GCM-encrypted TLV. Requires the aeadKey.
+		if s.aeadKey == nil {
+			return fmt.Errorf("data file is AES-GCM encrypted (magic 0xE0) but no aead key configured")
+		}
+		if err := s.readEncryptedTLV(f); err != nil {
+			return fmt.Errorf("encrypted tlv read: %w", err)
+		}
+		return nil
+	}
+
 	// GOB format (legacy) — decode and convert to JSON-compatible structure
 	// Only attempted for files without a recognized magic byte.
 	if err := s.readGOB(f); err != nil {
@@ -216,6 +288,17 @@ func (s *KVStore) readTLV(r io.Reader) error {
 		return fmt.Errorf("unsupported TLV version: %d", version)
 	}
 	payloadLen := binary.BigEndian.Uint32(hdr[3:7])
+	// M-1: cap the wire-supplied payload length before allocating.
+	// The data file lives on disk and an attacker with write access
+	// (container escape, shared mount, restored backup) could plant
+	// payloadLen = 0xFFFFFFFF — make([]byte, 4 GiB) instantly OOM-
+	// kills the process at startup. maxKVPayload (package-level)
+	// matches the WAL cap and is well above any realistic real KV
+	// record while keeping the upper bound far below the uint32
+	// ceiling.
+	if payloadLen > maxKVPayload {
+		return fmt.Errorf("kvstore: TLV payload %d exceeds max %d", payloadLen, maxKVPayload)
+	}
 
 	// Read payload + HMAC in one read.
 	recordLen := int(payloadLen) + hmacLenBytes
@@ -298,14 +381,23 @@ func (s *KVStore) save() error {
 		}
 	}()
 
-	if s.hmacKey != nil {
-		// Write TLV+HMAC format: [magic(1) version(2) payloadLen(4) payload(n) hmac(32)]
+	// NEW-H1: dispatch to writeTLV when EITHER protection key is
+	// configured. The aead branch lives inside writeTLV, so gating
+	// only on hmacKey silently dropped aeadKey-only deployments back
+	// to the legacy JSON path — and the startup log still claimed
+	// "AES-256-GCM at rest". With this gate, an aead-only config
+	// writes through writeTLV (which then encrypts the whole post-
+	// magic body); the embedded HMAC computed with a nil key is
+	// redundant under AEAD but doesn't harm anything.
+	if s.hmacKey != nil || s.aeadKey != nil {
+		// Write TLV+HMAC format: [magic(1) version(2) payloadLen(4) payload(n) hmac(32)],
+		// optionally wrapped in AES-256-GCM if aeadKey is set.
 		if err := s.writeTLV(tmpFile); err != nil {
 			tmpFile.Close()
 			return fmt.Errorf("write tlv: %w", err)
 		}
 	} else {
-		// Legacy JSON format (no HMAC)
+		// Legacy JSON format (no HMAC, no encryption).
 		encoder := json.NewEncoder(tmpFile)
 		if err := encoder.Encode(s.root); err != nil {
 			tmpFile.Close()
@@ -350,6 +442,14 @@ func (s *KVStore) writeTLV(w io.Writer) error {
 		return fmt.Errorf("json marshal: %w", err)
 	}
 
+	// L-N2: refuse to write a payload that the uint32 length field
+	// would silently truncate. maxKVPayload (64 MiB) is far below
+	// the uint32 ceiling so this is defensive against future buggy
+	// callers expanding the cap without re-checking the conversion.
+	if len(payload) > maxKVPayload {
+		return fmt.Errorf("kvstore: payload %d exceeds max %d", len(payload), maxKVPayload)
+	}
+
 	// Frame: magic + version + length + payload + hmac.
 	frameLen := 1 + 2 + 4 + len(payload) + hmacLenBytes
 	frame := make([]byte, frameLen)
@@ -364,8 +464,95 @@ func (s *KVStore) writeTLV(w io.Writer) error {
 	sum := hm.Sum(nil) // 32 bytes
 	copy(frame[7+len(payload):], sum)
 
+	// L-6: encrypt the whole post-magic body if an aead key is set.
+	// Layout becomes 0xE0 || version || nonce || GCM(plain-TLV-body,
+	// AAD=magic||version) where plain-TLV-body is everything after
+	// the magic byte in the unencrypted frame.
+	if s.aeadKey != nil {
+		gcm, err := newGCM(s.aeadKey)
+		if err != nil {
+			return err
+		}
+		nonce := make([]byte, aeadNonceLen)
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			return fmt.Errorf("aead nonce: %w", err)
+		}
+		aad := []byte{encryptedFileMagic, 0x00, byte(fileVersion)}
+		ct := gcm.Seal(nil, nonce, frame[1:], aad)
+		out := make([]byte, 0, 1+2+aeadNonceLen+len(ct))
+		out = append(out, encryptedFileMagic)
+		out = append(out, aad[1:3]...) // version
+		out = append(out, nonce...)
+		out = append(out, ct...)
+		_, err = w.Write(out)
+		return err
+	}
+
 	_, err = w.Write(frame)
 	return err
+}
+
+// readEncryptedTLV decrypts an AES-GCM-wrapped TLV frame and feeds
+// the plaintext through readTLV via a bytes.Reader. L-6.
+func (s *KVStore) readEncryptedTLV(r io.Reader) error {
+	var hdr [3]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return err
+	}
+	if hdr[0] != encryptedFileMagic {
+		return fmt.Errorf("invalid encrypted magic: 0x%x", hdr[0])
+	}
+	version := binary.BigEndian.Uint16(hdr[1:3])
+	if version != fileVersion {
+		return fmt.Errorf("unsupported encrypted TLV version: %d", version)
+	}
+	nonce := make([]byte, aeadNonceLen)
+	if _, err := io.ReadFull(r, nonce); err != nil {
+		return err
+	}
+	// L-N1: bound the ciphertext read. The earlier comment claimed
+	// "the underlying io.Reader is bounded" but no LimitReader was
+	// actually applied — a disk-write attacker (the exact threat
+	// model L-6 targets) could plant a multi-GB file starting with
+	// 0xE0 and OOM startup before gcm.Open ever runs. Cap matches
+	// the inner maxKVPayload plus headroom for the GCM tag + a
+	// small fixed overhead.
+	const maxEncryptedKVBody = maxKVPayload + 1024 // payload cap + tag + tlv header
+	ct, err := io.ReadAll(io.LimitReader(r, maxEncryptedKVBody+1))
+	if err != nil {
+		return err
+	}
+	if len(ct) > maxEncryptedKVBody {
+		return fmt.Errorf("kvstore: encrypted body %d exceeds max %d", len(ct), maxEncryptedKVBody)
+	}
+	gcm, err := newGCM(s.aeadKey)
+	if err != nil {
+		return err
+	}
+	aad := []byte{encryptedFileMagic, hdr[1], hdr[2]}
+	pt, err := gcm.Open(nil, nonce, ct, aad)
+	if err != nil {
+		return fmt.Errorf("aead decrypt: %w", err)
+	}
+	// pt is the plain-TLV-body (version || payloadLen || payload || hmac).
+	// Prepend the plain magic so readTLV parses it as a normal TLV frame.
+	plain := make([]byte, 1+len(pt))
+	plain[0] = fileMagic
+	copy(plain[1:], pt)
+	return s.readTLV(bytes.NewReader(plain))
+}
+
+// newGCM constructs an AES-256-GCM AEAD from a 32-byte key.
+func newGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aead key: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("aead init: %w", err)
+	}
+	return gcm, nil
 }
 
 // Begin starts a new transaction.
@@ -483,6 +670,20 @@ func (s *KVStore) Close() error {
 	if err := s.save(); err != nil {
 		return err
 	}
+
+	// L-N3: best-effort key zeroize. Go GC means full eradication is
+	// impossible (the runtime may have copied the slice during stack
+	// growth or escape analysis), but overwriting the live header
+	// shrinks the post-Close window where a memory dump could
+	// recover the keys. Defensive, low-cost.
+	for i := range s.hmacKey {
+		s.hmacKey[i] = 0
+	}
+	for i := range s.aeadKey {
+		s.aeadKey[i] = 0
+	}
+	s.hmacKey = nil
+	s.aeadKey = nil
 	return nil
 }
 

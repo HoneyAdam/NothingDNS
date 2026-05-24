@@ -992,12 +992,22 @@ func TestRRSIGForRRSet(t *testing.T) {
 		Signature:   []byte("test-signature-data"),
 	}
 
-	result, err := RRSIGForRRSet(rrsig, rrset)
+	reversed := []*ResourceRecord{rrset[1], rrset[0]}
+	result, err := RRSIGForRRSet(rrsig, reversed)
 	if err != nil {
-		t.Logf("RRSIGForRRSet returned error (expected for placeholder): %v", err)
+		t.Fatalf("RRSIGForRRSet returned error: %v", err)
 	}
-	// Function is placeholder returning nil, nil, so result will be nil
-	_ = result
+	if len(result) == 0 {
+		t.Fatal("RRSIGForRRSet returned empty canonical data")
+	}
+
+	sortedResult, err := RRSIGForRRSet(rrsig, rrset)
+	if err != nil {
+		t.Fatalf("RRSIGForRRSet sorted input returned error: %v", err)
+	}
+	if !bytes.Equal(result, sortedResult) {
+		t.Fatal("RRSIGForRRSet should canonicalize RRSet order")
+	}
 }
 
 // TestResourceRecordString tests ResourceRecord String method

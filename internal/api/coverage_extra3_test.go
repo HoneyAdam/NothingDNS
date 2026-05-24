@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/nothingdns/nothingdns/internal/auth"
 	"github.com/nothingdns/nothingdns/internal/config"
@@ -45,10 +44,13 @@ func TestHandleSlaveZones_WithSyncedZone(t *testing.T) {
 		t.Fatalf("AddSlaveZone: %v", err)
 	}
 
-	// Get the zone and set it to synced state
+	// Get the zone and set it to synced state. Use the exported
+	// UpdateZone setter so the assignment goes through sz.mu — the
+	// AddSlaveZone goroutine is still racing performZoneTransfer,
+	// which reads sz.LastSerial under that same lock.
 	zones := sm.GetAllSlaveZones()
 	for name, sz := range zones {
-		sz.Zone = &zone.Zone{
+		sz.UpdateZone(&zone.Zone{
 			Origin: name,
 			Records: map[string][]zone.Record{
 				"www." + name: {
@@ -56,9 +58,7 @@ func TestHandleSlaveZones_WithSyncedZone(t *testing.T) {
 					{Type: "A", TTL: 300, RData: "10.0.0.2"},
 				},
 			},
-		}
-		sz.LastSerial = 2024010101
-		sz.LastTransfer = time.Now()
+		}, 2024010101)
 	}
 
 	s := newTestAPIServerV2(t)

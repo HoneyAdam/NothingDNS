@@ -57,7 +57,7 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 			s.writeJSON(w, http.StatusCreated, &MessageResponse{Message: "Blocklist file added"})
 		} else if req.URL != "" {
 			if err := s.blocklist.AddURL(req.URL); err != nil {
-				s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to load blocklist from URL: %v", err))
+				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to load blocklist from URL"))
 				return
 			}
 			s.writeJSON(w, http.StatusCreated, &MessageResponse{Message: "Blocklist URL added: " + req.URL})
@@ -143,7 +143,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 			decodedPath = path
 		}
 		if err := s.blocklist.RemoveSource(decodedPath); err != nil {
-			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("Failed to remove blocklist source: %v", err))
+			s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to remove blocklist source"))
 			return
 		}
 		s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "Blocklist source removed"})

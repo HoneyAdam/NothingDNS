@@ -55,10 +55,18 @@ service:
   tcpPort: 53
   # DNS over TLS port
   dotPort: 853
-  # DNS over HTTPS port (if enabled)
-  dohPort: 443
   # API/WebSocket port
   apiPort: 8080
+
+# Secret material used by the generated chart Secret. Set existingSecret to
+# reference a pre-created Secret with these keys instead:
+#   auth-secret, admin-password, metrics-auth-token, cluster-encryption-key.
+auth:
+  existingSecret: ""
+  authSecret: ""
+  adminPassword: ""
+  metricsAuthToken: ""
+  clusterEncryptionKey: ""
 
 # Ingress configuration for DoH/API
 ingress:
@@ -72,7 +80,7 @@ ingress:
       paths:
         - path: /dns-query
           pathType: Prefix
-          servicePort: 443
+          servicePort: 8080
         - path: /api
           pathType: Prefix
           servicePort: 8080
@@ -169,20 +177,25 @@ config:
     tls:
       cert_file: ""
       key_file: ""
-      ca_file: ""
 
-  # API configuration
-  api:
+  # HTTP API / Dashboard / DoH configuration
+  http:
     enabled: true
-    bind: 0.0.0.0
-    port: 8080
+    bind: "0.0.0.0:8080"
     # CORS origins
     allowed_origins:
       - "http://localhost:3000"
       - "https://localhost:3000"
     # Authentication
-    jwt_secret: ""  # Will be auto-generated if empty
-    session_timeout: 24h
+    auth_secret: ""
+    users: []
+    # - username: admin
+    #   password: ""
+    #   role: admin
+    tls_cert_file: ""
+    tls_key_file: ""
+    doh_enabled: false
+    doh_path: /dns-query
 
   # Logging configuration
   logging:
@@ -204,13 +217,6 @@ config:
   dns64:
     enabled: false
     prefix: "64:ff9b::/96"
-
-  # Rate limiting
-  rate_limit:
-    enabled: true
-    rate: 5
-    burst: 20
-    max_buckets: 10000
 
   # Upstream DNS servers
   upstream:
@@ -261,41 +267,37 @@ config:
   # XoT (Zone Transfer over TLS)
   xot:
     enabled: false
-    port: 853
+    bind: ":853"
     cert_file: ""
     key_file: ""
-    allowed_networks: []
+    ca_file: ""
+    min_tls_version: 12
 
-  # Zone transfer configuration (AXFR/IXFR)
-  zone_transfer:
-    enabled: false
+  # Secondary zone transfer configuration (AXFR/IXFR)
+  slave_zones: []
+  # slave_zones:
+  #   - zone_name: "example.com."
+  #     masters:
+  #       - "192.0.2.1:53"
+  #     transfer_type: ixfr
+  #     timeout: 30s
+  #     retry_interval: 5m
+  #     max_retries: 3
+
+  # Serving zone transfers to secondary servers is deny-by-default.
+  transfer:
     allow_list: []
-    # allow_list:
-    #   - "192.168.1.0/24"
-    #   - "10.0.0.0/8"
     require_tsig: false
-
-  # NOTIFY configuration
-  notify:
-    enabled: false
-    slaves: []
-
-  # Dynamic DNS (DDNS)
-  ddns:
-    enabled: false
-    allow_list: []
-    require_tsig: true
+    # allow_list:
+    #   - "192.0.2.0/24"
+    #   - "2001:db8::/32"
 
   # Metrics and monitoring
   metrics:
-    enabled: true
+    enabled: false
     port: 9090
     path: /metrics
-
-  # Health checks
-  health:
-    enabled: true
-    port: 8080
+    auth_token: ""
 
   # OpenTelemetry tracing
   tracing:
@@ -304,16 +306,10 @@ config:
     # endpoint: "http://otel-collector:4317"
     sample_rate: 0.1
 
-  # Initial zones to create
-  zones: {}
+  # Authoritative zone files to load
+  zones: []
   # zones:
-  #   "example.com.":
-  #     type: primary
-  #     file: "/var/lib/nothingdns/zones/example.com.zone"
-  #   "example.net.":
-  #     type: secondary
-  #     masters:
-  #       - "192.168.1.10:53"
+  #   - "/var/lib/nothingdns/zones/example.com.zone"
 
 # Monitoring
 monitoring:

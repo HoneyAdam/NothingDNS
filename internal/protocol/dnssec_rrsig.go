@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"bytes"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -240,6 +242,12 @@ func (r *RDataRRSIG) SignerNameString() string {
 // RRSIGForRRSet returns the canonical wire format data to be signed.
 // This is used when creating signatures per RFC 4034 Section 5.
 func RRSIGForRRSet(rrsig *RDataRRSIG, rrset []*ResourceRecord) ([]byte, error) {
+	if rrsig == nil {
+		return nil, fmt.Errorf("nil RRSIG")
+	}
+	if rrsig.SignerName == nil {
+		return nil, fmt.Errorf("nil RRSIG signer name")
+	}
 	if len(rrset) == 0 {
 		return nil, fmt.Errorf("empty RRSet")
 	}
@@ -262,25 +270,42 @@ func RRSIGForRRSet(rrsig *RDataRRSIG, rrset []*ResourceRecord) ([]byte, error) {
 
 	// RRSet in canonical form (sorted, one RR at a time):
 	// Owner Name | Type | Class | TTL | RDLENGTH | RDATA
+	rrData := make([][]byte, 0, len(rrset))
 	for _, rr := range rrset {
-		data = append(data, CanonicalWireName(rr.Name.String())...)
-		data = append(data, byte(rr.Type>>8), byte(rr.Type))
-		data = append(data, byte(rr.Class>>8), byte(rr.Class))
-		data = append(data, byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
+		if rr == nil {
+			return nil, fmt.Errorf("nil RR in RRSet")
+		}
+		if rr.Name == nil {
+			return nil, fmt.Errorf("nil RR owner name")
+		}
+
+		var rrWire []byte
+		rrWire = append(rrWire, CanonicalWireName(rr.Name.String())...)
+		rrWire = append(rrWire, byte(rr.Type>>8), byte(rr.Type))
+		rrWire = append(rrWire, byte(rr.Class>>8), byte(rr.Class))
+		rrWire = append(rrWire, byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
 			byte(rrsig.OriginalTTL>>8), byte(rrsig.OriginalTTL))
 
 		if rr.Data != nil {
 			buf := make([]byte, 65535)
 			n, err := rr.Data.Pack(buf, 0)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("pack RR RDATA: %w", err)
 			}
 			rdata := buf[:n]
-			data = append(data, byte(len(rdata)>>8), byte(len(rdata)))
-			data = append(data, rdata...)
+			rrWire = append(rrWire, byte(len(rdata)>>8), byte(len(rdata)))
+			rrWire = append(rrWire, rdata...)
 		} else {
-			data = append(data, 0, 0)
+			rrWire = append(rrWire, 0, 0)
 		}
+		rrData = append(rrData, rrWire)
+	}
+
+	sort.Slice(rrData, func(i, j int) bool {
+		return bytes.Compare(rrData[i], rrData[j]) < 0
+	})
+	for _, rrWire := range rrData {
+		data = append(data, rrWire...)
 	}
 
 	return data, nil

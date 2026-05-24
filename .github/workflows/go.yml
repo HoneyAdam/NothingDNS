@@ -9,9 +9,30 @@ on:
 permissions:
   contents: read
   security-events: write
-  pull-requests: write
+  # L-14: pull-requests permission was granted workflow-wide but no
+  # step writes PR comments / labels / status. Removed; restore as a
+  # job-scoped grant if a future step actually needs it.
 
 jobs:
+  actions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Run actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          actionlint
+
   go:
     runs-on: ubuntu-latest
 
@@ -49,28 +70,21 @@ jobs:
           go-version-file: go.mod
           cache: false
 
-      - name: Download module cache
-        uses: actions/download-artifact@v4
-        with:
-          name: go-modules
-          path: |
-            ~/go/pkg/mod
-          retention-days: 1
-
       - name: Run tests with coverage
         run: |
           mkdir -p coverage
-          for pkg in $(go list ./... | grep -v e2e); do
-            go test -coverprofile=coverage/$(echo $pkg | tr '/' '_').out $pkg
-          done
+          while read -r pkg; do
+            profile="coverage/$(echo "$pkg" | tr '/' '_').out"
+            go test -coverprofile="$profile" "$pkg"
+          done < <(go list ./... | grep -v e2e)
 
       - name: Combine coverage
         run: |
           echo "mode: set" > coverage/all.out
-          cat coverage/*.out | grep -v "^mode:" >> coverage/all.out
+          find coverage -name '*.out' ! -name all.out -exec grep -h -v "^mode:" {} + >> coverage/all.out
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
         with:
           files: ./coverage/all.out
           flags: unittests
@@ -84,7 +98,7 @@ jobs:
           # Create summary
           grep -v "^mode:" coverage/all.out | \
             awk -F: '{print $1, $2}' | \
-            while read file coverage; do
+            while read -r file coverage; do
               echo "$file: $coverage%"
             done > coverage/summary.txt
 
@@ -96,6 +110,52 @@ jobs:
             coverage/index.html
             coverage/summary.txt
           retention-days: 14
+
+  helm:
+    runs-on: ubuntu-latest
+    needs: go
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Set up Helm
+        uses: Azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v3.19.0
+
+      - name: Lint Helm chart
+        run: |
+          helm lint deploy/helm/nothingdns \
+            --set-string auth.authSecret='AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+            --set-string auth.adminPassword='AdminPassword-1234567890-ABCDE'
+
+      - name: Validate rendered daemon config
+        env:
+          NOTHINGDNS_AUTH_SECRET: AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+          NOTHINGDNS_ADMIN_PASSWORD: AdminPassword-1234567890-ABCDE
+          NOTHINGDNS_METRICS_AUTH_TOKEN: MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+          NOTHINGDNS_CLUSTER_ENCRYPTION_KEY: ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+        run: |
+          helm template nothingdns deploy/helm/nothingdns \
+            --set-string auth.authSecret="$NOTHINGDNS_AUTH_SECRET" \
+            --set-string auth.adminPassword="$NOTHINGDNS_ADMIN_PASSWORD" \
+            > /tmp/nothingdns-helm.yaml
+
+          awk '
+            found && /^    / { sub(/^    /, ""); print; next }
+            found && /^$/ { print; next }
+            found { exit }
+            /^  nothingdns\.yaml: \|/ { found=1 }
+          ' /tmp/nothingdns-helm.yaml > /tmp/nothingdns-helm-config.yaml
+
+          test -s /tmp/nothingdns-helm-config.yaml
+          go run ./cmd/nothingdns -config /tmp/nothingdns-helm-config.yaml -validate-config
 
   security:
     runs-on: ubuntu-latest
@@ -111,20 +171,27 @@ jobs:
           cache: false
 
       - name: Run Go Security Checker
+        # M-11: pin tool versions instead of @latest. The security job
+        # has `security-events: write` plus the runner has GITHUB_TOKEN
+        # in scope; a compromised upstream of either tool would inherit
+        # those permissions. Bump these tags via Renovate / Dependabot.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
 
       - name: Run Static Analysis
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@latest
+          go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
           staticcheck ./...
 
-      - name: Run CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
         with:
           languages: go
           queries: security-extended
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
 
   e2e:
     runs-on: ubuntu-latest

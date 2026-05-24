@@ -6,26 +6,41 @@ import { queryClient } from '@/lib/queryClient';
 import { useAuthStore } from '@/stores/authStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Sidebar } from '@/components/layout/sidebar';
-import { DashboardPage } from '@/pages/dashboard';
-import { ZonesPage } from '@/pages/zones';
-import { ZoneDetailPage } from '@/pages/zone-detail';
-import { SettingsPage } from '@/pages/settings';
-import { AboutPage } from '@/pages/about';
 import { LoginPage } from '@/pages/login';
-import { QueryLogPage } from '@/pages/query-log';
-import { TopDomainsPage } from '@/pages/top-domains';
-import { BlocklistPage } from '@/pages/blocklist';
-import { UpstreamsPage } from '@/pages/upstreams';
-import { UsersPage } from '@/pages/users';
-import { HistoricalChartsPage } from '@/pages/historical-charts';
-import { DNSSECPage } from '@/pages/dnssec';
-import { ClusterPage } from '@/pages/cluster';
-import { RPZPage } from '@/pages/rpz';
-import { ACLPage } from '@/pages/acl';
-import { GeoIPPage } from '@/pages/geoip';
-import { DNS64CookiesPage } from '@/pages/dns64-cookies';
-import { ZoneTransferPage } from '@/pages/zone-transfer';
-import { useEffect } from 'react';
+import { lazy, Suspense, useEffect } from 'react';
+
+const DashboardPage = lazy(() => import('@/pages/dashboard').then(({ DashboardPage }) => ({ default: DashboardPage })));
+const ZonesPage = lazy(() => import('@/pages/zones').then(({ ZonesPage }) => ({ default: ZonesPage })));
+const ZoneDetailPage = lazy(() => import('@/pages/zone-detail').then(({ ZoneDetailPage }) => ({ default: ZoneDetailPage })));
+const SettingsPage = lazy(() => import('@/pages/settings').then(({ SettingsPage }) => ({ default: SettingsPage })));
+const AboutPage = lazy(() => import('@/pages/about').then(({ AboutPage }) => ({ default: AboutPage })));
+const QueryLogPage = lazy(() => import('@/pages/query-log').then(({ QueryLogPage }) => ({ default: QueryLogPage })));
+const TopDomainsPage = lazy(() => import('@/pages/top-domains').then(({ TopDomainsPage }) => ({ default: TopDomainsPage })));
+const BlocklistPage = lazy(() => import('@/pages/blocklist').then(({ BlocklistPage }) => ({ default: BlocklistPage })));
+const UpstreamsPage = lazy(() => import('@/pages/upstreams').then(({ UpstreamsPage }) => ({ default: UpstreamsPage })));
+const UsersPage = lazy(() => import('@/pages/users').then(({ UsersPage }) => ({ default: UsersPage })));
+const HistoricalChartsPage = lazy(() => import('@/pages/historical-charts').then(({ HistoricalChartsPage }) => ({ default: HistoricalChartsPage })));
+const DNSSECPage = lazy(() => import('@/pages/dnssec').then(({ DNSSECPage }) => ({ default: DNSSECPage })));
+const ClusterPage = lazy(() => import('@/pages/cluster').then(({ ClusterPage }) => ({ default: ClusterPage })));
+const RPZPage = lazy(() => import('@/pages/rpz').then(({ RPZPage }) => ({ default: RPZPage })));
+const ACLPage = lazy(() => import('@/pages/acl').then(({ ACLPage }) => ({ default: ACLPage })));
+const GeoIPPage = lazy(() => import('@/pages/geoip').then(({ GeoIPPage }) => ({ default: GeoIPPage })));
+const DNS64CookiesPage = lazy(() => import('@/pages/dns64-cookies').then(({ DNS64CookiesPage }) => ({ default: DNS64CookiesPage })));
+const ZoneTransferPage = lazy(() => import('@/pages/zone-transfer').then(({ ZoneTransferPage }) => ({ default: ZoneTransferPage })));
+
+function PageFallback() {
+  return (
+    <div className="space-y-4" aria-label="Loading page">
+      <div className="h-8 w-48 rounded bg-muted animate-pulse" />
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="h-28 rounded-lg bg-muted animate-pulse" />
+        <div className="h-28 rounded-lg bg-muted animate-pulse" />
+        <div className="h-28 rounded-lg bg-muted animate-pulse" />
+      </div>
+      <div className="h-64 rounded-lg bg-muted animate-pulse" />
+    </div>
+  );
+}
 
 function AppContent() {
   const { isAuthenticated, token } = useAuthStore();
@@ -48,26 +63,28 @@ function AppContent() {
         <Sidebar connected={connected} />
         <main className="flex-1 overflow-y-auto h-screen">
           <div className="p-6 max-w-6xl mx-auto">
-            <Routes>
-              <Route path="/" element={<DashboardPage />} />
-              <Route path="/zones" element={<ZonesPage />} />
-              <Route path="/zones/:name" element={<ZoneDetailPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/about" element={<AboutPage />} />
-              <Route path="/query-log" element={<QueryLogPage />} />
-              <Route path="/top-domains" element={<TopDomainsPage />} />
-              <Route path="/blocklist" element={<BlocklistPage />} />
-              <Route path="/upstreams" element={<UpstreamsPage />} />
-              <Route path="/users" element={<UsersPage />} />
-              <Route path="/charts" element={<HistoricalChartsPage />} />
-              <Route path="/dnssec" element={<DNSSECPage />} />
-              <Route path="/cluster" element={<ClusterPage />} />
-              <Route path="/rpz" element={<RPZPage />} />
-              <Route path="/acl" element={<ACLPage />} />
-              <Route path="/geoip" element={<GeoIPPage />} />
-              <Route path="/dns64-cookies" element={<DNS64CookiesPage />} />
-              <Route path="/zone-transfer" element={<ZoneTransferPage />} />
-            </Routes>
+            <Suspense fallback={<PageFallback />}>
+              <Routes>
+                <Route path="/" element={<DashboardPage />} />
+                <Route path="/zones" element={<ZonesPage />} />
+                <Route path="/zones/:name" element={<ZoneDetailPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/about" element={<AboutPage />} />
+                <Route path="/query-log" element={<QueryLogPage />} />
+                <Route path="/top-domains" element={<TopDomainsPage />} />
+                <Route path="/blocklist" element={<BlocklistPage />} />
+                <Route path="/upstreams" element={<UpstreamsPage />} />
+                <Route path="/users" element={<UsersPage />} />
+                <Route path="/charts" element={<HistoricalChartsPage />} />
+                <Route path="/dnssec" element={<DNSSECPage />} />
+                <Route path="/cluster" element={<ClusterPage />} />
+                <Route path="/rpz" element={<RPZPage />} />
+                <Route path="/acl" element={<ACLPage />} />
+                <Route path="/geoip" element={<GeoIPPage />} />
+                <Route path="/dns64-cookies" element={<DNS64CookiesPage />} />
+                <Route path="/zone-transfer" element={<ZoneTransferPage />} />
+              </Routes>
+            </Suspense>
           </div>
         </main>
       </div>

@@ -483,12 +483,21 @@ func (e *Engine) ClientIPPolicy(clientIP net.IP) *Rule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// L-8: walk every matching CIDR and return the highest-priority
+	// hit (Rule.Priority semantics: lower numeric value = higher
+	// priority, same as QNAMEPolicy). The earlier implementation
+	// returned the first slice-order match, so insertion order silently
+	// won over the operator-declared priority.
+	var best *Rule
 	for i, cidr := range e.clientIPRules {
 		if cidr.Contains(clientIP) {
-			return e.clientActions[i]
+			r := e.clientActions[i]
+			if best == nil || r.Priority < best.Priority {
+				best = r
+			}
 		}
 	}
-	return nil
+	return best
 }
 
 // ResponseIPPolicy evaluates RPZ policy based on response IP addresses.
@@ -500,14 +509,23 @@ func (e *Engine) ResponseIPPolicy(ips []net.IP) *Rule {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	// L-8: as for ClientIPPolicy, prefer the highest-priority match
+	// across all response IPs and all CIDR rules rather than the first
+	// slice-order hit. Iterating IPs as the outer loop preserves the
+	// original "any response IP matches" semantics; only the tie-break
+	// on multiple matches changes.
+	var best *Rule
 	for _, ip := range ips {
 		for i, cidr := range e.respIPRules {
 			if cidr.Contains(ip) {
-				return e.respActions[i]
+				r := e.respActions[i]
+				if best == nil || r.Priority < best.Priority {
+					best = r
+				}
 			}
 		}
 	}
-	return nil
+	return best
 }
 
 // Reload reloads all RPZ zone files.

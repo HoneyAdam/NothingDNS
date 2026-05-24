@@ -1,10 +1,13 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -61,6 +64,230 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("View: %v", err)
+	}
+}
+
+// TestReadEncryptedTLV_RejectsOversizedBody regresses
+// SECURITY-REPORT-2026-05-23-rescan L-N1. readEncryptedTLV used to
+// call io.ReadAll on the raw reader before any size check, so a
+// disk-write attacker (the L-6 threat model) could plant a multi-GB
+// file starting with 0xE0 and OOM startup before gcm.Open ran. The
+// fix wraps the read in io.LimitReader + a post-read sanity check.
+func TestReadEncryptedTLV_RejectsOversizedBody(t *testing.T) {
+	aead := make([]byte, 32)
+	store := &KVStore{aeadKey: aead}
+
+	// Header (magic + version + nonce) is fine; trailing bytes intentionally
+	// exceed the cap. We don't need valid ciphertext — the cap check fires
+	// before gcm.Open.
+	var buf bytes.Buffer
+	buf.WriteByte(encryptedFileMagic)
+	verBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(verBytes, fileVersion)
+	buf.Write(verBytes)
+	buf.Write(make([]byte, aeadNonceLen)) // nonce
+	// (64 MiB + headroom + 1) of body bytes — guaranteed over the cap.
+	body := make([]byte, (64<<20)+1024+1)
+	buf.Write(body)
+
+	err := store.readEncryptedTLV(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized encrypted body, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max' (the cap guard message)", err)
+	}
+}
+
+// TestKVStore_EncryptedAeadOnly_NoPlaintextOnDisk regresses
+// SECURITY-REPORT-2026-05-23 NEW-H1. The original L-6 wiring at
+// zone_manager.go passes nil hmacKey + aeadKey to OpenKVStoreEncrypted,
+// but save()'s dispatch was `if s.hmacKey != nil { writeTLV } else
+// { writeJSON }` — so aead-only deployments silently wrote PLAIN
+// JSON despite the startup log claiming "AES-256-GCM at rest". The
+// earlier TestKVStore_EncryptedRoundTrip passed only because it
+// supplied BOTH keys, which doesn't match production wiring shape.
+//
+// This test pins the production shape: nil hmacKey + aeadKey, write
+// a known-secret value, assert the on-disk file starts with the
+// encrypted magic 0xE0 and does NOT contain the cleartext value.
+func TestKVStore_EncryptedAeadOnly_NoPlaintextOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	aeadKey := make([]byte, 32)
+	for i := range aeadKey {
+		aeadKey[i] = byte(7*i + 3)
+	}
+
+	const (
+		bkt    = "prod-shape-bucket"
+		k      = "prod-shape-key"
+		secret = "this-must-never-appear-in-the-data-file"
+	)
+
+	store, err := OpenKVStoreEncrypted(dir, nil, aeadKey) // production shape
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (write, nil hmac): %v", err)
+	}
+	if err := store.Update(func(tx *Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(bkt))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(k), []byte(secret))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, DataFile))
+	if err != nil {
+		t.Fatalf("read on-disk file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("NEW-H1 regression: data file magic = 0x%x, want 0xE0 (encrypted) — save() dispatch silently fell back to plain JSON", raw[0])
+	}
+	for _, needle := range []string{bkt, k, secret} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("NEW-H1 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the same aead key must recover the value.
+	store2, err := OpenKVStoreEncrypted(dir, nil, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (read): %v", err)
+	}
+	defer store2.Close()
+	if err := store2.View(func(tx *Tx) error {
+		b := tx.Bucket([]byte(bkt))
+		if b == nil {
+			return fmt.Errorf("bucket missing")
+		}
+		got := b.Get([]byte(k))
+		if string(got) != secret {
+			return fmt.Errorf("got %q, want %q", got, secret)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+}
+
+// TestKVStore_EncryptedRoundTrip regresses SECURITY-REPORT.md L-6.
+// When OpenKVStoreEncrypted is configured with a 32-byte aeadKey,
+// the on-disk data file must be AES-256-GCM encrypted: a re-open
+// with the same key recovers the value, and a hex dump of the file
+// must not contain the cleartext bucket / key / value bytes that
+// the JSON serializer would otherwise emit verbatim. Plain mode
+// (aeadKey nil) and HMAC-only mode keep working unchanged.
+func TestKVStore_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	hmacKey := make([]byte, 32)
+	aeadKey := make([]byte, 32)
+	for i := range hmacKey {
+		hmacKey[i] = byte(i + 1)
+		aeadKey[i] = byte(255 - i)
+	}
+
+	const (
+		secretBucket = "secret-bucket"
+		secretKey    = "the-secret-key"
+		secretValue  = "extremely-confidential-payload"
+	)
+
+	store, err := OpenKVStoreEncrypted(dir, hmacKey, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (write): %v", err)
+	}
+	if err := store.Update(func(tx *Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte(secretBucket))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(secretKey), []byte(secretValue))
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// On-disk file must NOT contain the plaintext bucket/key/value.
+	raw, err := os.ReadFile(filepath.Join(dir, DataFile))
+	if err != nil {
+		t.Fatalf("read on-disk file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("L-6 regression: data file magic = 0x%x, want 0xE0 (encrypted)", raw[0])
+	}
+	for _, needle := range []string{secretBucket, secretKey, secretValue} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("L-6 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the SAME aead key must recover the value.
+	store2, err := OpenKVStoreEncrypted(dir, hmacKey, aeadKey)
+	if err != nil {
+		t.Fatalf("OpenKVStoreEncrypted (re-open): %v", err)
+	}
+	defer store2.Close()
+	if err := store2.View(func(tx *Tx) error {
+		b := tx.Bucket([]byte(secretBucket))
+		if b == nil {
+			return fmt.Errorf("bucket missing")
+		}
+		got := b.Get([]byte(secretKey))
+		if string(got) != secretValue {
+			return fmt.Errorf("got %q, want %q", got, secretValue)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("View: %v", err)
+	}
+
+	// Re-open WITHOUT the aead key must refuse to load (clear error,
+	// not silent empty store).
+	store3, err := OpenKVStore(dir, hmacKey)
+	if err == nil {
+		_ = store3.Close()
+		t.Error("L-6 regression: plain-mode open succeeded on an encrypted file — should have refused with a clear error")
+	}
+}
+
+// TestReadTLV_RejectsOversizedPayloadLen regresses SECURITY-REPORT.md
+// M-1. readTLV used to read a uint32 payloadLen from the data file
+// and immediately allocate make([]byte, payloadLen + hmacLenBytes)
+// with no upper bound. An attacker with write access to the data
+// file — per architecture.md this is an enumerated on-disk attack
+// surface (container escape, shared mount, restored backup) — could
+// plant payloadLen = 0xFFFFFFFF and OOM-kill the process at startup.
+// Same shape as the recently-fixed Raft snapshot OOM (b9f0ed5) and
+// raft entry-slice OOM (e9687fe); the cap pattern here mirrors
+// kvjournal.go's maxJournalPayload.
+func TestReadTLV_RejectsOversizedPayloadLen(t *testing.T) {
+	store := &KVStore{}
+
+	// Build a TLV header with payloadLen = 64 MiB + 1 (one byte over
+	// the cap). No payload bytes follow — readTLV must error out at
+	// the cap check before attempting to allocate.
+	var buf bytes.Buffer
+	buf.WriteByte(0xDB) // fileMagic
+	versionBytes := []byte{0, 0}
+	binary.BigEndian.PutUint16(versionBytes, 1) // fileVersion
+	buf.Write(versionBytes)
+	payloadLenBytes := make([]byte, 4)
+	binary.BigEndian.PutUint32(payloadLenBytes, (64<<20)+1)
+	buf.Write(payloadLenBytes)
+
+	err := store.readTLV(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized payloadLen, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max' (the cap guard message)", err)
 	}
 }
 

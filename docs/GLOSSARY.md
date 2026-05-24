@@ -5,7 +5,7 @@ DNS terminology, acronyms, and RFC reference guide.
 ## A
 
 ### ACL (Access Control List)
-A list of rules that defines which IP addresses are allowed or denied access to DNS queries or management functions. Configured in `security.acl` section.
+A list of rules that defines which IP addresses are allowed or denied access to DNS queries. Configured in the top-level `acl` section and managed at runtime via `/api/v1/acl`.
 
 **RFC**: None (operational concept)
 

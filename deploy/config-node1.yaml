@@ -6,7 +6,6 @@ server:
   http:
     enabled: true
     bind: "0.0.0.0:8080"
-    dashboard: true
 
 upstream:
   strategy: round_robin
@@ -43,21 +42,23 @@ logging:
   format: json
   output: stdout
 
-security:
-  rate_limit:
-    enabled: true
-    rate: 100
-    burst: 200
+rrl:
+  enabled: true
+  rate: 100
+  burst: 200
 
 dnssec:
   enabled: true
 
 metrics:
   enabled: true
-  prometheus:
-    enabled: true
-    bind: ":9153"
-    path: /metrics
+  bind: ":9153"
+  path: /metrics
 
 zones:
   - /etc/nothingdns/zones/example.com.zone
+
+# AXFR/IXFR serving is deny-by-default. Add trusted secondary CIDRs here.
+transfer:
+  allow_list: []
+  require_tsig: false

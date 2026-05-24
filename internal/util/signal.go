@@ -144,12 +144,9 @@ func (s *SignalHandler) GracefulShutdown(timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Execute shutdown functions
-	s.performShutdown()
-
-	// Wait for completion or timeout
 	done := make(chan struct{})
 	go func() {
+		s.performShutdown()
 		s.wg.Wait()
 		close(done)
 	}()

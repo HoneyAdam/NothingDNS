@@ -18,6 +18,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -47,6 +48,7 @@ jobs:
             type=sha,prefix=
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -54,8 +56,26 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
+          # L-15: GHA cache is scoped per-branch; mode=max stores all
+          # layers including any build-time secrets that may be added
+          # in the future. Today there are no --mount=type=secret or
+          # build-args carrying secrets, so this is safe. If that
+          # changes, drop mode=max for the secret-carrying layers or
+          # switch to a private OCI cache (type=registry,ref=…).
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          sbom: true
+          provenance: mode=max
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Sign image digest
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE_REF"
 
       - name: Update repo description
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -63,10 +83,12 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
         run: |
-          echo "## Container Image" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Available tags:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "$REGISTRY/$IMAGE_NAME:latest" >> "$GITHUB_STEP_SUMMARY"
-          echo "$REGISTRY/$IMAGE_NAME:<tag>" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Container Image"
+            echo ""
+            echo "Available tags:"
+            echo '```'
+            echo "$REGISTRY/$IMAGE_NAME:latest"
+            echo "$REGISTRY/$IMAGE_NAME:<tag>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

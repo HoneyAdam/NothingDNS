@@ -15,17 +15,38 @@ data:
       tls:
         cert_file: {{ .Values.config.server.tls.cert_file }}
         key_file: {{ .Values.config.server.tls.key_file }}
-        {{- if .Values.config.server.tls.ca_file }}
-        ca_file: {{ .Values.config.server.tls.ca_file }}
+      {{- end }}
+      {{- if .Values.config.xot.enabled }}
+      xot:
+        enabled: {{ .Values.config.xot.enabled }}
+        cert_file: {{ .Values.config.xot.cert_file }}
+        key_file: {{ .Values.config.xot.key_file }}
+        {{- if .Values.config.xot.ca_file }}
+        ca_file: {{ .Values.config.xot.ca_file }}
         {{- end }}
+        bind: {{ .Values.config.xot.bind | quote }}
+        min_tls_version: {{ .Values.config.xot.min_tls_version }}
       {{- end }}
 
-    api:
-      enabled: {{ .Values.config.api.enabled }}
-      bind: {{ .Values.config.api.bind }}
-      port: {{ .Values.config.api.port }}
-      allowed_origins: {{ .Values.config.api.allowed_origins | toYaml | nindent 8 }}
-      session_timeout: {{ .Values.config.api.session_timeout }}
+      http:
+        enabled: {{ .Values.config.http.enabled }}
+        bind: {{ .Values.config.http.bind | quote }}
+        auth_secret: "${NOTHINGDNS_AUTH_SECRET}"
+        allowed_origins: {{ .Values.config.http.allowed_origins | toYaml | nindent 10 }}
+        {{- if .Values.config.http.users }}
+        users: {{ .Values.config.http.users | toYaml | nindent 10 }}
+        {{- else }}
+        users:
+          - username: admin
+            password: "${NOTHINGDNS_ADMIN_PASSWORD}"
+            role: admin
+        {{- end }}
+        {{- if .Values.config.http.tls_cert_file }}
+        tls_cert_file: {{ .Values.config.http.tls_cert_file | quote }}
+        tls_key_file: {{ .Values.config.http.tls_key_file | quote }}
+        {{- end }}
+        doh_enabled: {{ .Values.config.http.doh_enabled }}
+        doh_path: {{ .Values.config.http.doh_path }}
 
     logging:
       level: {{ .Values.config.logging.level }}
@@ -47,12 +68,6 @@ data:
       prefix: {{ .Values.config.dns64.prefix }}
     {{- end }}
 
-    rate_limit:
-      enabled: {{ .Values.config.rate_limit.enabled }}
-      rate: {{ .Values.config.rate_limit.rate }}
-      burst: {{ .Values.config.rate_limit.burst }}
-      max_buckets: {{ .Values.config.rate_limit.max_buckets }}
-
     upstream:
       servers: {{ .Values.config.upstream.servers | toYaml | nindent 8 }}
       timeout: {{ .Values.config.upstream.timeout }}
@@ -69,9 +84,10 @@ data:
     {{- if .Values.config.cluster.enabled }}
     cluster:
       enabled: {{ .Values.config.cluster.enabled }}
-      node_id: {{ .Values.config.cluster.node_id | default (printf "%s-%s" .Release.Name (randAlphaNum 8)) }}
-      bind_addr: {{ .Values.config.cluster.bind_addr }}
+      node_id: {{ .Values.config.cluster.node_id | default "${POD_NAME}" | quote }}
+      bind_addr: {{ .Values.config.cluster.bind_addr | default "${POD_IP}" | quote }}
       bind_port: {{ .Values.config.cluster.bind_port }}
+      encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
       peers: {{ .Values.config.cluster.peers | toYaml | nindent 8 }}
     {{- end }}
 
@@ -94,41 +110,21 @@ data:
       database_path: {{ .Values.config.geoip.database_path }}
     {{- end }}
 
-    {{- if .Values.config.xot.enabled }}
-    xot:
-      enabled: {{ .Values.config.xot.enabled }}
-      port: {{ .Values.config.xot.port }}
-      allowed_networks: {{ .Values.config.xot.allowed_networks | toYaml | nindent 8 }}
+    {{- if .Values.config.slave_zones }}
+    slave_zones: {{ .Values.config.slave_zones | toYaml | nindent 6 }}
     {{- end }}
 
-    {{- if .Values.config.zone_transfer.enabled }}
-    zone_transfer:
-      enabled: {{ .Values.config.zone_transfer.enabled }}
-      allow_list: {{ .Values.config.zone_transfer.allow_list | toYaml | nindent 8 }}
-      require_tsig: {{ .Values.config.zone_transfer.require_tsig }}
-    {{- end }}
-
-    {{- if .Values.config.notify.enabled }}
-    notify:
-      enabled: {{ .Values.config.notify.enabled }}
-      slaves: {{ .Values.config.notify.slaves | toYaml | nindent 8 }}
-    {{- end }}
-
-    {{- if .Values.config.ddns.enabled }}
-    ddns:
-      enabled: {{ .Values.config.ddns.enabled }}
-      allow_list: {{ .Values.config.ddns.allow_list | toYaml | nindent 8 }}
-      require_tsig: {{ .Values.config.ddns.require_tsig }}
+    {{- if or .Values.config.transfer.allow_list .Values.config.transfer.require_tsig }}
+    transfer:
+      allow_list: {{ .Values.config.transfer.allow_list | toYaml | nindent 8 }}
+      require_tsig: {{ .Values.config.transfer.require_tsig }}
     {{- end }}
 
     metrics:
       enabled: {{ .Values.config.metrics.enabled }}
-      port: {{ .Values.config.metrics.port }}
+      bind: ":{{ .Values.config.metrics.port }}"
       path: {{ .Values.config.metrics.path }}
-
-    health:
-      enabled: {{ .Values.config.health.enabled }}
-      port: {{ .Values.config.health.port }}
+      auth_token: "${NOTHINGDNS_METRICS_AUTH_TOKEN}"
 
     {{- if .Values.config.tracing.enabled }}
     tracing:
@@ -137,4 +133,4 @@ data:
       sample_rate: {{ .Values.config.tracing.sample_rate }}
     {{- end }}
 
-    zones: {{ .Values.config.zones | toYaml | nindent 6 }}
+    zones: {{ .Values.config.zones | default (list) | toYaml | nindent 6 }}

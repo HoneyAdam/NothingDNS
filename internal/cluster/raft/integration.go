@@ -39,9 +39,14 @@ type ClusterIntegration struct {
 }
 
 // NewClusterIntegration creates a new Raft cluster integration.
-// encryptionKey is a hex-encoded 32-byte AES-256 key. If empty, AEAD is disabled
+// encryptionKey is a hex-encoded 32-byte AES-256 key used for the
+// network/transport AEAD. If empty, transport AEAD is disabled
 // (dev-only; production must supply a key).
-func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey string) (*ClusterIntegration, error) {
+//
+// snapshotEncryptionKey, when set, is an independent hex-encoded
+// 32-byte AES-256 key used for on-disk snapshot encryption (L-6).
+// Empty leaves snapshots in plaintext (existing behaviour).
+func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
 
@@ -99,8 +104,22 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 		node.log = append(node.log, entries...)
 	}
 
-	// Create snapshotter.
-	snapshotter, err := NewSnapshotter(dataDir + "/snapshots")
+	// Create snapshotter — L-6: encrypted at rest if a snapshot key
+	// is provided. The hex decode mirrors the transport-AEAD path
+	// above; config.Validate already enforces 32-byte hex + key
+	// separation from EncryptionKey.
+	var snapAeadKey []byte
+	if snapshotEncryptionKey != "" {
+		key, err := hex.DecodeString(snapshotEncryptionKey)
+		if err != nil {
+			return nil, fmt.Errorf("invalid snapshot encryption key hex: %w", err)
+		}
+		if len(key) != 32 {
+			return nil, fmt.Errorf("snapshot encryption key must be 32 bytes (%d provided)", len(key))
+		}
+		snapAeadKey = key
+	}
+	snapshotter, err := NewSnapshotterEncrypted(dataDir+"/snapshots", snapAeadKey)
 	if err != nil {
 		return nil, fmt.Errorf("snapshotter: %w", err)
 	}

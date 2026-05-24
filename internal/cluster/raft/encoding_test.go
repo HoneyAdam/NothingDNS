@@ -6,6 +6,7 @@ package raft
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
 )
 
@@ -141,10 +142,70 @@ func TestEncodeDecodeEntrySlice_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecodeAppendRequest_TruncatedLeaderCommit pins the trailing-field
+// bound check added alongside encoding.go:353. A peer that packs
+// entriesLen to consume every remaining byte leaves data[off:] empty
+// at the LeaderCommit read site — without the guard, the Uint64 call
+// panics with index-out-of-range, giving any keyring peer a one-message
+// DoS against every Raft member. The corpus seed
+// FuzzDecodeAppendRequest/8a11b8a6ad0520c7 originally tripped this.
+func TestDecodeAppendRequest_TruncatedLeaderCommit(t *testing.T) {
+	// Build a minimal AppendRequest body where entries fill the buffer.
+	//   Term(8) + leaderLen(4)=0 + LeaderID(0) + PrevLogIndex(8) +
+	//   PrevLogTerm(8) + entriesLen(4) + entries(N) — and NO LeaderCommit.
+	// Set entriesLen = 4 and use 4 trailing bytes that decodeEntrySlice
+	// accepts (count=0 → empty entries), so the trailing slice is fully
+	// consumed before the LeaderCommit read.
+	buf := make([]byte, 0, 36)
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 1) // Term = 1
+	buf = append(buf, 0, 0, 0, 0)             // leaderLen = 0
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0) // PrevLogIndex
+	buf = append(buf, 0, 0, 0, 0, 0, 0, 0, 0) // PrevLogTerm
+	buf = append(buf, 0, 0, 0, 4)             // entriesLen = 4 (consumes all remaining)
+	buf = append(buf, 0, 0, 0, 0)             // entries body: count=0
+	// LeaderCommit deliberately omitted.
+
+	var a AppendRequest
+	err := decodeAppendRequest(&a, buf)
+	if err == nil {
+		t.Fatal("expected error for truncated LeaderCommit, got nil")
+	}
+	if !contains(err.Error(), "LeaderCommit") {
+		t.Errorf("error %q should mention LeaderCommit", err)
+	}
+}
+
 func TestDecodeEntrySlice_TruncatedHeader(t *testing.T) {
 	var got []entry
 	if err := decodeEntrySlice(&got, []byte{0}); err == nil {
 		t.Error("expected error for truncated count header")
+	}
+}
+
+// TestDecodeEntrySlice_RejectsAttackerCount regresses e9687fe:
+// decodeEntrySlice must cap the wire-supplied count against what the
+// remaining buffer could physically hold (>= minEntryBytes per entry),
+// rejecting before make([]entry, 0, count). Without the cap a peer
+// could pack count = 2^32-1 into a small frame and the cap-allocation
+// would request ~160 GB up front for the 40-byte entry struct, OOM-
+// panicking the Raft member.
+func TestDecodeEntrySlice_RejectsAttackerCount(t *testing.T) {
+	// 4-byte count of 1,000,000 followed by nothing — clearly cannot
+	// fit a million 25-byte entries in zero remaining bytes.
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, 1_000_000)
+
+	var got []entry
+	err := decodeEntrySlice(&got, buf)
+	if err == nil {
+		t.Fatal("expected error for impossible count, got nil")
+	}
+	// The regression test must hit the new make()-guard, NOT the
+	// per-iteration overflow inside the loop. Pin to the guard's
+	// distinctive wording so a future refactor that drops the cap
+	// (and falls back to "entry %d overflow") fails this test.
+	if !contains(err.Error(), "exceeds possible") {
+		t.Errorf("error %q should mention 'exceeds possible' (the make-guard message)", err)
 	}
 }
 

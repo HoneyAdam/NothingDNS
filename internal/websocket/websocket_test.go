@@ -520,3 +520,35 @@ func TestSetReadDeadline_NoNetConn(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 }
+
+// TestReadFrame_ExtendedLength_RejectsHighBit regresses SECURITY-REPORT.md
+// L-1. Frames with payload-length opcode 127 carry an 8-byte length;
+// pre-fix readFrame did `payloadLen = int(binary.BigEndian.Uint64(ext))`
+// which sign-flips negative on 64-bit platforms for any value ≥ 2^63.
+// The downstream `if payloadLen > 16*1024` check then passes (negative
+// is not greater than 16384) and `make([]byte, payloadLen)` panics
+// "makeslice: len out of range" — a per-connection DoS that the
+// outer http.Server recover would catch but still kill the WS.
+//
+// The fix bounds the raw uint64 against the frame cap BEFORE the
+// int() narrowing, so any high-bit value (which RFC 6455 also
+// requires be zero) is rejected cleanly with an error.
+func TestReadFrame_ExtendedLength_RejectsHighBit(t *testing.T) {
+	// Frame: FIN=1, opcode=binary, NOT masked, length-marker=127,
+	// extended length = 0x8000000000000001 (MSB set + small low byte
+	// so that int(uint64) sign-flips to a small negative on 64-bit).
+	frame := []byte{
+		0x82,                                           // FIN + binary opcode
+		127,                                            // length marker, no mask bit
+		0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // length = 2^63 + 1
+	}
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil {
+		t.Fatal("expected error for high-bit extended length, got nil")
+	}
+	if !strings.Contains(err.Error(), "frame too large") {
+		t.Errorf("expected error to mention 'frame too large', got %v", err)
+	}
+}

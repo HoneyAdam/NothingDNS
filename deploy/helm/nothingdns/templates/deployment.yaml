@@ -1,3 +1,4 @@
+{{- $secretName := default (include "nothingdns.fullname" .) .Values.auth.existingSecret }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,15 +46,14 @@ spec:
             - name: dot
               containerPort: 853
               protocol: TCP
-            - name: doh
-              containerPort: 443
-              protocol: TCP
             - name: api
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.config.metrics.enabled }}
             - name: metrics
-              containerPort: 9090
+              containerPort: {{ .Values.config.metrics.port }}
               protocol: TCP
+            {{- end }}
           env:
             - name: POD_NAME
               valueFrom:
@@ -67,6 +67,34 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.config.http.enabled }}
+            - name: NOTHINGDNS_AUTH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: auth-secret
+            {{- if not .Values.config.http.users }}
+            - name: NOTHINGDNS_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: admin-password
+            {{- end }}
+            {{- end }}
+            {{- if .Values.config.metrics.enabled }}
+            - name: NOTHINGDNS_METRICS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: metrics-auth-token
+            {{- end }}
+            {{- if .Values.config.cluster.enabled }}
+            - name: NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: cluster-encryption-key
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/nothingdns
@@ -111,7 +139,7 @@ spec:
               - configMap:
                   name: {{ include "nothingdns.fullname" . }}-config
               - secret:
-                  name: {{ include "nothingdns.fullname" . }}
+                  name: {{ $secretName }}
         - name: data
         {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:

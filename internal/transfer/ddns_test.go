@@ -1,7 +1,9 @@
 package transfer
 
 import (
+	"errors"
 	"net"
+	"sync"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
@@ -406,6 +408,87 @@ func TestApplyUpdate_AddRecord(t *testing.T) {
 	records := z.Records["www.example.com."]
 	if len(records) != 1 {
 		t.Errorf("Expected 1 record, got %d", len(records))
+	}
+}
+
+// TestApplyUpdate_PrereqFailReturnsTypedError regresses SECURITY-REPORT.md
+// M-6: ApplyUpdate must report prerequisite failures via ErrPrereqFailed
+// so the handler can return the RFC 2136 NXRRSET RCODE rather than the
+// generic ServFail. Pre-fix the handler did a separate prereq check
+// before taking any zone lock — racing concurrent writes AND reading
+// z.Records without z.RLock(). Now the prereq check lives inside
+// ApplyUpdate under z.Lock(), and the typed error replaces the lost
+// fast-fail RCODE.
+func TestApplyUpdate_PrereqFailReturnsTypedError(t *testing.T) {
+	z := zone.NewZone("example.com.")
+	z.Records["www.example.com."] = []zone.Record{
+		{Name: "www.example.com.", Type: "A", TTL: 3600, RData: "192.0.2.1"},
+	}
+
+	update := &UpdateRequest{
+		ZoneName: "example.com.",
+		Prerequisites: []UpdatePrerequisite{
+			// NXRRSET: A at www.example.com. must NOT exist.
+			{Name: "www.example.com.", Type: protocol.TypeA, Class: protocol.ClassNONE, Condition: PrecondNotExists},
+		},
+		Updates: []UpdateOperation{
+			{Name: "www.example.com.", Type: protocol.TypeA, TTL: 3600, RData: "192.0.2.2", Operation: UpdateOpAdd},
+		},
+	}
+
+	err := ApplyUpdate(z, update)
+	if err == nil {
+		t.Fatal("expected prereq failure, got nil")
+	}
+	if !errors.Is(err, ErrPrereqFailed) {
+		t.Errorf("expected errors.Is(err, ErrPrereqFailed), got %v", err)
+	}
+}
+
+// TestApplyUpdate_ConcurrentExclusivePrereqs regresses M-6: two
+// goroutines applying mutually-exclusive prerequisites must produce
+// exactly one success and exactly one ErrPrereqFailed. Pre-fix the
+// unlocked outside-check at HandleUpdate let both pass through; the
+// inside-lock check then failed the second one with a generic error
+// (handler → SERVFAIL). Post-fix both checks live inside z.Lock() and
+// the typed error reaches the handler so it can return NXRRSET.
+func TestApplyUpdate_ConcurrentExclusivePrereqs(t *testing.T) {
+	z := zone.NewZone("example.com.")
+
+	mkReq := func(rdata string) *UpdateRequest {
+		return &UpdateRequest{
+			ZoneName: "example.com.",
+			Prerequisites: []UpdatePrerequisite{
+				// "no A at www.example.com. yet" — only one of the two can win.
+				{Name: "www.example.com.", Type: protocol.TypeA, Class: protocol.ClassNONE, Condition: PrecondNotExists},
+			},
+			Updates: []UpdateOperation{
+				{Name: "www.example.com.", Type: protocol.TypeA, TTL: 3600, RData: rdata, Operation: UpdateOpAdd},
+			},
+		}
+	}
+
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); results <- ApplyUpdate(z, mkReq("192.0.2.1")) }()
+	go func() { defer wg.Done(); results <- ApplyUpdate(z, mkReq("192.0.2.2")) }()
+	wg.Wait()
+	close(results)
+
+	var successes, prereqFails int
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrPrereqFailed):
+			prereqFails++
+		default:
+			t.Errorf("unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || prereqFails != 1 {
+		t.Errorf("expected 1 success + 1 ErrPrereqFailed, got %d successes and %d prereq-fails", successes, prereqFails)
 	}
 }
 

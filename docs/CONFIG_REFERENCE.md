@@ -183,6 +183,20 @@ slave_zones:
 AXFR/IXFR ile master'dan zone alıp barındırma. TSIG anahtarları yapılandırıldıysa
 imzalama uygulanır; TSIG IP binding güvenlik düzeltmesi yakın zamanda eklendi.
 
+## `transfer`
+
+```yaml
+transfer:
+  allow_list:
+    - 192.0.2.0/24
+    - 2001:db8::/32
+  require_tsig: false
+```
+
+Yerel authoritative zone'ları AXFR/IXFR ile secondary sunuculara servis eder.
+`allow_list` boşsa transfer istekleri deny-by-default reddedilir.
+`require_tsig: true`, IP allow-list eşleşse bile TSIG doğrulamasını zorunlu kılar.
+
 ## `views` — Split-Horizon DNS
 
 ```yaml

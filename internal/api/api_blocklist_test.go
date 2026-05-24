@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/auth"
@@ -162,6 +163,42 @@ func TestHandleBlocklists_PostAddURL(t *testing.T) {
 	// URL should be rejected by SSRF protection.
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400 (SSRF rejection), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleBlocklists_PostAddURL_DoesNotLeakInternalAddress regresses
+// SECURITY-REPORT.md M-4. The AddURL error handler used to interpolate
+// the raw err.Error() into the API response with fmt.Sprintf("...: %v",
+// err), bypassing the sanitizeError helper used elsewhere. SSRF
+// rejections of internal targets therefore echoed the internal
+// hostname / IP / path back to whoever asked, leaking the host's
+// network topology to any operator-token holder.
+//
+// Post-fix the handler routes through sanitizeError, which collapses
+// any error message containing a "/" to the fallback string — and a
+// URL always contains "/", so an internal target never appears in
+// the response body.
+func TestHandleBlocklists_PostAddURL_DoesNotLeakInternalAddress(t *testing.T) {
+	bl := blocklist.New(blocklist.Config{Enabled: true})
+	srv, user := newBlocklistTestServer(t, bl)
+
+	const internalIP = "192.168.42.99"
+	body, _ := json.Marshal(BlocklistAddRequest{URL: "https://" + internalIP + ":8080/private-list.txt"})
+	req := reqWithUser(httptest.NewRequest(http.MethodPost, "/api/v1/blocklists", bytes.NewReader(body)), user)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.handleBlocklists(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 from SSRF rejection, got %d: %s", rec.Code, rec.Body.String())
+	}
+	respBody := rec.Body.String()
+	if strings.Contains(respBody, internalIP) {
+		t.Errorf("M-4 regression: response body leaked internal target %q\n  body: %s", internalIP, respBody)
+	}
+	if strings.Contains(respBody, "private-list.txt") {
+		t.Errorf("M-4 regression: response body leaked internal path component\n  body: %s", respBody)
 	}
 }
 

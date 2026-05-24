@@ -21,13 +21,12 @@ server:
     enabled: true
     bind: "0.0.0.0:8080"
     # TLS configuration (optional, enables HTTPS)
-    # tls:
-    #   enabled: true
-    #   cert_file: /etc/nothingdns/tls/server.crt
-    #   key_file: /etc/nothingdns/tls/server.key
+    # tls_cert_file: /etc/nothingdns/tls/server.crt
+    # tls_key_file: /etc/nothingdns/tls/server.key
 
-    # Embedded web dashboard
-    dashboard: true
+    # DoH endpoint served from the HTTP listener when TLS is configured.
+    doh_enabled: false
+    doh_path: /dns-query
 
   # DNS over TLS (DoT)
   # xot:
@@ -69,12 +68,26 @@ cluster:
   # or "raft" (strong consistency, requires explicit peers)
   consensus_mode: "swim"
 
-  # Encryption key (REQUIRED for multi-node, 32 bytes, base64 encoded)
-  # Generate with: openssl rand -base64 32
-  # encryption_key: "YOUR_32_BYTE_BASE64_KEY_HERE"
+  # Encryption key (REQUIRED for multi-node, 32 bytes, hex encoded)
+  # Generate with: openssl rand -hex 32
+  # encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE"
+
+  # SECURITY-REPORT.md L-6: Optional at-rest encryption for Raft
+  # snapshot files. Independent 32-byte hex key. MUST differ from
+  # encryption_key above (key separation enforced by config.Validate).
+  # snapshot_encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE_DIFFERENT_FROM_ABOVE"
 
   # Enable cache synchronization across nodes
   cache_sync: true
+
+# =============================================================================
+# STORAGE CONFIGURATION
+# =============================================================================
+# storage:
+#   # SECURITY-REPORT.md L-6: Optional at-rest encryption for the KV
+#   # data file (zone state, etc.). 32-byte hex key. MUST differ from
+#   # cluster.encryption_key and cluster.snapshot_encryption_key.
+#   encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE_DIFFERENT_FROM_OTHERS"
 
 # =============================================================================
 # ZONE CONFIGURATION
@@ -84,11 +97,14 @@ zones:
   - /etc/nothingdns/zones/example.com.zone
   - /etc/nothingdns/zones/internal.zone
 
-  # Zone directory for bulk loading
-  # zone_dir: /etc/nothingdns/zones
+# Zone directory for bulk loading
+# zone_dir: /etc/nothingdns/zones
 
-  # Enable ZONEMD message digests (RFC 8976)
-  zonemd: false
+# Enable ZONEMD message digests (RFC 8976)
+zonemd: false
+
+# Graceful shutdown timeout
+shutdown_timeout: 30s
 
 # =============================================================================
 # UPSTREAM / FORWARDING
@@ -141,29 +157,17 @@ cache:
 
   # Serve stale cache when upstream is unavailable (RFC 8767)
   serve_stale: true
-  serve_stale_ttl: 604800     # 7 days
-
-  # Enable negative caching (RFC 2308)
-  negative_cache: true
-
-  # Cache persistence to disk
-  # persistence:
-  #   enabled: true
-  #   path: /data/cache.json
-  #   interval: 300  # seconds
+  stale_grace_secs: 604800     # 7 days
 
 # =============================================================================
 # RECURSIVE RESOLVER (Iterative Resolution)
 # =============================================================================
-resolver:
+resolution:
   # Enable recursive resolution (default: false, use upstream forwarding)
-  enabled: false
+  recursive: false
 
   # Maximum recursion depth
   max_depth: 30
-
-  # Maximum CNAME chain depth
-  max_cname_depth: 10
 
   # Query timeout
   timeout: 5s
@@ -178,7 +182,7 @@ resolver:
   use_0x20: false
 
   # Root hints file (optional, defaults embedded)
-  # root_hints_file: /etc/nothingdns/root.hints
+  # root_hints: /etc/nothingdns/root.hints
 
 # =============================================================================
 # DNSSEC CONFIGURATION
@@ -187,84 +191,68 @@ dnssec:
   # Enable DNSSEC validation
   enabled: true
 
-  # Trust anchors (DNSKEY or DS records)
-  trust_anchors:
-    # Root zone KSK (RFC 5011 managed)
-    - type: hint
-      value: "20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+  # Optional trust anchor file. Empty uses built-in root anchors.
+  trust_anchor: ""
 
   # Zone signing keys (for authoritative zones)
   signing:
     enabled: false
 
-    # Key algorithm: rsasha256, rsasha512, ecdsap256sha256, ecdsap384sha384, ed25519
-    algorithm: rsasha256
-
-    # Key sizes
-    ksk_size: 2048
-    zsk_size: 1024
-
     # Signature validity
-    signature_validity: 7        # days
-    signature_refresh: 5        # days
+    signature_validity: 7d
+
+    # Signing keys
+    keys:
+      # - private_key: /etc/nothingdns/dnssec/Kexample.com.+013+12345.private
+      #   type: zsk
+      #   algorithm: 13
 
     # NSEC3 configuration (more private than NSEC)
     nsec3:
-      enabled: false
       iterations: 10
-      salt_length: 16
+      salt: ""
       opt_out: true              # Allow opt-out for large delegations
 
 # =============================================================================
 # SECURITY SETTINGS
 # =============================================================================
-security:
-  # Access Control List
-  acl:
-    # Default action for unmatched clients
-    default_action: allow        # allow, deny, drop
+# Access Control List
+acl:
+  # Allow only specific IP ranges
+  - name: allow-private-networks
+    action: allow
+    networks:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+    types:
+      - ANY
 
-    rules:
-      # Allow only specific IP ranges
-      - name: allow-private-networks
-        action: allow
-        networks:
-          - 10.0.0.0/8
-          - 172.16.0.0/12
-          - 192.168.0.0/16
+  # Deny specific IPs
+  # - name: deny-test-net
+  #   action: deny
+  #   networks:
+  #     - 192.0.2.0/24
+  #   types:
+  #     - ANY
 
-      # Deny specific IPs
-      # - name: deny-test-net
-      #   action: deny
-      #   networks:
-      #     - 192.0.2.0/24
+# Response Rate Limiting (RRL) for amplification prevention
+rrl:
+  enabled: true
+  rate: 100              # responses per second per client
+  burst: 200             # burst capacity
+  max_buckets: 10000     # tracked client buckets
 
-  # Rate limiting (queries per second per IP)
-  rate_limit:
-    enabled: true
-    rate: 100              # queries per second per client
-    burst: 200             # burst capacity
+# DNS Cookies (RFC 7873)
+cookie:
+  enabled: true
+  secret_rotation: 1h
 
-  # Response Rate Limiting (RRL) for amplification prevention
-  rrl:
-    enabled: true
-    window: 5                    # seconds
-    rate_limit: 100              # responses per second
-    responses_per_window: 100
-    max_table_size: 10000
-
-  # DNS Cookies (RFC 7873)
-  cookies:
-    enabled: true
-    # Secret for cookie generation (32 bytes, base64 encoded)
-    # Generate with: openssl rand -base64 32
-    secret: "YOUR_32_BYTE_BASE64_SECRET_HERE"
-
-  # DNS64 synthesis (RFC 6147) - for IPv4-only clients on IPv6-only networks
-  dns64:
-    enabled: false
-    # NAT64 prefix (typically 64:ff9b::/96)
-    prefix: "64:ff9b::/96"
+# DNS64 synthesis (RFC 6147) - for IPv4-only clients on IPv6-only networks
+dns64:
+  enabled: false
+  prefix: "64:ff9b::"
+  prefix_len: 96
 
 # =============================================================================
 # BLOCKLIST CONFIGURATION
@@ -272,20 +260,13 @@ security:
 blocklist:
   enabled: false
 
-  # Blocklist sources (hosts file format or DNS zone format)
-  sources:
-    # - url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
-    #   format: hosts
-    #   refresh: 86400    # Refresh interval in seconds
+  # Local blocklist files
+  files:
+    # - /etc/nothingdns/blocklists/ads.txt
 
-  # Custom block rules
-  rules:
-    # - example.com
-    # - ads.*.example.com
-
-  # Response for blocked domains
-  blocked_response: nxdomain    # nxdomain, nodata, null, custom_ip
-  custom_ip: "0.0.0.0"          # IP to return if blocked_response is custom_ip
+  # Remote blocklist URLs
+  urls:
+    # - https://example.com/blocklist.txt
 
 # =============================================================================
 # RESPONSE POLICY ZONES (RPZ)
@@ -293,12 +274,11 @@ blocklist:
 rpz:
   enabled: false
 
-  # RPZ zone files
+  # RPZ policy zones
   zones:
-    # - /etc/nothingdns/rpz/blacklist.zone
-
-  # Default policy for unmatched domains
-  default_policy: passthru      # passthru, nxdomain, nodata, drop, tcp_only
+    # - name: blacklist
+    #   file: /etc/nothingdns/rpz/blacklist.zone
+    #   priority: 100
 
 # =============================================================================
 # SPLIT-HORIZON / VIEWS
@@ -306,13 +286,15 @@ rpz:
 views:
   # Define different zone views based on client IP
   # - name: internal
-  #   match_client_ip: "10.0.0.0/8"
-  #   zones:
+  #   match_clients:
+  #     - 10.0.0.0/8
+  #   zone_files:
   #     - /etc/nothingdns/zones/internal.example.com.zone
 
   # - name: external
-  #   match_client_ip: "0.0.0.0/0"
-  #   zones:
+  #   match_clients:
+  #     - 0.0.0.0/0
+  #   zone_files:
   #     - /etc/nothingdns/zones/example.com.zone
 
 # =============================================================================
@@ -322,120 +304,56 @@ geodns:
   enabled: false
 
   # MaxMind GeoIP database path
-  # database: /var/lib/nothingdns/GeoLite2-City.mmdb
+  # mmdb_file: /var/lib/nothingdns/GeoLite2-City.mmdb
 
-  # Anycast groups for geographic routing
-  # anycast_groups:
-  #   us-east:
-  #     - 10.0.0.1:53
-  #     - 10.0.0.2:53
-  #   us-west:
-  #     - 10.1.0.1:53
-  #   eu:
-  #     - 10.2.0.1:53
+  # Rules for geographic answers
+  rules:
+    # - domain: geo.example.com.
+    #   type: A
+    #   default: 192.0.2.10
+    #   US: 192.0.2.20
+    #   EU: 192.0.2.30
 
 # =============================================================================
 # TRANSFER / SLAVE ZONES
 # =============================================================================
+# Serving local zones to secondary servers is deny-by-default. Add only
+# trusted secondary CIDRs here before testing AXFR/IXFR.
 transfer:
-  # AXFR server (for zone transfers to secondaries)
-  axfr:
-    enabled: true
-    bind: "0.0.0.0:53"          # Usually same as main server
+  allow_list: []
+  require_tsig: false
+  # allow_list:
+  #   - 192.0.2.0/24
+  #   - 2001:db8::/32
 
-  # XoT (DNS over TLS, RFC 9103)
-  xot:
-    enabled: true
-    bind: "0.0.0.0:853"         # TLS port
-
-  # IXFR server (incremental zone transfer)
-  ixfr:
-    enabled: true
-
-  # Slave zone configuration (receive transfers from master)
-  slave:
-    enabled: false
-
-    masters:
-      # - 192.0.2.1:53
-
-    # TSIG key for authentication
-    # tsig:
-    #   key_name: "transfer-key"
-    #   algorithm: hmac-sha256
-    #   secret: "YOUR_TSIG_SECRET_HERE"
+# Zone transfer receivers are configured with top-level slave_zones:
+# slave_zones:
+#   - zone_name: example.com.
+#     masters:
+#       - 192.0.2.53:53
+#     transfer_type: ixfr
+#     timeout: 30s
+#     retry_interval: 5m
+#     max_retries: 3
+#
+# XoT server settings live under server.xot.
 
 # =============================================================================
 # DYNAMIC DNS UPDATES (RFC 2136)
 # =============================================================================
-ddns:
-  enabled: false
-
-  # Allow dynamic updates from specific IPs
-  allow_update:
-    - 10.0.0.0/8
-
-  # TSIG requirement
-  require_tsig: true
-
-  # TSIG key (if required)
-  # tsig:
-  #   key_name: "update-key"
-  #   algorithm: hmac-sha256
-  #   secret: "YOUR_TSIG_SECRET_HERE"
+# Dynamic DNS update settings are not parsed from this config file yet.
 
 # =============================================================================
 # AUTHENTICATION & AUTHORIZATION
 # =============================================================================
-auth:
-  # API authentication method: token, jwt, both
-  mode: jwt                      # token (shared secret), jwt (tokens), both
-
-  # JWT configuration
-  jwt:
-    secret: "YOUR_JWT_SECRET_HERE"  # Minimum 32 bytes, Generate with: openssl rand -base64 32
-    expiry: 86400                # Token expiry in seconds (24 hours)
-
-  # Legacy token authentication
-  # token: "your-shared-secret-token"
-
-  # Initial admin user (created on first start if no users exist)
-  bootstrap:
-    username: admin
-    password: "ChangeMe123!"     # CHANGE THIS PASSWORD
-
-  # Session persistence
-  session:
-    persistence: true
-    file: /data/sessions.json
-
-  # Rate limiting for login attempts
-  login_rate_limit:
-    enabled: true
-    max_attempts: 5
-    lockout_duration: 300        # seconds (5 minutes)
+# HTTP API auth is configured under server.http.auth_secret,
+# server.http.auth_token, server.http.auth_token_role, and
+# server.http.users.
 
 # =============================================================================
 # API CONFIGURATION
 # =============================================================================
-api:
-  # CORS settings
-  cors:
-    allowed_origins:
-      - "https://dashboard.example.com"
-    # Use ["*"] to allow all origins (not recommended for production)
-    # allowed_origins: ["*"]
-
-  # Rate limiting for API requests
-  rate_limit:
-    enabled: true
-    requests_per_minute: 100
-    max_ips: 50000
-
-  # OpenAPI documentation
-  swagger:
-    enabled: true
-    path: /api/docs
+# API bind, CORS, dashboard, DoH, and auth settings live under server.http.
 
 # =============================================================================
 # METRICS & OBSERVABILITY
@@ -444,17 +362,8 @@ metrics:
   enabled: true
 
   # Prometheus metrics endpoint
-  prometheus:
-    enabled: true
-    bind: ":9153"
-    path: /metrics
-
-  # OpenTelemetry tracing
-  otel:
-    enabled: false
-    # exporter: otlp
-    # endpoint: "http://localhost:4317"
-    # service_name: nothingdns
+  bind: ":9153"
+  path: /metrics
 
 # =============================================================================
 # LOGGING
@@ -470,77 +379,35 @@ logging:
   output: stdout
 
   # Query logging (for audit)
-  query_log:
-    enabled: false
-    file: /var/log/nothingdns/query.log
-    # Rotate when file reaches this size
-    max_size: 100     # MB
-    max_backups: 10
-    max_age: 30       # days
-
-  # Reload logging
-  reload_log:
-    enabled: true
-    file: /var/log/nothingdns/reload.log
-
-# =============================================================================
-# IDNA (Internationalized Domain Names)
-# =============================================================================
-idna:
-  # Enable IDNA validation (RFC 5891)
-  enabled: true
-
-  # Use STD3 rules (restrict special characters)
-  use_std3_rules: true
-
-  # Validate bi-directional text (RTL/LTR)
-  validate_bidi: true
-
-  # Validate joiners (non-standard characters)
-  validate_joiners: true
+  query_log: false
+  query_log_file: /var/log/nothingdns/query.log
 
 # =============================================================================
 # MULTICAST DNS (mDNS)
 # =============================================================================
-mdns:
-  enabled: false
-  bind: "224.0.0.251:5353"       # Standard mDNS multicast address
+# mDNS settings are not parsed from this config file yet.
 
 # =============================================================================
 # DNS STATEFUL OPERATIONS (RFC 8490)
 # =============================================================================
-dso:
-  enabled: false
-  # session_timeout: 300          # seconds
-  # max_sessions: 10000
-  # max_payload_size: 65535
+# DSO settings are not parsed from this config file yet.
 
 # =============================================================================
 # OBLIVIOUS DNS over HTTPS (ODoH, RFC 9230)
 # =============================================================================
-odoh:
-  enabled: false
-
-  # ODoH relay (proxy)
-  relay:
-    enabled: false
-    # target_url: "https://odoh-target.example.com/dns-query"
-
-  # ODoH target (resolver)
-  target:
-    enabled: false
-    # listen: "127.0.0.1:8081"
+# ODoH settings are not parsed from this config file yet.
 
 # =============================================================================
 # SLAVE ZONES (AXFR/IXFR)
 # =============================================================================
 slave_zones: []
 # Example:
-# - name: example.com
-#   type: slave
+# - zone_name: example.com.
+#   transfer_type: ixfr
 #   masters:
 #     - 192.0.2.1:53
-#   # tsig:
-#   #   key_name: "transfer-key"
-#   #   algorithm: hmac-sha256
-#   #   secret: "YOUR_TSIG_SECRET_HERE"
+#   tsig_key_name: transfer-key
+#   tsig_secret: "REPLACE_WITH_RANDOM_TSIG_SECRET"
+#   timeout: 30s
+#   retry_interval: 5m
+#   max_retries: 3

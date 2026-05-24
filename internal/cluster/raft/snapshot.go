@@ -1,6 +1,10 @@
 package raft
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -23,6 +27,7 @@ type Snapshot struct {
 type Snapshotter struct {
 	mu           sync.RWMutex
 	snapshotsDir string
+	aeadKey      []byte // L-6: optional AES-256-GCM key for at-rest snapshot encryption
 }
 
 // NewSnapshotter creates a new snapshotter.
@@ -34,6 +39,48 @@ func NewSnapshotter(dir string) (*Snapshotter, error) {
 		snapshotsDir: dir,
 	}, nil
 }
+
+// NewSnapshotterEncrypted creates a snapshotter that writes
+// AES-256-GCM-encrypted snapshot files. Reads support both plain and
+// encrypted files (dispatched by leading magic byte) so an operator
+// can roll an in-place migration: enable the key, and the next Save
+// rewrites the snapshot in encrypted form. L-6.
+func NewSnapshotterEncrypted(dir string, aeadKey []byte) (*Snapshotter, error) {
+	if aeadKey != nil && len(aeadKey) != 32 {
+		return nil, fmt.Errorf("aead key must be 32 bytes (%d provided)", len(aeadKey))
+	}
+	s, err := NewSnapshotter(dir)
+	if err != nil {
+		return nil, err
+	}
+	// L-N3: copy the key so caller mutations don't bleed into our
+	// AEAD state. Snapshotter has no Close to zeroize the copy, but
+	// at least our state is decoupled from caller-held slices.
+	if len(aeadKey) > 0 {
+		s.aeadKey = append([]byte(nil), aeadKey...)
+	}
+	return s, nil
+}
+
+// Snapshot file magic bytes.
+//
+// Plain snapshots start with bytes 0..7 of Index (uint64) — for any
+// realistic Raft index that's 0x00..0x00 in the high bytes, so the
+// encrypted magic 0xE0 is unambiguous: an Index of 0xE000_0000_…
+// would be ~16 exa-entries, far beyond any practical cluster.
+//
+// Encrypted layout:
+//
+//	byte 0:        0xE0
+//	bytes 1-2:     version (big-endian uint16)
+//	bytes 3-14:    12-byte nonce
+//	bytes 15..end: AES-GCM(plaintext = plain-snapshot-body,
+//	                       AAD       = magic||version)
+const (
+	encryptedSnapshotMagic   = 0xE0
+	encryptedSnapshotVersion = 1
+	snapAeadNonceLen         = 12
+)
 
 // Save saves a snapshot to disk.
 //
@@ -134,7 +181,40 @@ func (s *Snapshotter) Load() (*Snapshot, error) {
 }
 
 // writeSnapshot writes a snapshot to a writer.
+//
+// L-6: if aeadKey is set, the plain serialised body is wrapped in
+// AES-256-GCM and emitted as 0xE0 || version || nonce || ciphertext.
+// The plain path is unchanged when aeadKey is nil.
 func (s *Snapshotter) writeSnapshot(w io.Writer, snap *Snapshot) error {
+	if s.aeadKey != nil {
+		var plain bytes.Buffer
+		if err := s.writePlainSnapshot(&plain, snap); err != nil {
+			return err
+		}
+		gcm, err := newSnapshotGCM(s.aeadKey)
+		if err != nil {
+			return err
+		}
+		nonce := make([]byte, snapAeadNonceLen)
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			return fmt.Errorf("aead nonce: %w", err)
+		}
+		aad := []byte{encryptedSnapshotMagic, 0x00, byte(encryptedSnapshotVersion)}
+		ct := gcm.Seal(nil, nonce, plain.Bytes(), aad)
+		out := make([]byte, 0, 3+snapAeadNonceLen+len(ct))
+		out = append(out, encryptedSnapshotMagic)
+		out = append(out, aad[1:3]...)
+		out = append(out, nonce...)
+		out = append(out, ct...)
+		_, err = w.Write(out)
+		return err
+	}
+	return s.writePlainSnapshot(w, snap)
+}
+
+// writePlainSnapshot is the unencrypted writer body — called directly
+// when aeadKey is nil and via writeSnapshot's encrypt wrapper.
+func (s *Snapshotter) writePlainSnapshot(w io.Writer, snap *Snapshot) error {
 	// Format: Index(8) + Term(8) + LastIndex(8) + LastTerm(8) + DataLen(8) + Data + MembershipLen(4) + Membership
 	buf := make([]byte, 8)
 
@@ -209,8 +289,79 @@ const (
 	maxNodeIDBytes        = 256
 )
 
-// readSnapshot reads a snapshot from a reader.
+// readSnapshot reads a snapshot from a reader. L-6: peeks the first
+// byte to dispatch between the encrypted (0xE0) and plain layouts.
 func (s *Snapshotter) readSnapshot(r io.Reader) (*Snapshot, error) {
+	var magic [1]byte
+	if _, err := io.ReadFull(r, magic[:]); err != nil {
+		return nil, fmt.Errorf("read magic: %w", err)
+	}
+	if magic[0] == encryptedSnapshotMagic {
+		if s.aeadKey == nil {
+			return nil, fmt.Errorf("snapshot file is AES-GCM encrypted (magic 0xE0) but no aead key configured")
+		}
+		return s.readEncryptedSnapshot(r)
+	}
+	// Plain layout — magic byte was actually the high byte of Index.
+	// Re-feed it to the plain reader prepended to the rest of r.
+	prefixed := io.MultiReader(bytes.NewReader(magic[:]), r)
+	return s.readPlainSnapshot(prefixed)
+}
+
+// readEncryptedSnapshot reads (post-magic) version + nonce + ciphertext
+// and dispatches the decrypted body through readPlainSnapshot.
+func (s *Snapshotter) readEncryptedSnapshot(r io.Reader) (*Snapshot, error) {
+	var verBytes [2]byte
+	if _, err := io.ReadFull(r, verBytes[:]); err != nil {
+		return nil, fmt.Errorf("read version: %w", err)
+	}
+	version := binary.BigEndian.Uint16(verBytes[:])
+	if version != encryptedSnapshotVersion {
+		return nil, fmt.Errorf("unsupported encrypted snapshot version: %d", version)
+	}
+	nonce := make([]byte, snapAeadNonceLen)
+	if _, err := io.ReadFull(r, nonce); err != nil {
+		return nil, fmt.Errorf("read nonce: %w", err)
+	}
+	// L-N1: bound the ciphertext read. A planted snapshot file
+	// starting with 0xE0 could otherwise be multi-GB and OOM startup
+	// before gcm.Open runs. Cap matches the inner maxSnapshotDataBytes
+	// plus generous headroom for the GCM tag, membership list, and
+	// other fixed-width fields.
+	const maxEncryptedSnapshotBody = maxSnapshotDataBytes + 1024*1024 // +1 MiB headroom
+	ct, err := io.ReadAll(io.LimitReader(r, maxEncryptedSnapshotBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read ciphertext: %w", err)
+	}
+	if int64(len(ct)) > maxEncryptedSnapshotBody {
+		return nil, fmt.Errorf("snapshot: encrypted body %d exceeds max %d", len(ct), maxEncryptedSnapshotBody)
+	}
+	gcm, err := newSnapshotGCM(s.aeadKey)
+	if err != nil {
+		return nil, err
+	}
+	aad := []byte{encryptedSnapshotMagic, verBytes[0], verBytes[1]}
+	pt, err := gcm.Open(nil, nonce, ct, aad)
+	if err != nil {
+		return nil, fmt.Errorf("aead decrypt: %w", err)
+	}
+	return s.readPlainSnapshot(bytes.NewReader(pt))
+}
+
+func newSnapshotGCM(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("aead key: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("aead init: %w", err)
+	}
+	return gcm, nil
+}
+
+// readPlainSnapshot reads the unencrypted body (Index..Membership).
+func (s *Snapshotter) readPlainSnapshot(r io.Reader) (*Snapshot, error) {
 	snap := &Snapshot{}
 
 	buf := make([]byte, 8)

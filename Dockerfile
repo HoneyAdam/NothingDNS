@@ -3,7 +3,12 @@
 # Final image is FROM scratch with a stdlib-only static binary (no shared libraries)
 # Supports multi-arch builds via docker buildx
 
-# Build stage
+# Build stage. L-12: tag-pinned for readability; for reproducible
+# builds replace with a digest pin you've reviewed, e.g.
+#   FROM golang:1.26.3-alpine@sha256:<digest> AS builder
+# Renovate / Dependabot can keep a digest-pinned tag in sync. The
+# final image is FROM scratch so build-stage drift only affects the
+# binary, never the runtime surface.
 FROM golang:1.26.3-alpine AS builder
 
 # Install build dependencies (ca-certificates for TLS/DoH in final image)
@@ -67,12 +72,14 @@ VOLUME ["/data"]
 # Default configuration path
 ENV NOTHINGDNS_CONFIG=/etc/nothingdns/nothingdns.yaml
 
-# Health check delegated to orchestrator (K8s/Docker Swarm) probes.
-# Scratch images cannot run shell commands; orchestrator-level health
-# checks are the only viable option (MED-014).
-# Example Docker Compose healthcheck:
+# Health check delegated to orchestrator (K8s/Docker Swarm) probes,
+# OR run dnsctl in-image — it ships at /usr/local/bin/dnsctl and
+# exits non-zero when the /health endpoint is unreachable. wget /
+# curl are NOT in the scratch image (no shell either) so they cannot
+# be used. See docker-compose.yml for the working pattern (M-9).
+# Example:
 #   healthcheck:
-#     test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+#     test: ["CMD", "/usr/local/bin/dnsctl", "server", "health"]
 #     interval: 30s
 #     timeout: 5s
 #     retries: 3

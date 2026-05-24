@@ -22,6 +22,17 @@ const (
 
 	// wsCloseMessage is the WebSocket close frame opcode.
 	wsCloseMessage = 8
+
+	// wsRateLimitMessages caps the number of DNS queries one DoWS
+	// connection may issue per wsRateLimitWindow. The HTTP-layer rate
+	// limiter only throttles new connections, not per-message DNS
+	// traffic, and the 30-second read deadline resets on every frame
+	// — without a per-connection limit one unauthenticated client can
+	// flood the resolver indefinitely (M-7). 100 q/s matches the
+	// dashboard's WebSocket limit and is well above any plausible
+	// real DNS-over-WebSocket client.
+	wsRateLimitMessages = 100
+	wsRateLimitWindow   = time.Second
 )
 
 // WSHandler handles DNS over WebSocket requests.
@@ -48,6 +59,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+
+	// Per-connection rate limit (M-7). Without this, a single
+	// unauthenticated DoWS connection can flood the resolver — the
+	// HTTP-layer apiRateLimiter only gates the initial Upgrade.
+	conn.SetRateLimit(wsRateLimitMessages, wsRateLimitWindow)
 
 	for {
 		// Set a read deadline to prevent hanging connections.

@@ -12,7 +12,15 @@ data:
       http:
         enabled: true
         bind: "0.0.0.0:8080"
-        auth_required: true  # VULN-052: Require auth on API endpoints
+        auth_secret: "${NOTHINGDNS_AUTH_SECRET}"
+        users:
+          - username: admin
+            password: "${NOTHINGDNS_ADMIN_PASSWORD}"
+            role: admin
+        tls_cert_file: /etc/nothingdns/tls/tls.crt
+        tls_key_file: /etc/nothingdns/tls/tls.key
+        doh_enabled: true
+        doh_path: /dns-query
     upstream:
       servers:
         - 1.1.1.1:53
@@ -30,3 +38,15 @@ data:
       enabled: true
       gossip_port: 7946
       cache_sync: true
+      consensus_mode: swim
+      node_id: "${POD_NAME}"
+      bind_addr: "${POD_IP}"
+      encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
+    metrics:
+      enabled: true
+      bind: ":9153"
+      path: /metrics
+      auth_token: "${NOTHINGDNS_METRICS_AUTH_TOKEN}"
+    transfer:
+      allow_list: []
+      require_tsig: false

@@ -75,13 +75,18 @@ upstream:
 zones:
   - /etc/nothingdns/zones/staging/example.com.zone
 
+# AXFR/IXFR serving is deny-by-default. Add trusted staging secondary CIDRs here.
+transfer:
+  allow_list: []
+  require_tsig: false
+
 # Relaxed ACL for testing
 acl:
   - name: "allow-all-staging"
     action: allow
     networks:
       - 0.0.0.0/0
-      - ::/0
+      - "::/0"
     types:
       - ANY
 

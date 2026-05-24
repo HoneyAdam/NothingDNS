@@ -227,12 +227,30 @@ func perShardCapacity(total int) int {
 	return per
 }
 
+// keyNameHashSeed seeds the per-process maphash used by MakeKey for
+// long names. M-2: the earlier implementation used a fixed Java-style
+// polynomial hash (h = h*31 + byte, misleadingly named crc32Hash).
+// That hash is trivially collidable — the well-known "Aa" / "BB"
+// 2-byte collision generalises by padding both with the same suffix,
+// so an attacker who controlled or guessed a victim name longer than
+// maxKeyNameLen could craft a second name that hashed to the same
+// cache key. Result: poisoning the victim name's cached response
+// with the attacker's RDATA.
+//
+// maphash.MakeSeed returns a process-random seed, so collision
+// search has to be redone against a runtime the attacker can't
+// observe — and Go's underlying hash (currently an AES-based PRF on
+// AES-NI hosts, otherwise a wyhash variant) is keyed and not
+// computationally feasible to invert per-process.
+var keyNameHashSeed = maphash.MakeSeed()
+
 // MakeKey creates a cache key from query name, type, and DNSSEC DO bit.
 // VULN-060: DO bit included so DNSSEC and plain responses don't share cache entries.
 //
 // SECURITY: Domain names longer than maxKeyNameLen are hashed to prevent
 // cache key DoS attacks where an attacker floods the cache with unique
-// long domain names.
+// long domain names. The hash is keyed (see keyNameHashSeed) so
+// adversarial-collision attacks can't be precomputed.
 func MakeKey(name string, qtype uint16, doBit bool) string {
 	const maxKeyNameLen = 128 // Maximum domain name length before hashing
 
@@ -240,8 +258,19 @@ func MakeKey(name string, qtype uint16, doBit bool) string {
 	b.Grow(len(name) + 1 + 6 + 1 + 1)
 
 	if len(name) > maxKeyNameLen {
-		// Hash long domain names to prevent cache flooding
-		h := crc32Hash(name)
+		// RFC 1035 §2.3.3 case-fold while hashing so "Example.com…"
+		// and "example.com…" hit the same cache entry, matching the
+		// short-name path below. DNS names cap at 255 bytes so a
+		// stack-sized buffer is sufficient.
+		var lower [256]byte
+		for i := 0; i < len(name); i++ {
+			c := name[i]
+			if c >= 'A' && c <= 'Z' {
+				c |= 0x20
+			}
+			lower[i] = c
+		}
+		h := maphash.Bytes(keyNameHashSeed, lower[:len(name)])
 		b.WriteString(strconv.FormatUint(h, 10))
 	} else {
 		// RFC 1035 §2.3.3: domain names are case-insensitive. Lower-case here
@@ -269,15 +298,6 @@ func MakeKey(name string, qtype uint16, doBit bool) string {
 		b.WriteByte('0')
 	}
 	return b.String()
-}
-
-// crc32Hash returns a CRC32 hash of the input string as uint64.
-func crc32Hash(s string) uint64 {
-	h := uint64(0)
-	for i := 0; i < len(s); i++ {
-		h = h*31 + uint64(s[i])
-	}
-	return h
 }
 
 // Get retrieves an entry from the cache.

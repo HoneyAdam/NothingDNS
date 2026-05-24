@@ -1,10 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -66,8 +69,11 @@ func TestUnmarshalYAMLBasic(t *testing.T) {
 	input := `
 server:
   port: 5353
+  pid_file: /tmp/nothingdns.pid
   bind:
     - 127.0.0.1
+zonemd: true
+shutdown_timeout: 45s
 upstream:
   strategy: round_robin
   servers:
@@ -87,6 +93,15 @@ upstream:
 	if len(cfg.Server.Bind) != 1 || cfg.Server.Bind[0] != "127.0.0.1" {
 		t.Errorf("unexpected bind: %v", cfg.Server.Bind)
 	}
+	if cfg.Server.PIDFile != "/tmp/nothingdns.pid" {
+		t.Errorf("expected pid_file '/tmp/nothingdns.pid', got %q", cfg.Server.PIDFile)
+	}
+	if !cfg.ZONEMD {
+		t.Error("expected zonemd to be true")
+	}
+	if cfg.ShutdownTimeout != "45s" {
+		t.Errorf("expected shutdown_timeout '45s', got %q", cfg.ShutdownTimeout)
+	}
 
 	if cfg.Upstream.Strategy != "round_robin" {
 		t.Errorf("expected strategy 'round_robin', got %q", cfg.Upstream.Strategy)
@@ -94,6 +109,34 @@ upstream:
 
 	if len(cfg.Upstream.Servers) != 2 {
 		t.Errorf("expected 2 servers, got %d", len(cfg.Upstream.Servers))
+	}
+}
+
+func TestUnmarshalYAMLRootKeyWarnings(t *testing.T) {
+	var buf bytes.Buffer
+	prev := util.GetDefaultLogger()
+	util.SetDefaultLogger(util.NewLogger(util.WARN, util.TextFormat, &buf))
+	t.Cleanup(func() {
+		util.SetDefaultLogger(prev)
+	})
+
+	input := `
+resolver:
+  enabled: true
+misspelled_section:
+  enabled: true
+`
+
+	if _, err := UnmarshalYAML(input); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, `section "resolver" is a stale documented section`) {
+		t.Fatalf("expected stale documented section warning, got %q", output)
+	}
+	if !strings.Contains(output, `unknown top-level key "misspelled_section"`) {
+		t.Fatalf("expected unknown key warning, got %q", output)
 	}
 }
 
@@ -108,6 +151,8 @@ cache:
   negative_ttl: 120
   prefetch: true
   prefetch_threshold: 30
+  serve_stale: true
+  stale_grace_secs: 7200
 `
 
 	cfg, err := UnmarshalYAML(input)
@@ -138,6 +183,12 @@ cache:
 	}
 	if cfg.Cache.PrefetchThreshold != 30 {
 		t.Errorf("expected prefetch_threshold 30, got %d", cfg.Cache.PrefetchThreshold)
+	}
+	if !cfg.Cache.ServeStale {
+		t.Error("expected serve_stale to be enabled")
+	}
+	if cfg.Cache.StaleGraceSecs != 7200 {
+		t.Errorf("expected stale_grace_secs 7200, got %d", cfg.Cache.StaleGraceSecs)
 	}
 }
 
@@ -231,6 +282,59 @@ acl:
 	}
 	if cfg.ACL[2].Redirect != "0.0.0.0" {
 		t.Errorf("expected redirect '0.0.0.0', got %q", cfg.ACL[2].Redirect)
+	}
+}
+
+func TestUnmarshalYAMLRRL(t *testing.T) {
+	input := `
+rrl:
+  enabled: true
+  rate: 100
+  burst: 200
+  max_buckets: 10000
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.RRL.Enabled {
+		t.Error("expected RRL to be enabled")
+	}
+	if cfg.RRL.Rate != 100 {
+		t.Errorf("expected rate 100, got %d", cfg.RRL.Rate)
+	}
+	if cfg.RRL.Burst != 200 {
+		t.Errorf("expected burst 200, got %d", cfg.RRL.Burst)
+	}
+	if cfg.RRL.MaxBuckets != 10000 {
+		t.Errorf("expected max_buckets 10000, got %d", cfg.RRL.MaxBuckets)
+	}
+}
+
+func TestUnmarshalYAMLRRLAliases(t *testing.T) {
+	input := `
+rrl:
+  enabled: true
+  rate_limit: 150
+  burst: 300
+  max_table_size: 50000
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.RRL.Rate != 150 {
+		t.Errorf("expected rate alias to set 150, got %d", cfg.RRL.Rate)
+	}
+	if cfg.RRL.Burst != 300 {
+		t.Errorf("expected burst 300, got %d", cfg.RRL.Burst)
+	}
+	if cfg.RRL.MaxBuckets != 50000 {
+		t.Errorf("expected max_table_size alias to set 50000, got %d", cfg.RRL.MaxBuckets)
 	}
 }
 
@@ -484,6 +588,8 @@ blocklist:
   files:
     - /etc/dns/blocklists/ads.txt
     - /etc/dns/blocklists/malware.txt
+  urls:
+    - https://example.com/blocklist.txt
 `
 
 	cfg, err := UnmarshalYAML(input)
@@ -496,6 +602,9 @@ blocklist:
 	}
 	if len(cfg.Blocklist.Files) != 2 {
 		t.Errorf("expected 2 files, got %d", len(cfg.Blocklist.Files))
+	}
+	if len(cfg.Blocklist.URLs) != 1 {
+		t.Errorf("expected 1 URL, got %d", len(cfg.Blocklist.URLs))
 	}
 }
 
@@ -2600,6 +2709,7 @@ func TestUnmarshalMetricsWithBindAndPath(t *testing.T) {
 		input       string
 		wantBind    string
 		wantPath    string
+		wantToken   string
 		wantEnabled bool
 	}{
 		{
@@ -2609,9 +2719,11 @@ metrics:
   enabled: true
   bind: ":1234"
   path: /custom-metrics
+  auth_token: "metrics-token-1234567890-ABCDE"
 `,
 			wantBind:    ":1234",
 			wantPath:    "/custom-metrics",
+			wantToken:   "metrics-token-1234567890-ABCDE",
 			wantEnabled: true,
 		},
 		{
@@ -2646,6 +2758,9 @@ metrics: {}
 			}
 			if cfg.Metrics.Path != tt.wantPath {
 				t.Errorf("Metrics.Path = %q, want %q", cfg.Metrics.Path, tt.wantPath)
+			}
+			if cfg.Metrics.AuthToken != tt.wantToken {
+				t.Errorf("Metrics.AuthToken = %q, want %q", cfg.Metrics.AuthToken, tt.wantToken)
 			}
 			if cfg.Metrics.Enabled != tt.wantEnabled {
 				t.Errorf("Metrics.Enabled = %v, want %v", cfg.Metrics.Enabled, tt.wantEnabled)

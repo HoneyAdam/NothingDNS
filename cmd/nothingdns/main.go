@@ -141,9 +141,10 @@ func run() error {
 
 	// Initialize metrics collector
 	metricsCollector := metrics.New(metrics.Config{
-		Enabled: cfg.Metrics.Enabled,
-		Bind:    cfg.Metrics.Bind,
-		Path:    cfg.Metrics.Path,
+		Enabled:   cfg.Metrics.Enabled,
+		Bind:      cfg.Metrics.Bind,
+		Path:      cfg.Metrics.Path,
+		AuthToken: cfg.Metrics.AuthToken,
 	})
 	if err := metricsCollector.Start(); err != nil {
 		logger.Warnf("Failed to start metrics server: %v", err)
@@ -232,16 +233,22 @@ func run() error {
 		cfg.Server.HTTP.Users[i].Password = strings.Repeat("\x00", len(cfg.Server.HTTP.Users[i].Password))
 	}
 	authStore, err := auth.NewStore(&auth.Config{
-		Secret:      cfg.Server.HTTP.AuthSecret,
-		Users:       authUsers,
-		TokenExpiry: auth.Duration{Duration: 24 * time.Hour},
+		Secret:             cfg.Server.HTTP.AuthSecret,
+		Users:              authUsers,
+		TokenExpiry:        auth.Duration{Duration: 24 * time.Hour},
+		MaxSessionsPerUser: cfg.Server.HTTP.MaxSessionsPerUser, // L-N10
 	})
 	if err != nil {
 		logger.Fatalf("Failed to initialize auth store: %v", err)
 	}
 	logger.Infof("Auth store initialized with %d users", len(cfg.Server.HTTP.Users))
 
-	// Restore persistent tokens from file if configured
+	// Restore persistent tokens from file if configured. Validation
+	// lives in cmd/nothingdns/helpers.validateAuthPersistenceConfig
+	// so it's unit-testable (L-4).
+	if err := validateAuthPersistenceConfig(cfg.Server.HTTP); err != nil {
+		logger.Fatalf("%v", err)
+	}
 	if cfg.Server.HTTP.TokenPersistencePath != "" {
 		authStore.SetTokenFilePath(cfg.Server.HTTP.TokenPersistencePath)
 		if err := authStore.LoadTokensSigned(cfg.Server.HTTP.TokenPersistencePath); err != nil {
@@ -429,13 +436,7 @@ func run() error {
 	dashboardServer := dashboard.NewServer()
 	dashboardServer.SetAllowedOrigins(cfg.Server.HTTP.AllowedOrigins)
 	dashboardServer.SetAuthStore(authStore)
-	// Dashboard server uses the same legacy token resolution as the auth middleware:
-	// explicit auth_token takes precedence, then auth_secret as fallback.
-	legacyToken := cfg.Server.HTTP.AuthToken
-	if legacyToken == "" {
-		legacyToken = cfg.Server.HTTP.AuthSecret
-	}
-	dashboardServer.SetAuthToken(legacyToken)
+	dashboardServer.SetAuthToken(resolveDashboardBearer(cfg.Server.HTTP))
 	dashboardServer.SetZoneManager(zoneManagerInstance)
 	apiServer := api.NewServer(cfg.Server.HTTP, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")

@@ -253,12 +253,24 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 		}
 
 		// Fetch DS records for child zone
-		dsRecords, err := v.fetchDS(ctx, childZone)
+		dsRecords, dsMsg, err := v.fetchDS(ctx, childZone)
 		if err != nil {
 			return nil, fmt.Errorf("fetching DS for %s: %w", childZone, err)
 		}
 
 		if len(dsRecords) == 0 {
+			// An empty DS answer might mean (a) the parent zone
+			// authoritatively says the child is unsigned — chain
+			// genuinely ends in an Insecure delegation — or (b) an
+			// on-path attacker stripped the DS RRset to downgrade
+			// validation. The two are indistinguishable without an
+			// authenticated denial proof. RFC 4035 §5.2 / RFC 5155
+			// §8.6 require NSEC/NSEC3 proof of DS non-existence,
+			// signed by the parent's ZSK, before treating the
+			// subtree as Insecure.
+			if !v.verifyDSDenial(dsMsg, childZone, chain) {
+				return nil, fmt.Errorf("DS empty for %s but no authenticated denial proof (downgrade-attack guard)", childZone)
+			}
 			// Unsigned delegation - chain ends here
 			break
 		}
@@ -696,7 +708,18 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 	qtype := msg.Questions[0].QType
 	isNXDomain := msg.Header.Flags.RCODE == protocol.RcodeNameError
 
-	// Walk Authority once, counting distinct proof contributions.
+	// NEW-H2: filter to only the NSEC/NSEC3 records whose RRset
+	// carries a valid RRSIG signed by the current zone's keys.
+	// Without this gate, an on-path attacker can spoof NSEC denial
+	// without ever supplying a real signature — same downgrade-attack
+	// class as H-2 on the chain-build DS path. RFC 4035 §5.4 / RFC
+	// 5155 §8 require authenticated denial proofs.
+	authenticated := v.authenticatedDenialRRs(msg, chain)
+	if len(authenticated) == 0 {
+		return ValidationBogus
+	}
+
+	// Walk authenticated set once, counting distinct proof contributions.
 	// A name-cover proof: NSEC/NSEC3 whose range covers queryName.
 	// A wildcard-cover proof: NSEC range covers "*.<ancestor>" of queryName,
 	// or (for NSEC3) any second distinct NSEC3 that passes range checks.
@@ -704,10 +727,7 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 	wildcardProofs := make(map[string]bool) // distinct owner names whose range covers a wildcard
 
 	checks := 0
-	for _, rr := range msg.Authorities {
-		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
-			continue
-		}
+	for _, rr := range authenticated {
 		if checks >= maxNSECValidations {
 			return ValidationBogus
 		}
@@ -744,7 +764,7 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 	// NSEC3 owners" heuristic.
 	if isNXDomain {
 		var nsec3RRs []*protocol.ResourceRecord
-		for _, rr := range msg.Authorities {
+		for _, rr := range authenticated {
 			if rr.Type == protocol.TypeNSEC3 {
 				nsec3RRs = append(nsec3RRs, rr)
 			}
@@ -1155,15 +1175,19 @@ func (v *Validator) fetchDNSKEY(ctx context.Context, zone string) ([]*protocol.R
 	return keys, nil
 }
 
-// fetchDS fetches DS records for a delegation.
-func (v *Validator) fetchDS(ctx context.Context, zone string) ([]*protocol.ResourceRecord, error) {
+// fetchDS fetches DS records for a delegation and returns the raw
+// message alongside, so a caller observing an empty DS RRset can
+// verify that the parent zone authoritatively proved DS non-existence
+// (RFC 4035 §5.2 / RFC 5155 §8) rather than silently downgrading the
+// subtree to Insecure on a stripped response.
+func (v *Validator) fetchDS(ctx context.Context, zone string) ([]*protocol.ResourceRecord, *protocol.Message, error) {
 	if v.resolver == nil {
-		return nil, fmt.Errorf("no resolver configured")
+		return nil, nil, fmt.Errorf("no resolver configured")
 	}
 
 	msg, err := v.resolver.Query(ctx, zone, protocol.TypeDS)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	var dsRecords []*protocol.ResourceRecord
@@ -1173,7 +1197,125 @@ func (v *Validator) fetchDS(ctx context.Context, zone string) ([]*protocol.Resou
 		}
 	}
 
-	return dsRecords, nil
+	return dsRecords, msg, nil
+}
+
+// verifyDSDenial checks that msg (the response to a "<zone> IN DS"
+// query) constitutes an authenticated proof that no DS exists at
+// zone. This is the load-bearing check between "the parent zone
+// honestly says this child is unsigned" and "an attacker stripped
+// the DS RRset to downgrade DNSSEC validation to Insecure."
+//
+// Returns true only when at least one NSEC or NSEC3 record in
+// msg.Authorities both (a) proves NoData(DS) at zone, and (b)
+// carries a valid RRSIG signed by one of the parent zone's keys
+// already established in chain[len(chain)-1].dnsKeys. The chain
+// argument also supplies the parent's NSEC3PARAM for the NSEC3
+// path.
+//
+// References:
+//   - RFC 4035 §5.2 "Authenticating Denial of Existence"
+//   - RFC 5155 §8.6 "Validating Insecure Delegation State"
+func (v *Validator) verifyDSDenial(msg *protocol.Message, zone string, chain []*chainLink) bool {
+	if msg == nil || len(chain) == 0 {
+		return false
+	}
+	parentKeys := chain[len(chain)-1].dnsKeys
+	if len(parentKeys) == 0 {
+		return false
+	}
+
+	// Group Authority NSEC/NSEC3 records into RRsets by (name, type).
+	type rrsetKey struct {
+		name   string
+		rrtype uint16
+	}
+	sets := make(map[rrsetKey][]*protocol.ResourceRecord)
+	for _, rr := range msg.Authorities {
+		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
+			continue
+		}
+		k := rrsetKey{strings.ToLower(rr.Name.String()), rr.Type}
+		sets[k] = append(sets[k], rr)
+	}
+
+	for k, rrSet := range sets {
+		rrsig := v.findRRSIG(msg.Authorities, k.name, k.rrtype)
+		if rrsig == nil {
+			continue
+		}
+		if !v.validateRRSIG(rrSet, rrsig, parentKeys) {
+			continue
+		}
+		// Signature good. Does this RRset prove NoData(DS) at zone?
+		for _, rr := range rrSet {
+			switch rr.Type {
+			case protocol.TypeNSEC:
+				nsec, ok := rr.Data.(*protocol.RDataNSEC)
+				if !ok {
+					continue
+				}
+				if v.validateNSEC(rr.Name.String(), zone, protocol.TypeDS, nsec) {
+					return true
+				}
+			case protocol.TypeNSEC3:
+				nsec3, ok := rr.Data.(*protocol.RDataNSEC3)
+				if !ok {
+					continue
+				}
+				if v.validateNSEC3(rr.Name.String(), zone, protocol.TypeDS, nsec3, chain) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// authenticatedDenialRRs returns the subset of msg.Authorities that
+// are NSEC/NSEC3 records belonging to an RRset whose matching RRSIG
+// validates under chain's current zone keys. NEW-H2:
+// validateNegativeResponse previously walked msg.Authorities directly
+// and trusted whatever wire bytes the response contained — an
+// on-path adversary could forge an NSEC/NSEC3 NXDOMAIN/NODATA proof
+// with no DNSSEC signature and have the validator return Secure.
+// Same downgrade class as H-2's fetchDS path; same fix shape as
+// verifyDSDenial.
+func (v *Validator) authenticatedDenialRRs(msg *protocol.Message, chain []*chainLink) []*protocol.ResourceRecord {
+	if msg == nil || len(chain) == 0 {
+		return nil
+	}
+	keys := chain[len(chain)-1].dnsKeys
+	if len(keys) == 0 {
+		return nil
+	}
+
+	// Group Authority NSEC/NSEC3 records into RRsets by (name, type).
+	type rrsetKey struct {
+		name   string
+		rrtype uint16
+	}
+	sets := make(map[rrsetKey][]*protocol.ResourceRecord)
+	for _, rr := range msg.Authorities {
+		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
+			continue
+		}
+		k := rrsetKey{strings.ToLower(rr.Name.String()), rr.Type}
+		sets[k] = append(sets[k], rr)
+	}
+
+	var out []*protocol.ResourceRecord
+	for k, rrSet := range sets {
+		rrsig := v.findRRSIG(msg.Authorities, k.name, k.rrtype)
+		if rrsig == nil {
+			continue
+		}
+		if !v.validateRRSIG(rrSet, rrsig, keys) {
+			continue
+		}
+		out = append(out, rrSet...)
+	}
+	return out
 }
 
 // fetchNSEC3PARAM fetches NSEC3PARAM records for a zone.

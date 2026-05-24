@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -2035,4 +2036,190 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// TestReadEncryptedSnapshot_RejectsOversizedBody regresses
+// SECURITY-REPORT-2026-05-23-rescan L-N1 (Raft side). The encrypted
+// snapshot reader used to call io.ReadAll on the file with no cap;
+// a disk-write attacker could plant a multi-GB file starting with
+// 0xE0 and OOM startup before gcm.Open ran. The fix wraps the read
+// in io.LimitReader + a post-read sanity check.
+func TestReadEncryptedSnapshot_RejectsOversizedBody(t *testing.T) {
+	aead := make([]byte, 32)
+	snap := &Snapshotter{aeadKey: aead}
+
+	var buf bytes.Buffer
+	verBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(verBytes, encryptedSnapshotVersion)
+	buf.Write(verBytes)
+	buf.Write(make([]byte, snapAeadNonceLen))
+	// (1 GiB + 1 MiB headroom + 1) bytes — over cap.
+	body := make([]byte, (1<<30)+(1<<20)+1)
+	buf.Write(body)
+
+	_, err := snap.readEncryptedSnapshot(&buf)
+	if err == nil {
+		t.Fatal("expected error for oversized encrypted snapshot body, got nil")
+	}
+	if !contains(err.Error(), "exceeds max") {
+		t.Errorf("error %q should mention 'exceeds max'", err)
+	}
+}
+
+// TestSnapshotter_EncryptedRoundTrip regresses SECURITY-REPORT.md
+// L-6 (Raft snapshot portion). NewSnapshotterEncrypted writes
+// AES-256-GCM-wrapped files (leading magic 0xE0) and a re-open with
+// the same key recovers the original Snapshot. The on-disk bytes
+// must not contain the cleartext state-machine payload, and a plain
+// Snapshotter (no aead key) must refuse to load an encrypted file
+// with a clear error.
+func TestSnapshotter_EncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	aeadKey := make([]byte, 32)
+	for i := range aeadKey {
+		aeadKey[i] = byte(i + 1)
+	}
+
+	original := &Snapshot{
+		Index:      42,
+		Term:       7,
+		LastIndex:  41,
+		LastTerm:   7,
+		Data:       []byte("zone-state-machine-payload-confidential"),
+		Membership: []NodeID{"node-alpha", "node-bravo"},
+	}
+
+	encSnap, err := NewSnapshotterEncrypted(dir, aeadKey)
+	if err != nil {
+		t.Fatalf("NewSnapshotterEncrypted (write): %v", err)
+	}
+	if err := encSnap.Save(original); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// On-disk file: magic 0xE0, no plaintext membership / payload.
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	var snapPath string
+	for _, fi := range files {
+		if !fi.IsDir() {
+			snapPath = filepath.Join(dir, fi.Name())
+			break
+		}
+	}
+	if snapPath == "" {
+		t.Fatal("no snapshot file written")
+	}
+	raw, err := os.ReadFile(snapPath)
+	if err != nil {
+		t.Fatalf("read snapshot file: %v", err)
+	}
+	if len(raw) == 0 || raw[0] != 0xE0 {
+		t.Errorf("L-6 regression: magic = 0x%x, want 0xE0", raw[0])
+	}
+	for _, needle := range []string{"zone-state-machine-payload-confidential", "node-alpha", "node-bravo"} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Errorf("L-6 regression: on-disk file leaked %q in plaintext", needle)
+		}
+	}
+
+	// Re-open with the SAME aead key must recover the snapshot.
+	encSnap2, err := NewSnapshotterEncrypted(dir, aeadKey)
+	if err != nil {
+		t.Fatalf("NewSnapshotterEncrypted (read): %v", err)
+	}
+	loaded, err := encSnap2.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("Load returned nil snapshot")
+	}
+	if loaded.Index != original.Index || string(loaded.Data) != string(original.Data) {
+		t.Errorf("round-trip mismatch: got Index=%d Data=%q", loaded.Index, loaded.Data)
+	}
+
+	// Re-open WITHOUT the aead key must refuse to load.
+	plainSnap, err := NewSnapshotter(dir)
+	if err != nil {
+		t.Fatalf("NewSnapshotter (plain): %v", err)
+	}
+	if _, err := plainSnap.Load(); err == nil {
+		t.Error("L-6 regression: plain Snapshotter loaded an encrypted file without erroring")
+	}
+}
+
+// TestSnapshotterReadSnapshot_RejectsOversizedFields regresses b9f0ed5:
+// readSnapshot must reject wire-format length fields above their caps
+// before calling make(). Snapshot files live on disk and an attacker
+// with file-system access (container escape, mount, restored backup)
+// can plant a small file with absurd length fields. Without the caps
+// each make() OOM-panics the daemon on every restart.
+func TestSnapshotterReadSnapshot_RejectsOversizedFields(t *testing.T) {
+	snap, err := NewSnapshotter(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSnapshotter: %v", err)
+	}
+
+	// Common header: Index, Term, LastIndex, LastTerm — 4 × 8 bytes of zeros.
+	header := make([]byte, 32)
+
+	put64 := func(v uint64) []byte {
+		b := make([]byte, 8)
+		binary.BigEndian.PutUint64(b, v)
+		return b
+	}
+	put32 := func(v uint32) []byte {
+		b := make([]byte, 4)
+		binary.BigEndian.PutUint32(b, v)
+		return b
+	}
+
+	t.Run("dataLen above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(maxSnapshotDataBytes + 1))
+		// readSnapshot must error out before reading data, so no payload follows.
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized dataLen, got nil")
+		}
+		if !contains(err.Error(), "dataLen") {
+			t.Errorf("error %q should mention dataLen", err)
+		}
+	})
+
+	t.Run("membership count above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(0)) // dataLen = 0, no data bytes
+		buf.Write(put32(maxSnapshotMembership + 1))
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized membership count, got nil")
+		}
+		if !contains(err.Error(), "membership") {
+			t.Errorf("error %q should mention membership", err)
+		}
+	})
+
+	t.Run("peerLen above cap", func(t *testing.T) {
+		var buf bytes.Buffer
+		buf.Write(header)
+		buf.Write(put64(0))                       // dataLen = 0
+		buf.Write(put32(1))                       // mCount = 1
+		buf.Write(put32(uint32(maxNodeIDBytes + 1))) // peerLen above cap
+
+		_, err := snap.readSnapshot(&buf)
+		if err == nil {
+			t.Fatal("expected error for oversized peerLen, got nil")
+		}
+		if !contains(err.Error(), "peerLen") {
+			t.Errorf("error %q should mention peerLen", err)
+		}
+	})
 }

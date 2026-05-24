@@ -659,6 +659,120 @@ func TestValidateSecrets_AcceptsEmptyAndRealSecrets(t *testing.T) {
 	}
 }
 
+// TestValidate_AuthSecret_RejectsShortString regresses SECURITY-REPORT.md
+// L-5. http.auth_secret had a placeholder-check but no entropy check,
+// so a config with auth_secret: "x" or auth_secret: "short" passed
+// validation despite being a uselessly short HMAC-SHA512 signing
+// key. Post-fix it runs through the same secretHasMinEntropy gate the
+// auth_token block uses (>= 32 bytes, >= 3 character classes).
+func TestValidate_AuthSecret_RejectsShortString(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		secret    string
+		wantError bool
+	}{
+		{"empty — allowed (per-run random)", "", false},
+		{"5 bytes — too short", "short", true},
+		{"31 bytes — one below minimum", "abcdefghij1234567890ABCDEFGHIJ", true},
+		{"32 bytes, 3 classes — accepted", "abcdefghij1234567890ABCDEFGHIJKL", false},
+		{"32 bytes, only lowercase — too few classes", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Server.HTTP.AuthSecret = tc.secret
+			errors := c.Validate()
+			gotHit := false
+			for _, e := range errors {
+				if strings.Contains(e, "http.auth_secret") {
+					gotHit = true
+					break
+				}
+			}
+			if gotHit != tc.wantError {
+				t.Errorf("got hit=%v wantError=%v; errors=%v", gotHit, tc.wantError, errors)
+			}
+		})
+	}
+}
+
+// TestValidate_AtRestEncryptionKeys regresses SECURITY-REPORT.md L-6
+// wiring. The two new keys (storage.encryption_key,
+// cluster.snapshot_encryption_key) must be 32-byte hex when set, and
+// each one must differ from the others — key separation is the
+// load-bearing property when one of the three trust domains leaks.
+func TestValidate_AtRestEncryptionKeys(t *testing.T) {
+	// "aa..." × 32 / "bb..." × 32 / "cc..." × 32 → three distinct valid keys.
+	keyA := strings.Repeat("aa", 32) // 64 hex chars
+	keyB := strings.Repeat("bb", 32)
+	keyC := strings.Repeat("cc", 32)
+
+	cases := []struct {
+		name       string
+		storageKey string
+		snapKey    string
+		gossipKey  string
+		clusterOn  bool
+		expectHit  []string // substrings the error set must contain
+	}{
+		{
+			name:       "all empty — no error",
+			storageKey: "", snapKey: "", gossipKey: "",
+		},
+		{
+			name:       "storage non-hex",
+			storageKey: "not-hex-at-all", expectHit: []string{"storage.encryption_key"},
+		},
+		{
+			name:       "snap wrong length",
+			snapKey:    "deadbeef", expectHit: []string{"cluster.snapshot_encryption_key"},
+		},
+		{
+			name:       "storage == gossip — key reuse",
+			storageKey: keyA, gossipKey: keyA, clusterOn: true,
+			expectHit: []string{"storage.encryption_key must differ from cluster.encryption_key"},
+		},
+		{
+			name:       "snap == gossip — key reuse",
+			snapKey:    keyB, gossipKey: keyB, clusterOn: true,
+			expectHit: []string{"cluster.snapshot_encryption_key must differ from cluster.encryption_key"},
+		},
+		{
+			name:       "storage == snap — key reuse",
+			storageKey: keyC, snapKey: keyC,
+			expectHit: []string{"storage.encryption_key must differ from cluster.snapshot_encryption_key"},
+		},
+		{
+			name:       "three distinct keys, all valid hex — no error",
+			storageKey: keyA, snapKey: keyB, gossipKey: keyC, clusterOn: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Storage.EncryptionKey = tc.storageKey
+			c.Cluster.SnapshotEncryptionKey = tc.snapKey
+			c.Cluster.EncryptionKey = tc.gossipKey
+			c.Cluster.Enabled = tc.clusterOn
+			errors := c.Validate()
+			joined := strings.Join(errors, "\n")
+			for _, needle := range tc.expectHit {
+				if !strings.Contains(joined, needle) {
+					t.Errorf("expected error containing %q, got: %v", needle, errors)
+				}
+			}
+			if len(tc.expectHit) == 0 {
+				for _, e := range errors {
+					if strings.Contains(e, "storage.encryption_key") ||
+						strings.Contains(e, "snapshot_encryption_key") {
+						t.Errorf("unexpected at-rest-key error: %s", e)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestLooksLikePlaceholderSecret(t *testing.T) {
 	for _, tc := range []struct {
 		in       string

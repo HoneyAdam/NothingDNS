@@ -235,7 +235,9 @@ Content-Type: application/json
 
 {
   "name": "example.com.",
-  "zone_file": "/etc/nothingdns/zones/example.com.zone"
+  "nameservers": ["ns1.example.com."],
+  "admin_email": "admin.example.com.",
+  "ttl": 3600
 }
 ```
 
@@ -246,10 +248,10 @@ DELETE /api/v1/zones/{zone}
 Authorization: Bearer <token>
 ```
 
-### Reload All Zones
+### Reload a Zone
 
 ```http
-POST /api/v1/zones/reload
+POST /api/v1/zones/reload?zone={zone}
 Authorization: Bearer <token>
 ```
 
@@ -257,9 +259,12 @@ Authorization: Bearer <token>
 
 ```http
 GET    /api/v1/zones/{zone}           - Get zone details
-PUT    /api/v1/zones/{zone}           - Update zone config
+DELETE /api/v1/zones/{zone}           - Delete zone
+GET    /api/v1/zones/{zone}/records   - List records
 POST   /api/v1/zones/{zone}/records   - Add record
-DELETE /api/v1/zones/{zone}/records/{record_id} - Delete record
+PUT    /api/v1/zones/{zone}/records   - Update record
+DELETE /api/v1/zones/{zone}/records   - Delete record
+GET    /api/v1/zones/{zone}/export    - Export zone file
 ```
 
 ### Zone Transfers (AXFR/IXFR)
@@ -272,12 +277,14 @@ Authorization: Bearer <token>
 **Response** (200 OK):
 ```json
 {
-  "transfers": [
+  "slave_zones": [
     {
-      "zone": "example.com",
-      "type": "axfr",
-      "status": "active",
-      "serial": 2024050101
+      "zone": "example.com.",
+      "masters": "192.0.2.53:53",
+      "serial": 2024050101,
+      "last_transfer": "2026-05-24T12:00:00Z",
+      "status": "synced",
+      "records": 42
     }
   ]
 }
@@ -491,11 +498,10 @@ Authorization: Bearer <token>
 **Response** (200 OK):
 ```json
 {
-  "default_action": "allow",
   "rules": [
-    {"action": "allow", "cidr": "10.0.0.0/8"},
-    {"action": "allow", "cidr": "172.16.0.0/12"},
-    {"action": "deny", "cidr": "192.0.2.0/24"}
+    {"name": "allow-rfc1918-a", "action": "allow", "networks": ["10.0.0.0/8"], "types": ["ANY"]},
+    {"name": "allow-rfc1918-b", "action": "allow", "networks": ["172.16.0.0/12"], "types": ["ANY"]},
+    {"name": "deny-test-net", "action": "deny", "networks": ["192.0.2.0/24"], "types": ["ANY"]}
   ]
 }
 ```
@@ -508,10 +514,9 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {
-  "default_action": "deny",
   "rules": [
-    {"action": "allow", "cidr": "10.0.0.0/8"},
-    {"action": "allow", "cidr": "172.16.0.0/12"}
+    {"name": "allow-rfc1918-a", "action": "allow", "networks": ["10.0.0.0/8"], "types": ["ANY"]},
+    {"name": "allow-rfc1918-b", "action": "allow", "networks": ["172.16.0.0/12"], "types": ["ANY"]}
   ]
 }
 ```
@@ -651,8 +656,8 @@ Content-Type: application/json
 
 {
   "enabled": true,
-  "rate_limit": 100,
-  "window": 5
+  "rate": 100,
+  "burst": 200
 }
 ```
 

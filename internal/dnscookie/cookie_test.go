@@ -30,6 +30,24 @@ func TestNewCookieJar(t *testing.T) {
 	}
 }
 
+// TestNewCookieJar_ClampsNonPositiveInterval regresses 50ab228:
+// NewCookieJar must clamp a zero or negative rotation interval to a
+// positive duration. Otherwise time.Since(lastRotation) ≥ 0 is
+// trivially true and maybeRotate fires on every GenerateServerCookie
+// call — burning crypto/rand entropy on the hot path and serializing
+// cookie generation behind the jar's write lock.
+func TestNewCookieJar_ClampsNonPositiveInterval(t *testing.T) {
+	for _, in := range []time.Duration{0, -time.Nanosecond, -5 * time.Hour} {
+		jar, err := NewCookieJar(in)
+		if err != nil {
+			t.Fatalf("NewCookieJar(%v): %v", in, err)
+		}
+		if jar.rotationInterval <= 0 {
+			t.Errorf("NewCookieJar(%v): rotationInterval = %v, want > 0", in, jar.rotationInterval)
+		}
+	}
+}
+
 func TestGenerateClientCookie(t *testing.T) {
 	jar, err := NewCookieJar(1 * time.Hour)
 	if err != nil {

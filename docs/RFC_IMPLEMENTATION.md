@@ -807,12 +807,18 @@ features:
 
 ```yaml
 # config.yaml for XoT example
-zones:
-  - name: example.com
-    transfer:
-      mode: [axfr, ixfr, xot]  # Enable XoT
-      tls_profile: strict      # RFC 8310
-      tls_port: 853
+server:
+  xot:
+    enabled: true
+    bind: ":853"
+    cert_file: /etc/nothingdns/tls/server.crt
+    key_file: /etc/nothingdns/tls/server.key
+
+slave_zones:
+  - zone_name: example.com.
+    transfer_type: ixfr
+    masters:
+      - 192.0.2.1:53
 ```
 
 ---

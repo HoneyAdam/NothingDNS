@@ -46,7 +46,7 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 - **Authoritative Zones** - Zone file support for hosting your own DNS records
 - **Authoritative-Only Mode** - Return NXDOMAIN for non-zone queries instead of forwarding
 - **Slave Zones** - AXFR/IXFR zone transfer from master servers
-- **Zone Transfer** - AXFR support for serving zones to secondary servers
+- **Zone Transfer** - AXFR support for serving zones to secondary servers, deny-by-default via `transfer.allow_list`
 - **$GENERATE Directive** - BIND-compatible record generation for bulk entries
 - **Split-Horizon DNS** - View-based zone selection by client IP for internal/external resolution
 - **GeoIP DNS** - Geographic DNS responses using MaxMind MMDB databases

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -11,10 +12,52 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+// decodeHex32 decodes a hex string into a 32-byte slice. Used by the
+// L-6 at-rest encryption wiring (storage.encryption_key,
+// cluster.snapshot_encryption_key). config.Validate has already
+// enforced the same shape, so this is a defensive belt-and-braces
+// decode at the consumption site.
+func decodeHex32(s string) ([]byte, error) {
+	raw, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return nil, fmt.Errorf("hex decode: %w", err)
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("expected 32 bytes, got %d", len(raw))
+	}
+	return raw, nil
+}
+
+// resolveDashboardBearer picks the static bearer the dashboard server
+// will accept (when authenticateRequest's legacy-token branch fires).
+// It returns the explicitly-configured AuthToken and NOTHING ELSE —
+// in particular it must never return AuthSecret, which is the
+// HMAC-SHA512 session-signing key. Leaking the dashboard bearer would
+// otherwise leak the key needed to forge arbitrary session tokens.
+// See SECURITY-REPORT.md H-1.
+func resolveDashboardBearer(httpCfg config.HTTPConfig) string {
+	return httpCfg.AuthToken
+}
+
+// validateAuthPersistenceConfig enforces SECURITY-REPORT.md L-4: an
+// on-disk session-token file requires a stable AuthSecret. Without
+// one the per-run random secret invalidates every persisted session
+// at restart and the daemon silently boots with an empty token map
+// — operators see only a "Failed to load persisted tokens" warning
+// in the log. Fail-fast at startup so the misconfiguration is
+// impossible to deploy.
+func validateAuthPersistenceConfig(httpCfg config.HTTPConfig) error {
+	if httpCfg.TokenPersistencePath != "" && httpCfg.AuthSecret == "" {
+		return fmt.Errorf("token_persistence_path requires auth_secret to be set — without it, the per-run random secret invalidates every persisted session at restart (set auth_secret in config or remove token_persistence_path)")
+	}
+	return nil
+}
 
 // isSubdomain checks if child is a subdomain of parent.
 func isSubdomain(child, parent string) bool {

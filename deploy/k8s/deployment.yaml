@@ -44,6 +44,35 @@ spec:
           containerPort: 853
         - name: metrics
           containerPort: 9153
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NOTHINGDNS_AUTH_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: nothingdns-auth
+              key: auth-secret
+        - name: NOTHINGDNS_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: nothingdns-auth
+              key: admin-password
+        - name: NOTHINGDNS_METRICS_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: nothingdns-auth
+              key: metrics-auth-token
+        - name: NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: nothingdns-auth
+              key: cluster-encryption-key
         resources:
           requests:
             cpu: 100m

@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -39,6 +40,9 @@ type Config struct {
 	// DNSSEC configuration
 	DNSSEC DNSSECConfig `yaml:"dnssec"`
 
+	// Storage layer configuration (KV store at-rest encryption etc.)
+	Storage StorageConfig `yaml:"storage"`
+
 	// Zone files to load
 	Zones []string `yaml:"zones"`
 
@@ -72,6 +76,9 @@ type Config struct {
 
 	// Slave zone configuration for automatic zone transfers
 	SlaveZones []SlaveZoneConfig `yaml:"slave_zones"`
+
+	// Transfer configuration for serving AXFR/IXFR to secondary servers
+	Transfer TransferConfig `yaml:"transfer"`
 
 	// Split-Horizon view configuration
 	Views []ViewConfig `yaml:"views"`
@@ -305,6 +312,17 @@ type SlaveZoneConfig struct {
 	MaxRetries int `yaml:"max_retries"`
 }
 
+// TransferConfig controls outbound-serving zone transfers.
+type TransferConfig struct {
+	// AllowList contains CIDR ranges permitted to request AXFR/IXFR.
+	// Empty means deny zone transfer requests.
+	AllowList []string `yaml:"allow_list"`
+
+	// RequireTSIG requires TSIG authentication for transfer requests even
+	// when the client IP is in AllowList.
+	RequireTSIG bool `yaml:"require_tsig"`
+}
+
 // ServerConfig contains server-level settings.
 type ServerConfig struct {
 	// Listen addresses
@@ -399,6 +417,19 @@ type XoTConfig struct {
 }
 
 // ClusterConfig contains cluster settings.
+// StorageConfig groups the at-rest data-store settings the daemon
+// understands. SECURITY-REPORT.md L-6 added EncryptionKey here so
+// operators can opt the on-disk KV file into AES-256-GCM
+// confidentiality without touching any other subsystem's keys.
+type StorageConfig struct {
+	// EncryptionKey, when set, AES-256-GCM-encrypts the KV data file
+	// at rest (32 bytes, hex-encoded). Empty disables encryption
+	// (existing plain on-disk files keep loading). Use a DIFFERENT
+	// key from cluster.encryption_key and cluster.snapshot_encryption_key
+	// — those protect different data classes.
+	EncryptionKey string `yaml:"encryption_key"`
+}
+
 type ClusterConfig struct {
 	// Enable clustering
 	Enabled bool `yaml:"enabled"`
@@ -430,6 +461,16 @@ type ClusterConfig struct {
 	// Encryption key for gossip traffic (32 bytes, hex-encoded).
 	// When set, all inter-node communication is encrypted with AES-256-GCM.
 	EncryptionKey string `yaml:"encryption_key"`
+
+	// SnapshotEncryptionKey, when set, AES-256-GCM-encrypts Raft
+	// snapshot files at rest (32 bytes, hex-encoded — same format
+	// as EncryptionKey above). See SECURITY-REPORT.md L-6 and
+	// internal/cluster/raft/snapshot.go NewSnapshotterEncrypted.
+	// Must be a DIFFERENT key from EncryptionKey (key separation:
+	// gossip is a network-channel key, snapshots are an at-rest
+	// data-encryption key; conflating them widens the leak blast
+	// radius if either is compromised). Validated at config-load.
+	SnapshotEncryptionKey string `yaml:"snapshot_encryption_key"`
 
 	// AllowInsecureCluster permits starting a cluster without encryption_key.
 	// Default: false. Only enable for single-node dev setups; the gossip
@@ -496,6 +537,13 @@ type HTTPConfig struct {
 	// path. When set, tokens survive server restarts. When empty, tokens are
 	// in-memory only and all sessions are invalidated on restart.
 	TokenPersistencePath string `yaml:"token_persistence_path"`
+
+	// MaxSessionsPerUser caps the number of simultaneous tokens any
+	// single user may hold. 0 means unlimited. The auth.Store
+	// already implements the cap (with eviction-by-oldest semantics);
+	// L-N10 wired this field through to NewStore so operators can
+	// actually use it.
+	MaxSessionsPerUser int `yaml:"max_sessions_per_user"`
 
 	// DoH (DNS over HTTPS) settings
 	DoHEnabled bool   `yaml:"doh_enabled"` // Enable DoH endpoint
@@ -682,6 +730,9 @@ type MetricsConfig struct {
 
 	// Path for metrics endpoint
 	Path string `yaml:"path"`
+
+	// Bearer token required to scrape metrics and metrics health.
+	AuthToken string `yaml:"auth_token"`
 }
 
 // DNSSECConfig contains DNSSEC settings.
@@ -817,9 +868,10 @@ func DefaultConfig() *Config {
 			QueryLogFile: "",
 		},
 		Metrics: MetricsConfig{
-			Enabled: false,
-			Bind:    ":9153",
-			Path:    "/metrics",
+			Enabled:   false,
+			Bind:      ":9153",
+			Path:      "/metrics",
+			AuthToken: "",
 		},
 		DNSSEC: DNSSECConfig{
 			Enabled:     true, // Enable DNSSEC validation by default using built-in IANA root anchors
@@ -979,26 +1031,24 @@ func isAlphaNum(c byte) bool {
 // (e.g. mis-spelling "blocklist" as "blocklists" used to start the
 // server with blocklist disabled and zero indication of the typo).
 //
-// The list is the union of: sections referenced by node.Get(...) in
-// unmarshalToConfig and sections present at the document root in
-// config.example.yaml (which is the canonical reference layout).
+// The list is limited to sections referenced by node.Get(...) in
+// unmarshalToConfig. Anything else should warn instead of being
+// silently accepted as configured.
 var knownTopLevelConfigKeys = map[string]struct{}{
 	// Core sections wired through unmarshalToConfig.
 	"server": {}, "resolution": {}, "upstream": {}, "cache": {},
 	"logging": {}, "metrics": {}, "dnssec": {}, "zones": {},
-	"zone_dir": {}, "blocklist": {}, "cluster": {}, "tls": {},
-	"http": {}, "rules": {}, "memory_limit_mb": {}, "shutdown_timeout": {},
-	"rpz": {}, "geodns": {}, "anycast_groups": {}, "topology": {},
-	"views": {}, "acl": {}, "rrl": {}, "ratelimit": {}, "audit": {},
-	"slave_zones": {}, "dns64": {}, "cookie": {}, "xot": {},
-	"quic": {}, "signing": {}, "rpc": {}, "seed_nodes": {},
-	"odoh": {}, "idna": {}, "otel": {}, "tracing": {},
-	"catalog": {}, "mdns": {}, "load": {}, "filter": {},
+	"zone_dir": {}, "zonemd": {}, "memory_limit_mb": {},
+	"shutdown_timeout": {}, "acl": {}, "rrl": {},
+	"blocklist": {}, "rpz": {}, "geodns": {}, "dns64": {},
+	"cookie": {}, "cluster": {}, "storage": {}, "slave_zones": {},
+	"transfer": {},
+	"views":    {},
 }
 
-// documentedButUnwiredKeys lists keys that appear at the document
-// root of config.example.yaml (so operators reasonably reach for
-// them) but have NO corresponding code path inside unmarshalToConfig.
+// documentedButUnwiredKeys lists stale documented keys that operators
+// may still have in existing config files but that have NO
+// corresponding code path inside unmarshalToConfig.
 // The settings inside them are silently dropped. Treating them like
 // any other unknown key would (rightly) flag them, but the warning
 // here is more actionable: it tells the operator the section was
@@ -1008,7 +1058,7 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 // actually wired through unmarshalToConfig.
 var documentedButUnwiredKeys = map[string]struct{}{
 	"api": {}, "auth": {}, "ddns": {}, "dso": {},
-	"resolver": {}, "security": {}, "transfer": {}, "zonemd": {},
+	"idna": {}, "mdns": {}, "odoh": {}, "resolver": {},
 }
 
 // unmarshalToConfig unmarshals a node tree into a Config struct.
@@ -1027,11 +1077,12 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 			continue
 		}
 		if _, ok := documentedButUnwiredKeys[k]; ok {
-			// Documented in config.example.yaml but the parser has no
-			// branch that reads it. Loud-by-default so the operator
-			// can't quietly deploy a config whose half is dead weight.
-			util.Warnf("config: section %q is documented in config.example.yaml "+
-				"but not yet wired into the daemon — its settings will be ignored", k)
+			// Stale documented examples used these names, but the
+			// parser has no branch that reads them. Loud-by-default so
+			// the operator can't quietly deploy config whose half is
+			// dead weight.
+			util.Warnf("config: section %q is a stale documented section "+
+				"but is not wired into the daemon — its settings will be ignored", k)
 			continue
 		}
 		util.Warnf("config: unknown top-level key %q — ignored (typo?)", k)
@@ -1096,6 +1147,9 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		cfg.ZoneDir = zdn.Value
 	}
 
+	cfg.ZONEMD = getBool(node, "zonemd", cfg.ZONEMD)
+	cfg.ShutdownTimeout = getString(node, "shutdown_timeout", cfg.ShutdownTimeout)
+
 	// Memory limit
 	if mlNode := node.Get("memory_limit_mb"); mlNode != nil && mlNode.Value != "" {
 		if v, err := strconv.Atoi(mlNode.Value); err == nil && v > 0 {
@@ -1119,6 +1173,13 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 				}
 				cfg.ACL = append(cfg.ACL, rule)
 			}
+		}
+	}
+
+	// RRL config
+	if rrlNode := node.Get("rrl"); rrlNode != nil {
+		if err := unmarshalRRL(rrlNode, &cfg.RRL); err != nil {
+			return fmt.Errorf("rrl: %w", err)
 		}
 	}
 
@@ -1164,6 +1225,11 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		}
 	}
 
+	// Storage config (L-6)
+	if storageNode := node.Get("storage"); storageNode != nil {
+		cfg.Storage.EncryptionKey = storageNode.GetString("encryption_key")
+	}
+
 	// Slave zones config
 	if slaveZonesNode := node.Get("slave_zones"); slaveZonesNode != nil && slaveZonesNode.Type == NodeSequence {
 		for _, slaveNode := range slaveZonesNode.Children {
@@ -1200,6 +1266,12 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 		}
 	}
 
+	// Transfer serving config
+	if transferNode := node.Get("transfer"); transferNode != nil {
+		cfg.Transfer.AllowList = getStringSlice(transferNode, "allow_list", cfg.Transfer.AllowList)
+		cfg.Transfer.RequireTSIG = getBool(transferNode, "require_tsig", cfg.Transfer.RequireTSIG)
+	}
+
 	// Parse views (split-horizon)
 	if viewsNode := node.Get("views"); viewsNode != nil && viewsNode.Type == NodeSequence {
 		for _, viewNode := range viewsNode.Children {
@@ -1227,6 +1299,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 	cfg.Port = getInt(node, "port", cfg.Port)
 	cfg.UDPWorkers = getInt(node, "udp_workers", cfg.UDPWorkers)
 	cfg.TCPWorkers = getInt(node, "tcp_workers", cfg.TCPWorkers)
+	cfg.PIDFile = node.GetString("pid_file")
 
 	if tlsNode := node.Get("tls"); tlsNode != nil {
 		cfg.TLS.Enabled = getBool(tlsNode, "enabled", cfg.TLS.Enabled)
@@ -1260,6 +1333,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.HTTP.AuthTokenRole = httpNode.GetString("auth_token_role")
 		cfg.HTTP.AuthSecret = httpNode.GetString("auth_secret")
 		cfg.HTTP.TokenPersistencePath = httpNode.GetString("token_persistence_path")
+		cfg.HTTP.MaxSessionsPerUser = getInt(httpNode, "max_sessions_per_user", cfg.HTTP.MaxSessionsPerUser)
 		cfg.HTTP.AllowedOrigins = getStringSlice(httpNode, "allowed_origins", cfg.HTTP.AllowedOrigins)
 		cfg.HTTP.DoHEnabled = getBool(httpNode, "doh_enabled", cfg.HTTP.DoHEnabled)
 		cfg.HTTP.DoHPath = httpNode.GetString("doh_path")
@@ -1398,6 +1472,8 @@ func unmarshalCache(node *Node, cfg *CacheConfig) error {
 	cfg.NegativeTTL = getInt(node, "negative_ttl", cfg.NegativeTTL)
 	cfg.Prefetch = getBool(node, "prefetch", cfg.Prefetch)
 	cfg.PrefetchThreshold = getInt(node, "prefetch_threshold", cfg.PrefetchThreshold)
+	cfg.ServeStale = getBool(node, "serve_stale", cfg.ServeStale)
+	cfg.StaleGraceSecs = getInt(node, "stale_grace_secs", cfg.StaleGraceSecs)
 
 	return nil
 }
@@ -1439,6 +1515,7 @@ func unmarshalMetrics(node *Node, cfg *MetricsConfig) error {
 	if cfg.Path == "" {
 		cfg.Path = "/metrics"
 	}
+	cfg.AuthToken = node.GetString("auth_token")
 
 	return nil
 }
@@ -1484,6 +1561,23 @@ func unmarshalDNSSEC(node *Node, cfg *DNSSECConfig) error {
 	return nil
 }
 
+func unmarshalRRL(node *Node, cfg *RRLConfig) error {
+	if node.Type != NodeMapping {
+		return fmt.Errorf("expected mapping")
+	}
+
+	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
+	cfg.Rate = getInt(node, "rate", cfg.Rate)
+	cfg.Burst = getInt(node, "burst", cfg.Burst)
+	cfg.MaxBuckets = getInt(node, "max_buckets", cfg.MaxBuckets)
+
+	// Backward-compatible aliases used by earlier examples.
+	cfg.Rate = getInt(node, "rate_limit", cfg.Rate)
+	cfg.MaxBuckets = getInt(node, "max_table_size", cfg.MaxBuckets)
+
+	return nil
+}
+
 func unmarshalBlocklist(node *Node, cfg *BlocklistConfig) error {
 	if node.Type != NodeMapping {
 		return fmt.Errorf("expected mapping")
@@ -1491,6 +1585,7 @@ func unmarshalBlocklist(node *Node, cfg *BlocklistConfig) error {
 
 	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
 	cfg.Files = getStringSlice(node, "files", cfg.Files)
+	cfg.URLs = getStringSlice(node, "urls", cfg.URLs)
 
 	return nil
 }
@@ -1596,6 +1691,7 @@ func unmarshalCluster(node *Node, cfg *ClusterConfig) error {
 	cfg.Weight = getInt(node, "weight", cfg.Weight)
 	cfg.CacheSync = getBool(node, "cache_sync", cfg.CacheSync)
 	cfg.EncryptionKey = node.GetString("encryption_key")
+	cfg.SnapshotEncryptionKey = node.GetString("snapshot_encryption_key")
 	cfg.AllowInsecureCluster = getBool(node, "allow_insecure", cfg.AllowInsecureCluster)
 
 	// Parse consensus mode (default: raft)
@@ -1709,6 +1805,9 @@ func (c *Config) Validate() []string {
 	// Validate slave zones configuration
 	errors = append(errors, c.validateSlaveZones()...)
 
+	// Validate transfer serving configuration
+	errors = append(errors, c.validateTransfer()...)
+
 	// Validate views (split-horizon) configuration
 	errors = append(errors, c.validateViews()...)
 
@@ -1786,6 +1885,20 @@ func looksLikePlaceholderSecret(s string) string {
 
 // secretHasMinEntropy returns an error if the secret is below 32 bytes or
 // appears to be low-entropy (detectable via Shannon entropy heuristic).
+// validateHex32 checks that name's value is exactly 64 hex chars
+// (i.e. 32 bytes when decoded). Used by the L-6 at-rest encryption
+// keys (storage.encryption_key, cluster.snapshot_encryption_key).
+func validateHex32(name, value string) error {
+	raw, err := hex.DecodeString(value)
+	if err != nil {
+		return fmt.Errorf("%s is not valid hex: %v", name, err)
+	}
+	if len(raw) != 32 {
+		return fmt.Errorf("%s must decode to 32 bytes (got %d)", name, len(raw))
+	}
+	return nil
+}
+
 func secretHasMinEntropy(name, secret string) error {
 	if len(secret) < 32 {
 		return fmt.Errorf("%s is too short: %d bytes (minimum 32)", name, len(secret))
@@ -1852,6 +1965,25 @@ func (c *Config) validateSecrets() []string {
 		errors = append(errors, fmt.Sprintf(
 			"http.auth_secret still contains placeholder %q — set it via ${NOTHINGDNS_AUTH_SECRET} or replace with a real 32-byte random secret before starting",
 			token))
+	} else if c.Server.HTTP.AuthSecret != "" {
+		// L-5: AuthSecret is the HMAC-SHA512 session-signing key — a
+		// short / low-entropy value lets an attacker brute-force token
+		// forgery. The placeholder branch above already short-circuits
+		// the obvious "REPLACEME" mistakes; this branch catches the
+		// less obvious "I picked a short word" mistake. Same gate the
+		// auth_token block above uses.
+		if err := secretHasMinEntropy("http.auth_secret", c.Server.HTTP.AuthSecret); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	if token := looksLikePlaceholderSecret(c.Metrics.AuthToken); token != "" {
+		errors = append(errors, fmt.Sprintf(
+			"metrics.auth_token still contains placeholder %q — set it via ${NOTHINGDNS_METRICS_AUTH_TOKEN} or replace with a real secret before starting",
+			token))
+	} else if c.Metrics.AuthToken != "" {
+		if err := secretHasMinEntropy("metrics.auth_token", c.Metrics.AuthToken); err != nil {
+			errors = append(errors, err.Error())
+		}
 	}
 	for i, user := range c.Server.HTTP.Users {
 		if token := looksLikePlaceholderSecret(user.Password); token != "" {
@@ -1866,6 +1998,33 @@ func (c *Config) validateSecrets() []string {
 		if err := secretHasMinEntropy("cluster.encryption_key", c.Cluster.EncryptionKey); err != nil {
 			errors = append(errors, err.Error())
 		}
+	}
+
+	// L-6: validate the new at-rest encryption keys. Both must be
+	// 32-byte hex (64 hex chars) when set. Reject equal-to-other
+	// keys to keep the gossip / KV / snapshot trust domains
+	// separate; if one leaks, the blast radius stays bounded.
+	storageEnc := strings.TrimSpace(c.Storage.EncryptionKey)
+	if storageEnc != "" {
+		if err := validateHex32("storage.encryption_key", storageEnc); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	snapEnc := strings.TrimSpace(c.Cluster.SnapshotEncryptionKey)
+	if snapEnc != "" {
+		if err := validateHex32("cluster.snapshot_encryption_key", snapEnc); err != nil {
+			errors = append(errors, err.Error())
+		}
+	}
+	gossipEnc := strings.TrimSpace(c.Cluster.EncryptionKey)
+	if storageEnc != "" && storageEnc == gossipEnc {
+		errors = append(errors, "storage.encryption_key must differ from cluster.encryption_key (key separation)")
+	}
+	if snapEnc != "" && snapEnc == gossipEnc {
+		errors = append(errors, "cluster.snapshot_encryption_key must differ from cluster.encryption_key (key separation)")
+	}
+	if storageEnc != "" && snapEnc != "" && storageEnc == snapEnc {
+		errors = append(errors, "storage.encryption_key must differ from cluster.snapshot_encryption_key (key separation)")
 	}
 
 	// Validate per-slave TSIG secrets
@@ -2019,7 +2178,6 @@ func (c *Config) validateMetrics() []string {
 	if !strings.HasPrefix(c.Metrics.Path, "/") {
 		errors = append(errors, fmt.Sprintf("metrics: path '%s' must start with /", c.Metrics.Path))
 	}
-
 	return errors
 }
 
@@ -2231,6 +2389,18 @@ func (c *Config) validateSlaveZones() []string {
 	return errors
 }
 
+func (c *Config) validateTransfer() []string {
+	var errors []string
+
+	for _, cidr := range c.Transfer.AllowList {
+		if !isValidCIDR(cidr) {
+			errors = append(errors, fmt.Sprintf("transfer.allow_list: invalid CIDR '%s'", cidr))
+		}
+	}
+
+	return errors
+}
+
 func (c *Config) validateViews() []string {
 	var errors []string
 	names := make(map[string]bool)
@@ -2408,7 +2578,16 @@ func (c *RPCConfig) NewTLSConfig() (*tls.Config, error) {
 		if !caCertPool.AppendCertsFromPEM(caCert) {
 			return nil, fmt.Errorf("parse RPC CA certificate: %w", err)
 		}
+		// ClientCAs gates incoming Raft RPC connections (server side).
+		// RootCAs gates outgoing peer dials (client side); without it
+		// tls.Dial falls back to the host's system trust store, so any
+		// cert chained to a public CA (Let's Encrypt, DigiCert, etc.)
+		// whose SAN matches a peer address could impersonate that peer
+		// and inject log entries. The same private CA pool is correct
+		// for both directions — Raft peers authenticate each other
+		// against the cluster-operator-issued CA only.
 		config.ClientCAs = caCertPool
+		config.RootCAs = caCertPool
 		config.ClientAuth = tls.RequireAndVerifyClientCert
 	}
 

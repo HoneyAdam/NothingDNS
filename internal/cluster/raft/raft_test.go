@@ -10,21 +10,17 @@ import (
 
 // mockTransport implements Transport for testing.
 type mockTransport struct {
-	sendVoteCalled   int
-	sendAppendCalled int
-	voteResp         *VoteResponse
-	appendResp       *AppendResponse
-	voteRespErr      error
-	appendRespErr    error
+	voteResp      *VoteResponse
+	appendResp    *AppendResponse
+	voteRespErr   error
+	appendRespErr error
 }
 
 func (m *mockTransport) SendRequestVote(peerID NodeID, req VoteRequest) (*VoteResponse, error) {
-	m.sendVoteCalled++
 	return m.voteResp, m.voteRespErr
 }
 
 func (m *mockTransport) SendAppendEntries(peerID NodeID, req AppendRequest) (*AppendResponse, error) {
-	m.sendAppendCalled++
 	return m.appendResp, m.appendRespErr
 }
 
