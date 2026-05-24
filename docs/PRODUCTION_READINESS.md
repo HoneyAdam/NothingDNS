@@ -15,6 +15,7 @@ Run these before tagging or promoting an image:
 ```bash
 npm --prefix web run lint
 npm --prefix web run build
+npm --prefix web run smoke
 
 git diff --check
 go build ./...
@@ -57,6 +58,18 @@ go run ./cmd/nothingdns -config deploy/production.yaml -validate-config
 
 The production validation should complete without missing-environment warnings.
 
+Smoke-test a deployed target before promotion:
+
+```bash
+NOTHINGDNS_BASE_URL='https://dns.example.com' \
+NOTHINGDNS_METRICS_URL='https://metrics.example.com/metrics' \
+NOTHINGDNS_DNS_SERVER='203.0.113.53' \
+NOTHINGDNS_DNS_PORT='53' \
+NOTHINGDNS_DNS_NAME='example.com' \
+NOTHINGDNS_METRICS_AUTH_TOKEN="$NOTHINGDNS_METRICS_AUTH_TOKEN" \
+scripts/production-smoke.sh
+```
+
 ## Closed Production Gaps
 
 ### Configuration and Deployability
@@ -84,6 +97,7 @@ The production validation should complete without missing-environment warnings.
 ### Dashboard
 
 - The React dashboard passes lint and production build.
+- Dashboard route smoke tests are part of the web CI gate and verify the production shell, deep links, and entrypoint asset.
 - Route-level code splitting removed the large Vite chunk warning; the main dashboard JS chunk is now below the warning threshold and pages load as separate chunks.
 - `web/go.mod` is intentionally present as a nested Go module sentinel so root `go test ./...` does not traverse Go packages inside `web/node_modules`.
 
@@ -117,10 +131,10 @@ Do not commit literal secret values to any config file. The config validator rej
 
 ## Residual Non-Blockers
 
-- Browser-level dashboard smoke tests are not currently part of the release gate. Add Playwright route checks if visual regression coverage is required.
+- Visual browser regression tests are not currently part of the release gate. Add Playwright or screenshot checks later if pixel-level UI coverage is required.
 - Dashboard code splitting creates many small chunks. The current build is acceptable, but chunk grouping can be tuned later if request overhead matters for a specific deployment path.
 - `security-report/` may contain local ignored scan artifacts in a developer workspace. They are intentionally excluded from git except the main ledger.
-- Production TLS certificate files, zone files, root trust anchor files, and runtime secrets must exist on target hosts or be provided by Kubernetes/Helm before startup.
+- Production TLS certificate files, zone files, root trust anchor files, and runtime secrets must exist on target hosts or be provided by Kubernetes/Helm before startup; `scripts/production-smoke.sh` verifies only the running service surface after those inputs are present.
 
 ## Promotion Checklist
 
@@ -128,4 +142,4 @@ Do not commit literal secret values to any config file. The config validator rej
 - `npm --prefix web run build` output is committed under `internal/dashboard/static/dist/`.
 - Container image is built from the verified tree and includes SBOM/provenance.
 - Deployment config validates with real secret values in the target environment.
-- DNS, DoT/DoH, metrics, health, cluster, and dashboard endpoints are smoke-tested after rollout.
+- DNS, DoH, metrics, health, cluster, and dashboard endpoints are smoke-tested after rollout with `scripts/production-smoke.sh`.
