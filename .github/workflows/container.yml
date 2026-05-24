@@ -83,10 +83,12 @@ jobs:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_NAME: ${{ env.IMAGE_NAME }}
         run: |
-          echo "## Container Image" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Available tags:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "$REGISTRY/$IMAGE_NAME:latest" >> "$GITHUB_STEP_SUMMARY"
-          echo "$REGISTRY/$IMAGE_NAME:<tag>" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Container Image"
+            echo ""
+            echo "Available tags:"
+            echo '```'
+            echo "$REGISTRY/$IMAGE_NAME:latest"
+            echo "$REGISTRY/$IMAGE_NAME:<tag>"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

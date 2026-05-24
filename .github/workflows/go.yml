@@ -73,9 +73,10 @@ jobs:
       - name: Run tests with coverage
         run: |
           mkdir -p coverage
-          for pkg in $(go list ./... | grep -v e2e); do
-            go test -coverprofile=coverage/$(echo $pkg | tr '/' '_').out $pkg
-          done
+          while read -r pkg; do
+            profile="coverage/$(echo "$pkg" | tr '/' '_').out"
+            go test -coverprofile="$profile" "$pkg"
+          done < <(go list ./... | grep -v e2e)
 
       - name: Combine coverage
         run: |
@@ -97,7 +98,7 @@ jobs:
           # Create summary
           grep -v "^mode:" coverage/all.out | \
             awk -F: '{print $1, $2}' | \
-            while read file coverage; do
+            while read -r file coverage; do
               echo "$file: $coverage%"
             done > coverage/summary.txt
 

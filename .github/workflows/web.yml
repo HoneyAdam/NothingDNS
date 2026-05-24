@@ -44,6 +44,8 @@ jobs:
   security:
     runs-on: ubuntu-latest
     needs: web
+    env:
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -69,15 +71,14 @@ jobs:
           retire --path web/src --ignorefile retire.json
 
       - name: Run Snyk
+        if: env.SNYK_TOKEN != ''
         # M-12: pin to a release commit SHA, not @master. With @master
         # any push to snyk/actions runs against our SNYK_TOKEN and the
         # GitHub OIDC token this workflow holds. Refresh this SHA when
         # Snyk publishes a verified release.
         uses: snyk/actions/node@cdb760004ba9ea4d525f2e043745dfe85bb9077e # v0.4.0
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         with:
-          args: --severity-threshold=high
+          args: --file=web/package.json --package-manager=npm --severity-threshold=high
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
