@@ -74,8 +74,12 @@ jobs:
       - name: Sign image digest
         if: github.event_name != 'pull_request'
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-        run: cosign sign --yes "$IMAGE_REF"
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image_name="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          cosign sign --yes "$REGISTRY/$image_name@$IMAGE_DIGEST"
 
       - name: Update repo description
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
