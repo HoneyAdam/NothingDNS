@@ -129,10 +129,8 @@ The DNS hot path was creating fresh root contexts instead of inheriting request 
 **Trade-off accepted:** tests that call `ServeDNS` directly (not through `main.go`) get `serverCtx == nil`; the code guards this with a nil check and falls back to `context.Background()` for the per-request ctx. This is the correct behavior — test code doesn't go through the server lifecycle, so it shouldn't participate in server-level cancellation.
 
 
-### B4. Goroutine lifecycle (server layer = good; specific gaps below) · Confidence: Medium
-Server transports manage goroutines well (per-round `WaitGroup`, stop channels, `atomic.Pointer` for hot-swapping the rate limiter on reload — a nice pattern). Gaps flagged:
-- `cmd/nothingdns/main.go` — server `go func()`s are not tracked by a single `WaitGroup`; `xotServer.AcceptLoop()` reportedly has no stop signal. Verify shutdown actually joins every loop.
-- See §C3 for cluster/raft goroutine fan-out (the higher-risk area).
+### B4. Goroutine lifecycle · Confidence: Medium · ✅ **DONE (2026-05-29)**
+Fixed: `internal/transfer/xot.go` (`XoTServer`) **AcceptLoop goroutine leak confirmed and fixed.** After `Close()` closed the listener, `Accept()` kept returning errors and the loop `continue`d forever — goroutine never exited. Fix: `stopCh` closed in `Close()` before `wg.Wait()`; `AcceptLoop` exits via `select { case <-s.stopCh: return }` on error path; each connection goroutine also registered in `wg`; `if s.stopCh != nil` guard for tests that construct `XoTServer` directly. C3 (cluster/raft goroutine fan-out) remains open.
 
 ### B5. ⚠️ Dependency policy drift (P1) · Confidence: High
 `CLAUDE.md` states deps are *only* `quic-go` + `golang.org/x/*`, "everything else hand-rolled on stdlib," and "no `gopkg.in/yaml`." **Reality:** `go.mod` now requires `github.com/jackc/pgx/v5 v5.7.2` (+ 3 transitive jackc deps), used by `internal/storage/postgres_zonestore.go` and wired in `cmd/nothingdns/zone_manager.go:156`.
