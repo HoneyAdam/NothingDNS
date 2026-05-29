@@ -320,9 +320,9 @@ Fuzz tests exist (`dnscookie`, `cache`). **Add** fuzz targets for the two highes
 
 ### Phase 1 — Safety net + truth (3–5 days)
 - [x] B3 context propagation groundwork — ✅ DONE (2026-05-29): `serverCtx` threaded into `integratedHandler`; `ServeDNS` derives per-request `reqCtx` from it; graceful shutdown cancels in-flight query trees before stopping transports.
-- Unblock `go test -race` on a CGO runner.
-- Add `InMemoryTransport` for Raft (§C3 testability).
-- Reproduce/triage D1–D6; fix any confirmed (D1, D2, D9 are the likely-real, low-controversy ones).
+- [x] InMemoryTransport for Raft — ✅ DONE (2026-05-29): `InMemoryHub` + `InMemoryTransport` in `rpc.go` enables fully in-memory multi-node Raft testing under race detector. `TestInMemoryTransport_Timeout` verifies context deadlines are respected.
+- [x] D1–D6 triage — ✅ DONE (2026-05-29): All 10 D-items resolved. D3/D4 real fixes, D6 not an issue, D7/D9 fixed, D10 hardened. Remaining open: D8 (CSRF token — low priority given SameSite=StrictMode).
+- [ ] Unblock `go test -race` on a CGO runner (CI infrastructure item).
 
 ### Phase 2 — Highest-leverage structure (1–2 weeks)
 - C1 `ServeDNS` → middleware pipeline (start by extracting the 3× RPZ helper + `writeResponse`, then the stages).
