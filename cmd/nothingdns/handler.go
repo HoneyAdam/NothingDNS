@@ -724,8 +724,8 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 				if len(resp.Questions) > 0 {
 					qtype = resp.Questions[0].QType
 				}
-				queryLen := wireLen(r)
-				responseLen := wireLen(resp)
+				queryLen := r.WireLength()
+				responseLen := resp.WireLength()
 
 				// Check superlative (amplification) first — accelerates token drain.
 				h.rrl.LogSuperlative(clientIP, qtype, resp.Header.Flags.RCODE, queryLen, responseLen)
@@ -827,17 +827,6 @@ func (h *integratedHandler) checkRPZResponseIP(w server.ResponseWriter, r *proto
 		return h.applyRPZRule(w, r, q, rule)
 	}
 	return false
-}
-
-// wireLen returns the wire-format byte length of a DNS message.
-// Used by RRL to compute amplification ratios.
-func wireLen(m *protocol.Message) int {
-	if m == nil {
-		return 0
-	}
-	buf := make([]byte, 512) // typical query is < 512 bytes
-	n, _ := m.Pack(buf)
-	return n
 }
 
 // sendRefused returns a REFUSED response without forwarding to upstream.

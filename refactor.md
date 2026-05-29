@@ -163,9 +163,9 @@ Benefits: each stage ~50–100 LOC and individually testable; ordering becomes d
 
 **Companion fixes (verify lines):**
 - ✅ ~~Extract a `writeResponse` helper~~ — DONE (see Progress above).
-- `wireLen()` (≈ handler.go:936) allocates a 512-byte buffer per call on the RRL path → use a `sync.Pool` or precompute packed length.
+- ✅ ~~`wireLen()` allocates 512-byte buffer per RRL call~~ — DONE (2026-05-29). `protocol.Message` already has a `WireLength()` method that computes wire length without allocation. Replaced `wireLen(r)` → `r.WireLength()` and `wireLen(resp)` → `resp.WireLength()`; removed the redundant helper function.
+- ✅ ~~CNAME chasing loop guard~~ — DONE. `chaseCNAMEInZones` (`authoritative.go:369`) already has `maxCNAMEDepth = 16` constant and a `visited` map for loop detection.
 - **Zone lookup TOCTOU (Investigate):** zones are read under `zonesMu.RLock()` then handled after unlock (≈443–471); a concurrent SIGHUP reload could swap zone pointers. Confirm whether zone objects are immutable-after-publish (copy-on-write) — if they are, this is a non-issue; if mutated in place, copy refs under lock and/or guard zone content with its own RWMutex.
-- CNAME chasing (`chaseCNAMEInZones`) — confirm an explicit max-depth/loop guard exists; add one if not.
 
 ### C2. `internal/config` — break the 2679-line monolith (P2) · Confidence: High
 

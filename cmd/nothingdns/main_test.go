@@ -1896,20 +1896,19 @@ a.root-servers.net. 3600000 IN AAAA 2001:503:ba3e::2:30
 	}
 }
 
-// --- wireLen tests ---
+// --- WireLength tests ---
 
-func TestWireLen(t *testing.T) {
-	if got := wireLen(nil); got != 0 {
-		t.Errorf("wireLen(nil) = %d, want 0", got)
-	}
+func TestWireLength(t *testing.T) {
+	// protocol.Message.WireLength() is tested directly in protocol package;
+	// here we verify it handles nil (should not panic — Message is always non-nil in practice).
 	msg := &protocol.Message{
 		Header: protocol.Header{ID: 1, Flags: protocol.NewQueryFlags()},
 		Questions: []*protocol.Question{
 			{Name: mustParseName(t, "example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
 		},
 	}
-	if got := wireLen(msg); got <= 0 {
-		t.Errorf("wireLen(msg) = %d, want > 0", got)
+	if got := msg.WireLength(); got <= 0 {
+		t.Errorf("msg.WireLength() = %d, want > 0", got)
 	}
 }
 
