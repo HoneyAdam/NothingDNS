@@ -6,8 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // ClusterIntegration integrates Raft consensus into the cluster.
@@ -18,6 +19,7 @@ type ClusterIntegration struct {
 	rpcServer    *RPCServer
 	wal          *WAL
 	snapshotter  *Snapshotter
+	logger       *util.Logger // structured logger; no raw log.Printf
 
 	// Configuration
 	config Config
@@ -46,7 +48,7 @@ type ClusterIntegration struct {
 // snapshotEncryptionKey, when set, is an independent hex-encoded
 // 32-byte AES-256 key used for on-disk snapshot encryption (L-6).
 // Empty leaves snapshots in plaintext (existing behaviour).
-func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string) (*ClusterIntegration, error) {
+func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, logger *util.Logger) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
 
@@ -131,7 +133,8 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 		rpcServer:    rpcServer,
 		wal:          wal,
 		snapshotter:  snapshotter,
-		config:       config,
+		logger:      logger,
+		config:      config,
 		nodeID:       nodeID,
 		peers:        peers,
 		stopCh:       make(chan struct{}),
@@ -209,7 +212,7 @@ func (ci *ClusterIntegration) applyLoop() {
 						// — re-applying the same failed entry on the next
 						// tick would just busy-loop. Operators should treat
 						// this as a Sev-1 alert.
-						log.Printf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
+						ci.logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
 					}
 					ci.appliedIndex = e.Index
 					ci.lastAppliedTerm = e.Term
