@@ -307,6 +307,7 @@ func (c *Cluster) initRaft() error {
 		dataDir,
 		c.config.EncryptionKey,
 		c.config.SnapshotEncryptionKey,
+		c.logger,
 	)
 	if err != nil {
 		return fmt.Errorf("creating Raft node: %w", err)
