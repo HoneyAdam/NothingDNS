@@ -31,6 +31,9 @@ type XoTServer struct {
 	allowList    []net.IPNet
 	logger       *util.Logger
 	journalStore JournalStore // For IXFR incremental transfers
+
+	stopCh chan struct{}   // closed to signal AcceptLoop stop
+	wg     sync.WaitGroup  // waits for AcceptLoop and active connections
 }
 
 // TLSAUsage specifies how TLSA records should be used for XoT validation.
@@ -110,6 +113,7 @@ func NewXoTServer(zones map[string]*zone.Zone, config *XoTConfig, logger *util.L
 		zonesMu:   &sync.RWMutex{},
 		port:      config.ListenPort,
 		logger:    logger,
+		stopCh:    make(chan struct{}),
 	}
 	if server.port == 0 {
 		server.port = 853 // XoT default port
@@ -202,6 +206,8 @@ func (s *XoTServer) Serve(addr string) error {
 
 // AcceptLoop runs the accept loop for incoming connections.
 func (s *XoTServer) AcceptLoop() {
+	s.wg.Add(1)
+	defer s.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			if s.logger != nil {
@@ -215,9 +221,18 @@ func (s *XoTServer) AcceptLoop() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			continue
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				continue
+			}
 		}
-		go s.handleConnection(conn)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConnection(conn)
+		}()
 	}
 }
 
@@ -875,6 +890,10 @@ func (s *XoTServer) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.stopCh != nil {
+		close(s.stopCh)
+		s.wg.Wait()
+	}
 
 	if s.listener != nil {
 		return s.listener.Close()
