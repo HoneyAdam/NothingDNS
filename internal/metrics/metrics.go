@@ -101,9 +101,9 @@ var latencyLabels = [numLatencyBuckets]string{
 
 // Config holds metrics configuration.
 type Config struct {
-	Enabled   bool
-	Bind      string
-	Path      string
+	Enabled bool
+	Bind    string
+	Path    string
 	// AuthToken, when non-empty, requires an `Authorization: Bearer <token>`
 	// header on every /metrics and /health request. Previously the comment
 	// here claimed "?token=" query-param auth — which the code never

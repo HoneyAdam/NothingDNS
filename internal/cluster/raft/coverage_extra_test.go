@@ -2210,8 +2210,8 @@ func TestSnapshotterReadSnapshot_RejectsOversizedFields(t *testing.T) {
 	t.Run("peerLen above cap", func(t *testing.T) {
 		var buf bytes.Buffer
 		buf.Write(header)
-		buf.Write(put64(0))                       // dataLen = 0
-		buf.Write(put32(1))                       // mCount = 1
+		buf.Write(put64(0))                          // dataLen = 0
+		buf.Write(put32(1))                          // mCount = 1
 		buf.Write(put32(uint32(maxNodeIDBytes + 1))) // peerLen above cap
 
 		_, err := snap.readSnapshot(&buf)

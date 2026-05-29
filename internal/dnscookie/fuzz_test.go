@@ -16,7 +16,7 @@ import (
 func FuzzParseCookieOption(f *testing.F) {
 	// Seeds: empty, exactly-min-length, valid client+server, oversize.
 	f.Add([]byte{})
-	f.Add(make([]byte, ClientCookieLen))         // client only, no server cookie
+	f.Add(make([]byte, ClientCookieLen)) // client only, no server cookie
 	f.Add(make([]byte, ClientCookieLen+MinServerCookieLen))
 	f.Add(make([]byte, ClientCookieLen+MaxServerCookieLen+1)) // one byte over the cap
 

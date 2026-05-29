@@ -104,7 +104,9 @@ func cmdZone(args []string) error {
 		if err != nil {
 			return err
 		}
-		os.Stdout.Write(body)
+		if _, err := os.Stdout.Write(body); err != nil {
+			return fmt.Errorf("failed to write zone export: %w", err)
+		}
 		if len(body) > 0 && body[len(body)-1] != '\n' {
 			fmt.Println()
 		}

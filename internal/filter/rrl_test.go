@@ -141,7 +141,7 @@ func TestRRL_LogSuperlative_AmplificationSuppresses(t *testing.T) {
 	defer r.Stop()
 
 	ip := net.ParseIP("203.0.113.6")
-	r.Allow(ip, 1, 0) // seed bucket
+	r.Allow(ip, 1, 0)                    // seed bucket
 	r.LogSuperlative(ip, 1, 0, 50, 5000) // 100x amplification
 
 	if allowed, suppressed := r.Allow(ip, 1, 0); allowed || !suppressed {

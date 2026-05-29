@@ -224,8 +224,8 @@ func TestDecodeEntrySlice_TruncatedCommandPayload(t *testing.T) {
 		0, 0, 0, 1, // count
 		0, 0, 0, 0, 0, 0, 0, 1, // index
 		0, 0, 0, 0, 0, 0, 0, 1, // term
-		byte(EntryNormal),      // type
-		0, 0, 0, 10,            // cmdLen
+		byte(EntryNormal), // type
+		0, 0, 0, 10,       // cmdLen
 		// command bytes missing
 	}
 	var got []entry

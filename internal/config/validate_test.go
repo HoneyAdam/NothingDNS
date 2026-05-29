@@ -723,8 +723,8 @@ func TestValidate_AtRestEncryptionKeys(t *testing.T) {
 			storageKey: "not-hex-at-all", expectHit: []string{"storage.encryption_key"},
 		},
 		{
-			name:       "snap wrong length",
-			snapKey:    "deadbeef", expectHit: []string{"cluster.snapshot_encryption_key"},
+			name:    "snap wrong length",
+			snapKey: "deadbeef", expectHit: []string{"cluster.snapshot_encryption_key"},
 		},
 		{
 			name:       "storage == gossip — key reuse",
@@ -732,8 +732,8 @@ func TestValidate_AtRestEncryptionKeys(t *testing.T) {
 			expectHit: []string{"storage.encryption_key must differ from cluster.encryption_key"},
 		},
 		{
-			name:       "snap == gossip — key reuse",
-			snapKey:    keyB, gossipKey: keyB, clusterOn: true,
+			name:    "snap == gossip — key reuse",
+			snapKey: keyB, gossipKey: keyB, clusterOn: true,
 			expectHit: []string{"cluster.snapshot_encryption_key must differ from cluster.encryption_key"},
 		},
 		{

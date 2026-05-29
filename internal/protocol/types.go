@@ -1664,6 +1664,13 @@ func (r *RDataZONEMD) Unpack(buf []byte, offset int, rdlength uint16) (int, erro
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
+	// Defense-in-depth: the record-level unpacker (record.go) already ensures
+	// endOffset <= len(buf) before dispatching here, but the sibling RData
+	// unpackers (SVCB/SSHFP/TLSA) all re-check, and the buf[offset:endOffset]
+	// slice below would panic if a direct caller skipped that guard.
+	if endOffset > len(buf) {
+		return 0, ErrBufferTooSmall
+	}
 	if offset+6 > endOffset {
 		return 0, fmt.Errorf("ZONEMD rdata too short")
 	}
