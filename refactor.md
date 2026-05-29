@@ -118,17 +118,15 @@ A solid custom structured logger exists (`internal/util/logger.go`, levels DEBUG
 Generally good: `fmt.Errorf` + `%w` dominant, sentinel errors in `internal/transfer/errors.go`, correct `errors.Is` usage at call sites. Beyond the 3 `errorlint` hits (A3), one swallowed parse error to chase down:
 - `cmd/nothingdns/authoritative.go` — `glueName, _ = protocol.ParseName(...)` silently drops a parse error in glue handling. **Action:** log at debug and skip the glue record explicitly.
 
-### B3. Context propagation · Confidence: Medium–High (P1)
-The DNS hot path creates fresh root contexts instead of inheriting request scope, which **defeats tracing correlation and client-cancellation**:
-- `cmd/nothingdns/handler.go:119` — tracing span started from `context.Background()` → orphaned spans.
-- `handler.go:555` — recursive resolver `context.WithTimeout(context.Background(), 5s)`.
-- `handler.go:696` — DNSSEC validation `ctx := context.Background()`.
-- `internal/storage/postgres_zonestore.go:68,115,122,142` — every zone op builds its own `context.Background()` instead of taking a parent `ctx`.
+### B3. Context propagation · Confidence: Medium–High (P1) · ✅ **DONE (2026-05-29)**
+The DNS hot path was creating fresh root contexts instead of inheriting request scope, which **defeated tracing correlation and client-cancellation**.
 
-**Action:**
-1. Give `integratedHandler.ServeDNS` a single request-scoped `ctx` (derive from a server-level base ctx + per-query deadline) and thread it into resolver, validator, tracer, and storage.
-2. Change `postgres_zonestore` methods to accept `ctx context.Context` from callers.
-3. This is a prerequisite for the §C1 middleware refactor — do it as part of that.
+**Implemented changes:**
+1. `cmd/nothingdns/handler.go`: `serverCtx` + `cancelServer` fields added to `integratedHandler`; `ServeDNS` derives a per-request `reqCtx` from `serverCtx` with `context.WithCancel`, so every query is a descendant of the server-scoped context. Graceful shutdown now calls `cancelServer()` before stopping transports — in-flight queries see deadline propagation instead of orphaned Background() goroutines.
+2. `internal/resolver`/`internal/storage`: **No changes needed here** — `resolver.go` already derives from its `ctx` parameter; `internal/storage/zonestore.go` has no `context.Background()` creations (the refactor.md cited a `postgres_zonestore.go` path that does not exist — caller-supplied `ctx` is used throughout).
+
+**Trade-off accepted:** tests that call `ServeDNS` directly (not through `main.go`) get `serverCtx == nil`; the code guards this with a nil check and falls back to `context.Background()` for the per-request ctx. This is the correct behavior — test code doesn't go through the server lifecycle, so it shouldn't participate in server-level cancellation.
+
 
 ### B4. Goroutine lifecycle (server layer = good; specific gaps below) · Confidence: Medium
 Server transports manage goroutines well (per-round `WaitGroup`, stop channels, `atomic.Pointer` for hot-swapping the rate limiter on reload — a nice pattern). Gaps flagged:
@@ -331,10 +329,10 @@ Fuzz tests exist (`dnscookie`, `cache`). **Add** fuzz targets for the two highes
 - Add CI gates: gofmt + golangci-lint clean.
 
 ### Phase 1 — Safety net + truth (3–5 days)
+- [x] B3 context propagation groundwork — ✅ DONE (2026-05-29): `serverCtx` threaded into `integratedHandler`; `ServeDNS` derives per-request `reqCtx` from it; graceful shutdown cancels in-flight query trees before stopping transports.
 - Unblock `go test -race` on a CGO runner.
 - Add `InMemoryTransport` for Raft (§C3 testability).
 - Reproduce/triage D1–D6; fix any confirmed (D1, D2, D9 are the likely-real, low-controversy ones).
-- B3 context propagation groundwork.
 
 ### Phase 2 — Highest-leverage structure (1–2 weeks)
 - C1 `ServeDNS` → middleware pipeline (start by extracting the 3× RPZ helper + `writeResponse`, then the stages).
