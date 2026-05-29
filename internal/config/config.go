@@ -1891,7 +1891,7 @@ func looksLikePlaceholderSecret(s string) string {
 func validateHex32(name, value string) error {
 	raw, err := hex.DecodeString(value)
 	if err != nil {
-		return fmt.Errorf("%s is not valid hex: %v", name, err)
+		return fmt.Errorf("%s is not valid hex: %w", name, err)
 	}
 	if len(raw) != 32 {
 		return fmt.Errorf("%s must decode to 32 bytes (got %d)", name, len(raw))

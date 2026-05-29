@@ -32,8 +32,8 @@ type XoTServer struct {
 	logger       *util.Logger
 	journalStore JournalStore // For IXFR incremental transfers
 
-	stopCh chan struct{}   // closed to signal AcceptLoop stop
-	wg     sync.WaitGroup  // waits for AcceptLoop and active connections
+	stopCh chan struct{}  // closed to signal AcceptLoop stop
+	wg     sync.WaitGroup // waits for AcceptLoop and active connections
 }
 
 // TLSAUsage specifies how TLSA records should be used for XoT validation.

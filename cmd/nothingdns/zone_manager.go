@@ -114,7 +114,7 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 	if hexKey := cfg.Storage.EncryptionKey; hexKey != "" {
 		decoded, decErr := decodeHex32(hexKey)
 		if decErr != nil {
-			return nil, fmt.Errorf("storage.encryption_key invalid (%v); refusing to start in plaintext mode (L-N11)", decErr)
+			return nil, fmt.Errorf("storage.encryption_key invalid (%w); refusing to start in plaintext mode (L-N11)", decErr)
 		}
 		aeadKey = decoded
 	}

@@ -94,6 +94,9 @@ security-report/*
 # Runtime cache files
 cache.json
 
+# Cluster state directories (created at runtime by the cluster subsystem)
+clusters/
+
 # IXFR journal files
 ixfr-journals/
 
