@@ -2,6 +2,7 @@ package raft
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"sync"
@@ -9,6 +10,12 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+// raftRPCTimeout bounds each outgoing RPC. Without a timeout a transport
+// call that hangs (peer down, network partition) ties up a goroutine
+// indefinitely. A 5 s timeout is long enough for a live peer but clears
+// a blocked goroutine quickly when a node is unreachable.
+const raftRPCTimeout = 5 * time.Second
 
 // State represents the Raft node state.
 type State int
@@ -1077,14 +1084,19 @@ func (n *Node) replicateToFollowers(newEntry entry) {
 					util.Errorf("raft: panic in replicateToFollowers for peer %s: %v", peerID, r)
 				}
 			}()
+
+			// D4 fix: read all node state under a single lock hold.
+			// The previous version dropped the lock between reading nextIndex
+			// and reading n.log; a concurrent snapshot-install could truncate
+			// n.log between the two, making nextIdx stale and causing a panic
+			// in the copy(entries, n.log[offset:]) call. By holding the lock
+			// for the entire read window, we ensure nextIdx and the log view
+			// are consistent. The AppendRequest is built before releasing
+			// the lock, so sendAppendRequest only receives immutable data.
 			n.mu.Lock()
 			nextIdx := n.nextIndex[peerID]
-			n.mu.Unlock()
-
-			n.mu.Lock()
 			var entries []entry
 			if int(newEntry.Index) >= int(nextIdx) {
-				// This entry and any following
 				offset := int(nextIdx) - 1
 				if offset < 0 {
 					offset = 0
@@ -1099,8 +1111,6 @@ func (n *Node) replicateToFollowers(newEntry entry) {
 			if prevLogIndex > 0 && int(prevLogIndex)-1 < len(n.log) {
 				prevLogTerm = n.log[prevLogIndex-1].Term
 			}
-			n.mu.Unlock()
-
 			req := AppendRequest{
 				Term:         term,
 				LeaderID:     n.config.NodeID,
@@ -1109,6 +1119,8 @@ func (n *Node) replicateToFollowers(newEntry entry) {
 				Entries:      entries,
 				LeaderCommit: 0,
 			}
+			n.mu.Unlock()
+
 			n.sendAppendRequest(peerID, req)
 		}(id)
 	}
@@ -1125,12 +1137,19 @@ func (n *Node) sendVoteRequest(peerID NodeID, req VoteRequest) {
 				util.Errorf("raft: panic in sendVoteRequest: %v", r)
 			}
 		}()
-		resp, err := n.transport.SendRequestVote(peerID, req)
+		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+		defer cancel()
+		resp, err := n.transport.SendRequestVote(ctx, peerID, req)
 		if err != nil {
 			// Log error but don't block
 			return
 		}
-		n.voteRespCh <- *resp
+		select {
+		case n.voteRespCh <- *resp:
+		default:
+			// voteRespCh is bounded (size 10); if full drop the response
+			// rather than block the RPC handler.
+		}
 	}()
 }
 
@@ -1145,12 +1164,18 @@ func (n *Node) sendAppendRequest(peerID NodeID, req AppendRequest) {
 				util.Errorf("raft: panic in sendAppendRequest: %v", r)
 			}
 		}()
-		resp, err := n.transport.SendAppendEntries(peerID, req)
+		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+		defer cancel()
+		resp, err := n.transport.SendAppendEntries(ctx, peerID, req)
 		if err != nil {
 			// Log error but don't block
 			return
 		}
-		n.appendRespCh <- *resp
+		select {
+		case n.appendRespCh <- *resp:
+		default:
+			// appendRespCh is bounded; if full drop rather than block.
+		}
 	}()
 }
 

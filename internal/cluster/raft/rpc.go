@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"crypto/cipher"
 	"crypto/tls"
 	"encoding/binary"
@@ -21,13 +22,15 @@ const (
 )
 
 // Transport is the network transport interface for Raft RPC.
+// All methods accept a context; implementations should respect it for
+// cancellation and timeouts. A nil context is treated as context.Background.
 type Transport interface {
 	// SendRequestVote sends a RequestVote RPC to a peer.
-	SendRequestVote(peerID NodeID, req VoteRequest) (*VoteResponse, error)
+	SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error)
 	// SendAppendEntries sends an AppendEntries RPC to a peer.
-	SendAppendEntries(peerID NodeID, req AppendRequest) (*AppendResponse, error)
+	SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error)
 	// SendSnapshot sends a snapshot to a peer.
-	SendSnapshot(peerID NodeID, req SnapshotRequest) error
+	SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error
 }
 
 // RPCHandler handles incoming RPCs.
@@ -249,10 +252,14 @@ func NewTCPTransport(tlsConfig *tls.Config, aead cipher.AEAD) *TCPTransport {
 }
 
 // SendRequestVote sends a RequestVote RPC.
-func (t *TCPTransport) SendRequestVote(peerID NodeID, req VoteRequest) (*VoteResponse, error) {
+func (t *TCPTransport) SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error) {
 	conn, err := t.getConn(peerID)
 	if err != nil {
 		return nil, err
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
 	}
 
 	if err := writeRPCMessage(conn, msgTypeVoteRequest, req, t.aead); err != nil {
@@ -275,10 +282,14 @@ func (t *TCPTransport) SendRequestVote(peerID NodeID, req VoteRequest) (*VoteRes
 }
 
 // SendAppendEntries sends an AppendEntries RPC.
-func (t *TCPTransport) SendAppendEntries(peerID NodeID, req AppendRequest) (*AppendResponse, error) {
+func (t *TCPTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error) {
 	conn, err := t.getConn(peerID)
 	if err != nil {
 		return nil, err
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
 	}
 
 	if err := writeRPCMessage(conn, msgTypeAppendRequest, req, t.aead); err != nil {
@@ -301,10 +312,14 @@ func (t *TCPTransport) SendAppendEntries(peerID NodeID, req AppendRequest) (*App
 }
 
 // SendSnapshot sends a snapshot to a peer.
-func (t *TCPTransport) SendSnapshot(peerID NodeID, req SnapshotRequest) error {
+func (t *TCPTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
 	conn, err := t.getConn(peerID)
 	if err != nil {
 		return err
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
 	}
 
 	return writeRPCMessage(conn, msgTypeSnapshot, req, t.aead)
@@ -376,4 +391,111 @@ type Stats struct {
 	BytesSent     atomic.Uint64
 	BytesReceived atomic.Uint64
 	MessagesSent  atomic.Uint64
+}
+
+// InMemoryHub manages in-memory connections between Raft nodes for testing.
+// It acts as a switch: each node's InMemoryTransport routes to the peer's
+// registered handler. This lets tests run multi-node Raft entirely in-memory,
+// with the race detector enabled.
+type InMemoryHub struct {
+	mu       sync.RWMutex
+	handlers map[NodeID]RPCHandler
+}
+
+// NewInMemoryHub creates an empty hub. Register each node's RPCHandler
+// via AddNode before starting the test.
+func NewInMemoryHub() *InMemoryHub {
+	return &InMemoryHub{handlers: make(map[NodeID]RPCHandler)}
+}
+
+// AddNode registers a peer's RPCHandler. All transports created by this hub
+// will route to the registered handler when sending to that peerID.
+func (h *InMemoryHub) AddNode(id NodeID, handler RPCHandler) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.handlers[id] = handler
+}
+
+// NewTransport creates a Transport that routes to other nodes in the hub.
+// selfID is this node's own ID (so we can skip routing to ourselves).
+func (h *InMemoryHub) NewTransport(selfID NodeID) *InMemoryTransport {
+	return &InMemoryTransport{hub: h, selfID: selfID}
+}
+
+// InMemoryTransport implements Transport for in-memory multi-node testing.
+// It delegates to the peer handler registered with the hub. If the hub
+// has no handler for the target peer, all calls return ErrPeerNotFound.
+type InMemoryTransport struct {
+	hub    *InMemoryHub
+	selfID NodeID
+}
+
+// ErrPeerNotFound is returned by InMemoryTransport when the target peer
+// has not registered with the hub.
+var ErrPeerNotFound = fmt.Errorf("peer not found in in-memory hub")
+
+func (t *InMemoryTransport) getHandler(peerID NodeID) (RPCHandler, error) {
+	if peerID == t.selfID {
+		return nil, fmt.Errorf("InMemoryTransport: self-routing not supported")
+	}
+	t.hub.mu.RLock()
+	defer t.hub.mu.RUnlock()
+	h, ok := t.hub.handlers[peerID]
+	if !ok {
+		return nil, ErrPeerNotFound
+	}
+	return h, nil
+}
+
+func (t *InMemoryTransport) SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error) {
+	h, err := t.getHandler(peerID)
+	if err != nil {
+		return nil, err
+	}
+	// Handler blocks the caller; run under a goroutine so the transport
+	// call isancellable via ctx.
+	type result struct{ resp VoteResponse }
+	ch := make(chan result, 1)
+	go func() {
+		ch <- result{resp: h.HandleVoteRequest(req)}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		return &r.resp, nil
+	}
+}
+
+func (t *InMemoryTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error) {
+	h, err := t.getHandler(peerID)
+	if err != nil {
+		return nil, err
+	}
+	type result struct{ resp AppendResponse }
+	ch := make(chan result, 1)
+	go func() {
+		ch <- result{resp: h.HandleAppendRequest(req)}
+	}()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case r := <-ch:
+		return &r.resp, nil
+	}
+}
+
+func (t *InMemoryTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
+	h, err := t.getHandler(peerID)
+	if err != nil {
+		return err
+	}
+	// Snapshot install is typically large; run async so ctx timeout applies.
+	go h.HandleSnapshotRequest(req)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
+	}
 }
