@@ -69,6 +69,8 @@ type integratedHandler struct {
 	viewZones     map[string]map[string]*zone.Zone // view name -> origin -> Zone
 	auditLogger   *audit.AuditLogger
 	tracer        *otel.Tracer
+	serverCtx     context.Context // Root context for all per-query work; cancelled on server shutdown
+	cancelServer  context.CancelFunc
 	nsecCache     *cache.NSECCache // RFC 8198 aggressive NSEC caching
 	dns64Synth    *dns64.Synthesizer
 	cookieJar     *dnscookie.CookieJar
@@ -109,10 +111,24 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		rcodeStr = rcodeToString(code)
 	}
 
-	// OpenTelemetry tracing: create a span for this DNS query
+	// OpenTelemetry tracing: create a span for this DNS query.
+	// The span is derived from serverCtx so it is cancelled when the
+	// server shuts down, and child spans (resolver, validator) can inherit
+	// a cancellable parent instead of creating detached Background() ctxs.
 	var span *otel.Span
+	// If no root context is available (e.g. tests that call ServeDNS directly
+	// without going through main.go), fall back to a detached root rather than
+	// panicking in context.WithCancel.
+	var reqCtx context.Context
+	var reqCancel context.CancelFunc
+	if h.serverCtx != nil {
+		reqCtx, reqCancel = context.WithCancel(h.serverCtx)
+	} else {
+		reqCtx, reqCancel = context.WithCancel(context.Background())
+	}
+	defer reqCancel()
 	if h.tracer != nil {
-		_, span = h.tracer.StartSpan(context.Background(), "dns.query",
+		_, span = h.tracer.StartSpan(reqCtx, "dns.query",
 			otel.WithAttr("req.id", reqID),
 		)
 	}
@@ -474,7 +490,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 	if h.resolver != nil {
 		h.logger.Debugf("Resolving %s iteratively", qname)
 		resp, err := func() (*protocol.Message, error) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(reqCtx, 5*time.Second)
 			defer cancel()
 			return h.resolver.Resolve(ctx, qname, qtype)
 		}()
@@ -596,8 +612,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		// Validate DNSSEC if enabled and response has signatures
 		dnssecValidated := false
 		if h.validator != nil && dnssec.HasSignature(resp) {
-			ctx := context.Background()
-			result, err := h.validator.ValidateResponse(ctx, resp, qname)
+			result, err := h.validator.ValidateResponse(reqCtx, resp, qname)
 			if err != nil {
 				h.logger.Warnf("DNSSEC validation error for %s: %v", qname, err)
 			}
