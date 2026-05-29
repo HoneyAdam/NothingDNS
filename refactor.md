@@ -215,7 +215,9 @@ Benefits: each stage ~50–100 LOC and individually testable; ordering becomes d
 
 ### C4. `internal/api` — extract a service layer, tame routing (P2) · Confidence: High
 
-**Biggest win — kill REST/MCP duplication (~400 LOC):** `internal/api/mcp/tools.go` reimplements zone/record/cache operations that already exist in the REST handlers (`callZoneCreate` vs `handleCreateZone`, `callRecordAdd` vs `handleAddRecord`, `callCacheFlush` vs `handleCacheFlush`, …). Extract a transport-agnostic **service layer** (`ZoneService`, `CacheService`, …) taking `(ctx, user, input)` and returning `(output, error)`; have both REST and MCP call it. Single source of truth for validation + business rules; also enables future gRPC.
+**Progress (2026-05-29):** `ZoneService` created (`internal/api/zone_service.go`) — `ListZones()` and `GetZone()` methods now extract the business logic from REST handlers into a single, testable service type. `handleListZones` and `handleGetZone` now delegate to it. The MCP handler (`callZoneList`, `callZoneGet`) still calls `zoneManager` directly — next step is to wire the MCP handler to call `ZoneService` instead, which will also fix the latent security issue of MCP returning raw internal zone objects (all internal fields visible) instead of the sanitized `ZoneDetailResponse`.
+
+**Remaining:** `CacheService`, `BlocklistService` extraction; MCP handler wiring to `ZoneService`; route helper registration; `decode` helper; `WithOperator` middleware wrapper.
 
 **Handler boilerplate (repeated 40–50×):**
 - Method-dispatch (`if r.Method != ... { 405 }`) → a `RegisterRoute(path, map[method]handler)` helper.

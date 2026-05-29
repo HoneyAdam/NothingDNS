@@ -29,38 +29,8 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 
 // handleListZones returns list of zones with serial and record count.
 func (s *Server) handleListZones(w http.ResponseWriter, _ *http.Request) {
-	resp := &ZoneListResponse{Zones: []ZoneSummary{}}
-	if s.zoneManager != nil {
-		zones := s.zoneManager.List()
-		resp.Total = len(zones)
-		// L-N5: cap the response to ZoneListMaxResults. An operator
-		// with thousands of zones would otherwise build a
-		// proportional JSON document and freeze the dashboard.
-		count := 0
-		for name, z := range zones {
-			if count >= ZoneListMaxResults {
-				resp.Truncated = true
-				break
-			}
-			z.RLock()
-			recordCount := 0
-			for _, records := range z.Records {
-				recordCount += len(records)
-			}
-			serial := uint32(0)
-			if z.SOA != nil {
-				serial = z.SOA.Serial
-			}
-			z.RUnlock()
-			resp.Zones = append(resp.Zones, ZoneSummary{
-				Name:    name,
-				Serial:  serial,
-				Records: recordCount,
-			})
-			count++
-		}
-	}
-
+	zs := NewZoneService(s.zoneManager)
+	resp := zs.ListZones()
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -150,43 +120,12 @@ func (s *Server) handleZoneActions(w http.ResponseWriter, r *http.Request) {
 
 // handleGetZone returns details of a single zone.
 func (s *Server) handleGetZone(w http.ResponseWriter, _ *http.Request, name string) {
-	z, ok := s.zoneManager.Get(name)
+	zs := NewZoneService(s.zoneManager)
+	result, ok := zs.GetZone(name)
 	if !ok {
 		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Zone %s not found", name))
 		return
 	}
-
-	z.RLock()
-	defer z.RUnlock()
-
-	recordCount := 0
-	for _, records := range z.Records {
-		recordCount += len(records)
-	}
-
-	result := &ZoneDetailResponse{
-		Name:    z.Origin,
-		Records: recordCount,
-	}
-
-	if z.SOA != nil {
-		result.Serial = z.SOA.Serial
-		result.SOA = &SOADetail{
-			MName:   z.SOA.MName,
-			RName:   z.SOA.RName,
-			Serial:  z.SOA.Serial,
-			Refresh: z.SOA.Refresh,
-			Retry:   z.SOA.Retry,
-			Expire:  z.SOA.Expire,
-			Minimum: z.SOA.Minimum,
-		}
-	}
-
-	var nsList []string
-	for _, ns := range z.NS {
-		nsList = append(nsList, ns.NSDName)
-	}
-	result.Nameservers = nsList
 
 	s.writeJSON(w, http.StatusOK, result)
 }
