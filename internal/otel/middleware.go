@@ -1,9 +1,10 @@
 package otel
 
 import (
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // Middleware returns an HTTP middleware that adds tracing.
@@ -110,7 +111,7 @@ func RecordError(span *Span, err error) {
 func LogSpans(spans []*Span) {
 	for _, span := range spans {
 		duration := span.EndTime.Sub(span.StartTime)
-		log.Printf("span: name=%s trace=%x span=%x duration=%v attrs=%v",
+		util.Debugf("span: name=%s trace=%x span=%x duration=%v attrs=%v",
 			span.Name, span.TraceID, span.SpanID, duration, span.Attrs)
 	}
 }
