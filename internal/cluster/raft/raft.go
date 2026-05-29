@@ -768,7 +768,7 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	// next AppendEntries / snapshot retry will try again.
 	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
-			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+			util.Errorf("failed to restore state machine from snapshot: %v", err)
 			return
 		}
 	}
@@ -832,7 +832,7 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	// on its next AppendEntries; that's the standard recovery path.
 	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
-			fmt.Printf("failed to restore state machine from snapshot: %v\n", err)
+			util.Errorf("failed to restore state machine from snapshot: %v", err)
 			return
 		}
 	}
