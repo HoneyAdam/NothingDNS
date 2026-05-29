@@ -106,13 +106,14 @@ Working tree shows committed/loose runtime artifacts: `cache.json`, `data.db`, `
 
 ## Part B — Cross-cutting concerns
 
-### B1. Logging consistency · Confidence: High
-A solid custom structured logger exists (`internal/util/logger.go`, levels DEBUG→FATAL, text/JSON). Most code uses it correctly. **Escapes to fix:**
-- `internal/cluster/raft/integration.go:233` — raw `log.Printf("raft: stateMachine.Apply failed...")`.
-- `internal/otel/middleware.go:113` — raw `log.Printf("span: ...")`.
-- `internal/cluster/raft/raft.go:792, 865` — `fmt.Printf(...)` to stdout for snapshot-restore failures.
+### B1. Logging consistency · Confidence: High · ✅ **DONE (2026-05-29)**
+A solid custom structured logger exists (`internal/util/logger.go`, levels DEBUG→FATAL, text/JSON). Most code uses it correctly. Fixed the 4 raw `log.Printf`/`fmt.Printf` escapes:
 
-**Action:** thread the configured `*util.Logger` into `raft`/`otel` (or accept a minimal `Logger` interface) and replace these. Add a lint rule (`forbidigo`) banning `log.Printf`/`fmt.Printf` outside `cmd/*/main.go` and tests.
+- `internal/cluster/raft/integration.go` — added `logger *util.Logger` field to `ClusterIntegration`; `log.Printf` → `ci.logger.Errorf`
+- `internal/otel/middleware.go` — `LogSpans` now uses `util.Debugf` instead of raw `log.Printf`
+- `internal/cluster/raft/raft.go` (2 sites) — both snapshot-restore `fmt.Printf` → `util.Errorf`
+
+**Trade-offs:** `raft.go`'s `Node` struct remains logger-free (no `util` field), which is correct — errors there are propagated up to integration layer callers that hold the logger. The `util.Errorf` stand-in in raft.go is a pragmatic intermediate step; the B1 lint rule (`forbidigo`) remains as future work.
 
 ### B2. Error handling · Confidence: High
 Generally good: `fmt.Errorf` + `%w` dominant, sentinel errors in `internal/transfer/errors.go`, correct `errors.Is` usage at call sites. Beyond the 3 `errorlint` hits (A3), one swallowed parse error to chase down:
