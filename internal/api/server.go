@@ -803,7 +803,7 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		if r.Method == "OPTIONS" {
 			if allowOrigin == "" && origin != "" {
 				// Origin was present but not allowed — reject preflight
-				http.Error(w, "origin not allowed", http.StatusForbidden)
+				s.writeError(w, http.StatusForbidden, "origin not allowed")
 				return
 			}
 			w.WriteHeader(http.StatusOK)
@@ -872,7 +872,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			// Rate limit WebSocket connections to prevent connection exhaustion
 			ip := getClientIP(r)
 			if s.apiRateLimiter.checkRateLimit(ip) {
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				writeErrorJSON(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -899,7 +899,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if s.apiRateLimiter.checkRateLimit(ip) {
 				resetTime := s.apiRateLimiter.getResetTime(ip)
 				w.Header().Set("Retry-After", strconv.Itoa(int(resetTime.Seconds())+1))
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
+				writeErrorJSON(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 		}
@@ -908,7 +908,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// authentication is required. Deny all API requests.
 		// To allow unauthenticated access, set auth_token or configure users.
 		if s.config.AuthToken == "" && s.authStore == nil {
-			http.Error(w, `{"error":"authentication required: set auth_token or configure users"}`, http.StatusUnauthorized)
+			writeErrorJSON(w, http.StatusUnauthorized, "authentication required: set auth_token or configure users")
 			return
 		}
 
