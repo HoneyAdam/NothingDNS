@@ -35,7 +35,7 @@ func validationStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if len(q.msg.Questions) == 0 {
 			h.logger.Debug("Query with no questions")
-			sendError(w, q.msg, protocol.RcodeFormatError)
+			sendError(q.currentWriter, q.msg, protocol.RcodeFormatError)
 			return true, nil
 		}
 
@@ -49,7 +49,7 @@ func validationStage(h *integratedHandler) Stage {
 		if h.idnaEnabled {
 			if _, err := idna.ToASCII(q.qname); err != nil {
 				h.logger.Debugf("IDNA validation failed for %s: %v", q.qname, err)
-				sendErrorWithEDE(w, q.msg, protocol.RcodeFormatError, protocol.EDEProhibited, "invalid IDNA")
+				sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeFormatError, protocol.EDEProhibited, "invalid IDNA")
 				return true, nil
 			}
 		}
@@ -77,10 +77,10 @@ func aclStage(h *integratedHandler) Stage {
 			if !allowed {
 				if redirect != "" {
 					h.logger.Infof("ACL redirect: %s %s from %s -> %s", q.qname, typeToString(q.qtype), clientIP, redirect)
-					h.handleACLRedirect(w, q.msg, q.q, redirect)
+					h.handleACLRedirect(q.currentWriter, q.msg, q.q, redirect)
 				} else {
 					h.logger.Infof("ACL denied: %s %s from %s", q.qname, typeToString(q.qtype), clientIP)
-					sendError(w, q.msg, protocol.RcodeRefused)
+					sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				}
 				return true, nil
 			}
@@ -113,7 +113,7 @@ func rateLimitStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordRateLimited()
 				}
-				sendError(w, q.msg, protocol.RcodeRefused)
+				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				return true, nil
 			}
 		}
@@ -146,7 +146,7 @@ func cacheStage(h *integratedHandler) Stage {
 					h.metrics.RecordCacheHit()
 					h.metrics.RecordResponse(entry.RCode)
 				}
-				sendError(w, q.msg, entry.RCode)
+				sendError(q.currentWriter, q.msg, entry.RCode)
 				return true, nil
 			}
 			h.logger.Debugf("Cache hit for %s", q.qname)
@@ -154,7 +154,7 @@ func cacheStage(h *integratedHandler) Stage {
 				h.metrics.RecordCacheHit()
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			reply(w, q.msg, entry.Message)
+			reply(q.currentWriter, q.msg, entry.Message)
 			return true, nil
 		}
 
@@ -174,7 +174,7 @@ func nsecCacheStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(synthResp.Header.Flags.RCODE)
 				}
-				reply(w, q.msg, synthResp)
+				reply(q.currentWriter, q.msg, synthResp)
 				return true, nil
 			}
 		}
@@ -190,7 +190,7 @@ func blocklistStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordBlocklistBlock()
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeNameError, protocol.EDEFiltered, "blocked by blocklist")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeNameError, protocol.EDEFiltered, "blocked by blocklist")
 			return true, nil
 		}
 		return false, nil
@@ -284,7 +284,7 @@ func cnameStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDERecursiveLoop, "CNAME loop detected")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDERecursiveLoop, "CNAME loop detected")
 			return true, nil
 		}
 		if len(result.cnameRecords) > 0 {
@@ -298,7 +298,7 @@ func cnameStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			reply(w, q.msg, resp)
+			reply(q.currentWriter, q.msg, resp)
 			return true, nil
 		}
 		return false, nil
@@ -313,7 +313,7 @@ func authoritativeOnlyStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeRefused)
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeRefused, protocol.EDENotAuthoritative, "authoritative-only server: name is outside all configured zones")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeRefused, protocol.EDENotAuthoritative, "authoritative-only server: name is outside all configured zones")
 			return true, nil
 		}
 		return false, nil
@@ -341,13 +341,13 @@ func resolverStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				reply(w, q.msg, stale.Message)
+				reply(q.currentWriter, q.msg, stale.Message)
 				return true, nil
 			}
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "iterative resolution failed")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "iterative resolution failed")
 			return true, nil
 		}
 
@@ -367,7 +367,7 @@ func resolverStage(h *integratedHandler) Stage {
 		if h.metrics != nil {
 			h.metrics.RecordResponse(resp.Header.Flags.RCODE)
 		}
-		reply(w, q.msg, resp)
+		reply(q.currentWriter, q.msg, resp)
 		return true, nil
 	}
 }
@@ -406,13 +406,13 @@ func upstreamStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				reply(w, q.msg, stale.Message)
+				reply(q.currentWriter, q.msg, stale.Message)
 				return true, nil
 			}
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "upstream unavailable")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "upstream unavailable")
 			return true, nil
 		}
 
@@ -422,7 +422,7 @@ func upstreamStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
 			return true, nil
 		}
 		q.msg.Header.ID = origID
@@ -445,7 +445,7 @@ func upstreamStage(h *integratedHandler) Stage {
 					if h.metrics != nil {
 						h.metrics.RecordResponse(protocol.RcodeServerFailure)
 					}
-					sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECBogus, "DNSSEC validation failed")
+					sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECBogus, "DNSSEC validation failed")
 					return true, nil
 				}
 			case dnssec.ValidationInsecure:
@@ -456,7 +456,7 @@ func upstreamStage(h *integratedHandler) Stage {
 					if h.metrics != nil {
 						h.metrics.RecordResponse(protocol.RcodeServerFailure)
 					}
-					sendErrorWithEDE(w, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECIndeterminate, "DNSSEC indeterminate")
+					sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECIndeterminate, "DNSSEC indeterminate")
 					return true, nil
 				}
 			}
@@ -513,14 +513,14 @@ func upstreamStage(h *integratedHandler) Stage {
 				h.rrl.LogSuperlative(clientIP, qtype, resp.Header.Flags.RCODE, queryLen, responseLen)
 				if allowed, suppressed := h.rrl.Allow(clientIP, qtype, resp.Header.Flags.RCODE); !allowed {
 					if suppressed {
-						h.sendRefused(w, q.msg)
+						h.sendRefused(q.currentWriter, q.msg)
 						return true, nil
 					}
 				}
 			}
 		}
 
-		reply(w, q.msg, resp)
+		reply(q.currentWriter, q.msg, resp)
 		return true, nil
 	}
 }
@@ -533,7 +533,7 @@ func noUpstreamStage(h *integratedHandler) Stage {
 		if h.metrics != nil {
 			h.metrics.RecordResponse(protocol.RcodeNameError)
 		}
-		sendErrorWithEDE(w, q.msg, protocol.RcodeNameError, protocol.EDENotAuthoritative, "no upstream configured")
+		sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeNameError, protocol.EDENotAuthoritative, "no upstream configured")
 		return true, nil
 	}
 }
@@ -564,14 +564,14 @@ func cookieStage(h *integratedHandler) Stage {
 					optData.AddOption(protocol.OptionCodeCookie, cookieData)
 				}
 			}
-			if _, err := w.Write(resp); err != nil {
+			if _, err := q.currentWriter.Write(resp); err != nil {
 				// Can't use h.logger here since we don't have a format string helper convenient
 				// (would need to import fmt for this one-off case)
 			}
 			return true, nil
 		}
 		if cookieData != nil {
-			w = &cookieResponseWriter{inner: w, cookieData: cookieData}
+			q.currentWriter = &cookieResponseWriter{inner: q.currentWriter, cookieData: cookieData}
 		}
 		return false, nil
 	}
@@ -582,7 +582,7 @@ func anyStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if q.qtype == protocol.TypeANY {
 			if w.ClientInfo().Protocol == "udp" {
-				h.handleANYTruncated(w, q.msg, q.q)
+				h.handleANYTruncated(q.currentWriter, q.msg, q.q)
 				return true, nil
 			}
 		}
@@ -594,19 +594,19 @@ func anyStage(h *integratedHandler) Stage {
 func transferStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if q.qtype == protocol.TypeAXFR {
-			h.handleAXFR(w, q.msg, q.q)
+			h.handleAXFR(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if q.qtype == protocol.TypeIXFR {
-			h.handleIXFR(w, q.msg, q.q)
+			h.handleIXFR(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if transfer.IsNOTIFYRequest(q.msg) {
-			h.handleNOTIFY(w, q.msg, q.q)
+			h.handleNOTIFY(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if transfer.IsUpdateRequest(q.msg) {
-			h.handleUPDATE(w, q.msg, q.q)
+			h.handleUPDATE(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		return false, nil

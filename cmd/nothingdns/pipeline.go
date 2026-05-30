@@ -8,8 +8,11 @@ import (
 	"net"
 	"time"
 
+	"github.com/nothingdns/nothingdns/internal/audit"
+	"github.com/nothingdns/nothingdns/internal/otel"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // query holds all derived state for a DNS request.
@@ -39,7 +42,19 @@ type query struct {
 	cacheHit   bool   // set by cache stage
 
 	// Response state (written by final stages)
-	resp *protocol.Message
+	rcode    uint8  // written by stages that send a response
+	rcodeSet bool   // true once rcode has been set
+	resp     *protocol.Message
+
+	// Tracing (setup by setupStage, ended in defer)
+	span *otel.Span
+
+	// Pipeline context and cancel (setup by Pipeline.ServeDNS)
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// currentWriter is the active response writer; stages may wrap it
+	currentWriter server.ResponseWriter
 }
 
 // Stage is a single processing step in the DNS pipeline.
@@ -52,12 +67,97 @@ type Pipeline struct {
 	stages []Stage
 }
 
-// ServeDNS runs all stages in order.
-func (p *Pipeline) ServeDNS(ctx context.Context, h *integratedHandler, w server.ResponseWriter, r *protocol.Message) {
-	q := &query{msg: r, start: time.Now()}
+// ServeDNS runs all stages in order with full context/tracing/defer support.
+// This is the entry point wired into integratedHandler.ServeDNS.
+func (p *Pipeline) ServeDNS(h *integratedHandler, w server.ResponseWriter, r *protocol.Message) {
+	reqID := util.GenerateRequestID()
+	start := time.Now()
+
+	// Panic recovery — prevents handler crashes from crashing the server
+	defer func() {
+		if rec := recover(); rec != nil {
+			h.logger.Errorf("Panic in ServeDNS: internal error (req_id=%s)", reqID)
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "internal server error")
+		}
+	}()
+
+	// OpenTelemetry tracing: derive from serverCtx so it is cancelled on shutdown.
+	var span *otel.Span
+	var reqCtx context.Context
+	var reqCancel context.CancelFunc
+	if h.serverCtx != nil {
+		reqCtx, reqCancel = context.WithCancel(h.serverCtx)
+	} else {
+		reqCtx, reqCancel = context.WithCancel(context.Background())
+	}
+	defer reqCancel()
+
+	if h.tracer != nil {
+		_, span = h.tracer.StartSpan(reqCtx, "dns.query",
+			otel.WithAttr("req.id", reqID),
+		)
+	}
+
+	q := &query{
+		msg:    r,
+		start:  start,
+		reqID:  reqID,
+		span:   span,
+		ctx:    reqCtx,
+		cancel: reqCancel,
+	}
+
+	// Defer latency recording and audit logging
+	defer func() {
+		latency := time.Since(start)
+		if h.metrics != nil && q.qtypeStr != "" {
+			h.metrics.RecordQueryLatency(q.qtypeStr, latency)
+		}
+		if h.auditLogger != nil && q.qtypeStr != "" {
+			clientIP := "-"
+			if ci := q.currentWriter.ClientInfo(); ci != nil && ci.IP() != nil {
+				clientIP = ci.IP().String()
+			}
+			h.auditLogger.LogQuery(audit.QueryAuditEntry{
+				RequestID: reqID,
+				Timestamp: start.UTC().Format(time.RFC3339),
+				ClientIP:  clientIP,
+				QueryName: q.qnameAudit,
+				QueryType: q.qtypeStr,
+				Latency:   latency,
+				CacheHit:  q.cacheHit,
+			})
+		}
+		// End tracing span with DNS attributes
+		if span != nil {
+			if q.qtypeStr != "" {
+				span.Attrs = append(span.Attrs,
+					otel.Attr{Key: "dns.qname", Value: q.qnameAudit},
+					otel.Attr{Key: "dns.qtype", Value: q.qtypeStr},
+					otel.Attr{Key: "dns.cache_hit", Value: q.cacheHit},
+				)
+				if q.rcodeSet {
+					span.Attrs = append(span.Attrs,
+						otel.Attr{Key: "dns.rcode", Value: rcodeToString(q.rcode)},
+					)
+				}
+				if ci := w.ClientInfo(); ci != nil && ci.IP() != nil {
+					span.Attrs = append(span.Attrs,
+						otel.Attr{Key: "dns.client_ip", Value: ci.IP().String()},
+					)
+				}
+			}
+			h.tracer.EndSpan(span, nil)
+		}
+	}()
+
+	q.currentWriter = w
 
 	for _, stage := range p.stages {
-		handled, err := stage(ctx, q, w)
+		handled, err := stage(q.ctx, q, q.currentWriter)
 		if handled || err != nil {
 			return
 		}
