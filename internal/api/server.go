@@ -38,25 +38,25 @@ import (
 
 // Server provides HTTP API for DNS server management.
 type Server struct {
-	config          config.HTTPConfig
-	httpServer      *http.Server
-	zoneManager     *zone.Manager
-	cache           *cache.Cache
-	cacheService    *CacheService
-	zoneService     *ZoneService
-	reloadFunc      func() error
-	configGetter    func() *config.Config // Returns full server config
-	dnsHandler      server.Handler
-	cluster         *cluster.Cluster
-	dashboardServer *dashboard.Server
-	blocklist          *blocklist.Blocklist
-	blocklistService   *BlocklistService
-	upstreamClient  *upstream.Client
-	upstreamLB      *upstream.LoadBalancer
-	aclChecker      *filter.ACLChecker
-	authStore       *auth.Store
-	metrics         *metrics.MetricsCollector
-	validator       *dnssec.Validator
+	config           config.HTTPConfig
+	httpServer       *http.Server
+	zoneManager      *zone.Manager
+	cache            *cache.Cache
+	cacheService     *CacheService
+	zoneService      *ZoneService
+	reloadFunc       func() error
+	configGetter     func() *config.Config // Returns full server config
+	dnsHandler       server.Handler
+	cluster          *cluster.Cluster
+	dashboardServer  *dashboard.Server
+	blocklist        *blocklist.Blocklist
+	blocklistService *BlocklistService
+	upstreamClient   *upstream.Client
+	upstreamLB       *upstream.LoadBalancer
+	aclChecker       *filter.ACLChecker
+	authStore        *auth.Store
+	metrics          *metrics.MetricsCollector
+	validator        *dnssec.Validator
 	// SECURITY (LOW-026): zoneSigners is protected by RWMutex. Writes are rare
 	// (zone reload / DNSSEC key rollover) and reads are frequent. sync.Map is
 	// not used because the map is small and RWMutex performs better.
