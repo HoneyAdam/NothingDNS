@@ -1,3 +1,4 @@
+// Package api provides the REST API server for NothingDNS.
 package api
 
 import (
@@ -22,8 +23,6 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 }
 
 // writeErrorJSON writes a JSON error response with the given status and message.
-// This is a package-level helper so decode (a package func) can use it without
-// a Server receiver.
 func writeErrorJSON(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, &ErrorResponse{Error: message})
 }
