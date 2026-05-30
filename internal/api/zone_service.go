@@ -17,11 +17,9 @@ import (
 //   - REST handler calls the service method, formats the HTTP response
 //   - MCP handler calls the same service method, formats the tool result
 //
-// TODO(c4): Wire ZoneService into DNSToolsHandler (MCP). Currently the MCP
-// handler calls zoneManager directly, bypassing this service layer. The MCP
-// callZoneGet / callZoneList / etc. methods should be updated to call
-// ZoneService instead, ensuring both transports return identical data and
-// preventing internal zone fields from leaking via the MCP interface.
+// ✅ Wired: DNSToolsHandler.callZoneList/callZoneGet (MCP) now use
+// ZoneService. All zone read operations (ListZones, GetZone) go through
+// this service layer — no raw zone objects leak via MCP.
 type ZoneService struct {
 	zoneManager *zone.Manager
 }

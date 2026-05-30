@@ -902,12 +902,7 @@ func (c *Cluster) cacheSyncLoop() {
 	for event := range c.cacheSyncChan {
 		switch event.Type {
 		case "invalidate":
-			// In Raft mode, also use gossip for cache invalidation broadcast
-			if c.consensus == ConsensusRaft && c.gossip != nil {
-				if err := c.gossip.BroadcastCacheInvalidation(event.Keys); err != nil {
-					c.logger.Warnf("Failed to broadcast cache invalidation: %v", err)
-				}
-			} else if c.gossip != nil {
+			if c.gossip != nil {
 				if err := c.gossip.BroadcastCacheInvalidation(event.Keys); err != nil {
 					c.logger.Warnf("Failed to broadcast cache invalidation: %v", err)
 				}
