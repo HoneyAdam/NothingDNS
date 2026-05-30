@@ -751,7 +751,7 @@ func (h *integratedHandler) RebuildZoneTree() {
 
 	// Rebuild the unified zone provider
 	h.zoneProvider = NewMultiZoneProvider(
-		h.zones,
+		merged,
 		h.zoneManager,
 		h.kvPersistence,
 		h.zoneTree,
