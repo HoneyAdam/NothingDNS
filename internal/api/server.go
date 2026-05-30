@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -653,7 +652,7 @@ func (s *Server) Start() error {
 	if s.tracer != nil {
 		handler = otel.Middleware(s.tracer)(handler)
 	}
-	handler = securityHeadersMiddleware(s.corsMiddleware(s.authMiddleware(handler)))
+	handler = s.rateLimitMiddleware(s.loggingMiddleware(securityHeadersMiddleware(s.corsMiddleware(s.authMiddleware(handler)))))
 
 	s.httpServer = &http.Server{
 		Addr:              s.config.Bind,
@@ -869,12 +868,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if s.config.DoWSEnabled && s.config.DoWSPath != "" && r.URL.Path == s.config.DoWSPath {
-			// Rate limit WebSocket connections to prevent connection exhaustion
-			ip := getClientIP(r)
-			if s.apiRateLimiter.checkRateLimit(ip) {
-				writeErrorJSON(w, http.StatusTooManyRequests, "rate limit exceeded")
-				return
-			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -885,21 +878,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 			if r.URL.Path == "/.well-known/odoh-config" {
 				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// VULN-055: Apply the API rate limit to every /api/ request BEFORE
-		// any auth decision, so unauthenticated scans and failed-auth
-		// brute-force attempts also consume budget. Previously the limiter
-		// only fired inside the successful-auth branches, which left the
-		// login/credential-stuffing surface unthrottled.
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			ip := getClientIP(r)
-			if s.apiRateLimiter.checkRateLimit(ip) {
-				resetTime := s.apiRateLimiter.getResetTime(ip)
-				w.Header().Set("Retry-After", strconv.Itoa(int(resetTime.Seconds())+1))
-				writeErrorJSON(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
 		}
