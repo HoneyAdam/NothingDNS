@@ -6,6 +6,7 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/api"
 	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
@@ -629,10 +630,8 @@ func TestCallRecordListError(t *testing.T) {
 }
 
 func TestCallCacheStats(t *testing.T) {
-	_ = &MockCacheManager{
-		stats: CacheStats{Size: 1000, HitRate: 0.85, MissRate: 0.15, Evictions: 50},
-	}
-	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil)
+	c := cache.New(cache.DefaultConfig())
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(c), nil, nil, nil)
 
 	result, err := handler.CallTool("cache_stats", nil)
 	if err != nil {
@@ -658,8 +657,8 @@ func TestCallCacheStatsNoCache(t *testing.T) {
 }
 
 func TestCallCacheFlush(t *testing.T) {
-	_ = &MockCacheManager{}
-	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil).WithAuth(&MockAuthProvider{})
+	c := cache.New(cache.DefaultConfig())
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(c), nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("cache_flush", map[string]interface{}{
 		"auth_token": "test-token",
@@ -702,7 +701,8 @@ func TestCallCacheFlushError(t *testing.T) {
 }
 
 func TestCallBlocklistCheck(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, api.NewBlocklistService(nil), nil, nil)
+	bl := blocklist.New(blocklist.Config{Enabled: true, Files: []string{}})
+	handler := NewDNSToolsHandler(nil, nil, nil, api.NewBlocklistService(bl), nil, nil)
 
 	result, err := handler.CallTool("blocklist_check", map[string]interface{}{
 		"domain": "ads.example.com",
@@ -882,8 +882,8 @@ func TestReadResourceServerStatusNoProvider(t *testing.T) {
 }
 
 func TestReadResourceCacheStats(t *testing.T) {
-	_ = &MockCacheManager{stats: CacheStats{Size: 1000}}
-	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil)
+	c := cache.New(cache.DefaultConfig())
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(c), nil, nil, nil)
 
 	contents, err := handler.ReadResource("dns://cache/stats")
 	if err != nil {
