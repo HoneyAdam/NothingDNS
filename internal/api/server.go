@@ -42,12 +42,15 @@ type Server struct {
 	httpServer      *http.Server
 	zoneManager     *zone.Manager
 	cache           *cache.Cache
+	cacheService    *CacheService
+	zoneService     *ZoneService
 	reloadFunc      func() error
 	configGetter    func() *config.Config // Returns full server config
 	dnsHandler      server.Handler
 	cluster         *cluster.Cluster
 	dashboardServer *dashboard.Server
-	blocklist       *blocklist.Blocklist
+	blocklist          *blocklist.Blocklist
+	blocklistService   *BlocklistService
 	upstreamClient  *upstream.Client
 	upstreamLB      *upstream.LoadBalancer
 	aclChecker      *filter.ACLChecker
@@ -394,10 +397,12 @@ func (s *Server) WithDashboard(ds *dashboard.Server) *Server {
 
 // NewServer creates a new API server.
 func NewServer(cfg config.HTTPConfig, zm *zone.Manager, c *cache.Cache, reload func() error, dnsHandler server.Handler, cl *cluster.Cluster, ds *dashboard.Server) *Server {
-	return &Server{
+	s := &Server{
 		config:          cfg,
 		zoneManager:     zm,
 		cache:           c,
+		cacheService:    NewCacheService(c),
+		zoneService:     NewZoneService(zm),
 		reloadFunc:      reload,
 		dnsHandler:      dnsHandler,
 		cluster:         cl,
@@ -408,11 +413,20 @@ func NewServer(cfg config.HTTPConfig, zm *zone.Manager, c *cache.Cache, reload f
 		},
 		apiRateLimiter: newAPIRateLimiter(),
 	}
+	return s
 }
 
 // WithBlocklist sets the blocklist for the API server.
 func (s *Server) WithBlocklist(bl *blocklist.Blocklist) *Server {
 	s.blocklist = bl
+	s.blocklistService = NewBlocklistService(bl)
+	return s
+}
+
+// withBlocklist sets blocklist and its service directly (used by tests).
+func (s *Server) withBlocklist(bl *blocklist.Blocklist) *Server {
+	s.blocklist = bl
+	s.blocklistService = NewBlocklistService(bl)
 	return s
 }
 
