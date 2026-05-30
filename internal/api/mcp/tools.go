@@ -18,6 +18,7 @@ type AuthProvider interface {
 // DNSToolsHandler implements the Handler interface for DNS operations
 type DNSToolsHandler struct {
 	zoneService       *api.ZoneService
+	recordService     *api.RecordService
 	zoneManager       ZoneManager
 	cacheService      *api.CacheService
 	blocklistService  *api.BlocklistService
@@ -104,10 +105,10 @@ type ServerStats struct {
 
 // NewDNSToolsHandler creates a new DNS tools handler.
 //
-// zoneService provides read-only zone operations (list, get). cacheService
-// and blocklistService provide read-only stats/check operations. zoneManager
-// handles mutating operations (create, delete, add/delete record) that go
-// directly to the manager.
+// zoneService provides read-only zone operations (list, get). recordService
+// provides read-only record operations (list). cacheService and blocklistService
+// provide read-only stats/check operations. zoneManager handles mutating
+// operations (create, delete, add/delete record) that go directly to the manager.
 func NewDNSToolsHandler(
 	zoneService *api.ZoneService,
 	zoneManager ZoneManager,
@@ -120,10 +121,18 @@ func NewDNSToolsHandler(
 		zoneService:       zoneService,
 		zoneManager:       zoneManager,
 		cacheService:      cacheService,
-	blocklistService: blocklistService,
+		blocklistService:  blocklistService,
 		dnsResolver:       dnsResolver,
 		statsProvider:     statsProvider,
 	}
+}
+
+// WithRecordService configures the record service for read-only record
+// operations. When set, callRecordList uses the service layer (producing
+// identical response shapes to REST); otherwise falls back to zoneManager.
+func (h *DNSToolsHandler) WithRecordService(rs *api.RecordService) *DNSToolsHandler {
+	h.recordService = rs
+	return h
 }
 
 // WithAuth sets the authentication provider for the handler.
@@ -459,8 +468,15 @@ func (h *DNSToolsHandler) callRecordList(args map[string]interface{}) (*ToolResu
 		return nil, fmt.Errorf("zone is required")
 	}
 
+	// Prefer the service layer (identical response shape to REST).
+	// Fall back to zoneManager for backward compatibility.
+	if h.recordService != nil {
+		resp := h.recordService.ListRecords(zone, name)
+		return jsonResult(resp), nil
+	}
+
 	if h.zoneManager == nil {
-		return errorResult("Zone manager not configured"), nil
+		return errorResult("Record service not configured"), nil
 	}
 
 	records, err := h.zoneManager.GetRecords(zone, name)
