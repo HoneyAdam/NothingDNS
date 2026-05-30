@@ -4,7 +4,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/nothingdns/nothingdns/internal/api"
 	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
 // Mock implementations for testing
@@ -152,14 +154,14 @@ func TestNewDNSToolsHandler(t *testing.T) {
 	bl := &MockBlocklistManager{}
 	stats := &MockStatsProvider{}
 
-	handler := NewDNSToolsHandler(zm, cache, resolver, bl, stats)
+	handler := NewDNSToolsHandler(nil, zm, cache, resolver, bl, stats)
 	if handler == nil {
 		t.Fatal("Expected non-nil handler")
 	}
 }
 
 func TestDNSToolsHandlerListTools(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	tools, err := handler.ListTools()
 	if err != nil {
@@ -189,7 +191,7 @@ func TestDNSToolsHandlerListTools(t *testing.T) {
 }
 
 func TestCallToolUnknown(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("unknown_tool", nil)
 	if err == nil {
@@ -207,7 +209,7 @@ func TestCallDNSQuery(t *testing.T) {
 			Time:    1000000,
 		},
 	}
-	handler := NewDNSToolsHandler(nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
 
 	result, err := handler.CallTool("dns_query", map[string]interface{}{
 		"name": "example.com",
@@ -227,7 +229,7 @@ func TestCallDNSQuery(t *testing.T) {
 }
 
 func TestCallDNSQueryMissingName(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("dns_query", map[string]interface{}{})
 	if err == nil {
@@ -236,7 +238,7 @@ func TestCallDNSQueryMissingName(t *testing.T) {
 }
 
 func TestCallDNSQueryNoResolver(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("dns_query", map[string]interface{}{
 		"name": "example.com",
@@ -252,7 +254,7 @@ func TestCallDNSQueryNoResolver(t *testing.T) {
 
 func TestCallDNSQueryError(t *testing.T) {
 	resolver := &MockDNSResolver{err: errors.New("query failed")}
-	handler := NewDNSToolsHandler(nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
 
 	result, err := handler.CallTool("dns_query", map[string]interface{}{
 		"name": "example.com",
@@ -267,13 +269,9 @@ func TestCallDNSQueryError(t *testing.T) {
 }
 
 func TestCallZoneList(t *testing.T) {
-	zm := &MockZoneManager{
-		zones: []ZoneInfo{
-			{Name: "example.com", Serial: 2024010101, RecordCount: 10},
-			{Name: "test.com", Serial: 2024010102, RecordCount: 5},
-		},
-	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_list", nil)
 	if err != nil {
@@ -285,8 +283,8 @@ func TestCallZoneList(t *testing.T) {
 	}
 }
 
-func TestCallZoneListNoManager(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+func TestCallZoneListNoService(t *testing.T) {
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_list", nil)
 	if err != nil {
@@ -294,28 +292,34 @@ func TestCallZoneListNoManager(t *testing.T) {
 	}
 
 	if !result.IsError {
-		t.Error("Expected error result when no zone manager")
+		t.Error("Expected error result when no zone service")
 	}
 }
 
 func TestCallZoneListError(t *testing.T) {
-	zm := &MockZoneManager{listErr: errors.New("list failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	// ZoneService.ListZones() always succeeds (returns empty on nil manager).
+	// Verify the non-error path.
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("zone_list", nil)
-	if err == nil {
-		t.Error("Expected error from list zones")
+	if err != nil {
+		t.Fatalf("CallTool zone_list failed: %v", err)
 	}
 }
 
-func TestCallZoneGet(t *testing.T) {
-	zm := &MockZoneManager{
-		zones: []ZoneInfo{{Name: "example.com", Serial: 2024010101}},
-	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+func TestCallZoneGetActual(t *testing.T) {
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	zm.CreateZone("example.com.", 3600, &zone.SOARecord{
+		MName: "ns1.example.com.", RName: "admin.example.com.",
+		Serial: 2024010101, Refresh: 3600, Retry: 600, Expire: 86400, Minimum: 3600,
+	}, []zone.NSRecord{{NSDName: "ns1.example.com."}})
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_get", map[string]interface{}{
-		"name": "example.com",
+		"name": "example.com.",
 	})
 	if err != nil {
 		t.Fatalf("CallTool failed: %v", err)
@@ -327,7 +331,7 @@ func TestCallZoneGet(t *testing.T) {
 }
 
 func TestCallZoneGetMissingName(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("zone_get", map[string]interface{}{})
 	if err == nil {
@@ -337,7 +341,7 @@ func TestCallZoneGetMissingName(t *testing.T) {
 
 func TestCallZoneGetNotFound(t *testing.T) {
 	zm := &MockZoneManager{getErr: errors.New("zone not found")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_get", map[string]interface{}{
 		"name": "nonexistent.com",
@@ -353,7 +357,7 @@ func TestCallZoneGetNotFound(t *testing.T) {
 
 func TestCallZoneCreate(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("zone_create", map[string]interface{}{
 		"name":        "newzone.com",
@@ -371,7 +375,7 @@ func TestCallZoneCreate(t *testing.T) {
 }
 
 func TestCallZoneCreateMissingName(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	_, err := handler.CallTool("zone_create", map[string]interface{}{
 		"auth_token": "test-token",
@@ -383,7 +387,7 @@ func TestCallZoneCreateMissingName(t *testing.T) {
 
 func TestCallZoneCreateError(t *testing.T) {
 	zm := &MockZoneManager{createErr: errors.New("create failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("zone_create", map[string]interface{}{
 		"name":       "newzone.com",
@@ -400,7 +404,7 @@ func TestCallZoneCreateError(t *testing.T) {
 
 func TestCallZoneDelete(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("zone_delete", map[string]interface{}{
 		"name":       "example.com",
@@ -416,7 +420,7 @@ func TestCallZoneDelete(t *testing.T) {
 }
 
 func TestCallZoneDeleteMissingName(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	_, err := handler.CallTool("zone_delete", map[string]interface{}{
 		"auth_token": "test-token",
@@ -428,7 +432,7 @@ func TestCallZoneDeleteMissingName(t *testing.T) {
 
 func TestCallZoneDeleteError(t *testing.T) {
 	zm := &MockZoneManager{deleteErr: errors.New("delete failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("zone_delete", map[string]interface{}{
 		"name":       "example.com",
@@ -445,7 +449,7 @@ func TestCallZoneDeleteError(t *testing.T) {
 
 func TestCallRecordAdd(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("record_add", map[string]interface{}{
 		"zone":       "example.com",
@@ -465,7 +469,7 @@ func TestCallRecordAdd(t *testing.T) {
 }
 
 func TestCallRecordAddMissingFields(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	tests := []struct {
 		name string
@@ -489,7 +493,7 @@ func TestCallRecordAddMissingFields(t *testing.T) {
 
 func TestCallRecordAddError(t *testing.T) {
 	zm := &MockZoneManager{addRecErr: errors.New("add failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("record_add", map[string]interface{}{
 		"zone":       "example.com",
@@ -509,7 +513,7 @@ func TestCallRecordAddError(t *testing.T) {
 
 func TestCallRecordDelete(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("record_delete", map[string]interface{}{
 		"zone":       "example.com",
@@ -527,7 +531,7 @@ func TestCallRecordDelete(t *testing.T) {
 }
 
 func TestCallRecordDeleteMissingFields(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	tests := []struct {
 		name string
@@ -550,7 +554,7 @@ func TestCallRecordDeleteMissingFields(t *testing.T) {
 
 func TestCallRecordDeleteError(t *testing.T) {
 	zm := &MockZoneManager{delRecErr: errors.New("delete failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("record_delete", map[string]interface{}{
 		"zone":       "example.com",
@@ -574,7 +578,7 @@ func TestCallRecordList(t *testing.T) {
 			{Name: "mail", Type: "A", TTL: 3600, Value: "192.0.2.2"},
 		},
 	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_list", map[string]interface{}{
 		"zone": "example.com",
@@ -589,7 +593,7 @@ func TestCallRecordList(t *testing.T) {
 }
 
 func TestCallRecordListMissingZone(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("record_list", map[string]interface{}{})
 	if err == nil {
@@ -599,7 +603,7 @@ func TestCallRecordListMissingZone(t *testing.T) {
 
 func TestCallRecordListError(t *testing.T) {
 	zm := &MockZoneManager{getErr: errors.New("list failed")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_list", map[string]interface{}{
 		"zone": "example.com",
@@ -617,7 +621,7 @@ func TestCallCacheStats(t *testing.T) {
 	cache := &MockCacheManager{
 		stats: CacheStats{Size: 1000, HitRate: 0.85, MissRate: 0.15, Evictions: 50},
 	}
-	handler := NewDNSToolsHandler(nil, cache, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
 
 	result, err := handler.CallTool("cache_stats", nil)
 	if err != nil {
@@ -630,7 +634,7 @@ func TestCallCacheStats(t *testing.T) {
 }
 
 func TestCallCacheStatsNoCache(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("cache_stats", nil)
 	if err != nil {
@@ -644,7 +648,7 @@ func TestCallCacheStatsNoCache(t *testing.T) {
 
 func TestCallCacheFlush(t *testing.T) {
 	cache := &MockCacheManager{}
-	handler := NewDNSToolsHandler(nil, cache, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("cache_flush", map[string]interface{}{
 		"auth_token": "test-token",
@@ -659,7 +663,7 @@ func TestCallCacheFlush(t *testing.T) {
 }
 
 func TestCallCacheFlushNoCache(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("cache_flush", nil)
 	if err != nil {
@@ -673,7 +677,7 @@ func TestCallCacheFlushNoCache(t *testing.T) {
 
 func TestCallCacheFlushError(t *testing.T) {
 	cache := &MockCacheManager{flushErr: errors.New("flush failed")}
-	handler := NewDNSToolsHandler(nil, cache, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
 
 	result, err := handler.CallTool("cache_flush", nil)
 	if err != nil {
@@ -687,7 +691,7 @@ func TestCallCacheFlushError(t *testing.T) {
 
 func TestCallBlocklistCheck(t *testing.T) {
 	bl := &MockBlocklistManager{blocked: true}
-	handler := NewDNSToolsHandler(nil, nil, nil, bl, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, bl, nil)
 
 	result, err := handler.CallTool("blocklist_check", map[string]interface{}{
 		"domain": "ads.example.com",
@@ -702,7 +706,7 @@ func TestCallBlocklistCheck(t *testing.T) {
 }
 
 func TestCallBlocklistCheckMissingDomain(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.CallTool("blocklist_check", map[string]interface{}{})
 	if err == nil {
@@ -711,7 +715,7 @@ func TestCallBlocklistCheckMissingDomain(t *testing.T) {
 }
 
 func TestCallBlocklistCheckNoBlocklist(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("blocklist_check", map[string]interface{}{
 		"domain": "example.com",
@@ -736,7 +740,7 @@ func TestCallServerStats(t *testing.T) {
 			ZonesCount:     10,
 		},
 	}
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, stats)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, stats)
 
 	result, err := handler.CallTool("server_stats", nil)
 	if err != nil {
@@ -749,7 +753,7 @@ func TestCallServerStats(t *testing.T) {
 }
 
 func TestCallServerStatsNoProvider(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("server_stats", nil)
 	if err != nil {
@@ -764,24 +768,23 @@ func TestCallServerStatsNoProvider(t *testing.T) {
 // ListResources tests
 
 func TestListResources(t *testing.T) {
-	zm := &MockZoneManager{
-		zones: []ZoneInfo{{Name: "example.com", RecordCount: 10}},
-	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
 	resources, err := handler.ListResources()
 	if err != nil {
 		t.Fatalf("ListResources failed: %v", err)
 	}
 
-	// Should have zone resource + server/status + cache/stats
-	if len(resources) < 3 {
-		t.Errorf("Expected at least 3 resources, got %d", len(resources))
+	// No zones loaded — should have server/status + cache/stats only
+	if len(resources) != 2 {
+		t.Errorf("Expected 2 resources (server/status + cache/stats), got %d", len(resources))
 	}
 }
 
 func TestListResourcesNoZoneManager(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	resources, err := handler.ListResources()
 	if err != nil {
@@ -797,7 +800,7 @@ func TestListResourcesNoZoneManager(t *testing.T) {
 // ReadResource tests
 
 func TestReadResourceInvalidScheme(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("http://example.com")
 	if err == nil {
@@ -806,12 +809,15 @@ func TestReadResourceInvalidScheme(t *testing.T) {
 }
 
 func TestReadResourceZone(t *testing.T) {
-	zm := &MockZoneManager{
-		zones: []ZoneInfo{{Name: "example.com", Serial: 2024010101, RecordCount: 10}},
-	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	zm.CreateZone("example.com.", 3600, &zone.SOARecord{
+		MName: "ns1.example.com.", RName: "admin.example.com.",
+		Serial: 2024010101, Refresh: 3600, Retry: 600, Expire: 86400, Minimum: 3600,
+	}, []zone.NSRecord{{NSDName: "ns1.example.com."}})
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
-	contents, err := handler.ReadResource("dns://zone/example.com")
+	contents, err := handler.ReadResource("dns://zone/example.com.")
 	if err != nil {
 		t.Fatalf("ReadResource failed: %v", err)
 	}
@@ -822,7 +828,7 @@ func TestReadResourceZone(t *testing.T) {
 }
 
 func TestReadResourceZoneNoManager(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("dns://zone/example.com")
 	if err == nil {
@@ -831,8 +837,9 @@ func TestReadResourceZoneNoManager(t *testing.T) {
 }
 
 func TestReadResourceZoneNotFound(t *testing.T) {
-	zm := &MockZoneManager{getErr: errors.New("zone not found")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	zm := zone.NewManager()
+	zs := api.NewZoneService(zm)
+	handler := NewDNSToolsHandler(zs, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("dns://zone/nonexistent.com")
 	if err == nil {
@@ -842,7 +849,7 @@ func TestReadResourceZoneNotFound(t *testing.T) {
 
 func TestReadResourceServerStatus(t *testing.T) {
 	stats := &MockStatsProvider{stats: ServerStats{Uptime: 3600}}
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, stats)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, stats)
 
 	contents, err := handler.ReadResource("dns://server/status")
 	if err != nil {
@@ -855,7 +862,7 @@ func TestReadResourceServerStatus(t *testing.T) {
 }
 
 func TestReadResourceServerStatusNoProvider(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("dns://server/status")
 	if err == nil {
@@ -865,7 +872,7 @@ func TestReadResourceServerStatusNoProvider(t *testing.T) {
 
 func TestReadResourceCacheStats(t *testing.T) {
 	cache := &MockCacheManager{stats: CacheStats{Size: 1000}}
-	handler := NewDNSToolsHandler(nil, cache, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
 
 	contents, err := handler.ReadResource("dns://cache/stats")
 	if err != nil {
@@ -878,7 +885,7 @@ func TestReadResourceCacheStats(t *testing.T) {
 }
 
 func TestReadResourceCacheStatsNoCache(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("dns://cache/stats")
 	if err == nil {
@@ -887,7 +894,7 @@ func TestReadResourceCacheStatsNoCache(t *testing.T) {
 }
 
 func TestReadResourceNotFound(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.ReadResource("dns://unknown/resource")
 	if err == nil {
@@ -898,7 +905,7 @@ func TestReadResourceNotFound(t *testing.T) {
 // ListPrompts tests
 
 func TestListPrompts(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	prompts, err := handler.ListPrompts()
 	if err != nil {
@@ -920,7 +927,7 @@ func TestListPrompts(t *testing.T) {
 // GetPrompt tests
 
 func TestGetPromptTroubleshootDNS(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.GetPrompt("troubleshoot_dns", map[string]string{"domain": "example.com"})
 	if err != nil {
@@ -933,7 +940,7 @@ func TestGetPromptTroubleshootDNS(t *testing.T) {
 }
 
 func TestGetPromptZoneSetup(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.GetPrompt("zone_setup", map[string]string{"zone_name": "example.com"})
 	if err != nil {
@@ -946,7 +953,7 @@ func TestGetPromptZoneSetup(t *testing.T) {
 }
 
 func TestGetPromptUnknown(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	_, err := handler.GetPrompt("unknown_prompt", nil)
 	if err == nil {

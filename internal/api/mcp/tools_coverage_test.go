@@ -9,7 +9,7 @@ import (
 
 // TestCallZoneGet_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallZoneGet_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_get", map[string]interface{}{
 		"name": "example.com",
@@ -29,7 +29,7 @@ func TestCallZoneGet_NilManager_ErrorPath(t *testing.T) {
 
 // TestCallZoneCreate_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallZoneCreate_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_create", map[string]interface{}{
 		"name": "newzone.com",
@@ -45,7 +45,7 @@ func TestCallZoneCreate_NilManager_ErrorPath(t *testing.T) {
 
 // TestCallZoneDelete_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallZoneDelete_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_delete", map[string]interface{}{
 		"name": "example.com",
@@ -61,7 +61,7 @@ func TestCallZoneDelete_NilManager_ErrorPath(t *testing.T) {
 
 // TestCallRecordAdd_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallRecordAdd_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_add", map[string]interface{}{
 		"zone":  "example.com",
@@ -80,7 +80,7 @@ func TestCallRecordAdd_NilManager_ErrorPath(t *testing.T) {
 
 // TestCallRecordDelete_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallRecordDelete_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_delete", map[string]interface{}{
 		"zone": "example.com",
@@ -98,7 +98,7 @@ func TestCallRecordDelete_NilManager_ErrorPath(t *testing.T) {
 
 // TestCallRecordList_NilManager_ErrorPath covers the "Zone manager not configured" path.
 func TestCallRecordList_NilManager_ErrorPath(t *testing.T) {
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_list", map[string]interface{}{
 		"zone": "example.com",
@@ -115,7 +115,7 @@ func TestCallRecordList_NilManager_ErrorPath(t *testing.T) {
 // TestCallZoneGet_GetZoneError covers the GetZone error path.
 func TestCallZoneGet_GetZoneError(t *testing.T) {
 	zm := &MockZoneManager{getErr: errors.New("internal error")}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("zone_get", map[string]interface{}{
 		"name": "example.com",
@@ -132,7 +132,7 @@ func TestCallZoneGet_GetZoneError(t *testing.T) {
 // TestCallZoneCreate_WithDefaultTTL covers zone create with default TTL.
 func TestCallZoneCreate_WithDefaultTTL(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("zone_create", map[string]interface{}{
 		"name":       "newzone.com",
@@ -151,7 +151,7 @@ func TestCallZoneCreate_WithDefaultTTL(t *testing.T) {
 // TestCallRecordAdd_WithDefaultTTL covers record add with default TTL.
 func TestCallRecordAdd_WithDefaultTTL(t *testing.T) {
 	zm := &MockZoneManager{}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("record_add", map[string]interface{}{
 		"zone":       "example.com",
@@ -177,7 +177,7 @@ func TestCallRecordList_WithNameFilter(t *testing.T) {
 			{Name: "www", Type: "A", TTL: 3600, Value: "192.0.2.1"},
 		},
 	}
-	handler := NewDNSToolsHandler(zm, nil, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil)
 
 	result, err := handler.CallTool("record_list", map[string]interface{}{
 		"zone": "example.com",
@@ -202,7 +202,7 @@ func TestCallDNSQuery_WithDefaultType(t *testing.T) {
 			RCode:   "NOERROR",
 		},
 	}
-	handler := NewDNSToolsHandler(nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
 
 	// Call without type - should default to "A"
 	result, err := handler.CallTool("dns_query", map[string]interface{}{

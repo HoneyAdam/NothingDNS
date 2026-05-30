@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nothingdns/nothingdns/internal/api"
 	"github.com/nothingdns/nothingdns/internal/auth"
 )
 
@@ -16,6 +17,7 @@ type AuthProvider interface {
 
 // DNSToolsHandler implements the Handler interface for DNS operations
 type DNSToolsHandler struct {
+	zoneService   *api.ZoneService
 	zoneManager   ZoneManager
 	cache         CacheManager
 	dnsResolver   DNSResolver
@@ -24,10 +26,11 @@ type DNSToolsHandler struct {
 	authProvider  AuthProvider
 }
 
-// ZoneManager interface for zone operations
+// ZoneManager interface for zone mutating operations (create, delete,
+// record add/delete). Read operations (list, get) are handled by
+// ZoneService to ensure identical data and error handling across both
+// REST and MCP transports.
 type ZoneManager interface {
-	ListZones() ([]ZoneInfo, error)
-	GetZone(name string) (*ZoneInfo, error)
 	CreateZone(name string, opts ZoneOptions) error
 	DeleteZone(name string) error
 	AddRecord(zone, name, rtype, value string, ttl int) error
@@ -111,10 +114,15 @@ type ServerStats struct {
 	ZonesCount     int     `json:"zonesCount"`
 }
 
-// NewDNSToolsHandler creates a new DNS tools handler
-func NewDNSToolsHandler(zm ZoneManager, cache CacheManager, resolver DNSResolver, bl BlocklistManager, stats StatsProvider) *DNSToolsHandler {
+// NewDNSToolsHandler creates a new DNS tools handler.
+//
+// zoneService provides read-only zone operations (list, get) and is the
+// preferred path. zoneManager handlesMutating operations (create, delete,
+// add/delete record) that go directly to the manager.
+func NewDNSToolsHandler(zoneService *api.ZoneService, zoneManager ZoneManager, cache CacheManager, resolver DNSResolver, bl BlocklistManager, stats StatsProvider) *DNSToolsHandler {
 	return &DNSToolsHandler{
-		zoneManager:   zm,
+		zoneService:   zoneService,
+		zoneManager:   zoneManager,
 		cache:         cache,
 		dnsResolver:   resolver,
 		blocklist:     bl,
@@ -325,16 +333,11 @@ func (h *DNSToolsHandler) callDNSQuery(args map[string]interface{}) (*ToolResult
 }
 
 func (h *DNSToolsHandler) callZoneList() (*ToolResult, error) {
-	if h.zoneManager == nil {
-		return errorResult("Zone manager not configured"), nil
+	if h.zoneService == nil {
+		return errorResult("Zone service not configured"), nil
 	}
 
-	zones, err := h.zoneManager.ListZones()
-	if err != nil {
-		return nil, err
-	}
-
-	return jsonResult(zones), nil
+	return jsonResult(h.zoneService.ListZones()), nil
 }
 
 func (h *DNSToolsHandler) callZoneGet(args map[string]interface{}) (*ToolResult, error) {
@@ -343,13 +346,13 @@ func (h *DNSToolsHandler) callZoneGet(args map[string]interface{}) (*ToolResult,
 		return nil, fmt.Errorf("name is required")
 	}
 
-	if h.zoneManager == nil {
-		return errorResult("Zone manager not configured"), nil
+	if h.zoneService == nil {
+		return errorResult("Zone service not configured"), nil
 	}
 
-	zone, err := h.zoneManager.GetZone(name)
-	if err != nil {
-		return errorResult(fmt.Sprintf("Zone not found: %v", err)), nil
+	zone, ok := h.zoneService.GetZone(name)
+	if !ok {
+		return errorResult(fmt.Sprintf("Zone not found: %s", name)), nil
 	}
 
 	return jsonResult(zone), nil
@@ -529,17 +532,15 @@ func (h *DNSToolsHandler) callServerStats() (*ToolResult, error) {
 func (h *DNSToolsHandler) ListResources() ([]Resource, error) {
 	var resources []Resource
 
-	if h.zoneManager != nil {
-		zones, err := h.zoneManager.ListZones()
-		if err == nil {
-			for _, z := range zones {
-				resources = append(resources, Resource{
-					URI:         fmt.Sprintf("dns://zone/%s", z.Name),
-					Name:        fmt.Sprintf("Zone: %s", z.Name),
-					Description: fmt.Sprintf("DNS zone with %d records", z.RecordCount),
-					MimeType:    "application/json",
-				})
-			}
+	if h.zoneService != nil {
+		result := h.zoneService.ListZones()
+		for _, z := range result.Zones {
+			resources = append(resources, Resource{
+				URI:         fmt.Sprintf("dns://zone/%s", z.Name),
+				Name:        fmt.Sprintf("Zone: %s", z.Name),
+				Description: fmt.Sprintf("DNS zone with %d records", z.Records),
+				MimeType:    "application/json",
+			})
 		}
 	}
 
@@ -572,12 +573,12 @@ func (h *DNSToolsHandler) ReadResource(uri string) (*ResourceContents, error) {
 	switch {
 	case strings.HasPrefix(path, "zone/"):
 		zoneName := strings.TrimPrefix(path, "zone/")
-		if h.zoneManager == nil {
-			return nil, fmt.Errorf("zone manager not configured")
+		if h.zoneService == nil {
+			return nil, fmt.Errorf("zone service not configured")
 		}
-		zone, err := h.zoneManager.GetZone(zoneName)
-		if err != nil {
-			return nil, err
+		zone, ok := h.zoneService.GetZone(zoneName)
+		if !ok {
+			return nil, fmt.Errorf("zone not found: %s", zoneName)
 		}
 		data, err := json.MarshalIndent(zone, "", "  ")
 		if err != nil {
