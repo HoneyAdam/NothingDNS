@@ -202,7 +202,7 @@ func TestCallDNSQuery_WithDefaultType(t *testing.T) {
 			RCode:   "NOERROR",
 		},
 	}
-	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, resolver, nil)
 
 	// Call without type - should default to "A"
 	result, err := handler.CallTool("dns_query", map[string]interface{}{

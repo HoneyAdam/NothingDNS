@@ -17,13 +17,13 @@ type AuthProvider interface {
 
 // DNSToolsHandler implements the Handler interface for DNS operations
 type DNSToolsHandler struct {
-	zoneService   *api.ZoneService
-	zoneManager   ZoneManager
-	cache         CacheManager
-	dnsResolver   DNSResolver
-	blocklist     BlocklistManager
-	statsProvider StatsProvider
-	authProvider  AuthProvider
+	zoneService       *api.ZoneService
+	zoneManager       ZoneManager
+	cacheService      *api.CacheService
+	blocklistService  *api.BlocklistService
+	dnsResolver       DNSResolver
+	statsProvider     StatsProvider
+	authProvider      AuthProvider
 }
 
 // ZoneManager interface for zone mutating operations (create, delete,
@@ -40,21 +40,9 @@ type ZoneManager interface {
 	ExportZone(name string) ([]byte, error)
 }
 
-// CacheManager interface for cache operations
-type CacheManager interface {
-	GetStats() CacheStats
-	Flush() error
-}
-
 // DNSResolver interface for DNS resolution
 type DNSResolver interface {
 	Query(name, qtype string) (*QueryResult, error)
-}
-
-// BlocklistManager interface for blocklist operations
-type BlocklistManager interface {
-	IsBlocked(domain string) bool
-	Lists() []string
 }
 
 // StatsProvider interface for statistics
@@ -116,17 +104,25 @@ type ServerStats struct {
 
 // NewDNSToolsHandler creates a new DNS tools handler.
 //
-// zoneService provides read-only zone operations (list, get) and is the
-// preferred path. zoneManager handlesMutating operations (create, delete,
-// add/delete record) that go directly to the manager.
-func NewDNSToolsHandler(zoneService *api.ZoneService, zoneManager ZoneManager, cache CacheManager, resolver DNSResolver, bl BlocklistManager, stats StatsProvider) *DNSToolsHandler {
+// zoneService provides read-only zone operations (list, get). cacheService
+// and blocklistService provide read-only stats/check operations. zoneManager
+// handles mutating operations (create, delete, add/delete record) that go
+// directly to the manager.
+func NewDNSToolsHandler(
+	zoneService *api.ZoneService,
+	zoneManager ZoneManager,
+	cacheService *api.CacheService,
+	blocklistService *api.BlocklistService,
+	dnsResolver DNSResolver,
+	statsProvider StatsProvider,
+) *DNSToolsHandler {
 	return &DNSToolsHandler{
-		zoneService:   zoneService,
-		zoneManager:   zoneManager,
-		cache:         cache,
-		dnsResolver:   resolver,
-		blocklist:     bl,
-		statsProvider: stats,
+		zoneService:       zoneService,
+		zoneManager:       zoneManager,
+		cacheService:      cacheService,
+	blocklistService: blocklistService,
+		dnsResolver:       dnsResolver,
+		statsProvider:     statsProvider,
 	}
 }
 
@@ -476,12 +472,11 @@ func (h *DNSToolsHandler) callRecordList(args map[string]interface{}) (*ToolResu
 }
 
 func (h *DNSToolsHandler) callCacheStats() (*ToolResult, error) {
-	if h.cache == nil {
+	if h.cacheService == nil || !h.cacheService.Available() {
 		return errorResult("Cache not configured"), nil
 	}
 
-	stats := h.cache.GetStats()
-	return jsonResult(stats), nil
+	return jsonResult(h.cacheService.GetStats()), nil
 }
 
 func (h *DNSToolsHandler) callCacheFlush(args map[string]interface{}) (*ToolResult, error) {
@@ -489,11 +484,11 @@ func (h *DNSToolsHandler) callCacheFlush(args map[string]interface{}) (*ToolResu
 		return errorResult(err.Error()), nil
 	}
 
-	if h.cache == nil {
+	if h.cacheService == nil || !h.cacheService.Available() {
 		return errorResult("Cache not configured"), nil
 	}
 
-	if err := h.cache.Flush(); err != nil {
+	if err := h.cacheService.Flush(); err != nil {
 		return errorResult(fmt.Sprintf("Failed to flush cache: %v", err)), nil
 	}
 
@@ -506,11 +501,11 @@ func (h *DNSToolsHandler) callBlocklistCheck(args map[string]interface{}) (*Tool
 		return nil, fmt.Errorf("domain is required")
 	}
 
-	if h.blocklist == nil {
+	if h.blocklistService == nil || !h.blocklistService.Available() {
 		return errorResult("Blocklist not configured"), nil
 	}
 
-	blocked := h.blocklist.IsBlocked(domain)
+	blocked := h.blocklistService.IsBlocked(domain)
 	result := &BlocklistCheckResult{
 		Domain:  domain,
 		Blocked: blocked,
@@ -606,10 +601,10 @@ func (h *DNSToolsHandler) ReadResource(uri string) (*ResourceContents, error) {
 		}, nil
 
 	case path == "cache/stats":
-		if h.cache == nil {
+		if h.cacheService == nil || !h.cacheService.Available() {
 			return nil, fmt.Errorf("cache not configured")
 		}
-		stats := h.cache.GetStats()
+		stats := h.cacheService.GetStats()
 		data, err := json.MarshalIndent(stats, "", "  ")
 		if err != nil {
 			return nil, fmt.Errorf("marshaling cache stats: %w", err)

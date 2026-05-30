@@ -2294,6 +2294,37 @@ func TestApplyRPZRule_UnknownAction(t *testing.T) {
 	}
 }
 
+// --- applyRPZResponsePolicy tests ---
+
+func TestApplyRPZResponsePolicy_NoEngine(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.0.0.1", "udp")
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	resp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			{Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+		},
+	}
+	if h.applyRPZResponsePolicy(w, msg, msg.Questions[0], resp, "example.com.") {
+		t.Error("expected false when no RPZ engine")
+	}
+}
+
+func TestApplyRPZResponsePolicy_NoMatch(t *testing.T) {
+	h := newTestHandler()
+	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	w := newCaptureWriter("10.0.0.1", "udp")
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	resp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			{Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+		},
+	}
+	if h.applyRPZResponsePolicy(w, msg, msg.Questions[0], resp, "example.com.") {
+		t.Error("expected false when no RPZ rule matches")
+	}
+}
+
 // --- checkRPZResponseIP tests ---
 
 func TestCheckRPZResponseIP_NoEngine(t *testing.T) {

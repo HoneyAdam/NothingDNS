@@ -6,6 +6,7 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/api"
 	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
@@ -101,6 +102,17 @@ func (m *MockCacheManager) Flush() error {
 	return m.flushErr
 }
 
+// mockCacheService is a *api.CacheService-compatible type for testing.
+type mockCacheService struct{}
+
+func (m *mockCacheService) GetStats() *api.CacheStatsResponse {
+	return &api.CacheStatsResponse{Size: 1000, HitRatio: 0.85}
+}
+
+func (m *mockCacheService) Flush() error          { return nil }
+func (m *mockCacheService) Available() bool     { return true }
+func (m *mockCacheService) Cache() *cache.Cache { return nil }
+
 type MockDNSResolver struct {
 	result QueryResult
 	err    error
@@ -149,12 +161,11 @@ func (m *MockAuthProvider) HasRole(username string, required auth.Role) bool {
 
 func TestNewDNSToolsHandler(t *testing.T) {
 	zm := &MockZoneManager{}
-	cache := &MockCacheManager{}
 	resolver := &MockDNSResolver{}
-	bl := &MockBlocklistManager{}
+	_ = &MockBlocklistManager{}
 	stats := &MockStatsProvider{}
 
-	handler := NewDNSToolsHandler(nil, zm, cache, resolver, bl, stats)
+	handler := NewDNSToolsHandler(nil, zm, api.NewCacheService(nil), api.NewBlocklistService(nil), resolver, stats)
 	if handler == nil {
 		t.Fatal("Expected non-nil handler")
 	}
@@ -209,7 +220,7 @@ func TestCallDNSQuery(t *testing.T) {
 			Time:    1000000,
 		},
 	}
-	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, resolver, nil)
 
 	result, err := handler.CallTool("dns_query", map[string]interface{}{
 		"name": "example.com",
@@ -254,7 +265,7 @@ func TestCallDNSQueryNoResolver(t *testing.T) {
 
 func TestCallDNSQueryError(t *testing.T) {
 	resolver := &MockDNSResolver{err: errors.New("query failed")}
-	handler := NewDNSToolsHandler(nil, nil, nil, resolver, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, nil, resolver, nil)
 
 	result, err := handler.CallTool("dns_query", map[string]interface{}{
 		"name": "example.com",
@@ -618,10 +629,10 @@ func TestCallRecordListError(t *testing.T) {
 }
 
 func TestCallCacheStats(t *testing.T) {
-	cache := &MockCacheManager{
+	_ = &MockCacheManager{
 		stats: CacheStats{Size: 1000, HitRate: 0.85, MissRate: 0.15, Evictions: 50},
 	}
-	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil)
 
 	result, err := handler.CallTool("cache_stats", nil)
 	if err != nil {
@@ -647,8 +658,8 @@ func TestCallCacheStatsNoCache(t *testing.T) {
 }
 
 func TestCallCacheFlush(t *testing.T) {
-	cache := &MockCacheManager{}
-	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil).WithAuth(&MockAuthProvider{})
+	_ = &MockCacheManager{}
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil).WithAuth(&MockAuthProvider{})
 
 	result, err := handler.CallTool("cache_flush", map[string]interface{}{
 		"auth_token": "test-token",
@@ -677,7 +688,8 @@ func TestCallCacheFlushNoCache(t *testing.T) {
 
 func TestCallCacheFlushError(t *testing.T) {
 	cache := &MockCacheManager{flushErr: errors.New("flush failed")}
-	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
+	_ = cache
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil)
 
 	result, err := handler.CallTool("cache_flush", nil)
 	if err != nil {
@@ -690,8 +702,7 @@ func TestCallCacheFlushError(t *testing.T) {
 }
 
 func TestCallBlocklistCheck(t *testing.T) {
-	bl := &MockBlocklistManager{blocked: true}
-	handler := NewDNSToolsHandler(nil, nil, nil, nil, bl, nil)
+	handler := NewDNSToolsHandler(nil, nil, nil, api.NewBlocklistService(nil), nil, nil)
 
 	result, err := handler.CallTool("blocklist_check", map[string]interface{}{
 		"domain": "ads.example.com",
@@ -871,8 +882,8 @@ func TestReadResourceServerStatusNoProvider(t *testing.T) {
 }
 
 func TestReadResourceCacheStats(t *testing.T) {
-	cache := &MockCacheManager{stats: CacheStats{Size: 1000}}
-	handler := NewDNSToolsHandler(nil, nil, cache, nil, nil, nil)
+	_ = &MockCacheManager{stats: CacheStats{Size: 1000}}
+	handler := NewDNSToolsHandler(nil, nil, api.NewCacheService(nil), nil, nil, nil)
 
 	contents, err := handler.ReadResource("dns://cache/stats")
 	if err != nil {

@@ -436,29 +436,9 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 			targetAnswers := h.resolveCNAMETarget(w, r, q, result.targetName, qtype)
 			resp := h.buildCNAMEResponse(r, result.cnameRecords, targetAnswers)
 
-			// Check RPZ response IP policy on the resolved target
-			if h.rpzEngine != nil {
-				respIPs := extractResponseIPs(resp)
-				if len(respIPs) > 0 {
-					if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
-						h.logger.Debugf("RPZ response IP match for CNAME target %s (policy: %s)", result.targetName, rule.PolicyName)
-						if h.applyRPZRule(w, r, q, rule) {
-							return
-						}
-					}
-				}
-			}
-
-			// Check RPZ NSDNAME policy on CNAME target response authority section
-			if h.rpzEngine != nil {
-				for _, nsName := range extractNSNames(resp) {
-					if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
-						h.logger.Debugf("RPZ NSDNAME match for CNAME target %s (policy: %s)", nsName, rule.PolicyName)
-						if h.applyRPZRule(w, r, q, rule) {
-							return
-						}
-					}
-				}
+			// Check RPZ response IP + NSDNAME policy on resolved target
+			if h.applyRPZResponsePolicy(w, r, q, resp, result.targetName) {
+				return
 			}
 
 			if h.metrics != nil {
@@ -515,29 +495,9 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		// Copy query ID from original request
 		resp.Header.ID = r.Header.ID
 
-		// Check RPZ response IP policy
-		if h.rpzEngine != nil {
-			respIPs := extractResponseIPs(resp)
-			if len(respIPs) > 0 {
-				if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
-					h.logger.Debugf("RPZ response IP match for %s (policy: %s)", qname, rule.PolicyName)
-					if h.applyRPZRule(w, r, q, rule) {
-						return
-					}
-				}
-			}
-		}
-
-		// Check RPZ NSDNAME policy (TriggerNSDNAME): check NS names in authority section
-		if h.rpzEngine != nil {
-			for _, nsName := range extractNSNames(resp) {
-				if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
-					h.logger.Debugf("RPZ NSDNAME match for %s (policy: %s)", nsName, rule.PolicyName)
-					if h.applyRPZRule(w, r, q, rule) {
-						return
-					}
-				}
-			}
+		// Check RPZ response IP + NSDNAME policy on recursive response
+		if h.applyRPZResponsePolicy(w, r, q, resp, qname) {
+			return
 		}
 
 		// DNS64: synthesize AAAA from A if the AAAA response is empty
@@ -647,29 +607,9 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 			}
 		}
 
-		// Check RPZ response IP policy
-		if h.rpzEngine != nil {
-			respIPs := extractResponseIPs(resp)
-			if len(respIPs) > 0 {
-				if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
-					h.logger.Debugf("RPZ response IP match for %s (policy: %s)", qname, rule.PolicyName)
-					if h.applyRPZRule(w, r, q, rule) {
-						return
-					}
-				}
-			}
-		}
-
-		// Check RPZ NSDNAME policy (TriggerNSDNAME): check NS names in authority section
-		if h.rpzEngine != nil {
-			for _, nsName := range extractNSNames(resp) {
-				if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
-					h.logger.Debugf("RPZ NSDNAME match for %s (policy: %s)", nsName, rule.PolicyName)
-					if h.applyRPZRule(w, r, q, rule) {
-						return
-					}
-				}
-			}
+		// Check RPZ response IP + NSDNAME policy on recursive response
+		if h.applyRPZResponsePolicy(w, r, q, resp, qname) {
+			return
 		}
 
 		// DNS64: synthesize AAAA from A if the AAAA response is empty
@@ -806,6 +746,33 @@ func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protoc
 	h.logger.Debugf("DNS64: synthesized %d AAAA records for %s", len(synthesized.Answers), qname)
 	reply(w, r, synthesized)
 	return true
+}
+
+// applyRPZResponsePolicy applies RPZ response-IP and NSDNAME policies to resp.
+// Returns true if RPZ triggered (caller should return); false to continue.
+// This consolidates the 3× duplicated RPZ response-check blocks in ServeDNS.
+func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) bool {
+	if h.rpzEngine == nil {
+		return false
+	}
+	respIPs := extractResponseIPs(resp)
+	if len(respIPs) > 0 {
+		if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
+			h.logger.Debugf("RPZ response IP match for %s (policy: %s)", label, rule.PolicyName)
+			if h.applyRPZRule(w, r, q, rule) {
+				return true
+			}
+		}
+	}
+	for _, nsName := range extractNSNames(resp) {
+		if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
+			h.logger.Debugf("RPZ NSDNAME match for %s (policy: %s)", nsName, rule.PolicyName)
+			if h.applyRPZRule(w, r, q, rule) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkRPZResponseIP checks a DNS response against RPZ response-IP policy.
