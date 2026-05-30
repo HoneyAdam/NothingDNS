@@ -17,14 +17,14 @@ type AuthProvider interface {
 
 // DNSToolsHandler implements the Handler interface for DNS operations
 type DNSToolsHandler struct {
-	zoneService       *api.ZoneService
-	recordService     *api.RecordService
-	zoneManager       ZoneManager
-	cacheService      *api.CacheService
-	blocklistService  *api.BlocklistService
-	dnsResolver       DNSResolver
-	statsProvider     StatsProvider
-	authProvider      AuthProvider
+	zoneService      *api.ZoneService
+	recordService    *api.RecordService
+	zoneManager      ZoneManager
+	cacheService     *api.CacheService
+	blocklistService *api.BlocklistService
+	dnsResolver      DNSResolver
+	statsProvider    StatsProvider
+	authProvider     AuthProvider
 }
 
 // ZoneManager interface for zone mutating operations (create, delete,
@@ -118,12 +118,12 @@ func NewDNSToolsHandler(
 	statsProvider StatsProvider,
 ) *DNSToolsHandler {
 	return &DNSToolsHandler{
-		zoneService:       zoneService,
-		zoneManager:       zoneManager,
-		cacheService:      cacheService,
-		blocklistService:  blocklistService,
-		dnsResolver:       dnsResolver,
-		statsProvider:     statsProvider,
+		zoneService:      zoneService,
+		zoneManager:      zoneManager,
+		cacheService:     cacheService,
+		blocklistService: blocklistService,
+		dnsResolver:      dnsResolver,
+		statsProvider:    statsProvider,
 	}
 }
 

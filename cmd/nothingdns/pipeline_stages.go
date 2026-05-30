@@ -564,10 +564,7 @@ func cookieStage(h *integratedHandler) Stage {
 					optData.AddOption(protocol.OptionCodeCookie, cookieData)
 				}
 			}
-			if _, err := q.currentWriter.Write(resp); err != nil {
-				// Can't use h.logger here since we don't have a format string helper convenient
-				// (would need to import fmt for this one-off case)
-			}
+			_, _ = q.currentWriter.Write(resp)
 			return true, nil
 		}
 		if cookieData != nil {

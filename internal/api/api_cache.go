@@ -37,7 +37,10 @@ func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.cacheService.Flush()
+	if err := s.cacheService.Flush(); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Cache flush failed: "+err.Error())
+		return
+	}
 	s.writeJSON(w, http.StatusOK, &MessageResponse{
 		Message: "Cache flushed",
 	})

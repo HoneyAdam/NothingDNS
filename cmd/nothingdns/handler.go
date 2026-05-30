@@ -93,7 +93,6 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 	h.pipeline.ServeDNS(h, w, r)
 }
 
-
 // tryDNS64Synthesis checks whether DNS64 synthesis is needed for an AAAA query
 // that received no AAAA answers. If synthesis is appropriate, it re-queries for
 // A records via the same upstream path and returns a synthesized AAAA response.

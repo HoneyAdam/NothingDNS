@@ -109,7 +109,7 @@ func (m *mockCacheService) GetStats() *api.CacheStatsResponse {
 	return &api.CacheStatsResponse{Size: 1000, HitRatio: 0.85}
 }
 
-func (m *mockCacheService) Flush() error          { return nil }
+func (m *mockCacheService) Flush() error        { return nil }
 func (m *mockCacheService) Available() bool     { return true }
 func (m *mockCacheService) Cache() *cache.Cache { return nil }
 

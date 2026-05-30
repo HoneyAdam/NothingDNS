@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"net"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/audit"
@@ -18,17 +17,14 @@ import (
 // query holds all derived state for a DNS request.
 // Created once at the top of ServeDNS and passed through every stage.
 type query struct {
-	reqID    string
-	start    time.Time
+	reqID string
+	start time.Time
 
 	// Parsed from the incoming message
 	msg   *protocol.Message
 	q     *protocol.Question // first question; never nil after validation stage
 	qname string
 	qtype uint16
-
-	// Client context (populated early, used throughout)
-	clientIP net.IP
 
 	// DO bit for cache key (RFC 8914 §4.6)
 	doBit bool
@@ -42,9 +38,8 @@ type query struct {
 	cacheHit   bool   // set by cache stage
 
 	// Response state (written by final stages)
-	rcode    uint8  // written by stages that send a response
-	rcodeSet bool   // true once rcode has been set
-	resp     *protocol.Message
+	rcode    uint8 // written by stages that send a response
+	rcodeSet bool  // true once rcode has been set
 
 	// Tracing (setup by setupStage, ended in defer)
 	span *otel.Span
