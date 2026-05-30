@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/auth"
@@ -72,6 +73,7 @@ type Server struct {
 	tracer         *otel.Tracer  // OpenTelemetry tracing
 	stopCh         chan struct{} // Channel to signal shutdown
 	stopOnce       sync.Once     // Ensure Stop is idempotent
+	rateLimitWg    sync.WaitGroup // Tracks rateLimitCleanupLoop goroutine
 	bootstrapMu    sync.Mutex    // Serialize bootstrap to prevent TOCTOU race
 
 	// Goroutine leak detection baseline
@@ -529,6 +531,7 @@ func (s *Server) Start() error {
 
 	// Start rate limiter cleanup goroutine
 	s.stopCh = make(chan struct{})
+	s.rateLimitWg.Add(1)
 	go s.rateLimitCleanupLoop()
 
 	mux := http.NewServeMux()
@@ -704,6 +707,9 @@ func (s *Server) Stop() error {
 		}
 	})
 
+	// Wait for the rate limit cleanup goroutine to exit.
+	s.rateLimitWg.Wait()
+
 	if s.httpServer == nil {
 		return nil
 	}
@@ -716,7 +722,12 @@ func (s *Server) Stop() error {
 
 // rateLimitCleanupLoop periodically cleans up stale entries from rate limiters.
 func (s *Server) rateLimitCleanupLoop() {
-	ticker := time.NewTicker(1 * time.Minute)
+	defer s.rateLimitWg.Done() // Signal that we've exited
+	interval := 1 * time.Minute
+	if testing.Short() {
+		interval = 10 * time.Millisecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

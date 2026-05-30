@@ -202,7 +202,7 @@ func TestAPIRateLimitAppliesToUnauthenticatedRequests(t *testing.T) {
 		// Route every simulated request from the same source IP.
 		req.RemoteAddr = "203.0.113.10:40000"
 		rec := httptest.NewRecorder()
-		server.authMiddleware(testHandler).ServeHTTP(rec, req)
+		server.rateLimitMiddleware(server.authMiddleware(testHandler)).ServeHTTP(rec, req)
 		lastStatus = rec.Code
 	}
 

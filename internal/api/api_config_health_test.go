@@ -351,7 +351,9 @@ func TestHandleConfigLogging_AllLevels(t *testing.T) {
 func TestHandleConfigRRL_Success(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 5, Burst: 10})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 5, Burst: 10})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	adminUser, _ := store.GetUser("admin")
 	body, _ := json.Marshal(map[string]any{"enabled": true, "rate": 10.0, "burst": 20})
@@ -370,7 +372,9 @@ func TestHandleConfigRRL_Success(t *testing.T) {
 func TestHandleConfigRRL_WrongMethod(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/rrl", nil)
 	rec := httptest.NewRecorder()
@@ -403,7 +407,9 @@ func TestHandleConfigRRL_NoRateLimiter(t *testing.T) {
 func TestHandleConfigRRL_InvalidJSON(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	adminUser, _ := store.GetUser("admin")
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config/rrl", bytes.NewReader([]byte("bad")))
