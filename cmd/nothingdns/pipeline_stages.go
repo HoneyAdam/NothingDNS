@@ -610,6 +610,5 @@ func transferStage(h *integratedHandler) Stage {
 			return true, nil
 		}
 		return false, nil
-}
-
+	}
 }
