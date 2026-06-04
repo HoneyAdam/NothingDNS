@@ -23,9 +23,25 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := &DashboardStatsResponse{}
 
+	// Real server-wide counters (uptime, total/blocked queries, query rate,
+	// upstream latency) come from the metrics collector. Previously these
+	// fields were never set, so the dashboard showed permanent zeros.
+	if s.metrics != nil {
+		snap := s.metrics.Snapshot()
+		resp.Uptime = int(snap.UptimeSeconds)
+		resp.QueriesTotal = snap.QueriesTotal
+		resp.QueriesPerSec = snap.QueriesPerSec
+		resp.BlockedQueries = snap.BlockedQueries
+		resp.UpstreamLatency = snap.AvgUpstreamLatency
+	}
+
 	if s.cache != nil {
 		cs := s.cache.Stats()
-		resp.QueriesTotal = cs.Hits + cs.Misses
+		// Fall back to cache hits+misses for the total only when metrics are
+		// disabled, so the card is never blank.
+		if resp.QueriesTotal == 0 {
+			resp.QueriesTotal = cs.Hits + cs.Misses
+		}
 		total := float64(cs.Hits + cs.Misses)
 		if total > 0 {
 			resp.CacheHitRate = float64(cs.Hits) / total * 100
@@ -108,8 +124,16 @@ func (s *Server) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Optional case-insensitive domain substring filter, applied server-side
+	// across the full query log (not just the current page).
+	filter := strings.TrimSpace(r.URL.Query().Get("q"))
+	const maxFilterLen = 253 // max DNS name length
+	if len(filter) > maxFilterLen {
+		filter = filter[:maxFilterLen]
+	}
+
 	stats := s.dashboardServer.GetStats()
-	queries, total := stats.GetRecentQueries(offset, limit)
+	queries, total := stats.GetRecentQueriesFiltered(offset, limit, filter)
 
 	// Redact client IPs for non-admin operators (LOW-010)
 	isAdmin := hasRole(r.Context(), nil, auth.RoleAdmin)

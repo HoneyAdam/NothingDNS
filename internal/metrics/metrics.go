@@ -614,6 +614,65 @@ func (m *MetricsCollector) GetHistory() MetricsHistoryResponse {
 		Count:       count,
 	}
 }
+// DashboardSnapshot is a point-in-time aggregate of the collector's counters,
+// used to populate the dashboard stats endpoint with real values instead of
+// the zeros it returned before (the fields below were never wired up).
+type DashboardSnapshot struct {
+	UptimeSeconds      int64
+	QueriesTotal       uint64
+	BlockedQueries     uint64
+	QueriesPerSec      float64
+	AvgUpstreamLatency int64 // milliseconds, most recent 1-minute history sample
+}
+
+// Snapshot returns the current aggregate counters for the dashboard.
+func (m *MetricsCollector) Snapshot() DashboardSnapshot {
+	var qtotal uint64
+	m.mu.RLock()
+	for _, v := range m.queriesTotal {
+		qtotal += atomic.LoadUint64(v)
+	}
+	m.mu.RUnlock()
+
+	secs := int64(time.Since(m.startTime).Seconds())
+	blocked := atomic.LoadUint64(&m.blocklistBlocks)
+
+	// Recent query rate: prefer the delta between the two most recent history
+	// samples (≈1-minute resolution). historyQueries holds the cumulative total
+	// at each snapshot, so (newest-prev)/Δt is the recent per-second rate.
+	var qps float64
+	var latency int64
+	m.historyMu.RLock()
+	if m.historyCount >= 2 {
+		newest := (m.historyIndex - 1 + m.historySize) % m.historySize
+		prev := (m.historyIndex - 2 + m.historySize) % m.historySize
+		dq := float64(m.historyQueries[newest] - m.historyQueries[prev])
+		dt := float64(m.historyTimestamps[newest] - m.historyTimestamps[prev])
+		if dt > 0 && dq >= 0 {
+			qps = dq / dt
+		}
+	}
+	if m.historyCount >= 1 {
+		newest := (m.historyIndex - 1 + m.historySize) % m.historySize
+		latency = m.historyUpstreamMs[newest]
+	}
+	m.historyMu.RUnlock()
+
+	// Fall back to the lifetime average until at least two history samples
+	// exist (the ring is populated once per minute).
+	if qps == 0 && secs > 0 {
+		qps = float64(qtotal) / float64(secs)
+	}
+
+	return DashboardSnapshot{
+		UptimeSeconds:      secs,
+		QueriesTotal:       qtotal,
+		BlockedQueries:     blocked,
+		QueriesPerSec:      qps,
+		AvgUpstreamLatency: latency,
+	}
+}
+
 func (m *MetricsCollector) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
