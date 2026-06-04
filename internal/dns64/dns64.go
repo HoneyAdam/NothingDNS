@@ -287,6 +287,12 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 		}
 
 		ipv4 := net.IP(aData.Address[:])
+		// RFC 6147 §5.1.4: never synthesize for an A record whose address is in
+		// a configured exclusion range. The exclusion list was configurable but
+		// never consulted, so every A record got synthesized regardless.
+		if s.IsExcluded(ipv4) {
+			continue
+		}
 		synthesized := s.SynthesizeAAAA(ipv4)
 		if synthesized == nil {
 			continue
