@@ -103,8 +103,13 @@ func rpzClientStage(h *integratedHandler) Stage {
 		clientIP := w.ClientInfo().IP()
 		if h.rpzEngine != nil && clientIP != nil {
 			if rule := h.rpzEngine.ClientIPPolicy(clientIP); rule != nil {
-				h.applyRPZRule(w, q.msg, q.q, rule)
-				return true, nil
+				// applyRPZRule returns false for PASSTHRU (whitelist) and writes
+				// no response — the query must then CONTINUE through the pipeline.
+				// The previous unconditional `return true` turned a client-IP
+				// passthru rule into a silent drop. Mirror rpzQnameStage.
+				if h.applyRPZRule(w, q.msg, q.q, rule) {
+					return true, nil
+				}
 			}
 		}
 		return false, nil
