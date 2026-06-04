@@ -1219,11 +1219,14 @@ func TestCanonicalName(t *testing.T) {
 		input string
 		want  []byte
 	}{
-		// canonicalName reverses labels: TLD first, then subdomain, then root
-		{"example.com.", []byte{3, 'c', 'o', 'm', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0}},
-		{"www.example.com.", []byte{3, 'c', 'o', 'm', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'w', 'w', 'w', 0}},
-		// "." after TrimSuffix becomes "", Split gives [""], result is [0, 0] (empty label + root)
-		{".", []byte{0, 0}},
+		// Canonical wire form: owner-first, length-prefixed labels, lowercased,
+		// single trailing root label (RFC 1035 §3.1 / RFC 8976). The previous
+		// implementation reversed the labels (TLD-first), which never matched a
+		// real ZONEMD digest.
+		{"example.com.", []byte{7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}},
+		{"www.example.com.", []byte{3, 'w', 'w', 'w', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}},
+		// "." is the root: a single zero (the prior code wrongly produced [0,0]).
+		{".", []byte{0}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

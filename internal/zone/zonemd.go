@@ -9,6 +9,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 // ZONEMD represents a Message Digest for DNS Zones per RFC 8976.
@@ -209,22 +211,18 @@ func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]by
 	return result
 }
 
-// canonicalName returns the canonical wire format of a domain name.
+// canonicalName returns the canonical (owner-first, length-prefixed, lowercased)
+// wire format of a domain name per RFC 1035 §3.1 / RFC 8976, by delegating to
+// the shared protocol.CanonicalWireName encoder.
+//
+// The previous local implementation emitted labels in REVERSE order
+// (TLD-first, e.g. "com.example.www" instead of the wire-correct
+// "3www7example3com0"). The whole digest was computed over that non-canonical
+// form, so ComputeZoneMD/Verify were internally self-consistent but the digest
+// could never match one produced by BIND/Knot or carried in a transferred
+// ZONEMD RR — defeating the point of ZONEMD (cross-implementation integrity).
 func canonicalName(name string) []byte {
-	// Remove trailing dot if present
-	name = strings.TrimSuffix(name, ".")
-
-	var result []byte
-	labels := strings.Split(name, ".")
-	// Process from TLD to subdomain (reverse order for canonical)
-	for i := len(labels) - 1; i >= 0; i-- {
-		label := strings.ToLower(labels[i])
-		result = append(result, byte(len(label)))
-		result = append(result, label...)
-	}
-	result = append(result, 0) // Root label
-
-	return result
+	return protocol.CanonicalWireName(name)
 }
 
 // serializeSOA serializes SOA record data in canonical format.
