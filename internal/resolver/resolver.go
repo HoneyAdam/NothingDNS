@@ -1004,6 +1004,13 @@ func (t *StdioTransport) queryUDP(ctx context.Context, msg *protocol.Message, ad
 	if resp.Header.ID != msg.Header.ID {
 		return nil, fmt.Errorf("resolver: UDP ID mismatch")
 	}
+	// The response must answer the question we asked. Matching only the
+	// transaction ID lets a buggy/malicious nameserver in the delegation chain
+	// return data for a DIFFERENT name/type that would be cached under the
+	// queried key (cache-poisoning defense-in-depth).
+	if !questionMatches(msg, resp) {
+		return nil, fmt.Errorf("resolver: UDP response question mismatch")
+	}
 
 	return resp, nil
 }
@@ -1055,8 +1062,28 @@ func (t *StdioTransport) queryTCP(ctx context.Context, msg *protocol.Message, ad
 	if resp.Header.ID != msg.Header.ID {
 		return nil, fmt.Errorf("resolver: TCP ID mismatch")
 	}
+	if !questionMatches(msg, resp) {
+		return nil, fmt.Errorf("resolver: TCP response question mismatch")
+	}
 
 	return resp, nil
+}
+
+// questionMatches reports whether the response echoes the query's question
+// (name case-insensitively per RFC 4343, type and class exactly). A response
+// that doesn't answer the asked question must be dropped — see the call sites.
+func questionMatches(query, resp *protocol.Message) bool {
+	if len(query.Questions) == 0 || len(resp.Questions) == 0 {
+		return false
+	}
+	q, a := query.Questions[0], resp.Questions[0]
+	if q.QType != a.QType || q.QClass != a.QClass {
+		return false
+	}
+	return strings.EqualFold(
+		strings.TrimSuffix(q.Name.String(), "."),
+		strings.TrimSuffix(a.Name.String(), "."),
+	)
 }
 
 // readFull reads exactly len(buf) bytes. Uses io.ReadFull equivalent.
