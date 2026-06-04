@@ -527,7 +527,7 @@ func TestBuildChain_NilResolver(t *testing.T) {
 		Algorithm: protocol.AlgorithmRSASHA256,
 	}
 
-	_, err := v.buildChain(context.Background(), anchor, []string{})
+	_, _, err := v.buildChain(context.Background(), anchor, []string{})
 	if err == nil {
 		t.Error("expected error when resolver is nil")
 	}

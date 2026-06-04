@@ -193,13 +193,26 @@ func (v *Validator) ValidateResponse(ctx context.Context, msg *protocol.Message,
 	}
 
 	// Build validation chain from anchor to query name
-	chain, err := v.buildChain(ctx, anchor, remaining)
+	chain, insecure, err := v.buildChain(ctx, anchor, remaining)
 	if err != nil {
 		return ValidationBogus, fmt.Errorf("building validation chain: %w", err)
 	}
 
-	// Validate the answer against THIS message's signatures. Always.
-	// Do not cache the per-message outcome — see comment above.
+	// The chain terminated at a proven-unsigned delegation: the query name is
+	// in an Insecure subtree, so its records legitimately carry no signatures.
+	// Return Insecure (not Secure — that would set AD on unsigned data, and not
+	// Bogus — that would break every unsigned domain under a signed parent).
+	if insecure {
+		result := ValidationInsecure
+		if v.validationCache != nil && qtype != 0 {
+			v.validationCache.Set(queryName, qtype, result)
+		}
+		return result, nil
+	}
+
+	// Chain is fully signed down to the query name's zone. Validate the answer
+	// against THIS message's signatures. Always. Do not cache the per-message
+	// outcome — see comment above.
 	result := v.validateMessage(ctx, msg, queryName, chain)
 	return result, nil
 }
@@ -214,8 +227,19 @@ type chainLink struct {
 }
 
 // buildChain builds a validation chain from trust anchor to target.
-func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaining []string) ([]*chainLink, error) {
+//
+// The returned `insecure` flag is true when the chain terminates at a
+// PROVEN-unsigned delegation (empty DS with an authenticated denial of
+// existence) before reaching the query name's zone — i.e. the query name lives
+// in an Insecure subtree (RFC 4035 §4.3). Callers MUST treat that as
+// ValidationInsecure and MUST NOT require per-RRset signatures below the cut;
+// doing so would wrongly mark every legitimately-unsigned domain (the bulk of
+// the DNS) as Bogus. When `insecure` is false and err is nil, every delegation
+// down to the query name's zone was proven signed, so the answer's own RRset
+// must carry a valid RRSIG.
+func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaining []string) ([]*chainLink, bool, error) {
 	chain := []*chainLink{}
+	insecure := false
 
 	// Start with trust anchor zone
 	currentZone := anchor.Zone
@@ -223,12 +247,12 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 	// Fetch DNSKEY for trust anchor zone and validate
 	dnsKeys, err := v.fetchDNSKEY(ctx, currentZone)
 	if err != nil {
-		return nil, fmt.Errorf("fetching DNSKEY for %s: %w", currentZone, err)
+		return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", currentZone, err)
 	}
 
 	// Validate at least one DNSKEY matches the trust anchor
 	if !v.validateTrustAnchor(anchor, dnsKeys) {
-		return nil, fmt.Errorf("trust anchor validation failed for %s", currentZone)
+		return nil, false, fmt.Errorf("trust anchor validation failed for %s", currentZone)
 	}
 
 	// Fetch NSEC3PARAM for trust anchor zone (if using NSEC3)
@@ -249,13 +273,13 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 
 		// Check depth limit
 		if len(chain) >= v.config.MaxDelegationDepth {
-			return nil, fmt.Errorf("max delegation depth exceeded")
+			return nil, false, fmt.Errorf("max delegation depth exceeded")
 		}
 
 		// Fetch DS records for child zone
 		dsRecords, dsMsg, err := v.fetchDS(ctx, childZone)
 		if err != nil {
-			return nil, fmt.Errorf("fetching DS for %s: %w", childZone, err)
+			return nil, false, fmt.Errorf("fetching DS for %s: %w", childZone, err)
 		}
 
 		if len(dsRecords) == 0 {
@@ -269,21 +293,24 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 			// signed by the parent's ZSK, before treating the
 			// subtree as Insecure.
 			if !v.verifyDSDenial(dsMsg, childZone, chain) {
-				return nil, fmt.Errorf("DS empty for %s but no authenticated denial proof (downgrade-attack guard)", childZone)
+				return nil, false, fmt.Errorf("DS empty for %s but no authenticated denial proof (downgrade-attack guard)", childZone)
 			}
-			// Unsigned delegation - chain ends here
+			// Unsigned delegation - chain ends here. The query name is in an
+			// Insecure subtree; signal it so the caller returns Insecure rather
+			// than requiring (non-existent) signatures.
+			insecure = true
 			break
 		}
 
 		// Fetch DNSKEY for child zone
 		childKeys, err := v.fetchDNSKEY(ctx, childZone)
 		if err != nil {
-			return nil, fmt.Errorf("fetching DNSKEY for %s: %w", childZone, err)
+			return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", childZone, err)
 		}
 
 		// Validate DS records against parent keys
 		if !v.validateDelegation(chain[len(chain)-1], dsRecords, childKeys) {
-			return nil, fmt.Errorf("delegation validation failed for %s", childZone)
+			return nil, false, fmt.Errorf("delegation validation failed for %s", childZone)
 		}
 
 		// Fetch NSEC3PARAM for child zone (if using NSEC3)
@@ -303,7 +330,7 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 		_ = childZone
 	}
 
-	return chain, nil
+	return chain, insecure, nil
 }
 
 // validateTrustAnchor checks if DNSKEY records match the trust anchor.
@@ -424,11 +451,27 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 			continue
 		}
 
+		// RRSIG RRsets cover OTHER types, not themselves — never demand a
+		// signature "over" an RRSIG (it would have no covering RRSIG and would
+		// trip the missing-signature check below).
+		if rrSet[0].Type == protocol.TypeRRSIG {
+			continue
+		}
+
+		owner := rrSet[0].Name.String()
+
 		// Find matching RRSIG
-		rrsig := v.findRRSIG(msg.Answers, rrSet[0].Name.String(), rrSet[0].Type)
+		rrsig := v.findRRSIG(msg.Answers, owner, rrSet[0].Type)
 		if rrsig == nil {
-			// No signature for this RRSet
-			if v.config.RequireDNSSEC {
+			// No signature for this RRset. We only reach validateMessage when
+			// the chain proved the query name's zone is SIGNED (Insecure
+			// subtrees are short-circuited in ValidateResponse). A missing
+			// signature on the QUERIED name's own RRset is therefore a
+			// stripped-RRSIG downgrade — Bogus, never Secure, regardless of
+			// RequireDNSSEC. For other owners (e.g. a CNAME target served by a
+			// different/unsigned zone) stay lenient unless strict mode is on,
+			// since those names are validated by their own chain.
+			if v.config.RequireDNSSEC || sameDNSName(owner, queryName) {
 				return ValidationBogus
 			}
 			continue
@@ -449,6 +492,12 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 	}
 
 	return ValidationSecure
+}
+
+// sameDNSName reports whether two DNS owner names are equal, ignoring ASCII
+// case (RFC 1035 §2.3.3) and a single trailing root dot.
+func sameDNSName(a, b string) bool {
+	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
 }
 
 // findRRSIG finds an RRSIG record for the given name and type.

@@ -419,7 +419,7 @@ func TestValidatorBuildChain(t *testing.T) {
 	v := NewValidator(config, store, mock)
 
 	// buildChain should fail because DS doesn't match child DNSKEY
-	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	_, _, err = v.buildChain(context.Background(), anchor, []string{"example"})
 	if err == nil {
 		t.Error("Expected error when delegation validation fails (DS doesn't match child DNSKEY)")
 	}
@@ -916,7 +916,7 @@ func TestBuildChainBasic(t *testing.T) {
 	v := NewValidator(config, store, mock)
 
 	// Test buildChain with no remaining labels
-	chain, err := v.buildChain(context.Background(), anchor, []string{})
+	chain, _, err := v.buildChain(context.Background(), anchor, []string{})
 	if err != nil {
 		t.Fatalf("buildChain failed: %v", err)
 	}
@@ -942,7 +942,7 @@ func TestBuildChainFetchDNSKEYError(t *testing.T) {
 	config := DefaultValidatorConfig()
 	v := NewValidator(config, NewTrustAnchorStore(), nil)
 
-	_, err := v.buildChain(context.Background(), anchor, []string{})
+	_, _, err := v.buildChain(context.Background(), anchor, []string{})
 	if err == nil {
 		t.Error("Expected error when no resolver configured for buildChain")
 	}
@@ -980,7 +980,7 @@ func TestBuildChainAnchorValidationFails(t *testing.T) {
 	config := DefaultValidatorConfig()
 	v := NewValidator(config, NewTrustAnchorStore(), mock)
 
-	_, err := v.buildChain(context.Background(), anchor, []string{})
+	_, _, err := v.buildChain(context.Background(), anchor, []string{})
 	if err == nil {
 		t.Error("Expected error when anchor validation fails")
 	}
@@ -1080,7 +1080,7 @@ func TestBuildChainWithDelegation(t *testing.T) {
 	v := NewValidator(config, store, mock)
 
 	// Build chain with remaining label "example"
-	chain, err := v.buildChain(context.Background(), anchor, []string{"example"})
+	chain, _, err := v.buildChain(context.Background(), anchor, []string{"example"})
 	if err != nil {
 		t.Fatalf("buildChain with delegation failed: %v", err)
 	}
@@ -1154,7 +1154,7 @@ func TestBuildChainUnsignedDelegation(t *testing.T) {
 	// Build chain — must reject the empty-DS response because the
 	// parent supplied no authenticated denial proof. Silently
 	// breaking the chain here is the H-2 downgrade vector.
-	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	_, _, err = v.buildChain(context.Background(), anchor, []string{"example"})
 	if err == nil {
 		t.Fatal("expected downgrade-attack guard to reject empty DS with no denial proof, got nil error")
 	}
@@ -1212,7 +1212,7 @@ func TestBuildChainMaxDepth(t *testing.T) {
 	v := NewValidator(config, NewTrustAnchorStore(), mock)
 
 	remaining := []string{"label0", "label1"}
-	_, err = v.buildChain(context.Background(), anchor, remaining)
+	_, _, err = v.buildChain(context.Background(), anchor, remaining)
 	if err == nil {
 		t.Error("Expected error when max delegation depth exceeded")
 	}
@@ -1258,7 +1258,12 @@ func TestValidateMessageWithAnswersAndRRSIG(t *testing.T) {
 		Data:  &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
 	}
 
-	// Test with RequireDNSSEC=false, no RRSIG (should be SECURE, continue)
+	// Downgrade protection: the chain proves example.com. is SIGNED, and the
+	// queried name's own RRset (example.com. A) arrives with NO RRSIG. Even
+	// with RequireDNSSEC=false this must be BOGUS, not SECURE — a stripped
+	// signature on the queried RRset of a signed zone is a downgrade attack.
+	// (Insecure subtrees never reach validateMessage; ValidateResponse
+	// short-circuits them to ValidationInsecure.)
 	config := DefaultValidatorConfig()
 	config.RequireDNSSEC = false
 	v2 := NewValidator(config, nil, nil)
@@ -1267,9 +1272,43 @@ func TestValidateMessageWithAnswersAndRRSIG(t *testing.T) {
 		Answers: []*protocol.ResourceRecord{aRecord},
 	}
 	result := v2.validateMessage(context.Background(), msg, "example.com.", chain)
-	// Should be SECURE because RequireDNSSEC is false and no RRSIG means it just continues
-	if result != ValidationSecure {
-		t.Errorf("Expected SECURE with RequireDNSSEC=false, got %s", result)
+	if result != ValidationBogus {
+		t.Errorf("Expected BOGUS for unsigned queried RRset in a signed zone (downgrade), got %s", result)
+	}
+}
+
+// TestValidateMessage_LenientForNonQueriedOwner verifies the downgrade check is
+// scoped to the QUERIED name. An unsigned RRset owned by a different name (e.g.
+// a CNAME target served by another/unsigned zone) must NOT turn the whole
+// response Bogus when RequireDNSSEC is off — otherwise legitimate CNAME-to-
+// unsigned resolution would break across the DNS.
+func TestValidateMessage_LenientForNonQueriedOwner(t *testing.T) {
+	zoneName, _ := protocol.ParseName("example.com.")
+	chain := []*chainLink{{
+		zone:      "example.com.",
+		dnsKeys:   []*protocol.ResourceRecord{{Name: zoneName, Type: protocol.TypeDNSKEY, Data: &protocol.RDataDNSKEY{}}},
+		validated: true,
+	}}
+
+	otherName, _ := protocol.ParseName("target.elsewhere.net.")
+	msg := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{{
+			Name:  otherName,
+			Type:  protocol.TypeA,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data:  &protocol.RDataA{Address: [4]byte{5, 6, 7, 8}},
+		}},
+	}
+
+	config := DefaultValidatorConfig()
+	config.RequireDNSSEC = false
+	v := NewValidator(config, nil, nil)
+
+	// Queried name is example.com.; the answer's only RRset is owned by
+	// elsewhere.net. (outside the signed zone) and unsigned — stay lenient.
+	if result := v.validateMessage(context.Background(), msg, "example.com.", chain); result != ValidationSecure {
+		t.Errorf("expected SECURE (lenient for non-queried owner), got %s", result)
 	}
 }
 

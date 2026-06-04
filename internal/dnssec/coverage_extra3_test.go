@@ -453,7 +453,7 @@ func TestBuildChain_FetchDSError(t *testing.T) {
 	v := NewValidator(config, store, mock)
 
 	// Try to build chain with remaining labels, which will try to fetch DS
-	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	_, _, err = v.buildChain(context.Background(), anchor, []string{"example"})
 	if err == nil {
 		t.Error("expected error when fetchDS fails")
 	}
@@ -569,7 +569,7 @@ func TestBuildChain_FetchChildDNSKEYError(t *testing.T) {
 	config := DefaultValidatorConfig()
 	v := NewValidator(config, store, mock)
 
-	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	_, _, err = v.buildChain(context.Background(), anchor, []string{"example"})
 	if err == nil {
 		t.Error("expected error when child DNSKEY fetch fails")
 	}
@@ -1516,7 +1516,7 @@ func TestBuildChain_DelegationValidationFails(t *testing.T) {
 	v := NewValidator(config, store, mock)
 
 	// DS digest won't match child DNSKEY, so delegation validation fails
-	_, err = v.buildChain(context.Background(), anchor, []string{"example"})
+	_, _, err = v.buildChain(context.Background(), anchor, []string{"example"})
 	if err == nil {
 		t.Error("expected error when delegation validation fails")
 	}
