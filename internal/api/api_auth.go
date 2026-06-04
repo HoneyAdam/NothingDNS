@@ -354,6 +354,9 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "User deleted"})
+
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 

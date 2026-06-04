@@ -287,11 +287,24 @@ func NewServer(name, version string, handler Handler) *Server {
 }
 
 // HandleRequest handles a single JSON-RPC request
-func (s *Server) HandleRequest(ctx context.Context, req *Request) *Response {
-	resp := &Response{
+func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Response) {
+	resp = &Response{
 		JSONRPC: JsonRPC,
 		ID:      req.ID,
 	}
+
+	// A panic in any tool handler (or a downstream service it calls) must not
+	// crash the whole stdio MCP process — surface it as a JSON-RPC
+	// InternalError and keep serving.
+	defer func() {
+		if r := recover(); r != nil {
+			resp.Result = nil
+			resp.Error = &RPCError{
+				Code:    InternalError,
+				Message: fmt.Sprintf("internal error: %v", r),
+			}
+		}
+	}()
 
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {

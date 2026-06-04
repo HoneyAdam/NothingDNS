@@ -312,6 +312,41 @@ func TestHandleToolsCall(t *testing.T) {
 	}
 }
 
+// toolPanicHandler panics on CallTool to verify HandleRequest's panic recovery.
+type toolPanicHandler struct{ MockHandler }
+
+func (h *toolPanicHandler) CallTool(name string, args map[string]interface{}) (*ToolResult, error) {
+	panic("simulated tool handler panic")
+}
+
+// TestHandleRequest_RecoversToolPanic verifies a panicking tool handler is
+// surfaced as a JSON-RPC InternalError instead of crashing the whole stdio
+// MCP process.
+func TestHandleRequest_RecoversToolPanic(t *testing.T) {
+	server := NewServer("test-server", "1.0.0", &toolPanicHandler{})
+
+	paramsJSON, _ := json.Marshal(ToolCallParams{Name: "boom", Arguments: map[string]interface{}{}})
+	req := &Request{JSONRPC: JsonRPC, Method: "tools/call", Params: paramsJSON, ID: 7}
+
+	// Must not panic out of HandleRequest; must return an error response.
+	resp := server.HandleRequest(context.Background(), req)
+	if resp == nil {
+		t.Fatal("nil response after recovered panic")
+	}
+	if resp.Error == nil {
+		t.Fatal("expected an error response from a panicking tool handler")
+	}
+	if resp.Error.Code != InternalError {
+		t.Errorf("error code = %d, want InternalError (%d)", resp.Error.Code, InternalError)
+	}
+	if resp.Result != nil {
+		t.Errorf("expected nil result on panic, got %v", resp.Result)
+	}
+	if resp.ID != 7 {
+		t.Errorf("response ID = %v, want 7", resp.ID)
+	}
+}
+
 func TestHandleToolsCallWithInvalidParams(t *testing.T) {
 	handler := &MockHandler{}
 	server := NewServer("test-server", "1.0.0", handler)
