@@ -197,7 +197,11 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 				return resp, nil
 			}
 			if entry.Message != nil {
-				return entry.Message, nil
+				// Return a COPY: the caller (pipeline) hands this message to
+				// reply(), which mutates it in place (header ID/flags, section
+				// minimization). entry.Message is the shared cached object, so
+				// serving it directly would corrupt the cache for all clients.
+				return entry.Message.Copy(), nil
 			}
 		}
 	}

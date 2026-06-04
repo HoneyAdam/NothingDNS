@@ -177,11 +177,16 @@ func NewPipeline(h *integratedHandler) *Pipeline {
 	p.AppendStage(cookieStage(h))
 	p.AppendStage(anyStage(h))
 	p.AppendStage(transferStage(h))
+	// Filtering MUST run BEFORE the cache: a domain resolved and cached before
+	// it was added to the blocklist/RPZ (e.g. via hot-reload, or simply added
+	// after first resolution) would otherwise be served straight from cache,
+	// bypassing the filter until its TTL expires. This matches the documented
+	// pipeline order (blocklist → RPZ-QNAME → cache → NSEC cache).
+	p.AppendStage(blocklistStage(h))
+	p.AppendStage(rpzQnameStage(h))
 	p.AppendStage(doBitStage(h))
 	p.AppendStage(cacheStage(h))
 	p.AppendStage(nsecCacheStage(h))
-	p.AppendStage(blocklistStage(h))
-	p.AppendStage(rpzQnameStage(h))
 	p.AppendStage(splitHorizonStage(h))
 	p.AppendStage(authoritativeStage(h))
 	p.AppendStage(cnameStage(h))

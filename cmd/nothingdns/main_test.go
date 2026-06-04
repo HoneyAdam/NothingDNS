@@ -217,6 +217,46 @@ func TestServeDNS_Blocklist(t *testing.T) {
 	}
 }
 
+// TestServeDNS_BlocklistBeatsCache regresses the filter-bypass where the cache
+// stage ran BEFORE the blocklist stage: a domain resolved and cached before it
+// was added to the blocklist was served from cache, skipping the filter until
+// its TTL expired. Filtering now runs before the cache, so a freshly-
+// blocklisted domain is blocked even with a warm cache entry.
+func TestServeDNS_BlocklistBeatsCache(t *testing.T) {
+	h := newTestHandler()
+
+	const qname = "cached-then-blocked.example.com."
+
+	// 1) Warm the cache with a positive answer for the domain.
+	resp := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+	}
+	h.cache.Set(cache.MakeKey(qname, protocol.TypeA, false), resp, 300)
+
+	// 2) Add the domain to the blocklist AFTER it was cached (hot-reload / late add).
+	bl := blocklist.New(blocklist.Config{Enabled: true})
+	bl.AddDomain("cached-then-blocked.example.com")
+	h.blocklist = bl
+
+	// 3) The query must be BLOCKED (NXDOMAIN), not served from the warm cache.
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, qname, protocol.TypeA))
+
+	if w.msg == nil {
+		t.Fatal("expected a response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeNameError {
+		t.Errorf("blocklisted domain served from cache (filter bypass): rcode=%d, want NXDOMAIN", w.msg.Header.Flags.RCODE)
+	}
+	if len(w.msg.Answers) != 0 {
+		t.Errorf("blocked response must carry no answers, got %d", len(w.msg.Answers))
+	}
+}
+
 func TestServeDNS_CacheHit(t *testing.T) {
 	h := newTestHandler()
 
@@ -2042,6 +2082,85 @@ func TestSendErrorWithEDE_WithOPT(t *testing.T) {
 	}
 	if opt.Options[0].Code != protocol.OptionCodeExtendedError {
 		t.Errorf("expected EDE option, got code %d", opt.Options[0].Code)
+	}
+}
+
+// TestCacheStage_DoesNotMutateCachedMessage regresses the shared-pointer bug
+// where serving from cache mutated the cached *Message in place: reply() set
+// the header ID/flags and minimizeResponse() reassigned the authority/additional
+// sections, so the first serve permanently corrupted the entry for every future
+// client and could leak one client's transaction ID to another. Each client
+// must receive an isolated copy; the cached object must stay pristine.
+func TestCacheStage_DoesNotMutateCachedMessage(t *testing.T) {
+	h := newTestHandler()
+
+	const qname = "cached.example.com."
+	// Non-authoritative response with an additional record that
+	// minimizeResponse() drops (not OPT, not glue). Its survival in the cache
+	// after a serve proves the cached object was not mutated in place.
+	cached := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0x4242,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+		Additionals: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, "extra.example.com."), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{9, 9, 9, 9}},
+		}},
+	}
+	key := cache.MakeKey(qname, protocol.TypeA, false)
+	h.cache.Set(key, cached, 300)
+
+	serve := func(id uint16, clientIP string) *protocol.Message {
+		w := newCaptureWriter(clientIP, "udp")
+		q := &query{
+			msg:           &protocol.Message{Header: protocol.Header{ID: id}},
+			qname:         qname,
+			cacheKey:      key,
+			currentWriter: w,
+		}
+		handled, err := cacheStage(h)(context.Background(), q, w)
+		if err != nil {
+			t.Fatalf("cacheStage error: %v", err)
+		}
+		if !handled {
+			t.Fatal("expected cache hit to be handled")
+		}
+		if w.msg == nil {
+			t.Fatal("no response written")
+		}
+		return w.msg
+	}
+
+	// First client: served copy carries the query's transaction ID.
+	r1 := serve(0xAAAA, "10.0.0.1")
+	if r1.Header.ID != 0xAAAA {
+		t.Errorf("served ID = %#x, want 0xAAAA (the query's ID)", r1.Header.ID)
+	}
+
+	// The cached entry must be untouched after the first serve.
+	entry := h.cache.Get(key)
+	if entry == nil || entry.Message == nil {
+		t.Fatal("cache entry vanished after serve")
+	}
+	if entry.Message.Header.ID != 0x4242 {
+		t.Errorf("cached ID mutated to %#x, want 0x4242 — cross-client TX-ID leak", entry.Message.Header.ID)
+	}
+	if got := len(entry.Message.Additionals); got != 1 {
+		t.Errorf("cached additionals stripped by serve: got %d, want 1", got)
+	}
+
+	// Second client: independent ID, and the first response is unaffected.
+	r2 := serve(0xBBBB, "10.0.0.2")
+	if r2.Header.ID != 0xBBBB {
+		t.Errorf("second served ID = %#x, want 0xBBBB", r2.Header.ID)
+	}
+	if r1.Header.ID != 0xAAAA {
+		t.Errorf("first response ID changed to %#x after second serve — shared object", r1.Header.ID)
 	}
 }
 

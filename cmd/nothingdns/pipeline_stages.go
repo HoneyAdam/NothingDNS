@@ -154,7 +154,13 @@ func cacheStage(h *integratedHandler) Stage {
 				h.metrics.RecordCacheHit()
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			reply(q.currentWriter, q.msg, entry.Message)
+			// Serve a COPY of the cached message. reply()/minimizeResponse() and
+			// UDP truncation mutate the response in place (header ID & flags,
+			// authority/additional sections, answer trimming). entry.Message is
+			// the SHARED cached object — mutating it would permanently corrupt the
+			// cache for every future client and race across concurrent hits (a
+			// client could even receive another client's transaction ID).
+			reply(q.currentWriter, q.msg, entry.Message.Copy())
 			return true, nil
 		}
 
@@ -341,7 +347,8 @@ func resolverStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				reply(q.currentWriter, q.msg, stale.Message)
+				// Copy: stale.Message aliases the shared cached object (see cacheStage).
+				reply(q.currentWriter, q.msg, stale.Message.Copy())
 				return true, nil
 			}
 			if h.metrics != nil {
@@ -406,7 +413,8 @@ func upstreamStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				reply(q.currentWriter, q.msg, stale.Message)
+				// Copy: stale.Message aliases the shared cached object (see cacheStage).
+				reply(q.currentWriter, q.msg, stale.Message.Copy())
 				return true, nil
 			}
 			if h.metrics != nil {
