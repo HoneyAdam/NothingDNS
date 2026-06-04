@@ -16,6 +16,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/cluster"
 	"github.com/nothingdns/nothingdns/internal/config"
+	"github.com/nothingdns/nothingdns/internal/dashboard"
 	"github.com/nothingdns/nothingdns/internal/dns64"
 	"github.com/nothingdns/nothingdns/internal/dnscookie"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
@@ -51,7 +52,10 @@ type integratedHandler struct {
 	rpzEngine     *rpz.Engine
 	geoEngine     *geodns.Engine
 	metrics       *metrics.MetricsCollector
-	validator     *dnssec.Validator
+	// dashboardServer receives a QueryEvent per request to feed the Query Log
+	// page and the live WebSocket stream. Optional (nil when no dashboard).
+	dashboardServer *dashboard.Server
+	validator       *dnssec.Validator
 	zoneSigners   map[string]*dnssec.Signer
 	zoneSignersMu sync.RWMutex
 	zoneTree      *zone.RadixTree // Radix tree for O(log n) zone matching

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/audit"
+	"github.com/nothingdns/nothingdns/internal/dashboard"
 	"github.com/nothingdns/nothingdns/internal/otel"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
@@ -36,6 +37,7 @@ type query struct {
 	qtypeStr   string // human qtype for metrics/tracing
 	qnameAudit string // qname for audit log (set once)
 	cacheHit   bool   // set by cache stage
+	blocked    bool   // set by blocklist/RPZ stages (for the dashboard query log)
 
 	// Response state (written by final stages)
 	rcode    uint8 // written by stages that send a response
@@ -124,6 +126,37 @@ func (p *Pipeline) ServeDNS(h *integratedHandler, w server.ResponseWriter, r *pr
 				QueryType: q.qtypeStr,
 				Latency:   latency,
 				CacheHit:  q.cacheHit,
+			})
+		}
+		// Feed the dashboard Query Log page + live WebSocket stream (one event
+		// per query). dashboard.RecordQuery was defined but never called from
+		// the request pipeline, so both were always empty.
+		if h.dashboardServer != nil && q.qtypeStr != "" {
+			clientIP, proto := "-", ""
+			if ci := q.currentWriter.ClientInfo(); ci != nil {
+				if ip := ci.IP(); ip != nil {
+					clientIP = ip.String()
+				}
+				proto = ci.Protocol
+			}
+			var rcode uint8
+			if q.rcodeSet {
+				rcode = q.rcode
+			}
+			domain := q.qnameAudit
+			if domain == "" {
+				domain = q.qname
+			}
+			h.dashboardServer.RecordQuery(&dashboard.QueryEvent{
+				Timestamp:    start,
+				ClientIP:     clientIP,
+				Domain:       domain,
+				QueryType:    q.qtypeStr,
+				ResponseCode: rcodeToString(rcode),
+				Duration:     latency.Milliseconds(),
+				Cached:       q.cacheHit,
+				Blocked:      q.blocked,
+				Protocol:     proto,
 			})
 		}
 		// End tracing span with DNS attributes

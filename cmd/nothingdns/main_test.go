@@ -17,6 +17,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/config"
+	"github.com/nothingdns/nothingdns/internal/dashboard"
 	"github.com/nothingdns/nothingdns/internal/dns64"
 	"github.com/nothingdns/nothingdns/internal/dnscookie"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
@@ -254,6 +255,50 @@ func TestServeDNS_BlocklistBeatsCache(t *testing.T) {
 	}
 	if len(w.msg.Answers) != 0 {
 		t.Errorf("blocked response must carry no answers, got %d", len(w.msg.Answers))
+	}
+}
+
+// TestServeDNS_FeedsDashboardQueryLog regresses two gaps found via runtime
+// verification: q.qtypeStr/q.qnameAudit were never assigned (so the audit
+// logger and the dashboard, both gated on qtypeStr != "", never fired), and the
+// pipeline never called dashboard.RecordQuery (so the Query Log page and the
+// live stream were always empty). A served query must now produce a dashboard
+// event carrying the right domain, type, client IP and protocol.
+func TestServeDNS_FeedsDashboardQueryLog(t *testing.T) {
+	h := newTestHandler()
+	ds := dashboard.NewServer()
+	h.dashboardServer = ds
+
+	const qname = "logged.example.com."
+	// Pre-cache an answer so the query resolves without an upstream.
+	resp := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+	}
+	h.cache.Set(cache.MakeKey(qname, protocol.TypeA, false), resp, 300)
+
+	w := newCaptureWriter("10.1.2.3", "udp")
+	h.ServeDNS(w, newTestQuery(t, qname, protocol.TypeA))
+
+	queries, total := ds.GetStats().GetRecentQueries(0, 10)
+	if total != 1 || len(queries) != 1 {
+		t.Fatalf("dashboard query log: got total=%d len=%d, want 1/1 (RecordQuery never fired)", total, len(queries))
+	}
+	e := queries[0]
+	if e.Domain != qname {
+		t.Errorf("event domain = %q, want %q", e.Domain, qname)
+	}
+	if e.QueryType != "A" {
+		t.Errorf("event qtype = %q, want A (q.qtypeStr was never assigned before the fix)", e.QueryType)
+	}
+	if e.ClientIP != "10.1.2.3" {
+		t.Errorf("event clientIP = %q, want 10.1.2.3", e.ClientIP)
+	}
+	if e.Protocol != "udp" {
+		t.Errorf("event protocol = %q, want udp", e.Protocol)
 	}
 }
 

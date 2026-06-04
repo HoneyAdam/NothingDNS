@@ -445,6 +445,8 @@ func run() error {
 	dashboardServer.SetAuthStore(authStore)
 	dashboardServer.SetAuthToken(resolveDashboardBearer(cfg.Server.HTTP))
 	dashboardServer.SetZoneManager(zoneManagerInstance)
+	// Feed per-query events into the dashboard (Query Log page + live stream).
+	handler.dashboardServer = dashboardServer
 	apiServer := api.NewServer(cfg.Server.HTTP, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")
 		cfgMu.RLock()

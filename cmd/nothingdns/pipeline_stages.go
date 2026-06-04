@@ -61,8 +61,16 @@ func validationStage(h *integratedHandler) Stage {
 // metricsStage records the incoming query metric.
 func metricsStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
+		// Populate the human-readable qtype and the audit qname here, once and
+		// unconditionally. Several downstream consumers (the audit logger and
+		// the dashboard query log) gate on q.qtypeStr != "", and these fields
+		// were previously never assigned — so audit logging and the dashboard
+		// Query Log / live stream silently never fired.
+		q.qtypeStr = typeToString(q.qtype)
+		q.qnameAudit = q.qname
+
 		if h.metrics != nil {
-			h.metrics.RecordQuery(typeToString(q.qtype))
+			h.metrics.RecordQuery(q.qtypeStr)
 		}
 		return false, nil
 	}
@@ -193,6 +201,7 @@ func blocklistStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if h.blocklist != nil && h.blocklist.IsBlocked(q.qname) {
 			h.logger.Infof("Blocked query for %s", q.qname)
+			q.blocked = true
 			if h.metrics != nil {
 				h.metrics.RecordBlocklistBlock()
 			}
