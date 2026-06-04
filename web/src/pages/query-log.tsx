@@ -13,12 +13,23 @@ export function QueryLogPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [offset, setOffset] = useState(0);
   const [filter, setFilter] = useState('');
+  const [debouncedFilter, setDebouncedFilter] = useState('');
   const [error, setError] = useState<string | null>(null);
   const currentOffsetRef = useRef(offset);
 
   useEffect(() => {
     currentOffsetRef.current = offset;
   }, [offset]);
+
+  // Debounce the filter input and reset to the first page when it changes, so
+  // the (server-side) domain filter searches the whole log, not just one page.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedFilter(filter);
+      setOffset(0);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [filter]);
 
   useEffect(() => {
     let cancelled = false;
@@ -27,7 +38,8 @@ export function QueryLogPage() {
       setIsLoading(true);
       setError(null);
       try {
-        const result = await api<QueryLogResponse>('GET', `/api/v1/queries?offset=${offset}&limit=${PAGE_SIZE}`);
+        const q = debouncedFilter ? `&q=${encodeURIComponent(debouncedFilter)}` : '';
+        const result = await api<QueryLogResponse>('GET', `/api/v1/queries?offset=${offset}&limit=${PAGE_SIZE}${q}`);
         // Ignore stale responses
         if (cancelled) return;
         if (currentOffsetRef.current !== offset) return;
@@ -42,13 +54,10 @@ export function QueryLogPage() {
 
     load();
     return () => { cancelled = true; };
-  }, [offset]);
+  }, [offset, debouncedFilter]);
 
   const total = data?.total ?? 0;
   const queries = data?.queries ?? [];
-  const filtered = filter
-    ? queries.filter(q => q.domain.toLowerCase().includes(filter.toLowerCase()))
-    : queries;
 
   const pages = Math.ceil(total / PAGE_SIZE);
   const currentPage = Math.floor(offset / PAGE_SIZE) + 1;
@@ -75,7 +84,7 @@ export function QueryLogPage() {
         <CardContent className="p-0">
           {isLoading ? (
             <div className="p-6 space-y-3">{Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
-          ) : filtered.length === 0 ? (
+          ) : queries.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground"><p>No queries found</p></div>
           ) : (
             <div className="overflow-x-auto">
@@ -92,7 +101,7 @@ export function QueryLogPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((q, i) => (
+                  {queries.map((q, i) => (
                     <tr key={`${q.timestamp}-${q.domain}-${i}`} className="border-b hover:bg-muted/50 transition-colors">
                       <td className="p-3 font-mono text-xs">{new Date(q.timestamp).toLocaleTimeString()}</td>
                       <td className="p-3 font-medium truncate max-w-[200px]">{q.domain}</td>

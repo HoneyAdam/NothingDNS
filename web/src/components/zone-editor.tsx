@@ -146,9 +146,11 @@ export function ZoneEditor({ zoneName, initialRecords, onRefresh }: ZoneEditorPr
     if (selectedRecords.size === filteredRecords.length) {
       setSelectedRecords(new Set());
     } else {
-      setSelectedRecords(new Set(filteredRecords.map((_, i) => i)));
+      // Select all VISIBLE rows by their real index into `records` (not the
+      // filtered-loop index), so selection stays correct under search/filter.
+      setSelectedRecords(new Set(filteredRecords.map(r => records.indexOf(r))));
     }
-  }, [filteredRecords, selectedRecords]);
+  }, [filteredRecords, selectedRecords, records]);
 
   const handleDragStart = (index: number) => {
     dragItem.current = index;
@@ -264,7 +266,13 @@ export function ZoneEditor({ zoneName, initialRecords, onRefresh }: ZoneEditorPr
                     {records.length === 0 ? 'No records in this zone' : 'No matching records'}
                   </td>
                 </tr>
-              ) : filteredRecords.map((r, i) => (
+              ) : filteredRecords.map((r) => {
+                // Map the visible row back to its real index into `records`.
+                // `filteredRecords` holds the same object references, so
+                // indexOf is exact — this keeps edit/select/delete/drag aligned
+                // with the unfiltered array even when a search/type filter is active.
+                const i = records.indexOf(r);
+                return (
                 <tr
                   key={`${r.name}-${r.type}-${i}`}
                   className={`border-b hover:bg-muted/30 transition-colors cursor-grab active:cursor-grabbing ${r.edited ? 'bg-warning/5' : ''} ${selectedRecords.has(i) ? 'bg-primary/5' : ''}`}
@@ -338,7 +346,8 @@ export function ZoneEditor({ zoneName, initialRecords, onRefresh }: ZoneEditorPr
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

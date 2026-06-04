@@ -3,22 +3,22 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
-import { api, type DashboardStats, type QueryEvent } from '@/lib/api';
-import { useWebSocket } from '@/hooks/useWebSocket';
-import { Activity, Database, Shield, Clock, RefreshCw, Globe, Zap, Server, TrendingUp, AlertCircle } from 'lucide-react';
+import { api, type DashboardStats } from '@/lib/api';
+import { useQueryStream } from '@/stores/queryStream';
+import { Activity, Database, Shield, Clock, RefreshCw, Globe, Zap, TrendingUp, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [queries, setQueries] = useState<QueryEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
   const streamRef = useRef<HTMLDivElement>(null);
 
-  const { connected } = useWebSocket('/ws', {
-    onQuery: (event) => setQueries((p) => [event, ...p].slice(0, 100)),
-  });
+  // Live query events + connection state come from the app-wide shared
+  // WebSocket (opened once in App.tsx), not a dashboard-local socket.
+  const queries = useQueryStream((s) => s.events);
+  const connected = useQueryStream((s) => s.connected);
 
   const loadStats = async () => {
     try {
@@ -46,7 +46,6 @@ export function DashboardPage() {
     { t: 'Zones', v: String(stats?.zoneCount ?? '-'), s: 'Active', i: Globe, c: 'text-warning', b: 'bg-warning/10' },
     { t: 'Avg Latency', v: `${stats?.upstreamLatency ?? 0}ms`, s: 'Upstream', i: Zap, c: 'text-chart-5', b: 'bg-chart-5/10' },
     { t: 'Uptime', v: fmtUptime(stats?.uptime ?? 0), s: 'Since start', i: Clock, c: 'text-chart-1', b: 'bg-chart-1/10' },
-    { t: 'Clients', v: String(stats?.activeClients ?? '-'), s: 'Connected', i: Server, c: 'text-chart-2', b: 'bg-chart-2/10' },
     { t: 'Live Feed', v: connected ? 'Connected' : 'Offline', s: 'WebSocket', i: TrendingUp, c: connected ? 'text-success' : 'text-muted-foreground', b: connected ? 'bg-success/10' : 'bg-muted' },
   ];
 
@@ -70,7 +69,7 @@ export function DashboardPage() {
       )}
 
       <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
-        {loading ? Array.from({ length: 8 }).map((_, i) => <Card key={i}><CardContent className="p-6"><Skeleton className="h-4 w-20 mb-3" /><Skeleton className="h-8 w-16 mb-1" /><Skeleton className="h-3 w-12" /></CardContent></Card>)
+        {loading ? Array.from({ length: 7 }).map((_, i) => <Card key={i}><CardContent className="p-6"><Skeleton className="h-4 w-20 mb-3" /><Skeleton className="h-8 w-16 mb-1" /><Skeleton className="h-3 w-12" /></CardContent></Card>)
         : cards.map(({ t, v, s, i: I, c, b }) => (
           <Card key={t}><CardContent className="p-6">
             <div className="flex items-center justify-between mb-3"><span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t}</span><div className={cn('p-1.5 rounded-lg', b)}><I className={cn('h-4 w-4', c)} /></div></div>

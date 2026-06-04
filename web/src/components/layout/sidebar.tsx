@@ -1,6 +1,7 @@
-import { NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Globe, Settings, Info, ChevronLeft, ChevronRight, Wifi, WifiOff, Sun, Moon, Monitor, ScrollText, TrendingUp, Shield, Wifi as WifiIcon, Users, BarChart3, Key, Network, ShieldCheck, Globe2, Menu, X, ArrowLeftRight, CloudCog, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { api } from '@/lib/api';
 import { useTheme } from '@/hooks/useThemeHook';
 import { useState, useEffect } from 'react';
 import { useAuthStore } from '@/stores/authStore';
@@ -30,15 +31,21 @@ export function Sidebar({ connected }: { connected: boolean }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { theme, setTheme } = useTheme();
   const loc = useLocation();
-  const navigate = useNavigate();
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
 
   // Close mobile menu on route change
   useEffect(() => { setMobileOpen(false); }, [loc.pathname]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // Invalidate the server-side session / HttpOnly cookie before clearing
+    // local state; ignore network errors so logout always proceeds locally.
+    // clearAuth flips isAuthenticated → AppContent renders <LoginPage/>.
+    try {
+      await api('POST', '/api/v1/auth/logout');
+    } catch {
+      // best-effort: clear client state regardless of network outcome
+    }
     useAuthStore.getState().clearAuth();
-    navigate('/login');
   };
 
   return (

@@ -111,21 +111,24 @@ export function ZoneTransferPage() {
           <div className="grid gap-4 md:grid-cols-2">
             <Card>
               <CardHeader>
-                <CardTitle>AXFR/IXFR Status</CardTitle>
+                <CardTitle>Protocol Support</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3 text-sm">
+                  {/* These are server capabilities (always compiled in), not a
+                      per-zone runtime status — labelled "Supported" so the
+                      green badges don't imply a live transfer is active. */}
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">AXFR Support</span>
-                    <Badge variant="success">Enabled</Badge>
+                    <span className="text-muted-foreground">AXFR (full transfer)</span>
+                    <Badge variant="secondary">Supported</Badge>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">IXFR Support</span>
-                    <Badge variant="success">Enabled</Badge>
+                    <span className="text-muted-foreground">IXFR (incremental)</span>
+                    <Badge variant="secondary">Supported</Badge>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-muted-foreground">NOTIFY Handling</span>
-                    <Badge variant="success">Active</Badge>
+                    <span className="text-muted-foreground">NOTIFY handling</span>
+                    <Badge variant="secondary">Supported</Badge>
                   </div>
                 </div>
               </CardContent>
