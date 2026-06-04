@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -176,13 +177,22 @@ func buildXoTTLSConfig(config *XoTConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// readCAFile reads a CA certificate file.
+// readCAFile reads a PEM CA bundle from filename into a fresh cert pool. This
+// pool is the trust anchor for verifying XoT client certificates (mTLS), so it
+// MUST contain the operator's configured CA — NOT the system roots. The previous
+// implementation ignored filename and returned x509.SystemCertPool(), so client
+// certs were validated against public roots and the private-CA allowlist was
+// silently bypassed. Fails closed if the file is unreadable or has no certs.
 func readCAFile(filename string) (*x509.CertPool, error) {
-	caCert, err := x509.SystemCertPool()
+	pem, err := os.ReadFile(filename)
 	if err != nil {
-		return x509.NewCertPool(), nil
+		return nil, fmt.Errorf("xot: read CA file %q: %w", filename, err)
 	}
-	return caCert, nil
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("xot: CA file %q contains no valid PEM certificates", filename)
+	}
+	return pool, nil
 }
 
 // Serve starts the XoT server listening for incoming connections.
