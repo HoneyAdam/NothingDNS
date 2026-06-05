@@ -29,7 +29,7 @@ type KVJournalStore struct {
 // Pass a 32-byte hmacKey for integrity protection, or nil for legacy mode.
 func NewKVJournalStore(dataDir string, hmacKey ...[]byte) *KVJournalStore {
 	journalDir := filepath.Join(dataDir, "ixfr-journals")
-	os.MkdirAll(journalDir, 0755)
+	_ = os.MkdirAll(journalDir, 0755)
 	var key []byte
 	if len(hmacKey) > 0 {
 		key = hmacKey[0]

@@ -308,7 +308,8 @@ func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Respons
 
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
-		if rpcErr, ok := err.(*RPCError); ok {
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) {
 			resp.Error = rpcErr
 		} else {
 			resp.Error = &RPCError{

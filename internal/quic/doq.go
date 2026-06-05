@@ -233,7 +233,7 @@ func (s *DoQServer) Listen() error {
 
 	s.listener, err = quic.Listen(conn, s.tlsConfig, s.config)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("doq: quic listen: %w", err)
 	}
 
@@ -263,7 +263,7 @@ func (s *DoQServer) Serve() error {
 
 	<-s.ctx.Done()
 
-	s.listener.Close()
+	_ = s.listener.Close()
 	s.wg.Wait()
 	return nil
 }
@@ -287,7 +287,7 @@ func (s *DoQServer) acceptLoop() {
 		s.activeConnsMu.Lock()
 		if s.activeConns >= DoQMaxConnections {
 			s.activeConnsMu.Unlock()
-			conn.CloseWithError(0x05, "connection limit reached")
+			_ = conn.CloseWithError(0x05, "connection limit reached")
 			continue
 		}
 		s.activeConns++
@@ -300,7 +300,7 @@ func (s *DoQServer) acceptLoop() {
 			s.ipConnsMu.Unlock()
 			s.activeConns--
 			s.activeConnsMu.Unlock()
-			conn.CloseWithError(0x05, "per-IP connection limit reached")
+			_ = conn.CloseWithError(0x05, "per-IP connection limit reached")
 			continue
 		}
 		s.ipConns[ip]++
@@ -354,7 +354,7 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	wrappedStream := &Stream{stream: stream}
 
 	// Set stream deadline to prevent slow clients from holding resources.
-	stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout))
+	_ = stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout))
 
 	// RFC 9250 §4.2: each DNS message on a QUIC stream is prefixed by a
 	// 2-octet length field, identical to DNS-over-TCP framing per RFC 1035
@@ -386,24 +386,24 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	atomic.AddUint64(&s.queriesReceived, 1)
 
 	// Reset deadline before writing.
-	stream.SetWriteDeadline(time.Now().Add(DoQStreamIdleTimeout))
+	_ = stream.SetWriteDeadline(time.Now().Add(DoQStreamIdleTimeout))
 
 	s.handler.ServeDoQ(wrappedStream, query)
 
 	atomic.AddUint64(&s.queriesResponded, 1)
 
 	// Close the stream (sends FIN to client).
-	stream.Close()
+	_ = stream.Close()
 }
 
 // Stop gracefully shuts down the DoQ server.
 func (s *DoQServer) Stop() error {
 	s.cancel()
 	if s.listener != nil {
-		s.listener.Close()
+		_ = s.listener.Close()
 	}
 	if s.conn != nil {
-		s.conn.Close()
+		_ = s.conn.Close()
 	}
 	s.wg.Wait()
 	return nil

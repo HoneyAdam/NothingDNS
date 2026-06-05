@@ -5,6 +5,7 @@ package mdns
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -152,8 +153,8 @@ func (r *Responder) Start() error {
 	}
 
 	// Set buffer sizes
-	r.conn.SetReadBuffer(65536)
-	r.conn.SetWriteBuffer(65536)
+	_ = r.conn.SetReadBuffer(65536)
+	_ = r.conn.SetWriteBuffer(65536)
 
 	// Start listeners
 	r.wg.Add(2)
@@ -182,7 +183,7 @@ func (r *Responder) Stop() {
 	r.wg.Wait()
 
 	if r.conn != nil {
-		r.conn.Close()
+		_ = r.conn.Close()
 	}
 
 	if r.logger != nil {
@@ -285,10 +286,11 @@ func (r *Responder) receiveLoop() {
 		default:
 		}
 
-		r.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		_ = r.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, src, err := r.conn.ReadFromUDP(buf)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
 				continue
 			}
 			if r.logger != nil {

@@ -505,7 +505,7 @@ func (w *tlsResponseWriter) Write(msg *protocol.Message) (int, error) {
 	binary.BigEndian.PutUint16(buf[0:], uint16(n))
 
 	// Set write timeout
-	w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout))
+	_ = w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout))
 
 	// Write response
 	return w.conn.Write(buf[:n+2])

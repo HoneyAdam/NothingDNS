@@ -759,7 +759,7 @@ func (s *XoTServer) sendErrorResponse(conn net.Conn, reqMsg *protocol.Message, r
 	// Write length prefix + response
 	buf[0] = byte(n >> 8)
 	buf[1] = byte(n)
-	conn.Write(buf[:2+n])
+	_, _ = conn.Write(buf[:2+n])
 }
 
 // sendAXFRResponse sends AXFR/IXFR records over the TLS connection.

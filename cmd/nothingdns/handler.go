@@ -607,7 +607,7 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 		resp.Header.Flags.TC = true
 		resp.Header.Flags.QR = true
 		resp.Header.Flags.RCODE = protocol.RcodeSuccess
-		w.Write(resp)
+		_, _ = w.Write(resp)
 		return true
 	case rpz.ActionOverride:
 		// Return override IP
@@ -644,7 +644,7 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 				Data:  &protocol.RDataAAAA{Address: addr},
 			})
 		}
-		w.Write(resp)
+		_, _ = w.Write(resp)
 		return true
 	case rpz.ActionCNAME:
 		targetName, err := protocol.ParseName(rule.OverrideData)
@@ -666,7 +666,7 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 			TTL:   rule.TTL,
 			Data:  &protocol.RDataCNAME{CName: targetName},
 		})
-		w.Write(resp)
+		_, _ = w.Write(resp)
 		return true
 	default:
 		return false

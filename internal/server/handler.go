@@ -110,7 +110,7 @@ func sendSERVFAIL(w ResponseWriter, req *protocol.Message) {
 		},
 		Questions: req.Questions,
 	}
-	w.Write(resp)
+	_, _ = w.Write(resp)
 }
 
 // ServeDNS calls f(w, req).

@@ -586,7 +586,7 @@ func (s *Server) ClientLoop(client *Client) {
 		close(client.closed) // Signal write loop to exit
 		s.RemoveClient(client)
 		client.closeSend.Do(func() { close(client.send) })
-		client.conn.Close()
+		_ = client.conn.Close()
 	}()
 
 	// Write loop
@@ -633,7 +633,7 @@ func (s *Server) Stop() {
 		}
 		for client := range s.clients {
 			if client.conn != nil {
-				client.conn.Close()
+				_ = client.conn.Close()
 			}
 		}
 		s.clients = make(map[*Client]struct{})
