@@ -3,6 +3,7 @@ package storage
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -480,6 +481,29 @@ func TestWALCorruptedEntry(t *testing.T) {
 	_, err := wal.decodeEntry(corrupted)
 	if err != ErrInvalidChecksum {
 		t.Errorf("Expected ErrInvalidChecksum, got %v", err)
+	}
+}
+
+func TestWALAppendReportsRollbackFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	if err := wal.active.file.Close(); err != nil {
+		t.Fatalf("close active file: %v", err)
+	}
+
+	_, err = wal.Append(EntryTypePut, []byte("test_data"))
+	if err == nil {
+		t.Fatal("Append with closed active file should fail")
+	}
+	if !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("Append error should include rollback failure, got: %v", err)
 	}
 }
 
