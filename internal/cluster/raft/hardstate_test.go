@@ -7,8 +7,10 @@ package raft
 // rejection (which is the corruption-detection backstop).
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -77,6 +79,22 @@ func TestSaveHardState_EmptyDataDir_Refused(t *testing.T) {
 	// that would mask configuration bugs that lose election safety.
 	if err := saveHardState("", HardState{CurrentTerm: 1}); err == nil {
 		t.Error("expected error for empty dataDir")
+	}
+}
+
+func TestSaveHardState_ReturnsParentDirFsyncError(t *testing.T) {
+	originalSyncParentDir := syncHardStateParentDir
+	syncHardStateParentDir = func(string) error {
+		return errors.New("dir sync failed")
+	}
+	t.Cleanup(func() { syncHardStateParentDir = originalSyncParentDir })
+
+	err := saveHardState(t.TempDir(), HardState{CurrentTerm: 1, VotedFor: "node-1"})
+	if err == nil {
+		t.Fatal("saveHardState should return parent directory fsync error")
+	}
+	if !strings.Contains(err.Error(), "fsync hardstate dir") {
+		t.Fatalf("saveHardState error should include parent directory fsync context, got: %v", err)
 	}
 }
 

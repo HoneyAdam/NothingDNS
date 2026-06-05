@@ -80,6 +80,18 @@ func loadHardState(dataDir string) (HardState, error) {
 // dirent survives. Callers MUST hold any state lock around their hs
 // mutation; this function fsyncs and returns synchronously, so by the time
 // it returns the change is durable.
+var syncHardStateParentDir = func(dir string) error {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirFd.Close()
+	if err := dirFd.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func saveHardState(dataDir string, hs HardState) error {
 	if dataDir == "" {
 		return errors.New("raft: hardstate dataDir is empty; refusing to skip persistence")
@@ -134,12 +146,8 @@ func saveHardState(dataDir string, hs HardState) error {
 	}
 	cleanup = false
 
-	// Best-effort: fsync the parent directory so the dirent for the
-	// renamed file is durable. Some filesystems (e.g. tmpfs) don't
-	// support this; ignore in that case.
-	if dirFd, err := os.Open(dataDir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncHardStateParentDir(dataDir); err != nil {
+		return fmt.Errorf("fsync hardstate dir: %w", err)
 	}
 	return nil
 }
