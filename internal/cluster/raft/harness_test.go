@@ -33,12 +33,6 @@ func (t *inMemTransport) register(id NodeID, n *Node) {
 	t.nodes[id] = n
 }
 
-func (t *inMemTransport) deregister(id NodeID) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	delete(t.nodes, id)
-}
-
 func (t *inMemTransport) lookup(peerID NodeID) *Node {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
