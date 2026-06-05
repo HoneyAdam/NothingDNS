@@ -18,16 +18,36 @@ interface ClusterNode {
   version: number;
 }
 
+interface RaftInfo {
+  state: string;
+  term: number;
+  commit_index: number;
+  applied_index: number;
+  is_leader: boolean;
+  leader_id: string;
+}
+
+interface ClusterStatus {
+  node_id: string;
+  consensus: string;
+  raft?: RaftInfo;
+}
+
 export function ClusterPage() {
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
+  const [status, setStatus] = useState<ClusterStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
     try {
-      const data = await api<{ nodes: ClusterNode[] }>('GET', '/api/v1/cluster/nodes');
+      const [data, st] = await Promise.all([
+        api<{ nodes: ClusterNode[] }>('GET', '/api/v1/cluster/nodes'),
+        api<ClusterStatus>('GET', '/api/v1/cluster/status').catch(() => null),
+      ]);
       setNodes(data.nodes || []);
+      setStatus(st);
     } catch (e) {
       console.error(e);
     } finally {
@@ -136,6 +156,46 @@ export function ClusterPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Raft consensus status — only shown when the cluster runs in Raft mode */}
+      {status?.consensus === 'raft' && status.raft && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Network className="h-4 w-4" /> Raft Consensus
+              <Badge variant={status.raft.is_leader ? 'success' : 'secondary'}>
+                {status.raft.state}
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div>
+                <div className="text-xs text-muted-foreground">Leader</div>
+                <div className="text-sm font-semibold">{status.raft.leader_id || '—'}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Term</div>
+                <div className="text-sm font-semibold tabular-nums">{status.raft.term}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Commit Index</div>
+                <div className="text-sm font-semibold tabular-nums">{status.raft.commit_index}</div>
+              </div>
+              <div>
+                <div className="text-xs text-muted-foreground">Applied Index</div>
+                <div className="text-sm font-semibold tabular-nums">{status.raft.applied_index}</div>
+              </div>
+            </div>
+            {status.raft.commit_index !== status.raft.applied_index && (
+              <p className="text-xs text-warning mt-3">
+                Applying {status.raft.commit_index - status.raft.applied_index} pending committed entr
+                {status.raft.commit_index - status.raft.applied_index === 1 ? 'y' : 'ies'}…
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Nodes List */}
       <Card>

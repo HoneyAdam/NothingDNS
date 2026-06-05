@@ -39,8 +39,23 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		cacheHitRate = float64(clusterMetrics.CacheHits) / float64(clusterMetrics.CacheHits+clusterMetrics.CacheMisses)
 	}
 
+	// Surface Raft consensus state when the cluster runs in Raft mode so the
+	// dashboard can show leader/term/commit progress.
+	var raftInfo *RaftInfo
+	if string(stats.ConsensusMode) == "raft" {
+		raftInfo = &RaftInfo{
+			State:        stats.RaftStats.State,
+			Term:         stats.RaftStats.Term,
+			CommitIndex:  stats.RaftStats.CommitIndex,
+			AppliedIndex: stats.RaftStats.AppliedIndex,
+			IsLeader:     stats.RaftStats.IsLeader,
+			LeaderID:     s.cluster.RaftLeaderID(),
+		}
+	}
+
 	s.writeJSON(w, http.StatusOK, &ClusterStatusResponse{
 		NodeID:     stats.NodeID,
+		Consensus:  string(stats.ConsensusMode),
 		NodeCount:  stats.NodeCount,
 		AliveCount: stats.AliveCount,
 		Healthy:    stats.IsHealthy,
@@ -50,6 +65,7 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 			PingSent:         stats.GossipStats.PingSent,
 			PingReceived:     stats.GossipStats.PingReceived,
 		},
+		Raft: raftInfo,
 		Metrics: ClusterMetricsInfo{
 			QueriesTotal:  clusterMetrics.QueriesTotal,
 			QueriesPerSec: clusterMetrics.QueriesPerSec,

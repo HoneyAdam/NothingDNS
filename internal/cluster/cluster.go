@@ -738,6 +738,15 @@ func (c *Cluster) JoinSeed(seedAddr string) error {
 	return c.gossip.Join(seedAddr)
 }
 
+// RaftLeaderID returns the current Raft leader's node ID, or "" if not in
+// Raft mode or no leader has been observed yet.
+func (c *Cluster) RaftLeaderID() string {
+	if c.consensus != ConsensusRaft || c.raft == nil {
+		return ""
+	}
+	return string(c.raft.GetLeaderID())
+}
+
 // AddNodeViaLeader proposes adding a node to the Raft cluster. Only
 // works in Raft consensus mode and only on the current leader. When
 // called on a follower returns *raft.ErrNotLeader carrying the known
