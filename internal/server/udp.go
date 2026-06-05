@@ -240,7 +240,7 @@ func (s *UDPServer) Serve() error {
 
 	// Close the connection to unblock the reader from ReadFromUDP.
 	if s.conn != nil {
-		s.conn.Close()
+		_ = s.conn.Close()
 	}
 
 	// Wait for the reader to stop sending on requestChan.

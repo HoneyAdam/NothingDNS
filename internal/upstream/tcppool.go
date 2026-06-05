@@ -65,14 +65,14 @@ func (p *tcpConnPool) get() (*tcpConn, error) {
 
 		// Check if the idle connection is still valid
 		if time.Since(c.lastUsedAt) > p.idleTimeout {
-			c.close()
+			_ = c.close()
 			p.active--
 			continue
 		}
 
 		// Check if connection is still alive with a zero-read deadline
 		if err := c.conn.SetReadDeadline(time.Now()); err != nil {
-			c.close()
+			_ = c.close()
 			p.active--
 			continue
 		}
@@ -125,7 +125,7 @@ func (p *tcpConnPool) get() (*tcpConn, error) {
 func (p *tcpConnPool) put(c *tcpConn) {
 	if c.pool != p {
 		// Not part of this pool (overflow connection) — just close
-		c.close()
+		_ = c.close()
 		return
 	}
 
@@ -136,14 +136,14 @@ func (p *tcpConnPool) put(c *tcpConn) {
 	defer p.mu.Unlock()
 
 	if p.closed {
-		c.close()
+		_ = c.close()
 		p.active--
 		return
 	}
 
 	// If too many idle, close this one
 	if len(p.idle) >= p.maxIdle {
-		c.close()
+		_ = c.close()
 		p.active--
 		return
 	}
@@ -158,7 +158,7 @@ func (p *tcpConnPool) closeAll() {
 
 	p.closed = true
 	for _, c := range p.idle {
-		c.close()
+		_ = c.close()
 	}
 	p.idle = nil
 }

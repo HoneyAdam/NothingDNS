@@ -284,7 +284,7 @@ func (e *JaegerExporter) Flush() {
 	if err != nil {
 		return
 	}
-	io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
 	e.batch = e.batch[:0]

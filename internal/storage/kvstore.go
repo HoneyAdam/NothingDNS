@@ -624,7 +624,7 @@ func (s *KVStore) Update(fn func(*Tx) error) error {
 	}
 
 	if err := fn(tx); err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return err
 	}
 
@@ -641,7 +641,7 @@ func (s *KVStore) View(fn func(*Tx) error) error {
 	}
 
 	err = fn(tx)
-	tx.Rollback()
+	_ = tx.Rollback()
 	return err
 }
 

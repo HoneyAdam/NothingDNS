@@ -601,7 +601,7 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 		if returnToPool && hasPool {
 			pool.put(tc)
 		} else {
-			tc.close()
+			_ = tc.close()
 		}
 	}()
 
@@ -614,14 +614,14 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	length := uint16(len(packed))
 	lengthBuf := []byte{byte(length >> 8), byte(length)}
 	if _, err := tc.conn.Write(lengthBuf); err != nil {
-		tc.close()
+		_ = tc.close()
 		tc = nil // don't return broken conn to pool
 		return nil, fmt.Errorf("send length: %w", err)
 	}
 
 	start := time.Now()
 	if _, err := tc.conn.Write(packed); err != nil {
-		tc.close()
+		_ = tc.close()
 		tc = nil
 		return nil, fmt.Errorf("send query: %w", err)
 	}
@@ -629,7 +629,7 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read length prefix
 	respLenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(tc.conn, respLenBuf); err != nil {
-		tc.close()
+		_ = tc.close()
 		tc = nil
 		return nil, fmt.Errorf("read length: %w", err)
 	}
@@ -642,7 +642,7 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read response
 	_, err = io.ReadFull(tc.conn, buf[:respLen])
 	if err != nil {
-		tc.close()
+		_ = tc.close()
 		tc = nil
 		return nil, fmt.Errorf("read response: %w", err)
 	}

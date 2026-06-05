@@ -126,8 +126,8 @@ func (a *AuditLogger) LogQuery(entry QueryAuditEntry) {
 	line := formatQueryAuditLine(entry)
 
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 
@@ -138,8 +138,8 @@ func (a *AuditLogger) LogAXFR(entry AXFRAuditEntry) {
 	}
 	line := formatAXFRAuditLine(entry)
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 
@@ -150,8 +150,8 @@ func (a *AuditLogger) LogIXFR(entry IXFRAuditEntry) {
 	}
 	line := formatIXFRAuditLine(entry)
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 
@@ -162,8 +162,8 @@ func (a *AuditLogger) LogNOTIFY(entry NOTIFYAuditEntry) {
 	}
 	line := formatNOTIFYAuditLine(entry)
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 
@@ -174,8 +174,8 @@ func (a *AuditLogger) LogUpdate(entry UpdateAuditEntry) {
 	}
 	line := formatUpdateAuditLine(entry)
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 
@@ -186,8 +186,8 @@ func (a *AuditLogger) LogReload(entry ReloadAuditEntry) {
 	}
 	line := formatReloadAuditLine(entry)
 	a.mu.Lock()
-	a.output.Write([]byte(line))
-	a.output.Write([]byte{'\n'})
+	_, _ = a.output.Write([]byte(line))
+	_, _ = a.output.Write([]byte{'\n'})
 	a.mu.Unlock()
 }
 

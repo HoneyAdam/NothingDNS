@@ -122,6 +122,6 @@ func (m *ClusterManager) metricsUpdater(metricsCollector *metrics.MetricsCollect
 func (m *ClusterManager) Stop() {
 	close(m.stopCh)
 	if m.Cluster != nil {
-		m.Cluster.Stop()
+		_ = m.Cluster.Stop()
 	}
 }

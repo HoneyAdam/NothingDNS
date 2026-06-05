@@ -221,7 +221,7 @@ func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) {
 		return
 	}
 
-	kv.View(func(tx *storage.Tx) error {
+	_ = kv.View(func(tx *storage.Tx) error {
 		bucket := tx.Bucket([]byte("cache"))
 		if bucket == nil {
 			return nil

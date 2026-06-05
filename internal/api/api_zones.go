@@ -631,7 +631,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 		if ch.Action == "override" || ch.Action == "add" {
 			if ch.PTRExist {
-				s.zoneManager.DeleteRecord(zoneName, ch.RevRecord, "PTR")
+				_ = s.zoneManager.DeleteRecord(zoneName, ch.RevRecord, "PTR")
 			}
 			rec := zone.Record{
 				Name:  ch.RevRecord,
@@ -650,7 +650,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 		if req.AddA && ch.AName != "" {
 			if ch.AExist {
-				s.zoneManager.DeleteRecord(zoneName, ch.AName, "A")
+				_ = s.zoneManager.DeleteRecord(zoneName, ch.AName, "A")
 			}
 			aRec := zone.Record{
 				Name:  ch.AName,

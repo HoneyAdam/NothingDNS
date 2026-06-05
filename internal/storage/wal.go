@@ -559,7 +559,7 @@ func (wal *WAL) readSegment(segment *WALSegment) ([]WALEntry, error) {
 		// Read header
 		header := make([]byte, WALHeaderSize)
 		_, err := io.ReadFull(io.NewSectionReader(file, pos, WALHeaderSize), header)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		// A partial header at the tail of the segment is the signature of
@@ -593,7 +593,7 @@ func (wal *WAL) readSegment(segment *WALSegment) ([]WALEntry, error) {
 		_, err = io.ReadFull(io.NewSectionReader(file, pos, int64(entrySize)), buf)
 		// Partial trailing entry (some header, not enough body) — same
 		// torn-write story; stop and return successfully.
-		if errors.Is(err, io.ErrUnexpectedEOF) || err == io.EOF {
+		if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -652,13 +652,13 @@ func (wal *WAL) syncLoop() {
 		case <-ticker.C:
 			wal.mu.Lock()
 			if wal.syncPending && !wal.closed {
-				wal.syncLocked()
+				_ = wal.syncLocked()
 			}
 			wal.mu.Unlock()
 		case <-wal.syncChan:
 			wal.mu.Lock()
 			if wal.syncPending && !wal.closed {
-				wal.syncLocked()
+				_ = wal.syncLocked()
 			}
 			wal.mu.Unlock()
 		case <-wal.stopChan:
@@ -758,7 +758,7 @@ func (wal *WAL) Close() error {
 	wal.mu.Lock()
 	// Final sync
 	if wal.syncPending {
-		wal.syncLocked()
+		_ = wal.syncLocked()
 	}
 
 	// Close all segments

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/cipher"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -122,7 +123,8 @@ func (s *RPCServer) acceptLoop() {
 
 		conn, err := s.listener.Accept()
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
 				continue
 			}
 			return

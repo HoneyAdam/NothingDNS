@@ -7,6 +7,7 @@
 package zone
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -112,7 +113,7 @@ func (k *KVPersistence) LoadFromKV(zoneName string) (*Zone, bool, error) {
 
 	meta, records, err := store.LoadZone(zoneName)
 	if err != nil {
-		if err == storage.ErrZoneNotFound {
+		if errors.Is(err, storage.ErrZoneNotFound) {
 			return nil, false, nil
 		}
 		return nil, false, err

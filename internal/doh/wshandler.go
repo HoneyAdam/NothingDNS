@@ -58,7 +58,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Handshake already wrote an HTTP error response.
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Per-connection rate limit (M-7). Without this, a single
 	// unauthenticated DoWS connection can flood the resolver — the

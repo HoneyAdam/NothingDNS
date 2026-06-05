@@ -830,16 +830,16 @@ func run() error {
 
 				// Stop servers
 				cancelServer() // Cancel in-flight queries before stopping transports
-				udpServer.Stop()
-				tcpServer.Stop()
+				_ = udpServer.Stop()
+				_ = tcpServer.Stop()
 				if tlsServer != nil {
-					tlsServer.Stop()
+					_ = tlsServer.Stop()
 				}
 				if doqServer != nil {
-					doqServer.Stop()
+					_ = doqServer.Stop()
 				}
 				if xotServer != nil {
-					xotServer.Close()
+					_ = xotServer.Close()
 				}
 
 				// Close upstream client and load balancer
@@ -847,12 +847,12 @@ func run() error {
 
 				// Stop metrics server
 				if metricsCollector != nil {
-					metricsCollector.Stop()
+					_ = metricsCollector.Stop()
 				}
 
 				// Stop API server
 				if apiServer != nil {
-					apiServer.Stop()
+					_ = apiServer.Stop()
 				}
 
 				// Stop cluster manager

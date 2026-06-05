@@ -200,7 +200,7 @@ func (ci *ClusterIntegration) Stop() error {
 	}
 	ci.node.Stop()
 	ci.rpcServer.Stop()
-	ci.wal.Close()
+	_ = ci.wal.Close()
 	ci.wg.Wait()
 	return nil
 }

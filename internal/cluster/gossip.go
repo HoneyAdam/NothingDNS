@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -350,7 +351,7 @@ func (gp *GossipProtocol) Stop() error {
 	gp.cancel()
 
 	if gp.conn != nil {
-		gp.conn.Close()
+		_ = gp.conn.Close()
 	}
 
 	gp.wg.Wait()
@@ -469,7 +470,8 @@ func (gp *GossipProtocol) receiveLoop() {
 		}
 		n, from, err := gp.conn.ReadFromUDP(buf)
 		if err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
 				continue
 			}
 			if gp.ctx.Err() != nil {
@@ -617,7 +619,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 				gp.callbacksMu.RLock()
 				if gp.onNodeJoin != nil {
 					func() {
-						defer func() { recover() }()
+						defer func() { _ = recover() }()
 						gp.onNodeJoin(newNode)
 					}()
 				}
@@ -629,7 +631,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 			gp.callbacksMu.RLock()
 			if gp.onNodeUpdate != nil {
 				func() {
-					defer func() { recover() }()
+					defer func() { _ = recover() }()
 					gp.onNodeUpdate(existing)
 				}()
 			}
@@ -668,7 +670,7 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 	gp.callbacksMu.RLock()
 	if gp.onCacheInvalid != nil {
 		func() {
-			defer func() { recover() }()
+			defer func() { _ = recover() }()
 			gp.onCacheInvalid(payload.Keys)
 		}()
 	}
@@ -881,7 +883,7 @@ func (gp *GossipProtocol) handleZoneUpdate(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { recover() }()
+			defer func() { _ = recover() }()
 			onZoneUpdate(payload)
 		}()
 	}
@@ -923,7 +925,7 @@ func (gp *GossipProtocol) handleConfigSync(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { recover() }()
+			defer func() { _ = recover() }()
 			onConfigSync(payload)
 		}()
 	}
@@ -1493,7 +1495,7 @@ func (gp *GossipProtocol) probeNodes() {
 				gp.callbacksMu.RLock()
 				if gp.onNodeLeave != nil {
 					func() {
-						defer func() { recover() }()
+						defer func() { _ = recover() }()
 						gp.onNodeLeave(node)
 					}()
 				}

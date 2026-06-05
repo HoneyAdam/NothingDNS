@@ -337,7 +337,7 @@ func (c *Conn) writeClose(code int, reason string) {
 		frame = append(frame, byte(length>>8), byte(length))
 	}
 	frame = append(frame, buf...)
-	c.conn.Write(frame)
+	_, _ = c.conn.Write(frame)
 }
 
 // WriteMessage writes a message to the connection.

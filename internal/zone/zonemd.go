@@ -284,7 +284,7 @@ func serializeRecordData(rec Record) []byte {
 		parts := strings.Fields(rec.RData)
 		if len(parts) >= 2 {
 			var priority uint16
-			fmt.Sscanf(parts[0], "%d", &priority)
+			_, _ = fmt.Sscanf(parts[0], "%d", &priority)
 			result = append(result, byte(priority>>8), byte(priority&0xff))
 			result = append(result, canonicalName(parts[1])...)
 		}

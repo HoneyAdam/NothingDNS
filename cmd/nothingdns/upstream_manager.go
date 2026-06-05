@@ -96,10 +96,10 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 // Stop stops the upstream manager and its components.
 func (m *UpstreamManager) Stop() {
 	if m.Client != nil {
-		m.Client.Close()
+		_ = m.Client.Close()
 	}
 	if m.LoadBalancer != nil {
-		m.LoadBalancer.Close()
+		_ = m.LoadBalancer.Close()
 	}
 }
 
