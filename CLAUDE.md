@@ -17,7 +17,27 @@ go test ./internal/protocol/ -run TestName    # Single test
 go test ./internal/e2e/... -v                  # End-to-end tests
 ```
 
-**Go version**: 1.25.0+ (toolchain go1.26.2). `CGO_ENABLED=0` for static builds.
+**Static analysis (CI `Go` workflow / `security` job)** — must pass before merge:
+
+```bash
+staticcheck ./...
+errcheck -ignoretests -exclude .errcheck-excludes.txt ./...   # see note below
+go-errorlint -test=false ./...                                # production code only
+govulncheck ./...                                             # Go stdlib + deps CVEs
+```
+
+`.errcheck-excludes.txt` is errcheck's exclude list (one fully-qualified
+function/method signature per line, **no comments** — errcheck reads every
+line as a symbol). It suppresses conventionally-safe, deliberately-ignored
+calls (`fmt.Fprint*` to writers, `io`/`net` `Close`, `os.Remove`, deadline/
+buffer setters, `(net/http.ResponseWriter).Write`, …) so errcheck flags only
+genuine unhandled errors. Both errcheck and go-errorlint are scoped to
+production code (`-ignoretests` / `-test=false`); test files are not linted.
+When a new deliberate-ignore is genuinely safe and broadly applicable, add its
+signature here rather than scattering `_ =` — otherwise annotate the call site
+with `_ =` / `_, _ =`.
+
+**Go version**: 1.25.0+ (toolchain go1.26.4 — patches GO-2026-5039 / GO-2026-5037 in the stdlib). `CGO_ENABLED=0` for static builds.
 
 **Docker**: Multi-stage `Dockerfile` builds both binaries from scratch — `golang:1.26.2-alpine` compiles with `-trimpath -ldflags "-s -w -extldflags '-static'"`, then copies to `FROM scratch`.
 
