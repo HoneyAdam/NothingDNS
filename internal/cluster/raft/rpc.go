@@ -216,17 +216,13 @@ func (s *RPCServer) readMessage(r io.Reader, msg any) error {
 	return err
 }
 
-// writeRPCMessage and readRPCMessage are low-level helpers used by TCPTransport.
-// They use the server's AEAD when available (shared secret derived from cluster key).
+// writeRPCMessage is the low-level frame writer used by TCPTransport. It uses
+// the AEAD when available (shared secret derived from the cluster key). The
+// matching read side is frameReader.readFramed, called directly by the
+// transport's exchange().
 func writeRPCMessage(w io.Writer, msgType uint8, msg any, aead cipher.AEAD) error {
 	fw := newFrameWriter(w, aead)
 	return fw.writeFramed(msgType, msg)
-}
-
-func readRPCMessage(r io.Reader, msg any, aead cipher.AEAD) error {
-	fr := newFrameReader(r, aead)
-	_, err := fr.readFramed(msg)
-	return err
 }
 
 // TCPTransport is a TCP-based Raft transport.
