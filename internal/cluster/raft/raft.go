@@ -225,6 +225,16 @@ type Node struct {
 	// acknowledges an AppendEntries, so committed entries survive a crash.
 	persister logPersister
 
+	// snapshotBytes is the payload of the most recent snapshot this node took
+	// (leader) or installed (follower). The leader streams it to followers
+	// that have fallen behind lastSnapshot via InstallSnapshot.
+	snapshotBytes []byte
+
+	// onSnapshotInstalled, when set, is called after a snapshot is installed
+	// (with its last-included index) so the integration layer can fast-forward
+	// its applied index. Guarded by n.mu at call time.
+	onSnapshotInstalled func(Index)
+
 	// Channels
 	voteCh       chan VoteRequest    // Incoming vote requests from RPC
 	appendCh     chan AppendRequest  // Incoming append requests from RPC
@@ -886,6 +896,12 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	n.lastApplied = req.LastIndex
 	n.commitIndex = req.LastIndex
 	n.log = make([]entry, 0) // Discard all log entries before snapshot
+	n.snapshotBytes = req.Data
+	// Fast-forward the integration's applied index so its apply loop doesn't
+	// try to re-apply entries the snapshot already subsumes.
+	if n.onSnapshotInstalled != nil {
+		n.onSnapshotInstalled(req.LastIndex)
+	}
 }
 
 // handleAppendResponse handles an AppendEntries response from a peer.
@@ -953,9 +969,14 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 
 	// Install snapshot: update indices and clear log
 	n.lastSnapshot = req.LastIndex
+	n.lastSnapshotTerm = req.LastTerm
 	n.lastApplied = req.LastIndex
 	n.commitIndex = req.LastIndex
 	n.log = make([]entry, 0)
+	n.snapshotBytes = req.Data
+	if n.onSnapshotInstalled != nil {
+		n.onSnapshotInstalled(req.LastIndex)
+	}
 }
 
 // notifyLeadership publishes a leadership transition. The send is
@@ -1083,9 +1104,9 @@ func (n *Node) buildAppendRequestLocked(peerID NodeID, term Term) (AppendRequest
 	}, true
 }
 
-// replicateTo sends one AppendEntries to a single peer based on its
-// nextIndex. Used both by the heartbeat tick and immediately after a
-// Propose.
+// replicateTo sends one AppendEntries to a single peer based on its nextIndex,
+// or an InstallSnapshot when the peer has fallen behind our snapshot. Used by
+// the heartbeat tick and immediately after a Propose.
 func (n *Node) replicateTo(peerID NodeID, term Term) {
 	n.mu.Lock()
 	if n.state != StateLeader || n.currentTerm != term {
@@ -1093,11 +1114,79 @@ func (n *Node) replicateTo(peerID NodeID, term Term) {
 		return
 	}
 	req, ok := n.buildAppendRequestLocked(peerID, term)
-	n.mu.Unlock()
 	if !ok {
+		// The follower needs entries we've already compacted into our
+		// snapshot — bridge the gap with InstallSnapshot.
+		snap := SnapshotRequest{
+			Term:      term,
+			LeaderID:  n.config.NodeID,
+			Data:      n.snapshotBytes,
+			LastIndex: n.lastSnapshot,
+			LastTerm:  n.lastSnapshotTerm,
+		}
+		hasSnap := n.lastSnapshot > 0 && len(n.snapshotBytes) > 0
+		n.mu.Unlock()
+		if hasSnap {
+			n.sendInstallSnapshot(peerID, snap)
+		}
 		return
 	}
+	n.mu.Unlock()
 	n.sendAppendRequest(peerID, req)
+}
+
+// installLeaderSnapshot records a snapshot the LEADER just took: it caches the
+// payload for InstallSnapshot sends, advances lastSnapshot/lastSnapshotTerm,
+// and compacts the in-memory log up to index. The WAL is intentionally left
+// intact — on restart the node replays the full WAL and reconstructs the log;
+// snapshots are used for live follower catch-up, not boot recovery.
+func (n *Node) installLeaderSnapshot(index Index, term Term, data []byte) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if index <= n.lastSnapshot || index > n.lastIndex() {
+		return
+	}
+	remove := int(index - n.lastSnapshot) // entries lastSnapshot+1 .. index
+	if remove >= len(n.log) {
+		n.log = n.log[:0]
+	} else {
+		n.log = append([]entry(nil), n.log[remove:]...)
+	}
+	n.lastSnapshot = index
+	n.lastSnapshotTerm = term
+	n.snapshotBytes = data
+}
+
+// sendInstallSnapshot streams a snapshot to a peer and, on success,
+// optimistically advances its progress to just past the snapshot so the next
+// AppendEntries resumes cleanly. (SendSnapshot is one-way; the follower
+// installs synchronously on receipt.)
+func (n *Node) sendInstallSnapshot(peerID NodeID, req SnapshotRequest) {
+	if n.transport == nil {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				util.Errorf("raft: panic in sendInstallSnapshot: %v", r)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
+		defer cancel()
+		if err := n.transport.SendSnapshot(ctx, peerID, req); err != nil {
+			return
+		}
+		n.mu.Lock()
+		if n.state == StateLeader && n.currentTerm == req.Term {
+			if req.LastIndex > n.matchIndex[peerID] {
+				n.matchIndex[peerID] = req.LastIndex
+			}
+			if n.nextIndex[peerID] < req.LastIndex+1 {
+				n.nextIndex[peerID] = req.LastIndex + 1
+			}
+		}
+		n.mu.Unlock()
+	}()
 }
 
 // sendCommitted sends committed entries to the apply channel.
