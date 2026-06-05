@@ -40,6 +40,15 @@ type ClusterIntegration struct {
 	// real zone store can be updated. Guarded by mu.
 	applyHook func(ZoneCommand)
 
+	// snapshotFn produces the full state-machine snapshot payload (the real
+	// zone store, serialized). Used by the leader to take/send snapshots.
+	// Guarded by mu.
+	snapshotFn func() ([]byte, error)
+
+	// applyMu serializes state-machine application with snapshot capture, so a
+	// snapshot reads a consistent (appliedIndex, zone-store) pair.
+	applyMu sync.Mutex
+
 	stopCh   chan struct{}
 	stopOnce sync.Once // guards Stop() against second-call panic
 	wg       sync.WaitGroup
@@ -183,7 +192,83 @@ func (ci *ClusterIntegration) Start() error {
 	ci.wg.Add(1)
 	go ci.leadershipLoop()
 
+	// Start periodic snapshotter (leader-only work happens inside the loop)
+	ci.wg.Add(1)
+	go ci.snapshotLoop()
+
 	return nil
+}
+
+// snapshotLoop periodically takes a snapshot while this node is the leader, so
+// the log is bounded and followers that fall behind (or join fresh) can be
+// caught up via InstallSnapshot.
+func (ci *ClusterIntegration) snapshotLoop() {
+	defer ci.wg.Done()
+	interval := ci.config.SnapshotInterval
+	if interval <= 0 {
+		interval = 30 * time.Second
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ci.stopCh:
+			return
+		case <-t.C:
+			if ci.IsLeader() {
+				ci.takeSnapshot()
+			}
+		}
+	}
+}
+
+// takeSnapshot captures a consistent (appliedIndex, zone-store) pair, persists
+// it, and compacts the log up to that index. No-op if there's nothing newly
+// applied since the last snapshot.
+func (ci *ClusterIntegration) takeSnapshot() {
+	ci.mu.RLock()
+	fn := ci.snapshotFn
+	ci.mu.RUnlock()
+	if fn == nil {
+		return
+	}
+
+	// applyMu blocks the apply loop so the store and appliedIndex we read are
+	// a coherent pair.
+	ci.applyMu.Lock()
+	ci.node.mu.Lock()
+	idx := ci.appliedIndex
+	isLeader := ci.node.state == StateLeader
+	term, termOK := ci.node.entryTerm(idx)
+	already := idx <= ci.node.lastSnapshot
+	ci.node.mu.Unlock()
+	if !isLeader || already || idx == 0 || !termOK {
+		ci.applyMu.Unlock()
+		return
+	}
+	data, err := fn()
+	ci.applyMu.Unlock()
+	if err != nil {
+		ci.logger.Warnf("raft: snapshot serialization failed: %v", err)
+		return
+	}
+
+	if ci.snapshotter != nil {
+		if err := ci.snapshotter.Save(&Snapshot{Index: idx, Term: term, LastIndex: idx, LastTerm: term, Data: data}); err != nil {
+			ci.logger.Warnf("raft: persisting snapshot failed: %v", err)
+		}
+	}
+	ci.node.installLeaderSnapshot(idx, term, data)
+	ci.logger.Infof("raft: snapshot taken at index %d (term %d, %d bytes); log compacted", idx, term, len(data))
+}
+
+// fastForwardApplied is invoked (with ci.node.mu held) after a snapshot is
+// installed, advancing the integration's applied index past the snapshot.
+func (ci *ClusterIntegration) fastForwardApplied(idx Index) {
+	if idx > ci.appliedIndex {
+		ci.appliedIndex = idx
+		ci.lastAppliedTerm = ci.node.lastSnapshotTerm
+	}
 }
 
 // Stop stops the Raft integration. Idempotent — subsequent calls
@@ -238,6 +323,10 @@ func (ci *ClusterIntegration) applyLoop() {
 			ci.node.mu.Unlock()
 
 			for _, e := range pending {
+				// applyMu makes (apply-to-store + advance appliedIndex) atomic
+				// with respect to snapshot capture, so a snapshot never sees a
+				// store mutated past the appliedIndex it records.
+				ci.applyMu.Lock()
 				if e.Term != 0 {
 					if err := ci.stateMachine.Apply(e); err != nil {
 						// F050: an apply failure means this node has diverged
@@ -252,6 +341,7 @@ func (ci *ClusterIntegration) applyLoop() {
 				ci.appliedIndex = e.Index
 				ci.lastAppliedTerm = e.Term
 				ci.node.mu.Unlock()
+				ci.applyMu.Unlock()
 			}
 		}
 	}
@@ -349,6 +439,44 @@ func (ci *ClusterIntegration) AppliedIndex() Index {
 	ci.node.mu.Lock()
 	defer ci.node.mu.Unlock()
 	return ci.appliedIndex
+}
+
+// snapshotAdapter is the StateMachine the node uses solely for Snapshot()/
+// Restore() — delegating to the real zone store via cluster-provided funcs.
+// Apply is a no-op: committed entries reach the zone store through the apply
+// hook (and ci.stateMachine's ledger), not this.
+type snapshotAdapter struct {
+	snapshot func() ([]byte, error)
+	restore  func([]byte) error
+}
+
+func (a snapshotAdapter) Apply(entry) error { return nil }
+
+func (a snapshotAdapter) Snapshot() ([]byte, error) {
+	if a.snapshot == nil {
+		return nil, nil
+	}
+	return a.snapshot()
+}
+
+func (a snapshotAdapter) Restore(data []byte) error {
+	if a.restore == nil {
+		return nil
+	}
+	return a.restore(data)
+}
+
+// SetSnapshotFns wires the real zone-store snapshot/restore functions. The
+// node uses restore on InstallSnapshot receive; the leader uses snapshot to
+// produce the payload it sends and persists. Call before Start.
+func (ci *ClusterIntegration) SetSnapshotFns(snapshot func() ([]byte, error), restore func([]byte) error) {
+	ci.mu.Lock()
+	ci.snapshotFn = snapshot
+	ci.mu.Unlock()
+	ci.node.SetStateMachine(snapshotAdapter{snapshot: snapshot, restore: restore})
+	// When a snapshot is installed, fast-forward our applied index. Set
+	// directly (no lock): SetSnapshotFns runs at construction, before Start.
+	ci.node.onSnapshotInstalled = ci.fastForwardApplied
 }
 
 // SetApplyHook installs fn, called with each committed ZoneCommand as it is

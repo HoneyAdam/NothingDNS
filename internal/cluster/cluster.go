@@ -3,10 +3,12 @@ package cluster
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -330,6 +332,10 @@ func (c *Cluster) initRaft() error {
 	// Project committed Raft zone commands onto the local zone store so DNS
 	// data converges across the cluster.
 	c.raft.SetApplyHook(c.applyRaftZoneCommand)
+
+	// Back Raft snapshots with the real zone store: the leader snapshots the
+	// full zone set, and a follower installs it into its own zone store.
+	c.raft.SetSnapshotFns(c.snapshotZones, c.restoreZones)
 
 	return nil
 }
@@ -901,6 +907,47 @@ func (c *Cluster) handleCacheInvalid(keys []string) {
 	for _, handler := range c.handlers {
 		handler.OnCacheInvalid(keys)
 	}
+}
+
+// snapshotZones serializes the FULL zone store (every zone the manager holds,
+// including ones loaded from disk at boot) as a name→BIND-text map. This is the
+// Raft snapshot payload: a node that installs it gets the leader's entire zone
+// state, which is how disk-loaded zones reach a follower that doesn't have them
+// on its own disk.
+func (c *Cluster) snapshotZones() ([]byte, error) {
+	if c.zoneManager == nil {
+		return nil, fmt.Errorf("zoneManager not configured")
+	}
+	out := make(map[string]string)
+	for name, z := range c.zoneManager.List() {
+		txt, err := zone.WriteZone(z)
+		if err != nil {
+			return nil, fmt.Errorf("export zone %s: %w", name, err)
+		}
+		out[name] = txt
+	}
+	return json.Marshal(out)
+}
+
+// restoreZones loads a snapshot produced by snapshotZones into the local zone
+// store, replacing each zone's contents. Used when a follower installs a
+// snapshot from the leader.
+func (c *Cluster) restoreZones(data []byte) error {
+	if c.zoneManager == nil {
+		return fmt.Errorf("zoneManager not configured")
+	}
+	var in map[string]string
+	if err := json.Unmarshal(data, &in); err != nil {
+		return fmt.Errorf("unmarshal snapshot: %w", err)
+	}
+	for name, txt := range in {
+		z, err := zone.ParseFile(name, strings.NewReader(txt))
+		if err != nil {
+			return fmt.Errorf("parse zone %s: %w", name, err)
+		}
+		c.zoneManager.LoadZone(z, "")
+	}
+	return nil
 }
 
 // applyRaftZoneCommand projects a committed Raft ZoneCommand onto the local
