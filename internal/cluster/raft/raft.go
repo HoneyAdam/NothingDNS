@@ -543,11 +543,11 @@ func (n *Node) runCandidate() {
 
 	// Collect votes
 	voteCount := 1 // Vote for self
-	quorum := len(n.peers)/2 + 1
+	quorum := n.quorumSize()
 
-	// A self-vote may already be a majority (single-node cluster, or any
-	// config where ⌊peers/2⌋+1 == 1). Without this early check the node
-	// would wait forever for vote responses that no peer will ever send.
+	// A self-vote may already be a majority (single-node cluster). Without
+	// this early check the node would wait forever for vote responses that
+	// no peer will ever send.
 	if voteCount >= quorum {
 		n.becomeLeader(term)
 		return
@@ -1147,6 +1147,14 @@ func (n *Node) sendCommitted() {
 	}
 }
 
+// quorumSize is the number of nodes (including self) that must agree for a
+// decision — a strict majority of the full cluster. peers excludes self, so
+// the cluster has len(peers)+1 nodes and the majority is
+// ⌊(len(peers)+1)/2⌋ + 1. Correct for both odd and even cluster sizes.
+func (n *Node) quorumSize() int {
+	return (len(n.peers)+1)/2 + 1
+}
+
 // maybeAdvanceCommitIndex advances the commit index to the highest global
 // index replicated on a quorum, subject to the Raft §5.4.2 rule that a
 // leader may only commit an entry from its OWN term directly (older-term
@@ -1172,9 +1180,12 @@ func (n *Node) maybeAdvanceCommitIndex() {
 				replicas++
 			}
 		}
-		// Majority of the full cluster (peers + self). Since peers
-		// excludes self, that's replicas > len(peers)/2.
-		if replicas > len(n.peers)/2 {
+		// Commit once a strict majority of the FULL cluster (peers + self)
+		// holds the entry. quorumSize() is correct for both odd and even
+		// cluster sizes — the old `replicas > len(peers)/2` under-counted
+		// for even sizes (e.g. it committed with just the leader in a
+		// 2-node cluster, a split-brain hazard).
+		if replicas >= n.quorumSize() {
 			newCommit = i
 		}
 	}

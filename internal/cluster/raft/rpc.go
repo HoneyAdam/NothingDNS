@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/cipher"
 	"crypto/tls"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -153,7 +152,6 @@ func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
 
 	fw := newFrameWriter(conn, s.aead)
 	fr := newFrameReader(conn, s.aead)
-	buf := &voteReqBuf{}
 
 	for {
 		select {
@@ -166,41 +164,43 @@ func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
 			return
 		}
 
-		msgType, err := fr.readFramed(buf)
+		// Read the frame's type + raw payload, THEN decode into the struct the
+		// type calls for. The previous code decoded every frame into a whole
+		// voteReqBuf, which decodeNative doesn't handle — so the server errored
+		// on the first frame and dropped the connection. (Masked because no
+		// test exercised the real TCP path.)
+		msgType, payload, err := fr.readFrameBytes()
 		if err != nil {
 			return
 		}
 
 		switch msgType {
 		case msgTypeVoteRequest:
-			resp := s.handler.HandleVoteRequest(buf.VoteRequest)
-			buf.VoteResponse = resp
-			if err := fw.writeFramed(msgTypeVoteResponse, &buf.VoteResponse); err != nil {
+			var req VoteRequest
+			if err := decodeNative(&req, payload); err != nil {
+				return
+			}
+			resp := s.handler.HandleVoteRequest(req)
+			if err := fw.writeFramed(msgTypeVoteResponse, resp); err != nil {
 				return
 			}
 		case msgTypeAppendRequest:
-			resp := s.handler.HandleAppendRequest(buf.AppendRequest)
-			buf.AppendResponse = resp
-			if err := fw.writeFramed(msgTypeAppendResponse, &buf.AppendResponse); err != nil {
+			var req AppendRequest
+			if err := decodeNative(&req, payload); err != nil {
+				return
+			}
+			resp := s.handler.HandleAppendRequest(req)
+			if err := fw.writeFramed(msgTypeAppendResponse, resp); err != nil {
 				return
 			}
 		case msgTypeSnapshot:
-			if _, err := fr.readFramed(&buf.SnapshotRequest); err != nil {
+			var req SnapshotRequest
+			if err := decodeNative(&req, payload); err != nil {
 				return
 			}
-			s.handler.HandleSnapshotRequest(buf.SnapshotRequest)
+			s.handler.HandleSnapshotRequest(req)
 		}
 	}
-}
-
-// voteReqBuf pools per-connection buffers to avoid per-message allocation.
-// Each field is a named struct to avoid ambiguity in the type switch.
-type voteReqBuf struct {
-	VoteRequest     VoteRequest
-	VoteResponse    VoteResponse
-	AppendRequest   AppendRequest
-	AppendResponse  AppendResponse
-	SnapshotRequest SnapshotRequest
 }
 
 // writeMessage writes a message with type prefix.
@@ -234,6 +234,7 @@ type TCPTransport struct {
 	dialTimeout time.Duration
 	conns       map[NodeID]net.Conn
 	peerAddrs   map[NodeID]string
+	peerLocks   map[NodeID]*sync.Mutex // serializes each peer's request/response exchange
 	mu          sync.RWMutex
 	tlsConfig   *tls.Config // nil means plain TCP
 	aead        cipher.AEAD // AEAD for encrypted framing; nil is plaintext
@@ -246,83 +247,103 @@ func NewTCPTransport(tlsConfig *tls.Config, aead cipher.AEAD) *TCPTransport {
 		dialTimeout: 5 * time.Second,
 		conns:       make(map[NodeID]net.Conn),
 		peerAddrs:   make(map[NodeID]string),
+		peerLocks:   make(map[NodeID]*sync.Mutex),
 		tlsConfig:   tlsConfig,
 		aead:        aead,
 	}
 }
 
-// SendRequestVote sends a RequestVote RPC.
-func (t *TCPTransport) SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error) {
-	conn, err := t.getConn(peerID)
-	if err != nil {
-		return nil, err
+// peerLock returns the per-peer mutex that serializes a full request/response
+// exchange. A single TCP connection per peer is shared by the heartbeat
+// ticker and replication goroutines; without this lock their writes and reads
+// would interleave on the wire and corrupt the framing.
+func (t *TCPTransport) peerLock(peerID NodeID) *sync.Mutex {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	l, ok := t.peerLocks[peerID]
+	if !ok {
+		l = &sync.Mutex{}
+		t.peerLocks[peerID] = l
 	}
-
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
-	}
-
-	if err := writeRPCMessage(conn, msgTypeVoteRequest, req, t.aead); err != nil {
-		return nil, err
-	}
-
-	var respType uint8
-	if err := binary.Read(conn, binary.BigEndian, &respType); err != nil {
-		return nil, err
-	}
-	if respType != msgTypeVoteResponse {
-		return nil, fmt.Errorf("unexpected vote response type: %d", respType)
-	}
-
-	var resp VoteResponse
-	if err := readRPCMessage(conn, &resp, t.aead); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	return l
 }
 
-// SendAppendEntries sends an AppendEntries RPC.
-func (t *TCPTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error) {
-	conn, err := t.getConn(peerID)
-	if err != nil {
-		return nil, err
+// dropConn closes and forgets a connection (only if it's still the cached one)
+// so the next call redials. Called whenever an exchange errors — a half-read
+// response would otherwise desync every subsequent RPC on that conn.
+func (t *TCPTransport) dropConn(peerID NodeID, conn net.Conn) {
+	t.mu.Lock()
+	if t.conns[peerID] == conn {
+		delete(t.conns, peerID)
 	}
-
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
-	}
-
-	if err := writeRPCMessage(conn, msgTypeAppendRequest, req, t.aead); err != nil {
-		return nil, err
-	}
-
-	var respType uint8
-	if err := binary.Read(conn, binary.BigEndian, &respType); err != nil {
-		return nil, err
-	}
-	if respType != msgTypeAppendResponse {
-		return nil, fmt.Errorf("unexpected append response type: %d", respType)
-	}
-
-	var resp AppendResponse
-	if err := readRPCMessage(conn, &resp, t.aead); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+	t.mu.Unlock()
+	_ = conn.Close()
 }
 
-// SendSnapshot sends a snapshot to a peer.
-func (t *TCPTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
+// exchange performs one request/response RPC over the peer's connection,
+// serialized per peer. wantType validates the response frame's type; pass 0
+// with a nil resp for one-way messages (snapshot). On any error the connection
+// is dropped so the next call starts clean.
+func (t *TCPTransport) exchange(ctx context.Context, peerID NodeID, reqType uint8, req any, wantType uint8, resp any) error {
+	lock := t.peerLock(peerID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	conn, err := t.getConn(peerID)
 	if err != nil {
 		return err
 	}
-
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(deadline)
+	if ctx != nil {
+		if deadline, ok := ctx.Deadline(); ok {
+			_ = conn.SetDeadline(deadline)
+		}
 	}
 
-	return writeRPCMessage(conn, msgTypeSnapshot, req, t.aead)
+	if err := writeRPCMessage(conn, reqType, req, t.aead); err != nil {
+		t.dropConn(peerID, conn)
+		return err
+	}
+	if resp == nil {
+		return nil // one-way message, no response expected
+	}
+
+	fr := newFrameReader(conn, t.aead)
+	respType, err := fr.readFramed(resp)
+	if err != nil {
+		t.dropConn(peerID, conn)
+		return err
+	}
+	if respType != wantType {
+		t.dropConn(peerID, conn)
+		return fmt.Errorf("unexpected response type %d (want %d)", respType, wantType)
+	}
+	return nil
+}
+
+// SendRequestVote sends a RequestVote RPC and reads the single response frame.
+// (The earlier code read a bare type byte AND a frame — double-reading the
+// type and corrupting every TCP response, so real multi-node RPC never
+// actually worked; the exchange helper now does one matched read.)
+func (t *TCPTransport) SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error) {
+	var resp VoteResponse
+	if err := t.exchange(ctx, peerID, msgTypeVoteRequest, req, msgTypeVoteResponse, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// SendAppendEntries sends an AppendEntries RPC and reads the response frame.
+func (t *TCPTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error) {
+	var resp AppendResponse
+	if err := t.exchange(ctx, peerID, msgTypeAppendRequest, req, msgTypeAppendResponse, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// SendSnapshot sends a snapshot to a peer (one-way; no response frame).
+func (t *TCPTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
+	return t.exchange(ctx, peerID, msgTypeSnapshot, req, 0, nil)
 }
 
 // getConn gets or creates a connection to a peer.
