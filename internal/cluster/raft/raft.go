@@ -179,10 +179,11 @@ type Node struct {
 	log         []entry
 
 	// Volatile state
-	state        State
-	commitIndex  Index
-	lastApplied  Index
-	lastSnapshot Index // Highest index included in snapshot
+	state            State
+	commitIndex      Index
+	lastApplied      Index
+	lastSnapshot     Index // Highest index included in snapshot
+	lastSnapshotTerm Term  // Term of the entry at lastSnapshot
 
 	// leaderID is the most-recently-seen leader. Followers learn this
 	// from AppendEntries (req.LeaderID). Candidates clear it on start
@@ -216,6 +217,14 @@ type Node struct {
 	applyCh      chan Apply
 	snapshotCh   chan SnapshotRequest
 	leadershipCh chan LeadershipState
+
+	// electionResetCh carries "legitimate leader contact" events from the
+	// RPC handlers (valid AppendEntries received, or a vote granted) to the
+	// run loop. A follower resets its election timer on this; a candidate
+	// steps down. Without it the run-loop timer fires on a fixed schedule
+	// regardless of heartbeats, so every follower repeatedly times out and
+	// challenges a healthy leader — the cluster livelocks and never settles.
+	electionResetCh chan struct{}
 
 	// Control
 	stopCh   chan struct{}
@@ -308,25 +317,26 @@ func NewNode(config Config, peers []NodeID, transport Transport) *Node {
 	}
 
 	n := &Node{
-		config:       config,
-		transport:    transport,
-		state:        StateFollower,
-		currentTerm:  0,
-		votedFor:     "",
-		log:          make([]entry, 0),
-		nextIndex:    make(map[NodeID]Index),
-		matchIndex:   make(map[NodeID]Index),
-		peers:        make(map[NodeID]*Peer),
-		voteCh:       make(chan VoteRequest, 10),
-		appendCh:     make(chan AppendRequest, 10),
-		voteRespCh:   make(chan VoteResponse, 10),
-		appendRespCh: make(chan AppendResponse, 10),
-		commitCh:     make(chan Commit, 10),
-		applyCh:      make(chan Apply, 256),
-		snapshotCh:   make(chan SnapshotRequest, 10),
-		leadershipCh: make(chan LeadershipState, 10),
-		stopCh:       make(chan struct{}),
-		rng:          NewLockedRand(),
+		config:          config,
+		transport:       transport,
+		state:           StateFollower,
+		currentTerm:     0,
+		votedFor:        "",
+		log:             make([]entry, 0),
+		nextIndex:       make(map[NodeID]Index),
+		matchIndex:      make(map[NodeID]Index),
+		peers:           make(map[NodeID]*Peer),
+		voteCh:          make(chan VoteRequest, 10),
+		appendCh:        make(chan AppendRequest, 10),
+		voteRespCh:      make(chan VoteResponse, 10),
+		appendRespCh:    make(chan AppendResponse, 10),
+		commitCh:        make(chan Commit, 10),
+		applyCh:         make(chan Apply, 256),
+		snapshotCh:      make(chan SnapshotRequest, 10),
+		leadershipCh:    make(chan LeadershipState, 10),
+		electionResetCh: make(chan struct{}, 1),
+		stopCh:          make(chan struct{}),
+		rng:             NewLockedRand(),
 	}
 
 	// Restore persistent HardState from disk so currentTerm and votedFor
@@ -425,8 +435,19 @@ func (n *Node) run() {
 	defer n.wg.Done()
 
 	electionTimer := n.newElectionTimer()
+	defer electionTimer.Stop()
 
 	for {
+		// Exit promptly on Stop(): the inner state functions return when
+		// stopCh closes, but without this guard run() would busy-loop
+		// re-entering them forever and wg.Done (deferred above) would never
+		// fire, hanging Stop().
+		select {
+		case <-n.stopCh:
+			return
+		default:
+		}
+
 		n.mu.Lock()
 		state := n.state
 		n.mu.Unlock()
@@ -442,17 +463,42 @@ func (n *Node) run() {
 	}
 }
 
-// runFollower runs the follower state.
+// drainTimer empties a timer's channel after Stop so a stale fire can't be
+// observed by the next Reset cycle.
+func drainTimer(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
+}
+
+// runFollower runs the follower state. The election timer is restarted on
+// entry and every time the RPC layer reports legitimate leader contact, so
+// a follower only becomes a candidate after a genuine silence.
 func (n *Node) runFollower(electionTimer *time.Timer) {
+	drainTimer(electionTimer)
+	electionTimer.Reset(n.randomElectionTimeout())
+
 	for {
 		select {
 		case <-n.stopCh:
 			return
+		case <-n.electionResetCh:
+			// Heard from the leader (or granted a vote): restart the clock.
+			drainTimer(electionTimer)
+			electionTimer.Reset(n.randomElectionTimeout())
 		case <-electionTimer.C:
-			// Election timeout — become candidate
+			// Election timeout — become candidate. advanceTermLocked must
+			// run FIRST: it bumps the term, clears votedFor AND forces state
+			// back to Follower, so setting StateCandidate afterwards is what
+			// actually leaves us a candidate. The reverse order (the original
+			// bug) had advanceTermLocked silently stamp us back to Follower,
+			// so the node only ever incremented its term and never campaigned.
 			n.mu.Lock()
-			n.state = StateCandidate
 			n.advanceTermLocked(n.currentTerm + 1)
+			n.state = StateCandidate
 			n.mu.Unlock()
 			return
 		case req := <-n.voteCh:
@@ -488,12 +534,24 @@ func (n *Node) runCandidate() {
 		case <-n.stopCh:
 			return
 		case <-electionTimer.C:
-			// Election timeout — restart election
+			// Election timeout — restart election. advanceTermLocked first
+			// (it resets state to Follower); then mark candidate. See the
+			// matching note in runFollower.
 			n.mu.Lock()
-			n.state = StateCandidate
 			n.advanceTermLocked(n.currentTerm + 1)
+			n.state = StateCandidate
 			n.mu.Unlock()
 			return
+		case <-n.electionResetCh:
+			// An RPC handler accepted another leader (or we granted a vote
+			// and stepped down to follower). Abandon this candidacy and let
+			// run() re-dispatch on the updated state.
+			n.mu.Lock()
+			stillCandidate := n.state == StateCandidate
+			n.mu.Unlock()
+			if !stillCandidate {
+				return
+			}
 		case resp := <-n.voteRespCh:
 			if resp.Term > term {
 				// Discovered higher term — become follower
@@ -543,9 +601,6 @@ func (n *Node) runLeader() {
 			n.broadcastHeartbeat(currentTerm)
 		case resp := <-n.appendRespCh:
 			n.handleAppendResponse(resp)
-		case <-n.commitCh:
-			// Check for committed entries
-			n.sendCommitted()
 		case req := <-n.snapshotCh:
 			n.handleSnapshotRequest(req)
 		}
@@ -588,6 +643,9 @@ func (n *Node) handleVoteRequest(req VoteRequest) {
 	// up-to-date as receiver's log, grant vote
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
 		n.setVotedForLocked(req.CandidateID)
+		// Granting a vote counts as leader contact: don't immediately start
+		// our own campaign against the candidate we just endorsed.
+		n.signalElectionReset()
 		n.voteRespCh <- VoteResponse{
 			Term:        n.currentTerm,
 			VoteGranted: true,
@@ -602,64 +660,109 @@ func (n *Node) handleVoteRequest(req VoteRequest) {
 	}
 }
 
-// handleAppendRequest handles an AppendEntries request.
+// handleAppendRequest handles an AppendEntries request arriving on the
+// in-process channel path and pushes the response to appendRespCh.
 func (n *Node) handleAppendRequest(req AppendRequest) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
+	resp := n.appendEntriesLocked(req)
+	n.mu.Unlock()
+	n.appendRespCh <- resp
+}
 
+// appendEntriesLocked is the single, snapshot-aware implementation of the
+// AppendEntries receiver rules (Raft §5.3). Both the channel-based and the
+// exported RPC handler delegate here so the two can never drift apart.
+// MUST be called with n.mu held.
+//
+// On success it sets resp.MatchIndex to the global index of the last entry
+// the follower now stores that is consistent with the leader — WITHOUT
+// this the leader's matchIndex never advances and nothing ever commits.
+// On a consistency-check failure it returns a MatchIndex hint so the
+// leader can back nextIndex up quickly instead of decrementing by one.
+func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 	resp := AppendResponse{
 		Term:    n.currentTerm,
 		Success: false,
 		From:    n.config.NodeID,
 	}
 
-	// Reply false if term < currentTerm
+	// Reply false if term < currentTerm (Raft §5.1).
 	if req.Term < n.currentTerm {
-		n.appendRespCh <- resp
-		return
+		return resp
 	}
 
-	// Update term and convert to follower if necessary
+	// A valid AppendEntries means the sender is the leader of a term at
+	// least as new as ours: adopt the term, step down to follower, and
+	// record the leader for client redirection.
 	if req.Term > n.currentTerm {
 		n.advanceTermLocked(req.Term)
 	}
+	n.state = StateFollower
+	if req.LeaderID != "" {
+		n.leaderID = req.LeaderID
+	}
+	resp.Term = n.currentTerm
 
-	// Check if we have the previous log entry
-	if req.PrevLogIndex > 0 {
-		if int(req.PrevLogIndex) > len(n.log) {
-			// Don't have this many log entries
-			n.appendRespCh <- resp
-			return
-		}
-		if n.log[req.PrevLogIndex-1].Term != req.PrevLogTerm {
-			// Term mismatch — delete this and all following
-			n.log = n.log[:req.PrevLogIndex-1]
-			n.appendRespCh <- resp
-			return
+	// Legitimate leader contact for this term: restart the election clock
+	// (and, if we were a candidate, step down) so a healthy leader isn't
+	// repeatedly challenged.
+	n.signalElectionReset()
+
+	// Log-consistency check at PrevLogIndex (Raft §5.3).
+	if req.PrevLogIndex > n.lastIndex() {
+		// We're missing entries before PrevLogIndex. Hint our last index
+		// so the leader resumes from there.
+		resp.MatchIndex = n.lastIndex()
+		return resp
+	}
+	if req.PrevLogIndex > n.lastSnapshot {
+		if t, ok := n.entryTerm(req.PrevLogIndex); !ok || t != req.PrevLogTerm {
+			// Term conflict at PrevLogIndex: drop it and everything after,
+			// then ask the leader to retry one entry earlier.
+			n.truncateFrom(req.PrevLogIndex)
+			resp.MatchIndex = req.PrevLogIndex - 1
+			return resp
 		}
 	}
 
-	// Append new entries
-	if len(req.Entries) > 0 {
-		// Remove conflicting entries
-		offset := int(req.PrevLogIndex) + 1
-		if offset <= len(n.log) {
-			n.log = n.log[:offset-1]
+	// PrevLog matches. Reconcile the incoming entries with our log,
+	// overwriting only on a genuine term conflict so we never discard
+	// entries we already agree on (Raft §5.3 final paragraph).
+	for j, e := range req.Entries {
+		idx := req.PrevLogIndex + 1 + Index(j)
+		if idx <= n.lastSnapshot {
+			continue // already captured by the snapshot
 		}
-		n.log = append(n.log, req.Entries...)
+		if idx <= n.lastIndex() {
+			if t, _ := n.entryTerm(idx); t != e.Term {
+				n.truncateFrom(idx)
+				n.log = append(n.log, req.Entries[j:]...)
+				break
+			}
+			// identical entry already present — skip
+			continue
+		}
+		// idx is past our log: append this and all remaining entries.
+		n.log = append(n.log, req.Entries[j:]...)
+		break
 	}
 
-	// Update commit index
+	// Advance commit index. Cap at the last entry this request let us
+	// verify is consistent with the leader (PrevLogIndex + #entries) —
+	// never blindly to the leader's commit, which may be ahead of what
+	// this follower actually holds.
+	lastConsistent := req.PrevLogIndex + Index(len(req.Entries))
 	if req.LeaderCommit > n.commitIndex {
-		if req.LeaderCommit < Index(len(n.log)) {
-			n.commitIndex = req.LeaderCommit
-		} else {
-			n.commitIndex = Index(len(n.log))
+		newCommit := min(req.LeaderCommit, lastConsistent)
+		if newCommit > n.commitIndex {
+			n.commitIndex = newCommit
+			n.signalCommit()
 		}
 	}
 
 	resp.Success = true
-	n.appendRespCh <- resp
+	resp.MatchIndex = lastConsistent
+	return resp
 }
 
 // HandleVoteRequest is the exported RPC handler for vote requests.
@@ -681,6 +784,9 @@ func (n *Node) HandleVoteRequest(req VoteRequest) VoteResponse {
 
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
 		n.setVotedForLocked(req.CandidateID)
+		// Granting a vote counts as leader contact: don't immediately start
+		// our own campaign against the candidate we just endorsed.
+		n.signalElectionReset()
 		return VoteResponse{
 			Term:        n.currentTerm,
 			VoteGranted: true,
@@ -695,59 +801,12 @@ func (n *Node) HandleVoteRequest(req VoteRequest) VoteResponse {
 }
 
 // HandleAppendRequest is the exported RPC handler for append requests.
+// It delegates to the shared receiver implementation so the RPC and
+// in-process channel paths apply identical rules.
 func (n *Node) HandleAppendRequest(req AppendRequest) AppendResponse {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-
-	resp := AppendResponse{
-		Term:    n.currentTerm,
-		Success: false,
-		From:    n.config.NodeID,
-	}
-
-	if req.Term < n.currentTerm {
-		return resp
-	}
-
-	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
-	}
-
-	// The peer that successfully sends us AppendEntries for our current
-	// term IS the leader of that term. Remember it so callers asking
-	// "where do I retry a write?" can be answered.
-	if req.LeaderID != "" {
-		n.leaderID = req.LeaderID
-	}
-
-	if req.PrevLogIndex > 0 {
-		if int(req.PrevLogIndex) > len(n.log) {
-			return resp
-		}
-		if n.log[req.PrevLogIndex-1].Term != req.PrevLogTerm {
-			n.log = n.log[:req.PrevLogIndex-1]
-			return resp
-		}
-	}
-
-	if len(req.Entries) > 0 {
-		offset := int(req.PrevLogIndex) + 1
-		if offset <= len(n.log) {
-			n.log = n.log[:offset-1]
-		}
-		n.log = append(n.log, req.Entries...)
-	}
-
-	if req.LeaderCommit > n.commitIndex {
-		if req.LeaderCommit < Index(len(n.log)) {
-			n.commitIndex = req.LeaderCommit
-		} else {
-			n.commitIndex = Index(len(n.log))
-		}
-	}
-
-	resp.Success = true
-	return resp
+	return n.appendEntriesLocked(req)
 }
 
 // HandleSnapshotRequest is the exported RPC handler for snapshot requests.
@@ -780,8 +839,11 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 		}
 	}
 
-	// Install snapshot: update indices and clear log
+	// Install snapshot: update indices and clear log. lastSnapshotTerm
+	// must move with lastSnapshot so entryTerm(lastSnapshot) keeps
+	// answering correctly for the new compaction point.
 	n.lastSnapshot = req.LastIndex
+	n.lastSnapshotTerm = req.LastTerm
 	n.lastApplied = req.LastIndex
 	n.commitIndex = req.LastIndex
 	n.log = make([]entry, 0) // Discard all log entries before snapshot
@@ -803,15 +865,21 @@ func (n *Node) handleAppendResponse(resp AppendResponse) {
 	}
 
 	if resp.Success {
-		// Update match index for this peer using hint from response
+		// Advance match/next for this peer from the follower's hint, then
+		// recompute the commit index.
 		if resp.MatchIndex > n.matchIndex[resp.From] {
 			n.matchIndex[resp.From] = resp.MatchIndex
 		}
-		// Advance commit index
+		n.nextIndex[resp.From] = n.matchIndex[resp.From] + 1
 		n.maybeAdvanceCommitIndex()
 	} else {
-		// Retry with lower next index
-		if int(n.nextIndex[resp.From]) > 1 {
+		// Consistency check failed. Back nextIndex up — toward the
+		// follower's MatchIndex hint when it's useful, otherwise by one —
+		// so the next AppendEntries probes an earlier point in the log.
+		hintNext := resp.MatchIndex + 1
+		if hintNext >= 1 && hintNext < n.nextIndex[resp.From] {
+			n.nextIndex[resp.From] = hintNext
+		} else if n.nextIndex[resp.From] > 1 {
 			n.nextIndex[resp.From]--
 		}
 	}
@@ -851,8 +919,24 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	n.log = make([]entry, 0)
 }
 
-// becomeFollower transitions to follower state.
+// notifyLeadership publishes a leadership transition. The send is
+// non-blocking: leadershipCh is buffered and drained promptly by the
+// integration layer, but the run-loop goroutine must never block here —
+// a stalled consumer would otherwise freeze elections and replication.
+func (n *Node) notifyLeadership(s LeadershipState) {
+	select {
+	case n.leadershipCh <- s:
+	default:
+	}
+}
+
+// becomeFollower transitions to follower state. Called from the candidate
+// loop without n.mu held, so it takes the lock itself — the prior version
+// mutated state and called advanceTermLocked (which requires the lock and
+// fsyncs HardState) entirely unlocked, a data race against every other
+// accessor.
 func (n *Node) becomeFollower(term Term) {
+	n.mu.Lock()
 	// advanceTermLocked is a no-op when term <= currentTerm; ensure we at
 	// least transition to follower state in that case (e.g. on a peer
 	// step-down where the term doesn't move).
@@ -861,20 +945,26 @@ func (n *Node) becomeFollower(term Term) {
 	} else {
 		n.state = StateFollower
 	}
-	n.leadershipCh <- LeadershipState{State: StateFollower, Term: term}
+	n.mu.Unlock()
+	n.notifyLeadership(LeadershipState{State: StateFollower, Term: term})
 }
 
-// becomeLeader transitions to leader state.
+// becomeLeader transitions to leader state. Called from the candidate loop
+// without n.mu held. State mutation happens under the lock; Propose is
+// called afterwards because it acquires the lock itself.
 func (n *Node) becomeLeader(term Term) {
+	n.mu.Lock()
 	n.state = StateLeader
 	n.leaderID = n.config.NodeID
-	n.leadershipCh <- LeadershipState{State: StateLeader, Term: term}
-
-	// Initialize nextIndex and matchIndex for all peers
+	// Initialize nextIndex and matchIndex for all peers (Raft §5.3:
+	// nextIndex = leader's last log index + 1, matchIndex = 0).
 	for id := range n.peers {
-		n.nextIndex[id] = Index(len(n.log)) + 1
+		n.nextIndex[id] = n.lastIndex() + 1
 		n.matchIndex[id] = 0
 	}
+	n.mu.Unlock()
+
+	n.notifyLeadership(LeadershipState{State: StateLeader, Term: term})
 
 	// Commit a no-op entry to prove liveness. Failure here is logged but
 	// does not abort the leader transition — the next AppendEntries cycle
@@ -907,7 +997,11 @@ func (n *Node) broadcastVoteRequest(term Term, lastLogIndex Index, lastLogTerm T
 	}
 }
 
-// broadcastHeartbeat sends AppendEntries with no entries to all peers.
+// broadcastHeartbeat sends AppendEntries to every peer. A "heartbeat" in
+// this implementation is just a normal AppendEntries built from the peer's
+// nextIndex: if the follower is behind it carries the missing entries, if
+// it's caught up it carries none. This is the standard Raft model and is
+// what lets the leader's periodic tick double as the catch-up driver.
 func (n *Node) broadcastHeartbeat(term Term) {
 	for id := range n.peers {
 		go func(peerID NodeID) {
@@ -916,28 +1010,53 @@ func (n *Node) broadcastHeartbeat(term Term) {
 					util.Errorf("raft: panic in broadcastHeartbeat for peer %s: %v", peerID, r)
 				}
 			}()
-			n.sendHeartbeat(peerID, term)
+			n.replicateTo(peerID, term)
 		}(id)
 	}
 }
 
-// sendHeartbeat sends a heartbeat (AppendEntries with no entries) to a peer.
-func (n *Node) sendHeartbeat(peerID NodeID, term Term) {
-	n.mu.Lock()
-	prevLogIndex := Index(len(n.log))
-	var prevLogTerm Term
-	if prevLogIndex > 0 {
-		prevLogTerm = n.log[prevLogIndex-1].Term
+// buildAppendRequestLocked assembles the AppendEntries to send to peerID
+// from its current nextIndex. ok is false only when the entries the peer
+// needs have already been compacted into a snapshot (the caller should
+// send an InstallSnapshot instead — not yet wired). MUST hold n.mu.
+func (n *Node) buildAppendRequestLocked(peerID NodeID, term Term) (AppendRequest, bool) {
+	nextIdx := n.nextIndex[peerID]
+	if nextIdx < 1 {
+		nextIdx = 1
 	}
-	n.mu.Unlock()
-
-	req := AppendRequest{
+	prevLogIndex := nextIdx - 1
+	if prevLogIndex < n.lastSnapshot {
+		// The follower is so far behind that PrevLog is inside our
+		// snapshot; a plain AppendEntries can't bridge that gap.
+		return AppendRequest{}, false
+	}
+	prevLogTerm, ok := n.entryTerm(prevLogIndex)
+	if !ok {
+		return AppendRequest{}, false
+	}
+	return AppendRequest{
 		Term:         term,
 		LeaderID:     n.config.NodeID,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
-		Entries:      nil,
-		LeaderCommit: 0, // Heartbeat carries no commit index update
+		Entries:      n.entriesFrom(nextIdx),
+		LeaderCommit: n.commitIndex,
+	}, true
+}
+
+// replicateTo sends one AppendEntries to a single peer based on its
+// nextIndex. Used both by the heartbeat tick and immediately after a
+// Propose.
+func (n *Node) replicateTo(peerID NodeID, term Term) {
+	n.mu.Lock()
+	if n.state != StateLeader || n.currentTerm != term {
+		n.mu.Unlock()
+		return
+	}
+	req, ok := n.buildAppendRequestLocked(peerID, term)
+	n.mu.Unlock()
+	if !ok {
+		return
 	}
 	n.sendAppendRequest(peerID, req)
 }
@@ -989,31 +1108,41 @@ func (n *Node) sendCommitted() {
 	}
 }
 
-// maybeAdvanceCommitIndex advances the commit index if a quorum agrees.
+// maybeAdvanceCommitIndex advances the commit index to the highest global
+// index replicated on a quorum, subject to the Raft §5.4.2 rule that a
+// leader may only commit an entry from its OWN term directly (older-term
+// entries commit transitively once a current-term entry does). MUST hold
+// n.mu.
 func (n *Node) maybeAdvanceCommitIndex() {
 	if n.state != StateLeader {
 		return
 	}
 
-	// Can't commit entries from previous terms
-	for i := int(n.commitIndex) + 1; i <= len(n.log); i++ {
-		entry := n.log[i-1]
-		if entry.Term != n.currentTerm {
+	newCommit := n.commitIndex
+	for i := n.commitIndex + 1; i <= n.lastIndex(); i++ {
+		if i <= n.lastSnapshot {
+			continue
+		}
+		if t, ok := n.entryTerm(i); !ok || t != n.currentTerm {
 			continue
 		}
 
-		// Count replicas
-		replicas := 1 // Leader
+		replicas := 1 // the leader itself stores entry i
 		for id := range n.peers {
-			if n.matchIndex[id] >= Index(i) {
+			if n.matchIndex[id] >= i {
 				replicas++
 			}
 		}
-
+		// Majority of the full cluster (peers + self). Since peers
+		// excludes self, that's replicas > len(peers)/2.
 		if replicas > len(n.peers)/2 {
-			n.commitIndex = Index(i)
-			break
+			newCommit = i
 		}
+	}
+
+	if newCommit > n.commitIndex {
+		n.commitIndex = newCommit
+		n.signalCommit()
 	}
 }
 
@@ -1027,20 +1156,107 @@ func (n *Node) isLogUpToDate(candidateLastIndex Index, candidateLastTerm Term) b
 	return candidateLastIndex >= lastIndex
 }
 
-// lastLogInfo returns the last log index and term.
-func (n *Node) lastLogInfo() (Index, Term) {
-	if len(n.log) == 0 {
-		return 0, 0
-	}
-	last := n.log[len(n.log)-1]
-	return last.Index, last.Term
+// --- Snapshot-aware log index helpers ---
+//
+// The Raft log uses GLOBAL indices: an entry's logical index counts from
+// 1 and never resets, even after compaction. n.log only holds the entries
+// AFTER the snapshot, so the entry with global index i lives at
+// n.log[i-lastSnapshot-1]. Every place that maps between a global index
+// and the n.log slice MUST go through these helpers — mixing the two
+// conventions (as the pre-fix code did: maybeAdvanceCommitIndex used the
+// array offset while sendCommitted applied the snapshot offset) silently
+// commits the wrong entries once lastSnapshot > 0. All require n.mu held.
+
+// lastIndex returns the highest global log index the node holds.
+func (n *Node) lastIndex() Index {
+	return n.lastSnapshot + Index(len(n.log))
 }
 
-// newElectionTimer creates a randomized election timeout.
-func (n *Node) newElectionTimer() *time.Timer {
-	// Randomize within [electionTimeout, 2 * electionTimeout)
+// entryTerm returns the term of the entry at global index i.
+// ok is false when i was compacted away (below the snapshot, term
+// unknown) or is beyond the last index.
+func (n *Node) entryTerm(i Index) (term Term, ok bool) {
+	if i == 0 {
+		return 0, true
+	}
+	if i == n.lastSnapshot {
+		return n.lastSnapshotTerm, true
+	}
+	if i < n.lastSnapshot || i > n.lastIndex() {
+		return 0, false
+	}
+	return n.log[i-n.lastSnapshot-1].Term, true
+}
+
+// entriesFrom returns a fresh copy of the log entries at global indices
+// [from, lastIndex]. Entries already inside the snapshot are skipped.
+func (n *Node) entriesFrom(from Index) []entry {
+	if from <= n.lastSnapshot {
+		from = n.lastSnapshot + 1
+	}
+	startArr := int(from - n.lastSnapshot - 1)
+	if startArr < 0 || startArr >= len(n.log) {
+		return nil
+	}
+	out := make([]entry, len(n.log)-startArr)
+	copy(out, n.log[startArr:])
+	return out
+}
+
+// truncateFrom drops every log entry with global index >= idx.
+func (n *Node) truncateFrom(idx Index) {
+	if idx <= n.lastSnapshot+1 {
+		n.log = n.log[:0]
+		return
+	}
+	keep := int(idx - n.lastSnapshot - 1)
+	if keep < len(n.log) {
+		n.log = n.log[:keep]
+	}
+}
+
+// signalCommit wakes the apply loop after commitIndex advances. The send
+// is non-blocking: the applier always re-reads the current commitIndex
+// when it wakes, so a dropped signal (buffer full ⇒ applier already
+// behind) is harmless — any queued signal makes it apply up to the
+// latest commit. Safe to call with n.mu held.
+func (n *Node) signalCommit() {
+	select {
+	case n.commitCh <- Commit{}:
+	default:
+	}
+}
+
+// signalElectionReset notifies the run loop that we've had legitimate
+// leader contact (valid AppendEntries) or just granted a vote, so the
+// election timer should be restarted (follower) or the candidacy
+// abandoned (candidate). Non-blocking: the buffer-of-1 collapses bursts
+// and a dropped signal only costs one extra timer cycle. Safe under n.mu.
+func (n *Node) signalElectionReset() {
+	select {
+	case n.electionResetCh <- struct{}{}:
+	default:
+	}
+}
+
+// lastLogInfo returns the last global log index and its term.
+func (n *Node) lastLogInfo() (Index, Term) {
+	li := n.lastIndex()
+	t, _ := n.entryTerm(li)
+	return li, t
+}
+
+// randomElectionTimeout returns a randomized duration in
+// [electionTimeout, 2*electionTimeout). Randomization across nodes is what
+// breaks symmetric split votes (Raft §5.2).
+func (n *Node) randomElectionTimeout() time.Duration {
 	extra := n.rng.Int63n(int64(n.config.ElectionTimeout))
-	return time.NewTimer(time.Duration(extra) + n.config.ElectionTimeout)
+	return time.Duration(extra) + n.config.ElectionTimeout
+}
+
+// newElectionTimer creates a timer armed with a randomized election timeout.
+func (n *Node) newElectionTimer() *time.Timer {
+	return time.NewTimer(n.randomElectionTimeout())
 }
 
 // Propose proposes a command for replication. If node is not leader, returns error.
@@ -1053,7 +1269,7 @@ func (n *Node) Propose(command []byte, entryType EntryType) error {
 	}
 
 	entry := entry{
-		Index: Index(len(n.log) + 1),
+		Index: n.lastIndex() + 1,
 		Term:  n.currentTerm,
 		Type:  entryType,
 	}
@@ -1071,11 +1287,18 @@ func (n *Node) Propose(command []byte, entryType EntryType) error {
 	return nil
 }
 
-// replicateToFollowers sends new entries to all followers.
-func (n *Node) replicateToFollowers(newEntry entry) {
+// replicateToFollowers pushes newly-appended entries to every follower
+// immediately after a Propose, instead of waiting for the next heartbeat
+// tick. Each peer is served from its own nextIndex via replicateTo, so a
+// lagging follower still receives exactly the entries it's missing.
+func (n *Node) replicateToFollowers(_ entry) {
 	n.mu.Lock()
 	term := n.currentTerm
+	isLeader := n.state == StateLeader
 	n.mu.Unlock()
+	if !isLeader {
+		return
+	}
 
 	for id := range n.peers {
 		go func(peerID NodeID) {
@@ -1084,44 +1307,7 @@ func (n *Node) replicateToFollowers(newEntry entry) {
 					util.Errorf("raft: panic in replicateToFollowers for peer %s: %v", peerID, r)
 				}
 			}()
-
-			// D4 fix: read all node state under a single lock hold.
-			// The previous version dropped the lock between reading nextIndex
-			// and reading n.log; a concurrent snapshot-install could truncate
-			// n.log between the two, making nextIdx stale and causing a panic
-			// in the copy(entries, n.log[offset:]) call. By holding the lock
-			// for the entire read window, we ensure nextIdx and the log view
-			// are consistent. The AppendRequest is built before releasing
-			// the lock, so sendAppendRequest only receives immutable data.
-			n.mu.Lock()
-			nextIdx := n.nextIndex[peerID]
-			var entries []entry
-			if int(newEntry.Index) >= int(nextIdx) {
-				offset := int(nextIdx) - 1
-				if offset < 0 {
-					offset = 0
-				}
-				if offset < len(n.log) {
-					entries = make([]entry, len(n.log)-offset)
-					copy(entries, n.log[offset:])
-				}
-			}
-			prevLogIndex := Index(len(n.log))
-			var prevLogTerm Term
-			if prevLogIndex > 0 && int(prevLogIndex)-1 < len(n.log) {
-				prevLogTerm = n.log[prevLogIndex-1].Term
-			}
-			req := AppendRequest{
-				Term:         term,
-				LeaderID:     n.config.NodeID,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: 0,
-			}
-			n.mu.Unlock()
-
-			n.sendAppendRequest(peerID, req)
+			n.replicateTo(peerID, term)
 		}(id)
 	}
 }
@@ -1140,8 +1326,9 @@ func (n *Node) sendVoteRequest(peerID NodeID, req VoteRequest) {
 		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 		defer cancel()
 		resp, err := n.transport.SendRequestVote(ctx, peerID, req)
-		if err != nil {
-			// Log error but don't block
+		if err != nil || resp == nil {
+			// Transport error or a nil response (e.g. peer down): drop it
+			// rather than dereference a nil pointer.
 			return
 		}
 		select {
@@ -1167,8 +1354,9 @@ func (n *Node) sendAppendRequest(peerID NodeID, req AppendRequest) {
 		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 		defer cancel()
 		resp, err := n.transport.SendAppendEntries(ctx, peerID, req)
-		if err != nil {
-			// Log error but don't block
+		if err != nil || resp == nil {
+			// Transport error or a nil response (e.g. peer down): drop it
+			// rather than dereference a nil pointer.
 			return
 		}
 		select {
