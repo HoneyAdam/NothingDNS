@@ -145,6 +145,18 @@ type JointConfigProposal struct {
 	Proposed time.Time // When this was proposed
 }
 
+// logPersister durably records Raft log mutations. Implemented by *WAL.
+// All methods are called with the Node lock held, so implementations must
+// not call back into the Node.
+type logPersister interface {
+	// Write appends a single log entry.
+	Write(e entry) error
+	// TruncateAfter discards entries with Index > keepThrough.
+	TruncateAfter(keepThrough Index) error
+	// Sync flushes buffered writes to stable storage.
+	Sync() error
+}
+
 // StateMachine is the interface for the state machine that applies snapshots.
 // Implemented by ZoneStateMachine.
 type StateMachine interface {
@@ -207,6 +219,11 @@ type Node struct {
 	// State machine for applying snapshots (optional, set by ClusterIntegration)
 	// When set, snapshot install will restore state from snapshot data
 	stateMachine StateMachine
+
+	// persister durably records log mutations (optional). When set, log
+	// entries are written and fsynced before a Propose returns or a follower
+	// acknowledges an AppendEntries, so committed entries survive a crash.
+	persister logPersister
 
 	// Channels
 	voteCh       chan VoteRequest    // Incoming vote requests from RPC
@@ -720,6 +737,7 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 			// Term conflict at PrevLogIndex: drop it and everything after,
 			// then ask the leader to retry one entry earlier.
 			n.truncateFrom(req.PrevLogIndex)
+			n.persistTruncateLocked(req.PrevLogIndex - 1)
 			resp.MatchIndex = req.PrevLogIndex - 1
 			return resp
 		}
@@ -728,6 +746,9 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 	// PrevLog matches. Reconcile the incoming entries with our log,
 	// overwriting only on a genuine term conflict so we never discard
 	// entries we already agree on (Raft §5.3 final paragraph).
+	var toAppend []entry
+	truncated := false
+	var keepThrough Index
 	for j, e := range req.Entries {
 		idx := req.PrevLogIndex + 1 + Index(j)
 		if idx <= n.lastSnapshot {
@@ -736,16 +757,25 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 		if idx <= n.lastIndex() {
 			if t, _ := n.entryTerm(idx); t != e.Term {
 				n.truncateFrom(idx)
-				n.log = append(n.log, req.Entries[j:]...)
+				truncated = true
+				keepThrough = idx - 1
+				toAppend = req.Entries[j:]
+				n.log = append(n.log, toAppend...)
 				break
 			}
 			// identical entry already present — skip
 			continue
 		}
 		// idx is past our log: append this and all remaining entries.
-		n.log = append(n.log, req.Entries[j:]...)
+		toAppend = req.Entries[j:]
+		n.log = append(n.log, toAppend...)
 		break
 	}
+	// Durably record the reconciliation before acknowledging.
+	if truncated {
+		n.persistTruncateLocked(keepThrough)
+	}
+	n.persistEntriesLocked(toAppend)
 
 	// Advance commit index. Cap at the last entry this request let us
 	// verify is consistent with the leader (PrevLogIndex + #entries) —
@@ -1280,6 +1310,9 @@ func (n *Node) Propose(command []byte, entryType EntryType) error {
 	}
 
 	n.log = append(n.log, entry)
+	// Durably record the entry before it can be replicated/committed.
+	// (n.log[len-1:] avoids referencing the shadowed entry type here.)
+	n.persistEntriesLocked(n.log[len(n.log)-1:])
 
 	// Send to followers asynchronously
 	go n.replicateToFollowers(entry)
@@ -1650,4 +1683,41 @@ func (n *Node) SetStateMachine(sm StateMachine) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.stateMachine = sm
+}
+
+// SetLogPersister installs the durable log store. Call before Start.
+func (n *Node) SetLogPersister(p logPersister) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.persister = p
+}
+
+// persistEntriesLocked durably appends entries and fsyncs. A failure is
+// logged but not fatal: it indicates a catastrophic environment problem
+// (disk full) and panicking would take the node down harder than running
+// with a stale WAL. Caller holds n.mu.
+func (n *Node) persistEntriesLocked(entries []entry) {
+	if n.persister == nil || len(entries) == 0 {
+		return
+	}
+	for _, e := range entries {
+		if err := n.persister.Write(e); err != nil {
+			util.Errorf("raft: WAL write failed (index=%d): %v", e.Index, err)
+			return
+		}
+	}
+	if err := n.persister.Sync(); err != nil {
+		util.Errorf("raft: WAL sync failed: %v", err)
+	}
+}
+
+// persistTruncateLocked durably discards WAL entries past keepThrough.
+// Caller holds n.mu.
+func (n *Node) persistTruncateLocked(keepThrough Index) {
+	if n.persister == nil {
+		return
+	}
+	if err := n.persister.TruncateAfter(keepThrough); err != nil {
+		util.Errorf("raft: WAL truncate failed (keepThrough=%d): %v", keepThrough, err)
+	}
 }

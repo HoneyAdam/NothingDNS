@@ -85,8 +85,14 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 	// Create Raft node.
 	node := NewNode(config, peers, transport)
 
-	// Set state machine so snapshot installs can restore state
-	node.SetStateMachine(NewZoneStateMachine())
+	// ONE shared state machine. The node uses it for snapshot install
+	// (Restore), and the apply loop below uses the same instance to apply
+	// committed entries and to serve reads. The previous code created two
+	// independent ZoneStateMachines — snapshot restores landed in the
+	// node's copy while every read went to ci's copy, so a follower that
+	// installed a snapshot served permanently stale zone data.
+	stateMachine := NewZoneStateMachine()
+	node.SetStateMachine(stateMachine)
 
 	// Create RPC server with AEAD encryption.
 	rpcServer, err := NewRPCServer(addr, node, nil, aead)
@@ -100,11 +106,13 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 		return nil, fmt.Errorf("wal: %w", err)
 	}
 
-	// Load WAL entries into node.
+	// Load WAL entries into node, then install the WAL as the node's durable
+	// log persister so future appends/truncations are written through.
 	if entries, err := wal.ReadAll(); err == nil && len(entries) > 0 {
 		// Replay entries into node's log.
 		node.log = append(node.log, entries...)
 	}
+	node.SetLogPersister(wal)
 
 	// Create snapshotter — L-6: encrypted at rest if a snapshot key
 	// is provided. The hex decode mirrors the transport-AEAD path
@@ -128,7 +136,7 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 
 	ci := &ClusterIntegration{
 		node:         node,
-		stateMachine: NewZoneStateMachine(),
+		stateMachine: stateMachine, // SAME instance the node restores into
 		transport:    transport,
 		rpcServer:    rpcServer,
 		wal:          wal,
@@ -197,11 +205,17 @@ func (ci *ClusterIntegration) applyLoop() {
 			commitIdx := ci.node.commitIndex
 			ci.node.mu.Unlock()
 
-			// Apply entries from lastApplied+1 to commitIndex
+			// Apply entries from appliedIndex+1 to commitIndex, mapping each
+			// global index to its slice position via the snapshot offset
+			// (entry at global index i lives at log[i-lastSnapshot-1]).
 			ci.node.mu.Lock()
-			for i := int(ci.appliedIndex) + 1; i <= int(commitIdx); i++ {
-				if i > 0 && i <= len(ci.node.log) {
-					e := ci.node.log[i-1]
+			for i := ci.appliedIndex + 1; i <= commitIdx; i++ {
+				if i <= ci.node.lastSnapshot {
+					continue
+				}
+				pos := int(i - ci.node.lastSnapshot - 1)
+				if pos >= 0 && pos < len(ci.node.log) {
+					e := ci.node.log[pos]
 					if e.Term == 0 {
 						continue
 					}

@@ -44,7 +44,11 @@ func NewWAL(dir string) (*WAL, error) {
 func (w *WAL) Write(e entry) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.writeLocked(e)
+}
 
+// writeLocked appends one entry. Caller must hold w.mu.
+func (w *WAL) writeLocked(e entry) error {
 	// Format: Index(8) + Term(8) + CommandLen(8) + Command + Type(1)
 	dataLen := 8 + 8 + 8 + len(e.Command) + 1
 	buf := make([]byte, dataLen)
@@ -68,11 +72,50 @@ func (w *WAL) Write(e entry) error {
 	return err
 }
 
+// TruncateAfter removes every entry whose Index is greater than keepThrough,
+// rewriting the log file in place. Used when a follower's log conflicts with
+// the leader's and the tail must be discarded before the correct entries are
+// appended — without this the WAL would keep replaying stale, overwritten
+// entries on the next restart.
+func (w *WAL) TruncateAfter(keepThrough Index) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	all, err := w.readAllLocked()
+	if err != nil {
+		return err
+	}
+	kept := all[:0]
+	for _, e := range all {
+		if e.Index <= keepThrough {
+			kept = append(kept, e)
+		}
+	}
+
+	if err := w.logFile.Truncate(0); err != nil {
+		return fmt.Errorf("truncate WAL: %w", err)
+	}
+	if _, err := w.logFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek WAL: %w", err)
+	}
+	for _, e := range kept {
+		if err := w.writeLocked(e); err != nil {
+			return err
+		}
+	}
+	return w.logFile.Sync()
+}
+
 // ReadAll reads all entries from the WAL.
 func (w *WAL) ReadAll() ([]entry, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	return w.readAllLocked()
+}
 
+// readAllLocked reads every entry from the start of the file. Caller must
+// hold w.mu.
+func (w *WAL) readAllLocked() ([]entry, error) {
 	if _, err := w.logFile.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
