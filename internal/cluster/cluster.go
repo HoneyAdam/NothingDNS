@@ -268,10 +268,21 @@ func (c *Cluster) initRaft() error {
 		return fmt.Errorf("raft consensus requires at least one peer in config")
 	}
 
-	// Build peer list
+	// Build peer list and the NodeID→RPC-address map. Skip an entry that
+	// names this node itself: the Raft peer set must EXCLUDE self (quorum is
+	// computed as a majority of peers+1), and a node must not try to dial
+	// itself for RequestVote/AppendEntries.
 	var peerIDs []raft.NodeID
+	peerAddrs := make(map[raft.NodeID]string)
 	for _, p := range c.config.Peers {
-		peerIDs = append(peerIDs, raft.NodeID(p.NodeID))
+		if p.NodeID == c.config.NodeID {
+			continue
+		}
+		id := raft.NodeID(p.NodeID)
+		peerIDs = append(peerIDs, id)
+		if p.Addr != "" {
+			peerAddrs[id] = p.Addr
+		}
 	}
 
 	// Create self node entry for nodeList (used for gossip compatibility)
@@ -304,6 +315,7 @@ func (c *Cluster) initRaft() error {
 	raftNode, err := raft.NewClusterIntegration(
 		raft.NodeID(c.config.NodeID),
 		peerIDs,
+		peerAddrs,
 		raftAddr,
 		dataDir,
 		c.config.EncryptionKey,

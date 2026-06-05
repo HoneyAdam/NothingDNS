@@ -53,7 +53,11 @@ type ClusterIntegration struct {
 // snapshotEncryptionKey, when set, is an independent hex-encoded
 // 32-byte AES-256 key used for on-disk snapshot encryption (L-6).
 // Empty leaves snapshots in plaintext (existing behaviour).
-func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, logger *util.Logger) (*ClusterIntegration, error) {
+// peerAddrs maps each peer NodeID to its reachable RPC address. When an entry
+// is missing (or the whole map is nil), the NodeID itself is used as the
+// address — preserving the old behavior for callers/tests that name peers by
+// their address.
+func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]string, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, logger *util.Logger) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
 
@@ -82,9 +86,13 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 	// Create transport with AEAD encryption (nil AEAD = plaintext for dev).
 	transport := NewTCPTransport(nil, aead)
 
-	// Set peer addresses (simplified — would be looked up from config).
+	// Register each peer's reachable RPC address.
 	for _, peerID := range peers {
-		transport.SetPeerAddr(peerID, string(peerID)) // Placeholder.
+		paddr := peerAddrs[peerID]
+		if paddr == "" {
+			paddr = string(peerID) // fall back to NodeID-as-address
+		}
+		transport.SetPeerAddr(peerID, paddr)
 	}
 
 	// Create Raft node.
@@ -465,11 +473,15 @@ func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
 func (ci *ClusterIntegration) Stats() ClusterStats {
 	ci.mu.RLock()
 	isLeader := ci.isLeader
-	term := ci.currentTerm
 	ci.mu.RUnlock()
 
+	// Read the term from the node itself, not ci.currentTerm: the latter is
+	// only updated on a leadership transition, so a follower that simply
+	// follows a new leader (no transition of its own) would otherwise report
+	// a stale term (e.g. 0) in the dashboard.
 	ci.node.mu.Lock()
 	state := ci.node.state
+	term := ci.node.currentTerm
 	commitIdx := ci.node.commitIndex
 	applied := ci.appliedIndex
 	ci.node.mu.Unlock()

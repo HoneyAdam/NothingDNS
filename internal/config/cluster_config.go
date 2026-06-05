@@ -72,9 +72,25 @@ type ClusterConfig struct {
 	// SWIM provides eventual consistency with gossip-based membership.
 	ConsensusMode string `yaml:"consensus_mode"`
 
+	// DataDir is where Raft persists its WAL, HardState and snapshots.
+	// Each node needs its own directory. Defaults to
+	// /var/lib/nothingdns/cluster when empty.
+	DataDir string `yaml:"data_dir"`
+
+	// Peers lists the OTHER Raft cluster members (this node must NOT be in
+	// the list — it's filtered out anyway). Each peer needs a node_id and a
+	// reachable host:port RPC address. Required for multi-node Raft.
+	Peers []ClusterPeerConfig `yaml:"peers"`
+
 	// RPC TLS configuration for Raft consensus traffic.
 	// When TLSCertFile/TLSKeyFile are set, Raft RPC uses TLS.
 	RPC RPCConfig `yaml:"rpc"`
+}
+
+// ClusterPeerConfig identifies one Raft cluster peer.
+type ClusterPeerConfig struct {
+	NodeID string `yaml:"node_id"`
+	Addr   string `yaml:"addr"` // host:port the peer's Raft RPC server listens on
 }
 
 // RPCConfig contains TLS settings for cluster RPC traffic (Raft consensus).
@@ -134,6 +150,20 @@ func unmarshalCluster(node *Node, cfg *ClusterConfig) error {
 			cfg.SeedNodes = seedNodesNode.getStringSlice()
 		} else if seedNodesNode.Type == NodeScalar {
 			cfg.SeedNodes = []string{seedNodesNode.Value}
+		}
+	}
+
+	// Raft data directory and peer list.
+	cfg.DataDir = node.GetString("data_dir")
+	if peersNode := node.Get("peers"); peersNode != nil && peersNode.Type == NodeSequence {
+		for _, pn := range peersNode.Children {
+			p := ClusterPeerConfig{
+				NodeID: pn.GetString("node_id"),
+				Addr:   pn.GetString("addr"),
+			}
+			if p.NodeID != "" {
+				cfg.Peers = append(cfg.Peers, p)
+			}
 		}
 	}
 

@@ -40,11 +40,11 @@ func TestMultiNode_ZoneChangeReplicatesToFollower(t *testing.T) {
 	// NodeIDs double as transport addresses in this package's TCP transport.
 	idA, idB := NodeID(addrA), NodeID(addrB)
 
-	ciA, err := NewClusterIntegration(idA, []NodeID{idB}, addrA, t.TempDir(), "", "", util.DefaultLogger())
+	ciA, err := NewClusterIntegration(idA, []NodeID{idB}, nil, addrA, t.TempDir(), "", "", util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("NewClusterIntegration A: %v", err)
 	}
-	ciB, err := NewClusterIntegration(idB, []NodeID{idA}, addrB, t.TempDir(), "", "", util.DefaultLogger())
+	ciB, err := NewClusterIntegration(idB, []NodeID{idA}, nil, addrB, t.TempDir(), "", "", util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("NewClusterIntegration B: %v", err)
 	}
