@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"testing"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/auth"
@@ -70,11 +69,11 @@ type Server struct {
 	odohTarget     *odoh.ObliviousTarget // ODoH target resolver (RFC 9230)
 	loginLimiter   *loginRateLimiter
 	apiRateLimiter *apiRateLimiter
-	tracer         *otel.Tracer  // OpenTelemetry tracing
-	stopCh         chan struct{} // Channel to signal shutdown
-	stopOnce       sync.Once     // Ensure Stop is idempotent
+	tracer         *otel.Tracer   // OpenTelemetry tracing
+	stopCh         chan struct{}  // Channel to signal shutdown
+	stopOnce       sync.Once      // Ensure Stop is idempotent
 	rateLimitWg    sync.WaitGroup // Tracks rateLimitCleanupLoop goroutine
-	bootstrapMu    sync.Mutex    // Serialize bootstrap to prevent TOCTOU race
+	bootstrapMu    sync.Mutex     // Serialize bootstrap to prevent TOCTOU race
 
 	// Goroutine leak detection baseline
 	goroutineBaseline int64
@@ -641,8 +640,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/openapi.json", s.handleOpenAPISpec)
 	mux.HandleFunc("/api/docs", s.handleSwaggerUI)
 
-	// WebSocket endpoint
-	mux.HandleFunc("/ws", s.dashboardServer.ServeHTTP)
+	// WebSocket endpoint. Guard against a nil dashboard server: production
+	// always wires one (WithDashboard), but a Server built without it would
+	// otherwise register a method value bound to a nil receiver and panic on
+	// the first /ws request.
+	if s.dashboardServer != nil {
+		mux.HandleFunc("/ws", s.dashboardServer.ServeHTTP)
+	}
 
 	// SPA static assets
 	spaHandler := dashboard.SPAHandler()
@@ -723,11 +727,7 @@ func (s *Server) Stop() error {
 // rateLimitCleanupLoop periodically cleans up stale entries from rate limiters.
 func (s *Server) rateLimitCleanupLoop() {
 	defer s.rateLimitWg.Done() // Signal that we've exited
-	interval := 1 * time.Minute
-	if testing.Short() {
-		interval = 10 * time.Millisecond
-	}
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {
 		select {
@@ -808,7 +808,9 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// X-Requested-With is sent by the dashboard's api() helper (CSRF hint);
+		// list it so cross-origin dev setups don't fail the preflight.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
 
 		if r.Method == "OPTIONS" {
 			if allowOrigin == "" && origin != "" {

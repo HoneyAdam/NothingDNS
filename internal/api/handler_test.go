@@ -1119,7 +1119,7 @@ func TestCorsMiddleware(t *testing.T) {
 			t.Errorf("Unexpected Access-Control-Allow-Methods: %v", rec.Header().Get("Access-Control-Allow-Methods"))
 		}
 
-		if rec.Header().Get("Access-Control-Allow-Headers") != "Content-Type, Authorization" {
+		if rec.Header().Get("Access-Control-Allow-Headers") != "Content-Type, Authorization, X-Requested-With" {
 			t.Errorf("Unexpected Access-Control-Allow-Headers: %v", rec.Header().Get("Access-Control-Allow-Headers"))
 		}
 	})
