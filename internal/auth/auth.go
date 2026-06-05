@@ -724,6 +724,18 @@ func (s *Store) SaveTokensSigned(path string) error {
 // the end so the new dirent is durable. Used for the users
 // database and the encrypted token store — both are catastrophic
 // if a torn write leaves them malformed.
+var syncParentDir = func(dir string) error {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer dirFd.Close()
+	if err := dirFd.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -759,9 +771,8 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	cleanup = false
-	if dirFd, err := os.Open(dir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncParentDir(dir); err != nil {
+		return fmt.Errorf("fsync parent dir: %w", err)
 	}
 	return nil
 }
