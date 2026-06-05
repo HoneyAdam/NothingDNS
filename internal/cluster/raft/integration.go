@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/nothingdns/nothingdns/internal/util"
 )
@@ -34,6 +35,10 @@ type ClusterIntegration struct {
 	// Applied index tracking
 	appliedIndex    Index
 	lastAppliedTerm Term
+
+	// applyHook, when set, is invoked with each committed ZoneCommand so the
+	// real zone store can be updated. Guarded by mu.
+	applyHook func(ZoneCommand)
 
 	stopCh   chan struct{}
 	stopOnce sync.Once // guards Stop() against second-call panic
@@ -201,40 +206,67 @@ func (ci *ClusterIntegration) applyLoop() {
 		case <-ci.stopCh:
 			return
 		case <-ci.node.CommitCh():
+			// Collect the newly-committed entries under the node lock, then
+			// apply them OUTSIDE it. stateMachine.Apply fires the zone-apply
+			// hook (which writes through to the real zone store and may do
+			// disk I/O); holding the Raft node lock across that would stall
+			// heartbeats and replication. appliedIndex is advanced only AFTER
+			// each entry's apply completes, so a caller waiting on
+			// appliedIndex >= idx is guaranteed the store mutation is done.
 			ci.node.mu.Lock()
 			commitIdx := ci.node.commitIndex
-			ci.node.mu.Unlock()
-
-			// Apply entries from appliedIndex+1 to commitIndex, mapping each
-			// global index to its slice position via the snapshot offset
-			// (entry at global index i lives at log[i-lastSnapshot-1]).
-			ci.node.mu.Lock()
-			for i := ci.appliedIndex + 1; i <= commitIdx; i++ {
-				if i <= ci.node.lastSnapshot {
+			start := ci.appliedIndex + 1
+			lastSnap := ci.node.lastSnapshot
+			var pending []entry
+			for i := start; i <= commitIdx; i++ {
+				if i <= lastSnap {
 					continue
 				}
-				pos := int(i - ci.node.lastSnapshot - 1)
+				pos := int(i - lastSnap - 1)
 				if pos >= 0 && pos < len(ci.node.log) {
-					e := ci.node.log[pos]
-					if e.Term == 0 {
-						continue
-					}
-					if err := ci.stateMachine.Apply(e); err != nil {
-						// F050: a state-machine apply failure means this
-						// node has diverged from the cluster's intended
-						// state. Log loudly but advance appliedIndex anyway
-						// — re-applying the same failed entry on the next
-						// tick would just busy-loop. Operators should treat
-						// this as a Sev-1 alert.
-						ci.logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
-					}
-					ci.appliedIndex = e.Index
-					ci.lastAppliedTerm = e.Term
+					pending = append(pending, ci.node.log[pos])
 				}
 			}
 			ci.node.mu.Unlock()
+
+			for _, e := range pending {
+				if e.Term != 0 {
+					if err := ci.stateMachine.Apply(e); err != nil {
+						// F050: an apply failure means this node has diverged
+						// from the cluster's intended state. Log loudly but
+						// still advance appliedIndex — re-applying the same
+						// failed entry would just busy-loop. Treat as Sev-1.
+						ci.logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
+					}
+					ci.runApplyHook(e)
+				}
+				ci.node.mu.Lock()
+				ci.appliedIndex = e.Index
+				ci.lastAppliedTerm = e.Term
+				ci.node.mu.Unlock()
+			}
 		}
 	}
+}
+
+// runApplyHook decodes a committed normal entry's ZoneCommand and forwards
+// it to the registered apply hook (if any). Runs outside the Raft node lock.
+func (ci *ClusterIntegration) runApplyHook(e entry) {
+	if e.Type != EntryNormal || len(e.Command) == 0 {
+		return
+	}
+	ci.mu.RLock()
+	hook := ci.applyHook
+	ci.mu.RUnlock()
+	if hook == nil {
+		return
+	}
+	var cmd ZoneCommand
+	if err := json.Unmarshal(e.Command, &cmd); err != nil {
+		ci.logger.Errorf("raft: apply-hook decode failed for index=%d: %v", e.Index, err)
+		return
+	}
+	hook(cmd)
 }
 
 // leadershipLoop tracks leadership changes.
@@ -273,6 +305,52 @@ func (ci *ClusterIntegration) ProposeZoneChange(cmd ZoneCommand) error {
 	}
 
 	return nil
+}
+
+// ProposeZoneChangeWait replicates cmd through Raft and blocks until it has
+// been applied locally (so the zone store reflects it) or the timeout
+// elapses. Must be called on the leader — otherwise the underlying propose
+// returns a "not leader" error.
+func (ci *ClusterIntegration) ProposeZoneChangeWait(cmd ZoneCommand, timeout time.Duration) error {
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	idx, err := ci.node.ProposeEntry(data, EntryNormal)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if ci.AppliedIndex() >= idx {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("raft: zone change at index %d not applied within %s", idx, timeout)
+		}
+		select {
+		case <-ci.stopCh:
+			return fmt.Errorf("raft: shutting down before zone change applied")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// AppliedIndex returns the highest log index applied to the state machine.
+func (ci *ClusterIntegration) AppliedIndex() Index {
+	ci.node.mu.Lock()
+	defer ci.node.mu.Unlock()
+	return ci.appliedIndex
+}
+
+// SetApplyHook installs fn, called with each committed ZoneCommand as it is
+// applied on this node (leader and followers alike), so the real DNS zone
+// store stays in sync. Fires for every command type, independent of how the
+// in-memory ledger models it.
+func (ci *ClusterIntegration) SetApplyHook(fn func(ZoneCommand)) {
+	ci.mu.Lock()
+	ci.applyHook = fn
+	ci.mu.Unlock()
 }
 
 // GetLeaderID returns the current leader's node ID. If this node is the

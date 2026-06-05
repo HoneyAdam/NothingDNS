@@ -544,6 +544,15 @@ func (n *Node) runCandidate() {
 	// Collect votes
 	voteCount := 1 // Vote for self
 	quorum := len(n.peers)/2 + 1
+
+	// A self-vote may already be a majority (single-node cluster, or any
+	// config where ⌊peers/2⌋+1 == 1). Without this early check the node
+	// would wait forever for vote responses that no peer will ever send.
+	if voteCount >= quorum {
+		n.becomeLeader(term)
+		return
+	}
+
 	electionTimer := n.newElectionTimer()
 
 	for {
@@ -1291,14 +1300,22 @@ func (n *Node) newElectionTimer() *time.Timer {
 
 // Propose proposes a command for replication. If node is not leader, returns error.
 func (n *Node) Propose(command []byte, entryType EntryType) error {
+	_, err := n.ProposeEntry(command, entryType)
+	return err
+}
+
+// ProposeEntry is Propose that also returns the global index assigned to the
+// new entry, so callers can wait for it to be applied. Returns an error if
+// this node is not the leader.
+func (n *Node) ProposeEntry(command []byte, entryType EntryType) (Index, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if n.state != StateLeader {
-		return fmt.Errorf("not leader (state=%s)", n.state)
+		return 0, fmt.Errorf("not leader (state=%s)", n.state)
 	}
 
-	entry := entry{
+	e := entry{
 		Index: n.lastIndex() + 1,
 		Term:  n.currentTerm,
 		Type:  entryType,
@@ -1306,18 +1323,23 @@ func (n *Node) Propose(command []byte, entryType EntryType) error {
 	if command != nil {
 		cmd := make([]byte, len(command))
 		copy(cmd, command)
-		entry.Command = cmd
+		e.Command = cmd
 	}
 
-	n.log = append(n.log, entry)
+	n.log = append(n.log, e)
 	// Durably record the entry before it can be replicated/committed.
-	// (n.log[len-1:] avoids referencing the shadowed entry type here.)
 	n.persistEntriesLocked(n.log[len(n.log)-1:])
 
-	// Send to followers asynchronously
-	go n.replicateToFollowers(entry)
+	// Try to advance commit immediately: when the leader's own copy is
+	// already a quorum (single-node cluster), the entry commits here with no
+	// peer round-trip. For multi-node clusters this is a no-op until acks
+	// arrive (peers' matchIndex is still behind).
+	n.maybeAdvanceCommitIndex()
 
-	return nil
+	// Send to followers asynchronously
+	go n.replicateToFollowers(e)
+
+	return e.Index, nil
 }
 
 // replicateToFollowers pushes newly-appended entries to every follower
