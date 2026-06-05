@@ -56,30 +56,30 @@ type integratedHandler struct {
 	// page and the live WebSocket stream. Optional (nil when no dashboard).
 	dashboardServer *dashboard.Server
 	validator       *dnssec.Validator
-	zoneSigners   map[string]*dnssec.Signer
-	zoneSignersMu sync.RWMutex
-	zoneTree      *zone.RadixTree // Radix tree for O(log n) zone matching
-	cluster       *cluster.Cluster
-	axfrServer    *transfer.AXFRServer
-	ixfrServer    *transfer.IXFRServer
-	notifyHandler *transfer.NOTIFYSlaveHandler
-	ddnsHandler   *transfer.DynamicDNSHandler
-	slaveManager  *transfer.SlaveManager
-	aclChecker    *filter.ACLChecker
-	rateLimiter   *filter.RateLimiter
-	rrl           *filter.RRL
-	splitHorizon  *filter.SplitHorizon
-	viewZones     map[string]map[string]*zone.Zone // view name -> origin -> Zone
-	auditLogger   *audit.AuditLogger
-	tracer        *otel.Tracer
-	serverCtx     context.Context // Root context for all per-query work; cancelled on server shutdown
-	cancelServer  context.CancelFunc
-	nsecCache     *cache.NSECCache // RFC 8198 aggressive NSEC caching
-	dns64Synth    *dns64.Synthesizer
-	cookieJar     *dnscookie.CookieJar
-	idnaEnabled   bool // RFC 5891 IDNA validation enabled
-	mdnsResponder *mdns.Responder
-	dsoManager    *dso.Manager
+	zoneSigners     map[string]*dnssec.Signer
+	zoneSignersMu   sync.RWMutex
+	zoneTree        *zone.RadixTree // Radix tree for O(log n) zone matching
+	cluster         *cluster.Cluster
+	axfrServer      *transfer.AXFRServer
+	ixfrServer      *transfer.IXFRServer
+	notifyHandler   *transfer.NOTIFYSlaveHandler
+	ddnsHandler     *transfer.DynamicDNSHandler
+	slaveManager    *transfer.SlaveManager
+	aclChecker      *filter.ACLChecker
+	rateLimiter     *filter.RateLimiter
+	rrl             *filter.RRL
+	splitHorizon    *filter.SplitHorizon
+	viewZones       map[string]map[string]*zone.Zone // view name -> origin -> Zone
+	auditLogger     *audit.AuditLogger
+	tracer          *otel.Tracer
+	serverCtx       context.Context // Root context for all per-query work; cancelled on server shutdown
+	cancelServer    context.CancelFunc
+	nsecCache       *cache.NSECCache // RFC 8198 aggressive NSEC caching
+	dns64Synth      *dns64.Synthesizer
+	cookieJar       *dnscookie.CookieJar
+	idnaEnabled     bool // RFC 5891 IDNA validation enabled
+	mdnsResponder   *mdns.Responder
+	dsoManager      *dso.Manager
 
 	zoneProvider ZoneProvider // unified zone lookup
 

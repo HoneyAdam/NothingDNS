@@ -51,7 +51,8 @@ jobs:
       - name: Check formatting
         run: |
           # -l prints files that differ from gofmt; non-zero exit = unformatted files
-          unformatted=$(find . -name '*.go' -not -path './.git/*' | xargs gofmt -l 2>/dev/null)
+          # -exec ... + (not xargs) handles non-alphanumeric filenames safely (shellcheck SC2038)
+          unformatted=$(find . -name '*.go' -not -path './.git/*' -exec gofmt -l {} + 2>/dev/null)
           if [ -n "$unformatted" ]; then
             echo "Unformatted files:"
             echo "$unformatted"

@@ -614,6 +614,7 @@ func (m *MetricsCollector) GetHistory() MetricsHistoryResponse {
 		Count:       count,
 	}
 }
+
 // DashboardSnapshot is a point-in-time aggregate of the collector's counters,
 // used to populate the dashboard stats endpoint with real values instead of
 // the zeros it returned before (the fields below were never wired up).
