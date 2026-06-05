@@ -1,8 +1,15 @@
 package doh
 
 import (
+	"errors"
 	"testing"
 )
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("random source failed")
+}
 
 func TestNewHandler(t *testing.T) {
 	h := NewHandler(nil)
@@ -76,6 +83,26 @@ func TestPadMessage_Empty(t *testing.T) {
 	}
 	if len(padded) < MinPaddingSize {
 		t.Errorf("padded empty should have at least MinPaddingSize: %d", len(padded))
+	}
+}
+
+func TestPadMessage_RandomFailureReturnsOriginalAndError(t *testing.T) {
+	originalReader := secureRandomReader
+	secureRandomReader = failingReader{}
+	t.Cleanup(func() { secureRandomReader = originalReader })
+
+	original := []byte{0x00, 0x01, 0x02, 0x03}
+	padded, err := padMessage(original)
+	if err == nil {
+		t.Fatal("padMessage should return random source error")
+	}
+	if len(padded) != len(original) {
+		t.Fatalf("failed padding should return original length: got %d, want %d", len(padded), len(original))
+	}
+	for i, b := range original {
+		if padded[i] != b {
+			t.Errorf("byte %d mismatch: %x != %x", i, padded[i], b)
+		}
 	}
 }
 
