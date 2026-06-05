@@ -525,32 +525,20 @@ func NSEC3Hash(name string, algorithm uint8, iterations uint16, salt []byte) ([]
 	return hash, nil
 }
 
-// toWireFormat converts a domain name to DNS wire format (lowercase, length-prefixed labels).
-// Wire format: [len1][label1][len2][label2]...[0]
-// The name is first lowercased.
+// toWireFormat converts a domain name to canonical DNS wire format (lowercase,
+// length-prefixed labels, RFC 4034 §6.2). The actual encoding is delegated to
+// protocol.CanonicalWireName — the single shared canonical name encoder — to
+// avoid divergent implementations (a divergence would silently change NSEC3
+// hashes). This wrapper only adds the label-length validation that the NSEC3
+// path relies on.
 func toWireFormat(name string) ([]byte, error) {
-	name = strings.ToLower(strings.TrimSpace(name))
-	// Remove trailing dot
-	name = strings.TrimSuffix(name, ".")
-	// Handle root
-	if name == "" || name == "." {
-		return []byte{0}, nil
-	}
-
-	var wire []byte
-	labels := strings.Split(name, ".")
-	for _, label := range labels {
-		if label == "" {
-			continue
-		}
+	trimmed := strings.TrimSuffix(strings.TrimSpace(name), ".")
+	for _, label := range strings.Split(trimmed, ".") {
 		if len(label) > 63 {
 			return nil, fmt.Errorf("label too long: %q", label)
 		}
-		wire = append(wire, byte(len(label)))
-		wire = append(wire, []byte(label)...)
 	}
-	wire = append(wire, 0) // null terminator
-	return wire, nil
+	return protocol.CanonicalWireName(name), nil
 }
 
 // EncodeToString encodes bytes to base64.

@@ -5,6 +5,8 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -547,6 +549,24 @@ func TestSave_AtomicReplaceLeavesNoPartialFile(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("leftover temp file after Save: %s", e.Name())
 		}
+	}
+}
+
+func TestSave_ReturnsParentDirFsyncError(t *testing.T) {
+	store, _ := NewStore(&Config{Secret: "test-secret-12345"})
+
+	originalSyncParentDir := syncParentDir
+	syncParentDir = func(string) error {
+		return errors.New("dir sync failed")
+	}
+	t.Cleanup(func() { syncParentDir = originalSyncParentDir })
+
+	err := store.Save(filepath.Join(t.TempDir(), "users.json"))
+	if err == nil {
+		t.Fatal("Save should return parent directory fsync error")
+	}
+	if !strings.Contains(err.Error(), "fsync parent dir") {
+		t.Fatalf("Save error should include parent directory fsync context, got: %v", err)
 	}
 }
 
@@ -1648,10 +1668,10 @@ func TestSaveTokensSigned_LoadTokensSigned_RoundTrip(t *testing.T) {
 	if len(data) < 12+16+2 {
 		t.Errorf("encrypted file too small: %d bytes", len(data))
 	}
-	// Verify the token map was not written as plaintext JSON. Individual
-	// ciphertext bytes are random and may equal '{', so check for a JSON key
-	// shape from the serialized token map instead of a single byte value.
-	if bytes.Contains(data, []byte(`{"`)) || bytes.Contains(data, []byte(tok.Token)) {
+	// Verify the token map was not written as plaintext JSON. Ciphertext is
+	// random bytes, so short JSON-looking byte sequences can appear by chance;
+	// require a full JSON document or the actual token string before failing.
+	if json.Valid(data) || bytes.Contains(data, []byte(tok.Token)) {
 		t.Error("token file appears to be plaintext JSON, not encrypted")
 	}
 

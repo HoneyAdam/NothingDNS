@@ -168,7 +168,7 @@ func TestDecode_PointerSize0(t *testing.T) {
 	buf := []byte{
 		0x20, 0x04, // pointer to offset 4 (psize=0, low3=0, next=0x04)
 		0x00, 0x00, // padding
-		0x41, 'x',  // UTF8 "x" at offset 4
+		0x41, 'x', // UTF8 "x" at offset 4
 	}
 	v, off := decode(t, buf)
 	if v != "x" {

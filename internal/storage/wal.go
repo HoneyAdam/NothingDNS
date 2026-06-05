@@ -357,12 +357,11 @@ func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 	// size on error so recovery sees a clean log.
 	n, err := wal.active.file.Write(buf)
 	if err != nil || n != len(buf) {
-		// Best-effort rollback: truncate to the pre-Append size and
-		// reseek so the next Append starts at a known-clean offset.
-		_ = wal.active.file.Truncate(wal.active.size)
-		_, _ = wal.active.file.Seek(wal.active.size, 0)
 		if err == nil {
 			err = io.ErrShortWrite
+		}
+		if rollbackErr := wal.rollbackActiveAppend(wal.active.size); rollbackErr != nil {
+			return 0, fmt.Errorf("write entry: %w; rollback failed: %w", err, rollbackErr)
 		}
 		return 0, fmt.Errorf("write entry: %w", err)
 	}
@@ -434,10 +433,11 @@ func (wal *WAL) appendLocked(entryType byte, data []byte) (uint64, error) {
 	n, err := wal.active.file.Write(buf)
 	if err != nil || n != len(buf) {
 		// Same torn-write rollback as Append — see comment there.
-		_ = wal.active.file.Truncate(wal.active.size)
-		_, _ = wal.active.file.Seek(wal.active.size, 0)
 		if err == nil {
 			err = io.ErrShortWrite
+		}
+		if rollbackErr := wal.rollbackActiveAppend(wal.active.size); rollbackErr != nil {
+			return 0, fmt.Errorf("write entry: %w; rollback failed: %w", err, rollbackErr)
 		}
 		return 0, fmt.Errorf("write entry: %w", err)
 	}
@@ -446,6 +446,20 @@ func (wal *WAL) appendLocked(entryType byte, data []byte) (uint64, error) {
 	wal.syncPending = true
 
 	return uint64(wal.active.size), nil
+}
+
+func (wal *WAL) rollbackActiveAppend(size int64) error {
+	// Truncate to the pre-Append size and reseek so the next Append starts
+	// at a known-clean offset. If either operation fails, surface it:
+	// silently continuing after a failed rollback can leave hidden torn bytes
+	// in front of future entries.
+	if err := wal.active.file.Truncate(size); err != nil {
+		return fmt.Errorf("truncate active segment to %d: %w", size, err)
+	}
+	if _, err := wal.active.file.Seek(size, io.SeekStart); err != nil {
+		return fmt.Errorf("seek active segment to %d: %w", size, err)
+	}
+	return nil
 }
 
 // encodeEntry encodes a WAL entry with CRC

@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/queryClient';
 import { useAuthStore } from '@/stores/authStore';
+import { useQueryStream } from '@/stores/queryStream';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Sidebar } from '@/components/layout/sidebar';
 import { LoginPage } from '@/pages/login';
@@ -44,7 +45,13 @@ function PageFallback() {
 
 function AppContent() {
   const { isAuthenticated, token } = useAuthStore();
-  const { connected } = useWebSocket('/ws', { enabled: isAuthenticated });
+  const pushEvent = useQueryStream((s) => s.pushEvent);
+  const setStreamConnected = useQueryStream((s) => s.setConnected);
+  // The app's single shared WebSocket. Pages subscribe to events via the
+  // queryStream store rather than opening their own socket.
+  const { connected } = useWebSocket('/ws', { enabled: isAuthenticated, onQuery: pushEvent });
+
+  useEffect(() => { setStreamConnected(connected); }, [connected, setStreamConnected]);
 
   useEffect(() => {
     // Validate token on mount if authenticated

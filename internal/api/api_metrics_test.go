@@ -23,6 +23,7 @@ func setupMetricsServer(t *testing.T) (*Server, string) {
 func TestHandleQueryLog_WithDashboardData(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 
 	ds.RecordQuery(&dashboard.QueryEvent{
@@ -63,6 +64,7 @@ func TestHandleQueryLog_WithDashboardData(t *testing.T) {
 func TestHandleQueryLog_Pagination(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 
 	for i := 0; i < 20; i++ {
@@ -91,6 +93,7 @@ func TestHandleQueryLog_Pagination(t *testing.T) {
 func TestHandleQueryLog_InvalidParams(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/query-log?offset=abc&limit=-1", nil)
@@ -118,6 +121,7 @@ func TestHandleQueryLog_Unauthorized(t *testing.T) {
 func TestHandleTopDomains_WithDashboardData(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 
 	for i := 0; i < 5; i++ {
@@ -149,6 +153,7 @@ func TestHandleTopDomains_WithDashboardData(t *testing.T) {
 func TestHandleTopDomains_InvalidLimit(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/top-domains?limit=invalid", nil)
@@ -178,6 +183,7 @@ func TestHandleTopDomains_Unauthorized(t *testing.T) {
 func TestHandleDashboardQueries_WithData(t *testing.T) {
 	s, token := setupMetricsServer(t)
 	ds := dashboard.NewServer()
+	t.Cleanup(ds.Stop)
 	s.dashboardServer = ds
 	ds.RecordQuery(&dashboard.QueryEvent{Domain: "query1.com", Protocol: "tcp", Timestamp: time.Now()})
 

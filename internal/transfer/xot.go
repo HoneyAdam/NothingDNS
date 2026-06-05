@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,9 @@ type XoTServer struct {
 	allowList    []net.IPNet
 	logger       *util.Logger
 	journalStore JournalStore // For IXFR incremental transfers
+
+	stopCh chan struct{}  // closed to signal AcceptLoop stop
+	wg     sync.WaitGroup // waits for AcceptLoop and active connections
 }
 
 // TLSAUsage specifies how TLSA records should be used for XoT validation.
@@ -110,6 +114,7 @@ func NewXoTServer(zones map[string]*zone.Zone, config *XoTConfig, logger *util.L
 		zonesMu:   &sync.RWMutex{},
 		port:      config.ListenPort,
 		logger:    logger,
+		stopCh:    make(chan struct{}),
 	}
 	if server.port == 0 {
 		server.port = 853 // XoT default port
@@ -172,13 +177,22 @@ func buildXoTTLSConfig(config *XoTConfig) (*tls.Config, error) {
 	return tlsConfig, nil
 }
 
-// readCAFile reads a CA certificate file.
+// readCAFile reads a PEM CA bundle from filename into a fresh cert pool. This
+// pool is the trust anchor for verifying XoT client certificates (mTLS), so it
+// MUST contain the operator's configured CA — NOT the system roots. The previous
+// implementation ignored filename and returned x509.SystemCertPool(), so client
+// certs were validated against public roots and the private-CA allowlist was
+// silently bypassed. Fails closed if the file is unreadable or has no certs.
 func readCAFile(filename string) (*x509.CertPool, error) {
-	caCert, err := x509.SystemCertPool()
+	pem, err := os.ReadFile(filename)
 	if err != nil {
-		return x509.NewCertPool(), nil
+		return nil, fmt.Errorf("xot: read CA file %q: %w", filename, err)
 	}
-	return caCert, nil
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("xot: CA file %q contains no valid PEM certificates", filename)
+	}
+	return pool, nil
 }
 
 // Serve starts the XoT server listening for incoming connections.
@@ -202,6 +216,8 @@ func (s *XoTServer) Serve(addr string) error {
 
 // AcceptLoop runs the accept loop for incoming connections.
 func (s *XoTServer) AcceptLoop() {
+	s.wg.Add(1)
+	defer s.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			if s.logger != nil {
@@ -215,9 +231,18 @@ func (s *XoTServer) AcceptLoop() {
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
-			continue
+			select {
+			case <-s.stopCh:
+				return
+			default:
+				continue
+			}
 		}
-		go s.handleConnection(conn)
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.handleConnection(conn)
+		}()
 	}
 }
 
@@ -875,6 +900,10 @@ func (s *XoTServer) Close() error {
 		return nil
 	}
 	s.closed = true
+	if s.stopCh != nil {
+		close(s.stopCh)
+		s.wg.Wait()
+	}
 
 	if s.listener != nil {
 		return s.listener.Close()

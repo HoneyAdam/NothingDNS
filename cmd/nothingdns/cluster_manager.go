@@ -49,6 +49,8 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 		AllowInsecureCluster:  cfg.Cluster.AllowInsecureCluster,
 		ZoneManager:           zoneMgr,
 		ConsensusMode:         cluster.ConsensusMode(cfg.Cluster.ConsensusMode),
+		DataDir:               cfg.Cluster.DataDir,
+		Peers:                 mapClusterPeers(cfg.Cluster.Peers),
 	}
 
 	var err error
@@ -79,6 +81,18 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 	go mgr.metricsUpdater(metricsCollector, 30*time.Second)
 
 	return mgr, nil
+}
+
+// mapClusterPeers converts config peer entries to cluster.PeerConfig.
+func mapClusterPeers(peers []config.ClusterPeerConfig) []cluster.PeerConfig {
+	if len(peers) == 0 {
+		return nil
+	}
+	out := make([]cluster.PeerConfig, 0, len(peers))
+	for _, p := range peers {
+		out = append(out, cluster.PeerConfig{NodeID: p.NodeID, Addr: p.Addr})
+	}
+	return out
 }
 
 // metricsUpdater periodically updates cluster metrics.

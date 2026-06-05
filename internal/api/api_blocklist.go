@@ -17,7 +17,7 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.blocklist == nil {
+	if !s.blocklistService.Available() {
 		s.writeJSON(w, http.StatusOK, &BlocklistResponse{
 			Enabled:    false,
 			TotalRules: 0,
@@ -29,13 +29,8 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		stats := s.blocklist.Stats()
-		s.writeJSON(w, http.StatusOK, &BlocklistResponse{
-			Enabled:    stats.Enabled,
-			TotalRules: stats.TotalBlocks,
-			FilesCount: stats.Files,
-			URLsCount:  stats.URLs,
-		})
+		stats := s.blocklistService.GetStats()
+		s.writeJSON(w, http.StatusOK, stats)
 	case http.MethodPost:
 		// URL-based blocklist sources trigger an outbound HTTP fetch, giving
 		// the caller cross-site request primitives even with the allowlist
@@ -50,13 +45,13 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if req.File != "" {
-			if err := s.blocklist.AddFile(req.File); err != nil {
+			if err := s.blocklistService.AddFile(req.File); err != nil {
 				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to load blocklist file"))
 				return
 			}
 			s.writeJSON(w, http.StatusCreated, &MessageResponse{Message: "Blocklist file added"})
 		} else if req.URL != "" {
-			if err := s.blocklist.AddURL(req.URL); err != nil {
+			if err := s.blocklistService.AddURL(req.URL); err != nil {
 				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to load blocklist from URL"))
 				return
 			}
@@ -72,7 +67,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 	if s.requireOperator(w, r) {
 		return
 	}
-	if s.blocklist == nil {
+	if !s.blocklistService.Available() {
 		s.writeError(w, http.StatusServiceUnavailable, "Blocklist not available")
 		return
 	}
@@ -94,7 +89,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		// resulting value. Replaces the TOCTOU Stats()+SetEnabled
 		// pattern that could silently lose one of two simultaneous
 		// toggle clicks and report the wrong state back to the operator.
-		nowEnabled := s.blocklist.Toggle()
+		nowEnabled := s.blocklistService.Toggle()
 		s.writeJSON(w, http.StatusOK, &MessageResponse{
 			Message: fmt.Sprintf("Blocklist %s", map[bool]string{true: "enabled", false: "disabled"}[nowEnabled]),
 		})
@@ -103,7 +98,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 
 	// List sources: GET /api/v1/blocklists/sources
 	if path == "sources" && r.Method == http.MethodGet {
-		sources := s.blocklist.GetSources()
+		sources := s.blocklistService.GetSources()
 		s.writeJSON(w, http.StatusOK, sources)
 		return
 	}
@@ -122,7 +117,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			decodedID = id
 		}
-		enabled, err := s.blocklist.ToggleSource(decodedID)
+		enabled, err := s.blocklistService.ToggleSource(decodedID)
 		if err != nil {
 			s.writeError(w, http.StatusNotFound, "Source not found")
 			return
@@ -142,7 +137,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			decodedPath = path
 		}
-		if err := s.blocklist.RemoveSource(decodedPath); err != nil {
+		if err := s.blocklistService.RemoveSource(decodedPath); err != nil {
 			s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to remove blocklist source"))
 			return
 		}

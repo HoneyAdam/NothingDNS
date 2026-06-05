@@ -18,9 +18,9 @@ func FuzzCacheOperations(f *testing.F) {
 	// Seeds: a few short op streams plus one that mimics the fc40eb7
 	// shape (fill to capacity then refresh the same key).
 	f.Add([]byte{})
-	f.Add([]byte{0, 0, 0, 1, 0, 2, 0, 3})          // 4 SetNegative on distinct keys
-	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0})    // 5 refreshes of the same key
-	f.Add([]byte{0, 0, 1, 0, 2, 0, 3, 0, 0, 0})    // fill + interleaved Gets
+	f.Add([]byte{0, 0, 0, 1, 0, 2, 0, 3})       // 4 SetNegative on distinct keys
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}) // 5 refreshes of the same key
+	f.Add([]byte{0, 0, 1, 0, 2, 0, 3, 0, 0, 0}) // fill + interleaved Gets
 
 	f.Fuzz(func(t *testing.T, ops []byte) {
 		const capacity = numShards * 4

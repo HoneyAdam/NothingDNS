@@ -1,11 +1,18 @@
 package transfer
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1640,27 +1647,74 @@ func TestTSIGErrorString_AllCodes_CovExtra(t *testing.T) {
 // Coverage for XoT buildXoTTLSConfig with CAFile (readCAFile)
 // ---------------------------------------------------------------------------
 
-func TestReadCAFile_CovExtra(t *testing.T) {
-	// readCAFile ignores the filename and returns system cert pool (or empty pool on error)
-	pool, err := readCAFile("nonexistent-ca.pem")
+// writeTestCAFile generates a self-signed CA cert, writes it as PEM to a temp
+// file, and returns the path.
+func writeTestCAFile(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		t.Fatalf("readCAFile() error: %v", err)
+		t.Fatalf("gen key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("write CA: %v", err)
+	}
+	return path
+}
+
+func TestReadCAFile_CovExtra(t *testing.T) {
+	// Fail closed on a missing CA file (the previous impl ignored the filename
+	// and returned the system root pool, silently bypassing the operator CA).
+	if _, err := readCAFile("nonexistent-ca.pem"); err == nil {
+		t.Error("expected error for a nonexistent CA file")
+	}
+	// Fail closed on a file with no PEM certificates.
+	badPath := filepath.Join(t.TempDir(), "bad.pem")
+	if err := os.WriteFile(badPath, []byte("not a pem"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCAFile(badPath); err == nil {
+		t.Error("expected error for a file with no PEM certificates")
+	}
+	// A valid CA loads into a non-nil pool.
+	pool, err := readCAFile(writeTestCAFile(t))
+	if err != nil {
+		t.Fatalf("readCAFile(valid): %v", err)
 	}
 	if pool == nil {
-		t.Error("expected non-nil cert pool")
+		t.Error("expected non-nil cert pool for a valid CA")
 	}
 }
 
 func TestBuildXoTTLSConfig_WithCAFile_CovExtra(t *testing.T) {
-	cfg := &XoTConfig{
-		CAFile: "nonexistent-ca.pem",
+	// A missing CA file must fail closed — not silently fall back to system roots.
+	if _, err := buildXoTTLSConfig(&XoTConfig{CAFile: "nonexistent-ca.pem"}); err == nil {
+		t.Error("expected buildXoTTLSConfig to fail for a missing CA file")
 	}
-	tlsCfg, err := buildXoTTLSConfig(cfg)
+	// A valid CA file enables mTLS against that CA.
+	tlsCfg, err := buildXoTTLSConfig(&XoTConfig{CAFile: writeTestCAFile(t)})
 	if err != nil {
-		t.Fatalf("buildXoTTLSConfig() error: %v", err)
+		t.Fatalf("buildXoTTLSConfig(valid): %v", err)
 	}
 	if tlsCfg.ClientAuth != tls.RequireAndVerifyClientCert {
 		t.Errorf("ClientAuth = %d, want RequireAndVerifyClientCert", tlsCfg.ClientAuth)
+	}
+	if tlsCfg.ClientCAs == nil {
+		t.Error("expected ClientCAs to be set from the CA file")
 	}
 }
 

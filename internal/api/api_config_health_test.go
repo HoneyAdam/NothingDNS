@@ -137,6 +137,83 @@ func TestHandleConfigGet_Success(t *testing.T) {
 	}
 }
 
+// TestHandleConfigGet_RedactsAllSecrets regresses the at-rest secret leaks
+// where the redaction allowlist drifted out of sync with secret config fields:
+// Storage.EncryptionKey, Cluster.SnapshotEncryptionKey, Metrics.AuthToken, and
+// Server.HTTP.Users[].Password were all returned in cleartext to operators.
+func TestHandleConfigGet_RedactsAllSecrets(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	s := newServerWithAuth(store)
+	s.configGetter = func() *config.Config {
+		return &config.Config{
+			Server: config.ServerConfig{
+				HTTP: config.HTTPConfig{
+					Enabled:    true,
+					AuthToken:  "super-secret",
+					AuthSecret: "jwt-secret",
+					Users: []config.AuthUserConfig{
+						{Username: "alice", Password: "alice-plaintext", Role: "admin"},
+					},
+				},
+			},
+			Cluster: config.ClusterConfig{
+				EncryptionKey:         "gossip-key-abcdefghijklmnop",
+				SnapshotEncryptionKey: "snap-key-abcdefghijklmnop",
+			},
+			Storage: config.StorageConfig{
+				EncryptionKey: "storage-key-abcdefghijklmnop",
+			},
+			Metrics: config.MetricsConfig{
+				AuthToken: "prom-bearer-token",
+			},
+		}
+	}
+
+	adminUser, _ := store.GetUser("admin")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/config", nil)
+	req = req.WithContext(WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+
+	s.handleConfigGet(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// No configured secret value may appear anywhere in the response body.
+	body := rec.Body.String()
+	for _, secret := range []string{
+		"super-secret", "jwt-secret", "alice-plaintext",
+		"gossip-key-abcdefghijklmnop", "snap-key-abcdefghijklmnop",
+		"storage-key-abcdefghijklmnop", "prom-bearer-token",
+	} {
+		if bytes.Contains([]byte(body), []byte(secret)) {
+			t.Errorf("secret %q leaked in config response", secret)
+		}
+	}
+
+	// Structural spot-checks that the fields exist and are emptied (not dropped).
+	var result map[string]any
+	if err := json.Unmarshal([]byte(body), &result); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	cluster := result["Cluster"].(map[string]any)
+	if cluster["SnapshotEncryptionKey"] != "" {
+		t.Error("Cluster.SnapshotEncryptionKey should be redacted")
+	}
+	storage := result["Storage"].(map[string]any)
+	if storage["EncryptionKey"] != "" {
+		t.Error("Storage.EncryptionKey should be redacted")
+	}
+	metrics := result["Metrics"].(map[string]any)
+	if metrics["AuthToken"] != "" {
+		t.Error("Metrics.AuthToken should be redacted")
+	}
+	users := result["Server"].(map[string]any)["HTTP"].(map[string]any)["Users"].([]any)
+	if users[0].(map[string]any)["Password"] != "" {
+		t.Error("Server.HTTP.Users[].Password should be redacted")
+	}
+}
+
 func TestHandleConfigGet_WrongMethod(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
@@ -351,7 +428,9 @@ func TestHandleConfigLogging_AllLevels(t *testing.T) {
 func TestHandleConfigRRL_Success(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 5, Burst: 10})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 5, Burst: 10})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	adminUser, _ := store.GetUser("admin")
 	body, _ := json.Marshal(map[string]any{"enabled": true, "rate": 10.0, "burst": 20})
@@ -370,7 +449,9 @@ func TestHandleConfigRRL_Success(t *testing.T) {
 func TestHandleConfigRRL_WrongMethod(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/config/rrl", nil)
 	rec := httptest.NewRecorder()
@@ -403,7 +484,9 @@ func TestHandleConfigRRL_NoRateLimiter(t *testing.T) {
 func TestHandleConfigRRL_InvalidJSON(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
-	s.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	rl := filter.NewRateLimiter(config.RRLConfig{Enabled: true})
+	t.Cleanup(rl.Stop)
+	s.rateLimiter = rl
 
 	adminUser, _ := store.GetUser("admin")
 	req := httptest.NewRequest(http.MethodPut, "/api/v1/config/rrl", bytes.NewReader([]byte("bad")))

@@ -13,19 +13,13 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cache == nil {
+	if !s.cacheService.Available() {
 		s.writeError(w, http.StatusServiceUnavailable, "Cache not available")
 		return
 	}
 
-	stats := s.cache.Stats()
-	s.writeJSON(w, http.StatusOK, &CacheStatsResponse{
-		Size:     stats.Size,
-		Capacity: stats.Capacity,
-		Hits:     stats.Hits,
-		Misses:   stats.Misses,
-		HitRatio: stats.HitRatio(),
-	})
+	stats := s.cacheService.GetStats()
+	s.writeJSON(w, http.StatusOK, stats)
 }
 
 // handleCacheFlush flushes the cache.
@@ -38,12 +32,15 @@ func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.cache == nil {
+	if !s.cacheService.Available() {
 		s.writeError(w, http.StatusServiceUnavailable, "Cache not available")
 		return
 	}
 
-	s.cache.Flush()
+	if err := s.cacheService.Flush(); err != nil {
+		s.writeError(w, http.StatusInternalServerError, "Cache flush failed: "+err.Error())
+		return
+	}
 	s.writeJSON(w, http.StatusOK, &MessageResponse{
 		Message: "Cache flushed",
 	})

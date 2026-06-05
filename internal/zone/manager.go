@@ -349,7 +349,6 @@ func (m *Manager) DeleteZone(name string) error {
 // AddRecord adds a record to an existing zone.
 func (m *Manager) AddRecord(zoneName string, record Record) error {
 	zoneName = normalizeZoneName(zoneName)
-	record.Name = normalizeZoneName(record.Name)
 	if record.Class == "" {
 		record.Class = "IN"
 	}
@@ -365,6 +364,9 @@ func (m *Manager) AddRecord(zoneName string, record Record) error {
 	z.Lock()
 	defer z.Unlock()
 
+	// Key by the absolute owner name (relative to the zone origin), matching
+	// the parser — so a relative "api" resolves as "api.<origin>".
+	record.Name = qualifyName(record.Name, z.Origin)
 	z.Records[record.Name] = append(z.Records[record.Name], record)
 	IncrementSerial(z)
 
@@ -385,7 +387,6 @@ func (m *Manager) AddRecord(zoneName string, record Record) error {
 // DeleteRecord deletes records matching name+type from a zone.
 func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 	zoneName = normalizeZoneName(zoneName)
-	name = normalizeZoneName(name)
 	rtype = strings.ToUpper(rtype)
 
 	m.mu.RLock()
@@ -399,6 +400,7 @@ func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 	z.Lock()
 	defer z.Unlock()
 
+	name = qualifyName(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return fmt.Errorf("no records found for %s", name)
@@ -443,9 +445,7 @@ func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 // UpdateRecord replaces a record identified by name+type+oldData with a new record.
 func (m *Manager) UpdateRecord(zoneName string, name, rtype, oldData string, newRecord Record) error {
 	zoneName = normalizeZoneName(zoneName)
-	name = normalizeZoneName(name)
 	rtype = strings.ToUpper(rtype)
-	newRecord.Name = normalizeZoneName(newRecord.Name)
 	if newRecord.Class == "" {
 		newRecord.Class = "IN"
 	}
@@ -461,6 +461,8 @@ func (m *Manager) UpdateRecord(zoneName string, name, rtype, oldData string, new
 	z.Lock()
 	defer z.Unlock()
 
+	name = qualifyName(name, z.Origin)
+	newRecord.Name = qualifyName(newRecord.Name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return fmt.Errorf("no records found for %s", name)
@@ -511,7 +513,7 @@ func (m *Manager) GetRecords(zoneName, name string) ([]Record, error) {
 	defer z.RUnlock()
 
 	if name != "" {
-		name = normalizeZoneName(name)
+		name = qualifyName(name, z.Origin)
 		return z.Records[name], nil
 	}
 
@@ -548,6 +550,16 @@ func sanitizeZoneFileName(name string) string {
 	name = strings.ReplaceAll(name, "\\", "_")
 	name = strings.ReplaceAll(name, "..", "_")
 	return name
+}
+
+// qualifyName converts a record owner name to the absolute, lowercased key
+// used in z.Records — matching the zone-file parser, which stores owners as
+// absolute names (makeAbsolute). normalizeZoneName must NOT be used for record
+// names: it only appends a trailing dot, so a relative "api" became the ROOT
+// name "api." instead of "api.<origin>", and every API/dashboard-added record
+// with a relative name silently failed to resolve. FQDN inputs are unchanged.
+func qualifyName(name, origin string) string {
+	return makeAbsolute(strings.ToLower(strings.TrimSpace(name)), origin)
 }
 
 // normalizeZoneName ensures a zone name is lowercase with a trailing dot.

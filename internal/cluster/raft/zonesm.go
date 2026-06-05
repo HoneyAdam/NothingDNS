@@ -6,16 +6,27 @@ import (
 	"sync"
 )
 
-// ZoneCommand represents a zone mutation command.
+// ZoneCommand represents a zone mutation command replicated through Raft.
 type ZoneCommand struct {
-	Type     string          `json:"type"` // "add_record", "del_record", "update_record", "delete_zone"
-	Zone     string          `json:"zone"`
-	Name     string          `json:"name,omitempty"`
-	RRType   uint16          `json:"rrtype,omitempty"`
-	TTL      uint32          `json:"ttl,omitempty"`
-	RData    []string        `json:"rdata,omitempty"`
-	Priority int             `json:"priority,omitempty"`
-	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Type   string `json:"type"` // "add_record", "del_record", "update_record", "create_zone", "delete_zone"
+	Zone   string `json:"zone"`
+	Name   string `json:"name,omitempty"`
+	RRType uint16 `json:"rrtype,omitempty"`
+	// RRTypeStr carries the textual record type ("A", "AAAA", …) so the
+	// zone-store apply path is lossless (the store keys records by string
+	// type, not the numeric RRType used by the in-memory ledger).
+	RRTypeStr string   `json:"rrtype_str,omitempty"`
+	Class     string   `json:"class,omitempty"`
+	TTL       uint32   `json:"ttl,omitempty"`
+	RData     []string `json:"rdata,omitempty"`
+	// OldData identifies the record being replaced by update_record.
+	OldData string `json:"old_data,omitempty"`
+	// AdminEmail / Nameservers carry the parameters needed to rebuild a zone
+	// for create_zone.
+	AdminEmail  string          `json:"admin_email,omitempty"`
+	Nameservers []string        `json:"nameservers,omitempty"`
+	Priority    int             `json:"priority,omitempty"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
 }
 
 // ZoneStateMachine is the state machine that applies Raft log entries to zone data.
@@ -77,6 +88,10 @@ func (z *ZoneStateMachine) applyCommand(cmd ZoneCommand) error {
 		return z.delRecord(cmd)
 	case "update_record":
 		return z.updateRecord(cmd)
+	case "create_zone":
+		// The in-memory ledger doesn't model empty zones (records are added
+		// lazily); the real zone store handles creation via the apply hook.
+		return nil
 	case "delete_zone":
 		return z.deleteZone(cmd)
 	default:

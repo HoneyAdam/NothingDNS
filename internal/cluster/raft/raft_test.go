@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -16,15 +17,15 @@ type mockTransport struct {
 	appendRespErr error
 }
 
-func (m *mockTransport) SendRequestVote(peerID NodeID, req VoteRequest) (*VoteResponse, error) {
+func (m *mockTransport) SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error) {
 	return m.voteResp, m.voteRespErr
 }
 
-func (m *mockTransport) SendAppendEntries(peerID NodeID, req AppendRequest) (*AppendResponse, error) {
+func (m *mockTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error) {
 	return m.appendResp, m.appendRespErr
 }
 
-func (m *mockTransport) SendSnapshot(peerID NodeID, req SnapshotRequest) error {
+func (m *mockTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
 	return nil
 }
 
@@ -1838,7 +1839,7 @@ func TestTransportMockVariations(t *testing.T) {
 			}
 
 			// Test vote request
-			voteResp, err := transport.SendRequestVote("peer", VoteRequest{})
+			voteResp, err := transport.SendRequestVote(context.Background(), "peer", VoteRequest{})
 			if tt.voteErr != nil {
 				if err == nil {
 					t.Error("expected error for vote request")
@@ -1848,7 +1849,7 @@ func TestTransportMockVariations(t *testing.T) {
 			}
 
 			// Test append request
-			appendResp, err := transport.SendAppendEntries("peer", AppendRequest{})
+			appendResp, err := transport.SendAppendEntries(context.Background(), "peer", AppendRequest{})
 			if tt.appendErr != nil {
 				if err == nil {
 					t.Error("expected error for append request")

@@ -240,6 +240,56 @@ func TestShouldSynthesize(t *testing.T) {
 // TestSynthesizeResponse
 // ---------------------------------------------------------------------------
 
+// TestSynthesizeResponse_SkipsExcludedAddresses regresses RFC 6147 §5.1.4: an A
+// record whose address is in a configured exclusion range must NOT be
+// synthesized into AAAA. The exclusion list was configurable but never
+// consulted, so every A record got synthesized.
+func TestSynthesizeResponse_SkipsExcludedAddresses(t *testing.T) {
+	s, err := NewSynthesizer("64:ff9b::", 96)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddExcludeNet("192.0.2.0/24"); err != nil {
+		t.Fatalf("AddExcludeNet: %v", err)
+	}
+
+	question := &protocol.Question{
+		Name:   protocol.NewName([]string{"example", "com"}, true),
+		QType:  protocol.TypeAAAA,
+		QClass: protocol.ClassIN,
+	}
+	mkA := func(ip string) *protocol.ResourceRecord {
+		var addr [4]byte
+		copy(addr[:], net.ParseIP(ip).To4())
+		return &protocol.ResourceRecord{
+			Name:  protocol.NewName([]string{"example", "com"}, true),
+			Type:  protocol.TypeA,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data:  &protocol.RDataA{Address: addr},
+		}
+	}
+	aResp := &protocol.Message{Answers: []*protocol.ResourceRecord{
+		mkA("192.0.2.10"),   // excluded → no AAAA
+		mkA("198.51.100.7"), // not excluded → one AAAA
+	}}
+
+	out := s.SynthesizeResponse(question, aResp)
+	if out == nil {
+		t.Fatal("SynthesizeResponse returned nil")
+	}
+	if len(out.Answers) != 1 {
+		t.Fatalf("synthesized AAAA count = %d, want 1 (excluded address must be skipped)", len(out.Answers))
+	}
+	aaaa, ok := out.Answers[0].Data.(*protocol.RDataAAAA)
+	if !ok {
+		t.Fatalf("expected AAAA, got %T", out.Answers[0].Data)
+	}
+	if got, want := net.IP(aaaa.Address[:]), s.SynthesizeAAAA(net.ParseIP("198.51.100.7").To4()); !got.Equal(want) {
+		t.Errorf("synthesized AAAA for wrong address: got %v, want %v", got, want)
+	}
+}
+
 func TestSynthesizeResponse(t *testing.T) {
 	s, err := NewSynthesizer("64:ff9b::", 96)
 	if err != nil {

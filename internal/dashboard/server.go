@@ -104,6 +104,41 @@ func (ds *DashboardStats) GetRecentQueries(offset, limit int) ([]*QueryEvent, in
 	return queries, total
 }
 
+// GetRecentQueriesFiltered returns recent queries whose domain contains the
+// (case-insensitive) substring `filter`, paginated by offset/limit. When
+// `filter` is empty it behaves like GetRecentQueries. `total` is the count
+// AFTER filtering, so the caller paginates over the whole filtered set rather
+// than only the current page (the previous client-side filter searched just
+// the 50 visible rows, hiding matches on other pages).
+func (ds *DashboardStats) GetRecentQueriesFiltered(offset, limit int, filter string) ([]*QueryEvent, int) {
+	if filter == "" {
+		return ds.GetRecentQueries(offset, limit)
+	}
+
+	ds.mu.RLock()
+	defer ds.mu.RUnlock()
+
+	needle := strings.ToLower(filter)
+	matched := make([]*QueryEvent, 0)
+	for _, q := range ds.RecentQueries {
+		if q != nil && strings.Contains(strings.ToLower(q.Domain), needle) {
+			matched = append(matched, q)
+		}
+	}
+
+	total := len(matched)
+	if offset >= total {
+		return nil, total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := make([]*QueryEvent, end-offset)
+	copy(page, matched[offset:end])
+	return page, total
+}
+
 // TopDomainsEntry represents a domain with its query count.
 type TopDomainsEntry struct {
 	Domain string `json:"domain"`

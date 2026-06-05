@@ -48,6 +48,19 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Check formatting
+        run: |
+          # -l prints files that differ from gofmt; non-zero exit = unformatted files
+          # -exec ... + (not xargs) handles non-alphanumeric filenames safely (shellcheck SC2038)
+          unformatted=$(find . -name '*.go' -not -path './.git/*' -exec gofmt -l {} + 2>/dev/null)
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"
+            echo "$unformatted"
+            echo ""
+            echo "Run 'gofmt -w .' to format them."
+            exit 1
+          fi
+
       - name: Build
         run: go build -o nothingdns ./cmd/nothingdns
 
@@ -182,7 +195,11 @@ jobs:
       - name: Run Static Analysis
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
+          go install github.com/kisielk/errcheck@latest
+          go install github.com/polyfloyd/go-errorlint@latest
           staticcheck ./...
+          errcheck ./...
+          go vet ./...
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3

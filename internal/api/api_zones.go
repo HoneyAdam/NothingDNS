@@ -29,38 +29,8 @@ func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 
 // handleListZones returns list of zones with serial and record count.
 func (s *Server) handleListZones(w http.ResponseWriter, _ *http.Request) {
-	resp := &ZoneListResponse{Zones: []ZoneSummary{}}
-	if s.zoneManager != nil {
-		zones := s.zoneManager.List()
-		resp.Total = len(zones)
-		// L-N5: cap the response to ZoneListMaxResults. An operator
-		// with thousands of zones would otherwise build a
-		// proportional JSON document and freeze the dashboard.
-		count := 0
-		for name, z := range zones {
-			if count >= ZoneListMaxResults {
-				resp.Truncated = true
-				break
-			}
-			z.RLock()
-			recordCount := 0
-			for _, records := range z.Records {
-				recordCount += len(records)
-			}
-			serial := uint32(0)
-			if z.SOA != nil {
-				serial = z.SOA.Serial
-			}
-			z.RUnlock()
-			resp.Zones = append(resp.Zones, ZoneSummary{
-				Name:    name,
-				Serial:  serial,
-				Records: recordCount,
-			})
-			count++
-		}
-	}
-
+	zs := NewZoneService(s.zoneManager)
+	resp := zs.ListZones()
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -150,48 +120,46 @@ func (s *Server) handleZoneActions(w http.ResponseWriter, r *http.Request) {
 
 // handleGetZone returns details of a single zone.
 func (s *Server) handleGetZone(w http.ResponseWriter, _ *http.Request, name string) {
-	z, ok := s.zoneManager.Get(name)
+	zs := NewZoneService(s.zoneManager)
+	result, ok := zs.GetZone(name)
 	if !ok {
 		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Zone %s not found", name))
 		return
 	}
 
-	z.RLock()
-	defer z.RUnlock()
-
-	recordCount := 0
-	for _, records := range z.Records {
-		recordCount += len(records)
-	}
-
-	result := &ZoneDetailResponse{
-		Name:    z.Origin,
-		Records: recordCount,
-	}
-
-	if z.SOA != nil {
-		result.Serial = z.SOA.Serial
-		result.SOA = &SOADetail{
-			MName:   z.SOA.MName,
-			RName:   z.SOA.RName,
-			Serial:  z.SOA.Serial,
-			Refresh: z.SOA.Refresh,
-			Retry:   z.SOA.Retry,
-			Expire:  z.SOA.Expire,
-			Minimum: z.SOA.Minimum,
-		}
-	}
-
-	var nsList []string
-	for _, ns := range z.NS {
-		nsList = append(nsList, ns.NSDName)
-	}
-	result.Nameservers = nsList
-
 	s.writeJSON(w, http.StatusOK, result)
 }
 
 // handleCreateZone creates a new zone.
+// proposeZoneWrite routes a zone mutation through Raft consensus when the
+// cluster runs in Raft mode, so the write replicates to every node before
+// the API reports success. Returns:
+//
+//	routed=false → cluster is not in Raft mode; the caller performs its
+//	               normal direct zoneManager write.
+//	routed=true  → Raft handled it; ok=true means the change committed and
+//	               applied locally (caller should emit its success response),
+//	               ok=false means an HTTP error was already written (e.g. 421
+//	               when this node is not the leader).
+func (s *Server) proposeZoneWrite(w http.ResponseWriter, propose func() error) (routed, ok bool) {
+	if s.cluster == nil || !s.cluster.IsRaftMode() {
+		return false, false
+	}
+	if err := propose(); err != nil {
+		if leader, isNL := s.cluster.IsNotLeaderError(err); isNL {
+			msg := "not the Raft leader; retry the write against the current leader"
+			if leader != "" {
+				msg = "not the Raft leader; retry against " + leader
+			}
+			s.writeError(w, http.StatusMisdirectedRequest, msg)
+			return true, false
+		}
+		s.writeError(w, http.StatusServiceUnavailable, sanitizeError(err, "Failed to replicate change"))
+		return true, false
+	}
+	return true, true
+}
+
 func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	if s.requireOperator(w, r) {
 		return
@@ -246,7 +214,13 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if err := s.zoneManager.CreateZone(req.Name, ttl, soa, nsRecords); err != nil {
+	if routed, ok := s.proposeZoneWrite(w, func() error {
+		return s.cluster.ProposeCreateZone(req.Name, ttl, req.AdminEmail, req.Nameservers)
+	}); routed {
+		if !ok {
+			return
+		}
+	} else if err := s.zoneManager.CreateZone(req.Name, ttl, soa, nsRecords); err != nil {
 		s.writeError(w, http.StatusConflict, sanitizeError(err, "Failed to create zone"))
 		return
 	}
@@ -262,7 +236,13 @@ func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request, name s
 	if s.requireOperator(w, r) {
 		return
 	}
-	if err := s.zoneManager.DeleteZone(name); err != nil {
+	if routed, ok := s.proposeZoneWrite(w, func() error {
+		return s.cluster.ProposeDeleteZone(name)
+	}); routed {
+		if !ok {
+			return
+		}
+	} else if err := s.zoneManager.DeleteZone(name); err != nil {
 		s.writeError(w, http.StatusNotFound, sanitizeError(err, "Failed to delete zone"))
 		return
 	}
@@ -354,7 +334,13 @@ func (s *Server) handleAddRecord(w http.ResponseWriter, r *http.Request, zoneNam
 		RData: req.Data,
 	}
 
-	if err := s.zoneManager.AddRecord(zoneName, record); err != nil {
+	if routed, ok := s.proposeZoneWrite(w, func() error {
+		return s.cluster.ProposeAddRecord(zoneName, record.Name, record.Type, record.Class, record.TTL, record.RData)
+	}); routed {
+		if !ok {
+			return
+		}
+	} else if err := s.zoneManager.AddRecord(zoneName, record); err != nil {
 		s.writeError(w, http.StatusNotFound, sanitizeError(err, "Not found"))
 		return
 	}
@@ -395,7 +381,13 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request, zone
 		RData: req.Data,
 	}
 
-	if err := s.zoneManager.UpdateRecord(zoneName, req.Name, req.Type, req.OldData, newRecord); err != nil {
+	if routed, ok := s.proposeZoneWrite(w, func() error {
+		return s.cluster.ProposeUpdateRecord(zoneName, newRecord.Name, newRecord.Type, req.OldData, newRecord.Class, newRecord.TTL, newRecord.RData)
+	}); routed {
+		if !ok {
+			return
+		}
+	} else if err := s.zoneManager.UpdateRecord(zoneName, req.Name, req.Type, req.OldData, newRecord); err != nil {
 		s.writeError(w, http.StatusNotFound, sanitizeError(err, "Not found"))
 		return
 	}
@@ -425,7 +417,13 @@ func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request, zone
 		return
 	}
 
-	if err := s.zoneManager.DeleteRecord(zoneName, req.Name, req.Type); err != nil {
+	if routed, ok := s.proposeZoneWrite(w, func() error {
+		return s.cluster.ProposeDeleteRecord(zoneName, req.Name, req.Type)
+	}); routed {
+		if !ok {
+			return
+		}
+	} else if err := s.zoneManager.DeleteRecord(zoneName, req.Name, req.Type); err != nil {
 		s.writeError(w, http.StatusNotFound, sanitizeError(err, "Not found"))
 		return
 	}

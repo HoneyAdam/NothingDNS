@@ -51,9 +51,11 @@ export function LoginPage() {
         // JS-readable one that any XSS can exfiltrate. The backend cookie is
         // used by the browser automatically for safe-method requests; the
         // in-memory Bearer token below is used for mutations.
+        // setAuth flips isAuthenticated → AppContent re-renders to the
+        // dashboard reactively. Do NOT hard-reload (window.location): a full
+        // page reload drops the in-memory token (intentionally not persisted),
+        // which would bounce the user straight back to this login screen.
         setAuth(token, username, role);
-        // eslint-disable-next-line react-hooks/immutability
-        window.location.href = '/';
       } else if (r.status === 401) {
         setError('password', { message: 'Invalid credentials. Please check your username and password.' });
       } else if (r.status === 429) {

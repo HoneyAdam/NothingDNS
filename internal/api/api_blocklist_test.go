@@ -25,7 +25,7 @@ func newBlocklistTestServer(t *testing.T, bl *blocklist.Blocklist) (*Server, *au
 	cfg := config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}
 	s := NewServer(cfg, nil, nil, nil, nil, nil, nil)
 	s.authStore = store
-	s.blocklist = bl
+	s.withBlocklist(bl)
 	user, _ := store.GetUser("admin")
 	return s, user
 }

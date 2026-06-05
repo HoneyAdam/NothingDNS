@@ -1112,6 +1112,56 @@ func TestGetRecentQueries_OffsetBeyond(t *testing.T) {
 	}
 }
 
+func TestGetRecentQueriesFiltered(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			{Domain: "ads.example.com", QueryType: "A"},
+			{Domain: "www.example.com", QueryType: "A"},
+			{Domain: "tracker.ADS.net", QueryType: "A"}, // mixed case
+			{Domain: "cdn.other.org", QueryType: "AAAA"},
+		},
+	}
+
+	// Empty filter delegates to GetRecentQueries (full set).
+	q, total := ds.GetRecentQueriesFiltered(0, 10, "")
+	if total != 4 || len(q) != 4 {
+		t.Fatalf("empty filter: got total=%d len=%d, want 4/4", total, len(q))
+	}
+
+	// Case-insensitive substring filter across the WHOLE log, not one page.
+	q, total = ds.GetRecentQueriesFiltered(0, 10, "ads")
+	if total != 2 {
+		t.Errorf("filter 'ads': total = %d, want 2", total)
+	}
+	if len(q) != 2 {
+		t.Errorf("filter 'ads': len = %d, want 2", len(q))
+	}
+
+	// Pagination applies to the filtered set.
+	q, total = ds.GetRecentQueriesFiltered(0, 1, "example")
+	if total != 2 {
+		t.Errorf("filter 'example': total = %d, want 2", total)
+	}
+	if len(q) != 1 {
+		t.Errorf("filter 'example' page: len = %d, want 1", len(q))
+	}
+
+	// Offset beyond the filtered total returns no rows but the real total.
+	q, total = ds.GetRecentQueriesFiltered(5, 10, "example")
+	if q != nil {
+		t.Errorf("offset beyond: expected nil rows, got %d", len(q))
+	}
+	if total != 2 {
+		t.Errorf("offset beyond: total = %d, want 2", total)
+	}
+
+	// No matches.
+	q, total = ds.GetRecentQueriesFiltered(0, 10, "nomatch")
+	if total != 0 || q != nil {
+		t.Errorf("no match: got total=%d rows=%v, want 0/nil", total, q)
+	}
+}
+
 func TestGetTopDomains_Empty(t *testing.T) {
 	ds := &DashboardStats{
 		RecentQueries: nil,

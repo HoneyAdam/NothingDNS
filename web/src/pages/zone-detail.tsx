@@ -14,9 +14,11 @@ export function ZoneDetailPage() {
   const [zone, setZone] = useState<ZoneDetail | null>(null);
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const [zd, rd] = await Promise.all([
         api<ZoneDetail>('GET', `/api/v1/zones/${encodeURIComponent(zn)}`),
@@ -25,7 +27,7 @@ export function ZoneDetailPage() {
       setZone(zd);
       setRecords(rd.records || []);
     } catch (e) {
-      console.error(e);
+      setError(e instanceof Error ? e.message : 'Failed to load zone');
     } finally {
       setLoading(false);
     }
@@ -49,7 +51,28 @@ export function ZoneDetailPage() {
     );
   }
 
-  const dnssecEnabled = zone?.nameservers && zone.nameservers.length > 0;
+  if (error) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <button onClick={() => navigate('/zones')} className="hover:text-foreground transition-colors cursor-pointer">Zones</button>
+          <ChevronRight className="h-3.5 w-3.5" />
+          <span className="text-foreground font-medium">{zn}</span>
+        </div>
+        <Card className="border-destructive/50">
+          <CardContent className="p-6 flex flex-col items-start gap-3">
+            <p className="text-sm text-destructive">Failed to load zone: {error}</p>
+            <Button variant="outline" size="sm" onClick={load}>Retry</Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // DNSSEC is "signed" only when the zone actually carries signing records
+  // (DNSKEY at the apex / RRSIG over RRsets) — derived from real data, not
+  // from the unrelated nameserver count.
+  const dnssecSigned = records.some(r => r.type === 'DNSKEY' || r.type === 'RRSIG');
 
   return (
     <div className="space-y-6">
@@ -89,8 +112,8 @@ export function ZoneDetailPage() {
                 )}
                 <StatBadge
                   icon={<Shield className="h-3.5 w-3.5" />}
-                  label="DNSSEC"
-                  variant={dnssecEnabled ? 'success' : 'secondary'}
+                  label={dnssecSigned ? 'DNSSEC signed' : 'DNSSEC unsigned'}
+                  variant={dnssecSigned ? 'success' : 'secondary'}
                 />
               </div>
             </div>

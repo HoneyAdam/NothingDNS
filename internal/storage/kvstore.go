@@ -721,11 +721,15 @@ func (tx *Tx) Commit() error {
 		return nil
 	}
 
-	// Writable: save first; on error keep the lock held so the caller can
-	// observe the failed transaction's state and decide whether to retry.
+	// Writable: persist first. If the save fails, revert the in-memory state to
+	// the last durable version (mirroring Rollback) before releasing the lock —
+	// otherwise the mutated-but-unpersisted `root` stays visible to every future
+	// transaction and is lost on crash, violating atomicity & durability.
 	if err := tx.store.save(); err != nil {
-		// Save failed — release the exclusive lock and bail.
 		tx.store.rwtx = nil
+		if rerr := tx.store.load(); rerr != nil {
+			util.Warnf("kvstore: failed to reload data after failed commit: %v", rerr)
+		}
 		tx.closed = true
 		tx.store.removeTx(tx)
 		atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)

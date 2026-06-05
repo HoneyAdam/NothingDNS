@@ -68,6 +68,19 @@ cluster:
   # or "raft" (strong consistency, requires explicit peers)
   consensus_mode: "swim"
 
+  # Raft data directory (WAL, HardState, snapshots). Each node needs its own.
+  # data_dir: "/var/lib/nothingdns/cluster"
+
+  # Raft peers — the OTHER cluster members (this node is excluded
+  # automatically). Each peer needs a node_id and the host:port its Raft RPC
+  # server listens on (that address is the peer's bind_addr:gossip_port).
+  # Required for raft mode.
+  # peers:
+  #   - node_id: "node-2"
+  #     addr: "10.0.0.2:7946"
+  #   - node_id: "node-3"
+  #     addr: "10.0.0.3:7946"
+
   # Encryption key (REQUIRED for multi-node, 32 bytes, hex encoded)
   # Generate with: openssl rand -hex 32
   # encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE"

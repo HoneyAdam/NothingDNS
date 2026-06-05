@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sync"
+	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // ClusterIntegration integrates Raft consensus into the cluster.
@@ -18,6 +20,7 @@ type ClusterIntegration struct {
 	rpcServer    *RPCServer
 	wal          *WAL
 	snapshotter  *Snapshotter
+	logger       *util.Logger // structured logger; no raw log.Printf
 
 	// Configuration
 	config Config
@@ -33,6 +36,10 @@ type ClusterIntegration struct {
 	appliedIndex    Index
 	lastAppliedTerm Term
 
+	// applyHook, when set, is invoked with each committed ZoneCommand so the
+	// real zone store can be updated. Guarded by mu.
+	applyHook func(ZoneCommand)
+
 	stopCh   chan struct{}
 	stopOnce sync.Once // guards Stop() against second-call panic
 	wg       sync.WaitGroup
@@ -46,7 +53,11 @@ type ClusterIntegration struct {
 // snapshotEncryptionKey, when set, is an independent hex-encoded
 // 32-byte AES-256 key used for on-disk snapshot encryption (L-6).
 // Empty leaves snapshots in plaintext (existing behaviour).
-func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string) (*ClusterIntegration, error) {
+// peerAddrs maps each peer NodeID to its reachable RPC address. When an entry
+// is missing (or the whole map is nil), the NodeID itself is used as the
+// address — preserving the old behavior for callers/tests that name peers by
+// their address.
+func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]string, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, logger *util.Logger) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
 
@@ -75,16 +86,26 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 	// Create transport with AEAD encryption (nil AEAD = plaintext for dev).
 	transport := NewTCPTransport(nil, aead)
 
-	// Set peer addresses (simplified — would be looked up from config).
+	// Register each peer's reachable RPC address.
 	for _, peerID := range peers {
-		transport.SetPeerAddr(peerID, string(peerID)) // Placeholder.
+		paddr := peerAddrs[peerID]
+		if paddr == "" {
+			paddr = string(peerID) // fall back to NodeID-as-address
+		}
+		transport.SetPeerAddr(peerID, paddr)
 	}
 
 	// Create Raft node.
 	node := NewNode(config, peers, transport)
 
-	// Set state machine so snapshot installs can restore state
-	node.SetStateMachine(NewZoneStateMachine())
+	// ONE shared state machine. The node uses it for snapshot install
+	// (Restore), and the apply loop below uses the same instance to apply
+	// committed entries and to serve reads. The previous code created two
+	// independent ZoneStateMachines — snapshot restores landed in the
+	// node's copy while every read went to ci's copy, so a follower that
+	// installed a snapshot served permanently stale zone data.
+	stateMachine := NewZoneStateMachine()
+	node.SetStateMachine(stateMachine)
 
 	// Create RPC server with AEAD encryption.
 	rpcServer, err := NewRPCServer(addr, node, nil, aead)
@@ -98,11 +119,13 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 		return nil, fmt.Errorf("wal: %w", err)
 	}
 
-	// Load WAL entries into node.
+	// Load WAL entries into node, then install the WAL as the node's durable
+	// log persister so future appends/truncations are written through.
 	if entries, err := wal.ReadAll(); err == nil && len(entries) > 0 {
 		// Replay entries into node's log.
 		node.log = append(node.log, entries...)
 	}
+	node.SetLogPersister(wal)
 
 	// Create snapshotter — L-6: encrypted at rest if a snapshot key
 	// is provided. The hex decode mirrors the transport-AEAD path
@@ -126,11 +149,12 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, addr string, dataDir s
 
 	ci := &ClusterIntegration{
 		node:         node,
-		stateMachine: NewZoneStateMachine(),
+		stateMachine: stateMachine, // SAME instance the node restores into
 		transport:    transport,
 		rpcServer:    rpcServer,
 		wal:          wal,
 		snapshotter:  snapshotter,
+		logger:       logger,
 		config:       config,
 		nodeID:       nodeID,
 		peers:        peers,
@@ -190,34 +214,67 @@ func (ci *ClusterIntegration) applyLoop() {
 		case <-ci.stopCh:
 			return
 		case <-ci.node.CommitCh():
+			// Collect the newly-committed entries under the node lock, then
+			// apply them OUTSIDE it. stateMachine.Apply fires the zone-apply
+			// hook (which writes through to the real zone store and may do
+			// disk I/O); holding the Raft node lock across that would stall
+			// heartbeats and replication. appliedIndex is advanced only AFTER
+			// each entry's apply completes, so a caller waiting on
+			// appliedIndex >= idx is guaranteed the store mutation is done.
 			ci.node.mu.Lock()
 			commitIdx := ci.node.commitIndex
-			ci.node.mu.Unlock()
-
-			// Apply entries from lastApplied+1 to commitIndex
-			ci.node.mu.Lock()
-			for i := int(ci.appliedIndex) + 1; i <= int(commitIdx); i++ {
-				if i > 0 && i <= len(ci.node.log) {
-					e := ci.node.log[i-1]
-					if e.Term == 0 {
-						continue
-					}
-					if err := ci.stateMachine.Apply(e); err != nil {
-						// F050: a state-machine apply failure means this
-						// node has diverged from the cluster's intended
-						// state. Log loudly but advance appliedIndex anyway
-						// — re-applying the same failed entry on the next
-						// tick would just busy-loop. Operators should treat
-						// this as a Sev-1 alert.
-						log.Printf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
-					}
-					ci.appliedIndex = e.Index
-					ci.lastAppliedTerm = e.Term
+			start := ci.appliedIndex + 1
+			lastSnap := ci.node.lastSnapshot
+			var pending []entry
+			for i := start; i <= commitIdx; i++ {
+				if i <= lastSnap {
+					continue
+				}
+				pos := int(i - lastSnap - 1)
+				if pos >= 0 && pos < len(ci.node.log) {
+					pending = append(pending, ci.node.log[pos])
 				}
 			}
 			ci.node.mu.Unlock()
+
+			for _, e := range pending {
+				if e.Term != 0 {
+					if err := ci.stateMachine.Apply(e); err != nil {
+						// F050: an apply failure means this node has diverged
+						// from the cluster's intended state. Log loudly but
+						// still advance appliedIndex — re-applying the same
+						// failed entry would just busy-loop. Treat as Sev-1.
+						ci.logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
+					}
+					ci.runApplyHook(e)
+				}
+				ci.node.mu.Lock()
+				ci.appliedIndex = e.Index
+				ci.lastAppliedTerm = e.Term
+				ci.node.mu.Unlock()
+			}
 		}
 	}
+}
+
+// runApplyHook decodes a committed normal entry's ZoneCommand and forwards
+// it to the registered apply hook (if any). Runs outside the Raft node lock.
+func (ci *ClusterIntegration) runApplyHook(e entry) {
+	if e.Type != EntryNormal || len(e.Command) == 0 {
+		return
+	}
+	ci.mu.RLock()
+	hook := ci.applyHook
+	ci.mu.RUnlock()
+	if hook == nil {
+		return
+	}
+	var cmd ZoneCommand
+	if err := json.Unmarshal(e.Command, &cmd); err != nil {
+		ci.logger.Errorf("raft: apply-hook decode failed for index=%d: %v", e.Index, err)
+		return
+	}
+	hook(cmd)
 }
 
 // leadershipLoop tracks leadership changes.
@@ -256,6 +313,52 @@ func (ci *ClusterIntegration) ProposeZoneChange(cmd ZoneCommand) error {
 	}
 
 	return nil
+}
+
+// ProposeZoneChangeWait replicates cmd through Raft and blocks until it has
+// been applied locally (so the zone store reflects it) or the timeout
+// elapses. Must be called on the leader — otherwise the underlying propose
+// returns a "not leader" error.
+func (ci *ClusterIntegration) ProposeZoneChangeWait(cmd ZoneCommand, timeout time.Duration) error {
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	idx, err := ci.node.ProposeEntry(data, EntryNormal)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if ci.AppliedIndex() >= idx {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("raft: zone change at index %d not applied within %s", idx, timeout)
+		}
+		select {
+		case <-ci.stopCh:
+			return fmt.Errorf("raft: shutting down before zone change applied")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+// AppliedIndex returns the highest log index applied to the state machine.
+func (ci *ClusterIntegration) AppliedIndex() Index {
+	ci.node.mu.Lock()
+	defer ci.node.mu.Unlock()
+	return ci.appliedIndex
+}
+
+// SetApplyHook installs fn, called with each committed ZoneCommand as it is
+// applied on this node (leader and followers alike), so the real DNS zone
+// store stays in sync. Fires for every command type, independent of how the
+// in-memory ledger models it.
+func (ci *ClusterIntegration) SetApplyHook(fn func(ZoneCommand)) {
+	ci.mu.Lock()
+	ci.applyHook = fn
+	ci.mu.Unlock()
 }
 
 // GetLeaderID returns the current leader's node ID. If this node is the
@@ -370,11 +473,15 @@ func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
 func (ci *ClusterIntegration) Stats() ClusterStats {
 	ci.mu.RLock()
 	isLeader := ci.isLeader
-	term := ci.currentTerm
 	ci.mu.RUnlock()
 
+	// Read the term from the node itself, not ci.currentTerm: the latter is
+	// only updated on a leadership transition, so a follower that simply
+	// follows a new leader (no transition of its own) would otherwise report
+	// a stale term (e.g. 0) in the dashboard.
 	ci.node.mu.Lock()
 	state := ci.node.state
+	term := ci.node.currentTerm
 	commitIdx := ci.node.commitIndex
 	applied := ci.appliedIndex
 	ci.node.mu.Unlock()

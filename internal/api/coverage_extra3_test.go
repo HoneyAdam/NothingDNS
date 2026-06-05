@@ -35,6 +35,7 @@ func newTestAPIServerV2(t *testing.T) *Server {
 
 func TestHandleSlaveZones_WithSyncedZone(t *testing.T) {
 	sm := transfer.NewSlaveManager(nil)
+	t.Cleanup(sm.Stop)
 
 	err := sm.AddSlaveZone(transfer.SlaveZoneConfig{
 		ZoneName: "synced.example.com.",
@@ -100,6 +101,7 @@ func TestHandleSlaveZones_WithSyncedZone(t *testing.T) {
 
 func TestHandleSlaveZones_PendingZoneV2(t *testing.T) {
 	sm := transfer.NewSlaveManager(nil)
+	t.Cleanup(sm.Stop)
 
 	err := sm.AddSlaveZone(transfer.SlaveZoneConfig{
 		ZoneName: "pending.example.com.",

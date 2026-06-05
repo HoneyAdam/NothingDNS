@@ -167,7 +167,10 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		// account fresh. Using CreateUser (not UpdateUser) means the
 		// new account loses the IsAutoCreated marker and behaves like
 		// any normally-provisioned user from here on out.
-		s.authStore.DeleteUser("admin")
+		if err := s.authStore.DeleteUser("admin"); err != nil {
+			s.writeError(w, http.StatusInternalServerError, sanitizeError(err, "Failed to remove default admin"))
+			return
+		}
 		user, err = s.authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
 		if err != nil {
 			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
@@ -351,6 +354,9 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "User deleted"})
+
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 	}
 }
 

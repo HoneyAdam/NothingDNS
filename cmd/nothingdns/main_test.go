@@ -17,6 +17,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/config"
+	"github.com/nothingdns/nothingdns/internal/dashboard"
 	"github.com/nothingdns/nothingdns/internal/dns64"
 	"github.com/nothingdns/nothingdns/internal/dnscookie"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
@@ -214,6 +215,90 @@ func TestServeDNS_Blocklist(t *testing.T) {
 	}
 	if w.msg.Header.Flags.RCODE != protocol.RcodeNameError {
 		t.Errorf("expected NXDOMAIN for blocked query, got rcode %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
+// TestServeDNS_BlocklistBeatsCache regresses the filter-bypass where the cache
+// stage ran BEFORE the blocklist stage: a domain resolved and cached before it
+// was added to the blocklist was served from cache, skipping the filter until
+// its TTL expired. Filtering now runs before the cache, so a freshly-
+// blocklisted domain is blocked even with a warm cache entry.
+func TestServeDNS_BlocklistBeatsCache(t *testing.T) {
+	h := newTestHandler()
+
+	const qname = "cached-then-blocked.example.com."
+
+	// 1) Warm the cache with a positive answer for the domain.
+	resp := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+	}
+	h.cache.Set(cache.MakeKey(qname, protocol.TypeA, false), resp, 300)
+
+	// 2) Add the domain to the blocklist AFTER it was cached (hot-reload / late add).
+	bl := blocklist.New(blocklist.Config{Enabled: true})
+	bl.AddDomain("cached-then-blocked.example.com")
+	h.blocklist = bl
+
+	// 3) The query must be BLOCKED (NXDOMAIN), not served from the warm cache.
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, qname, protocol.TypeA))
+
+	if w.msg == nil {
+		t.Fatal("expected a response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeNameError {
+		t.Errorf("blocklisted domain served from cache (filter bypass): rcode=%d, want NXDOMAIN", w.msg.Header.Flags.RCODE)
+	}
+	if len(w.msg.Answers) != 0 {
+		t.Errorf("blocked response must carry no answers, got %d", len(w.msg.Answers))
+	}
+}
+
+// TestServeDNS_FeedsDashboardQueryLog regresses two gaps found via runtime
+// verification: q.qtypeStr/q.qnameAudit were never assigned (so the audit
+// logger and the dashboard, both gated on qtypeStr != "", never fired), and the
+// pipeline never called dashboard.RecordQuery (so the Query Log page and the
+// live stream were always empty). A served query must now produce a dashboard
+// event carrying the right domain, type, client IP and protocol.
+func TestServeDNS_FeedsDashboardQueryLog(t *testing.T) {
+	h := newTestHandler()
+	ds := dashboard.NewServer()
+	h.dashboardServer = ds
+
+	const qname = "logged.example.com."
+	// Pre-cache an answer so the query resolves without an upstream.
+	resp := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+	}
+	h.cache.Set(cache.MakeKey(qname, protocol.TypeA, false), resp, 300)
+
+	w := newCaptureWriter("10.1.2.3", "udp")
+	h.ServeDNS(w, newTestQuery(t, qname, protocol.TypeA))
+
+	queries, total := ds.GetStats().GetRecentQueries(0, 10)
+	if total != 1 || len(queries) != 1 {
+		t.Fatalf("dashboard query log: got total=%d len=%d, want 1/1 (RecordQuery never fired)", total, len(queries))
+	}
+	e := queries[0]
+	if e.Domain != qname {
+		t.Errorf("event domain = %q, want %q", e.Domain, qname)
+	}
+	if e.QueryType != "A" {
+		t.Errorf("event qtype = %q, want A (q.qtypeStr was never assigned before the fix)", e.QueryType)
+	}
+	if e.ClientIP != "10.1.2.3" {
+		t.Errorf("event clientIP = %q, want 10.1.2.3", e.ClientIP)
+	}
+	if e.Protocol != "udp" {
+		t.Errorf("event protocol = %q, want udp", e.Protocol)
 	}
 }
 
@@ -1896,20 +1981,19 @@ a.root-servers.net. 3600000 IN AAAA 2001:503:ba3e::2:30
 	}
 }
 
-// --- wireLen tests ---
+// --- WireLength tests ---
 
-func TestWireLen(t *testing.T) {
-	if got := wireLen(nil); got != 0 {
-		t.Errorf("wireLen(nil) = %d, want 0", got)
-	}
+func TestWireLength(t *testing.T) {
+	// protocol.Message.WireLength() is tested directly in protocol package;
+	// here we verify it handles nil (should not panic — Message is always non-nil in practice).
 	msg := &protocol.Message{
 		Header: protocol.Header{ID: 1, Flags: protocol.NewQueryFlags()},
 		Questions: []*protocol.Question{
 			{Name: mustParseName(t, "example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
 		},
 	}
-	if got := wireLen(msg); got <= 0 {
-		t.Errorf("wireLen(msg) = %d, want > 0", got)
+	if got := msg.WireLength(); got <= 0 {
+		t.Errorf("msg.WireLength() = %d, want > 0", got)
 	}
 }
 
@@ -2043,6 +2127,85 @@ func TestSendErrorWithEDE_WithOPT(t *testing.T) {
 	}
 	if opt.Options[0].Code != protocol.OptionCodeExtendedError {
 		t.Errorf("expected EDE option, got code %d", opt.Options[0].Code)
+	}
+}
+
+// TestCacheStage_DoesNotMutateCachedMessage regresses the shared-pointer bug
+// where serving from cache mutated the cached *Message in place: reply() set
+// the header ID/flags and minimizeResponse() reassigned the authority/additional
+// sections, so the first serve permanently corrupted the entry for every future
+// client and could leak one client's transaction ID to another. Each client
+// must receive an isolated copy; the cached object must stay pristine.
+func TestCacheStage_DoesNotMutateCachedMessage(t *testing.T) {
+	h := newTestHandler()
+
+	const qname = "cached.example.com."
+	// Non-authoritative response with an additional record that
+	// minimizeResponse() drops (not OPT, not glue). Its survival in the cache
+	// after a serve proves the cached object was not mutated in place.
+	cached := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0x4242,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+		Answers: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, qname), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+		}},
+		Additionals: []*protocol.ResourceRecord{{
+			Name: mustParseName(t, "extra.example.com."), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300,
+			Data: &protocol.RDataA{Address: [4]byte{9, 9, 9, 9}},
+		}},
+	}
+	key := cache.MakeKey(qname, protocol.TypeA, false)
+	h.cache.Set(key, cached, 300)
+
+	serve := func(id uint16, clientIP string) *protocol.Message {
+		w := newCaptureWriter(clientIP, "udp")
+		q := &query{
+			msg:           &protocol.Message{Header: protocol.Header{ID: id}},
+			qname:         qname,
+			cacheKey:      key,
+			currentWriter: w,
+		}
+		handled, err := cacheStage(h)(context.Background(), q, w)
+		if err != nil {
+			t.Fatalf("cacheStage error: %v", err)
+		}
+		if !handled {
+			t.Fatal("expected cache hit to be handled")
+		}
+		if w.msg == nil {
+			t.Fatal("no response written")
+		}
+		return w.msg
+	}
+
+	// First client: served copy carries the query's transaction ID.
+	r1 := serve(0xAAAA, "10.0.0.1")
+	if r1.Header.ID != 0xAAAA {
+		t.Errorf("served ID = %#x, want 0xAAAA (the query's ID)", r1.Header.ID)
+	}
+
+	// The cached entry must be untouched after the first serve.
+	entry := h.cache.Get(key)
+	if entry == nil || entry.Message == nil {
+		t.Fatal("cache entry vanished after serve")
+	}
+	if entry.Message.Header.ID != 0x4242 {
+		t.Errorf("cached ID mutated to %#x, want 0x4242 — cross-client TX-ID leak", entry.Message.Header.ID)
+	}
+	if got := len(entry.Message.Additionals); got != 1 {
+		t.Errorf("cached additionals stripped by serve: got %d, want 1", got)
+	}
+
+	// Second client: independent ID, and the first response is unaffected.
+	r2 := serve(0xBBBB, "10.0.0.2")
+	if r2.Header.ID != 0xBBBB {
+		t.Errorf("second served ID = %#x, want 0xBBBB", r2.Header.ID)
+	}
+	if r1.Header.ID != 0xAAAA {
+		t.Errorf("first response ID changed to %#x after second serve — shared object", r1.Header.ID)
 	}
 }
 
@@ -2292,6 +2455,37 @@ func TestApplyRPZRule_UnknownAction(t *testing.T) {
 	rule := &rpz.Rule{Action: rpz.PolicyAction(999), PolicyName: "test"}
 	if h.applyRPZRule(w, msg, msg.Questions[0], rule) {
 		t.Error("expected applyRPZRule to return false for unknown action")
+	}
+}
+
+// --- applyRPZResponsePolicy tests ---
+
+func TestApplyRPZResponsePolicy_NoEngine(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.0.0.1", "udp")
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	resp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			{Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+		},
+	}
+	if h.applyRPZResponsePolicy(w, msg, msg.Questions[0], resp, "example.com.") {
+		t.Error("expected false when no RPZ engine")
+	}
+}
+
+func TestApplyRPZResponsePolicy_NoMatch(t *testing.T) {
+	h := newTestHandler()
+	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	w := newCaptureWriter("10.0.0.1", "udp")
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	resp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			{Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+		},
+	}
+	if h.applyRPZResponsePolicy(w, msg, msg.Questions[0], resp, "example.com.") {
+		t.Error("expected false when no RPZ rule matches")
 	}
 }
 

@@ -144,7 +144,9 @@ internal/
 
 ## Dependency Policy
 
-**Minimal external dependencies** — currently `github.com/quic-go/quic-go` (DoQ transport) plus `golang.org/x/{sys,net,crypto}` (transitive). Everything else is hand-rolled on stdlib. Adding any new third-party import requires explicit discussion and justification.
+**Minimal external dependencies** — direct deps are `github.com/quic-go/quic-go` (DoQ transport) and `github.com/jackc/pgx/v5` (optional PostgreSQL zone backend, see below), plus `golang.org/x/{sys,net,crypto}` (transitive). Everything else is hand-rolled on stdlib (including the YAML parser — no `gopkg.in/yaml`). Adding any new third-party import requires explicit discussion and justification.
+
+**PostgreSQL backend (`pgx/v5`)** is an explicitly-approved, *runtime-optional* dependency: it powers `internal/storage/postgres_zonestore.go` and is selected at runtime via `storage.postgres.dsn` in config (wired in `cmd/nothingdns/zone_manager.go`). When no Postgres DSN is configured the server falls back to the embedded KV store, but `pgx` is still linked into the default binary. If a zero-third-party-deps build is ever required, this backend is the one to gate behind a build tag (`//go:build postgres`).
 
 ## Known Gotchas
 

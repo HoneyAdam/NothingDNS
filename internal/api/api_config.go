@@ -70,15 +70,34 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	}
 	publicCfg["Version"] = util.Version
 
-	// Redact sensitive fields
+	// Redact sensitive fields. These structs carry only yaml tags (no json
+	// tags), so they serialize under their Go field names — redact by those.
+	// NOTE: this is an allowlist-by-omission; whenever a secret field is added
+	// to a config struct it MUST be added here too (regression: TestConfigGet_RedactsSecrets).
 	if server, ok := publicCfg["Server"].(map[string]any); ok {
 		if httpCfg, ok := server["HTTP"].(map[string]any); ok {
 			httpCfg["AuthToken"] = ""
 			httpCfg["AuthSecret"] = ""
+			// Configured user plaintext passwords. Zeroed at startup in main.go,
+			// but a SIGHUP reload re-loads them, so redact at the boundary too.
+			if users, ok := httpCfg["Users"].([]any); ok {
+				for _, u := range users {
+					if user, ok := u.(map[string]any); ok {
+						user["Password"] = ""
+					}
+				}
+			}
 		}
 	}
 	if cluster, ok := publicCfg["Cluster"].(map[string]any); ok {
-		cluster["EncryptionKey"] = ""
+		cluster["EncryptionKey"] = ""         // gossip AES-256-GCM key
+		cluster["SnapshotEncryptionKey"] = "" // Raft snapshot at-rest key
+	}
+	if storage, ok := publicCfg["Storage"].(map[string]any); ok {
+		storage["EncryptionKey"] = "" // KV data-file at-rest key
+	}
+	if metrics, ok := publicCfg["Metrics"].(map[string]any); ok {
+		metrics["AuthToken"] = "" // Prometheus endpoint bearer token
 	}
 	if dnssecCfg, ok := publicCfg["DNSSEC"].(map[string]any); ok {
 		if signing, ok := dnssecCfg["Signing"].(map[string]any); ok {

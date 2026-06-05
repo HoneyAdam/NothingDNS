@@ -11,6 +11,7 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 const (
@@ -26,6 +27,8 @@ const (
 	// MaxPaddingSize is the maximum padding size per RFC 7830
 	MaxPaddingSize = 512
 )
+
+var secureRandomReader io.Reader = rand.Reader
 
 // Handler handles DNS over HTTPS requests (RFC 8484).
 type Handler struct {
@@ -319,8 +322,13 @@ func (rw *dohResponseWriter) Write(msg *protocol.Message) (int, error) {
 
 	// Add RFC 7830 padding if enabled
 	if rw.padding {
-		buf, _ = padMessage(buf[:n])
-		n = len(buf)
+		padded, err := padMessage(buf[:n])
+		if err != nil {
+			util.Warnf("doh: failed to add response padding: %v", err)
+		} else {
+			buf = padded
+			n = len(buf)
+		}
 	}
 
 	// Write HTTP response
@@ -380,7 +388,7 @@ func generatePadding() ([]byte, error) {
 	// Threshold: largest multiple of maxPad that fits in 16 bits
 	threshold := (65536 / maxPad) * maxPad
 	for {
-		if _, err := rand.Read(b[:]); err != nil {
+		if _, err := io.ReadFull(secureRandomReader, b[:]); err != nil {
 			return nil, err
 		}
 		val := int(b[0])<<8 | int(b[1])
@@ -392,7 +400,7 @@ func generatePadding() ([]byte, error) {
 
 	// Generate random padding data
 	padding := make([]byte, padSize)
-	if _, err := rand.Read(padding); err != nil {
+	if _, err := io.ReadFull(secureRandomReader, padding); err != nil {
 		return nil, err
 	}
 	return padding, nil
@@ -403,7 +411,7 @@ func generatePadding() ([]byte, error) {
 func padMessage(wire []byte) ([]byte, error) {
 	padding, err := generatePadding()
 	if err != nil {
-		return wire, nil // Fallback: return unpadded
+		return wire, err
 	}
 	return append(wire, padding...), nil
 }

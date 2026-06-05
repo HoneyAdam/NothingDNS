@@ -162,6 +162,11 @@ func run() error {
 	// Stop channel for graceful goroutine shutdown
 	stopCh := make(chan struct{})
 
+	// Server root context — cancelled on SIGINT/SIGTERM to tear down
+	// in-flight queries before the process exits.
+	serverCtx, cancelServer := context.WithCancel(context.Background())
+	defer cancelServer() // Safe: deferred before any early return
+
 	// Initialize cluster manager
 	clusterManager, err := NewClusterManager(cfg, logger, dnsCache, metricsCollector, zoneManagerInstance)
 	if err != nil {
@@ -379,6 +384,8 @@ func run() error {
 			kvPersistence,
 			zone.BuildRadixTree(zones),
 		),
+		serverCtx:    serverCtx,
+		cancelServer: cancelServer,
 	}
 
 	// Initialize iterative recursive resolver if enabled
@@ -438,6 +445,8 @@ func run() error {
 	dashboardServer.SetAuthStore(authStore)
 	dashboardServer.SetAuthToken(resolveDashboardBearer(cfg.Server.HTTP))
 	dashboardServer.SetZoneManager(zoneManagerInstance)
+	// Feed per-query events into the dashboard (Query Log page + live stream).
+	handler.dashboardServer = dashboardServer
 	apiServer := api.NewServer(cfg.Server.HTTP, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")
 		cfgMu.RLock()
@@ -820,6 +829,7 @@ func run() error {
 				defer close(done)
 
 				// Stop servers
+				cancelServer() // Cancel in-flight queries before stopping transports
 				udpServer.Stop()
 				tcpServer.Stop()
 				if tlsServer != nil {

@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,22 +37,25 @@ import (
 
 // Server provides HTTP API for DNS server management.
 type Server struct {
-	config          config.HTTPConfig
-	httpServer      *http.Server
-	zoneManager     *zone.Manager
-	cache           *cache.Cache
-	reloadFunc      func() error
-	configGetter    func() *config.Config // Returns full server config
-	dnsHandler      server.Handler
-	cluster         *cluster.Cluster
-	dashboardServer *dashboard.Server
-	blocklist       *blocklist.Blocklist
-	upstreamClient  *upstream.Client
-	upstreamLB      *upstream.LoadBalancer
-	aclChecker      *filter.ACLChecker
-	authStore       *auth.Store
-	metrics         *metrics.MetricsCollector
-	validator       *dnssec.Validator
+	config           config.HTTPConfig
+	httpServer       *http.Server
+	zoneManager      *zone.Manager
+	cache            *cache.Cache
+	cacheService     *CacheService
+	zoneService      *ZoneService
+	reloadFunc       func() error
+	configGetter     func() *config.Config // Returns full server config
+	dnsHandler       server.Handler
+	cluster          *cluster.Cluster
+	dashboardServer  *dashboard.Server
+	blocklist        *blocklist.Blocklist
+	blocklistService *BlocklistService
+	upstreamClient   *upstream.Client
+	upstreamLB       *upstream.LoadBalancer
+	aclChecker       *filter.ACLChecker
+	authStore        *auth.Store
+	metrics          *metrics.MetricsCollector
+	validator        *dnssec.Validator
 	// SECURITY (LOW-026): zoneSigners is protected by RWMutex. Writes are rare
 	// (zone reload / DNSSEC key rollover) and reads are frequent. sync.Map is
 	// not used because the map is small and RWMutex performs better.
@@ -67,10 +69,11 @@ type Server struct {
 	odohTarget     *odoh.ObliviousTarget // ODoH target resolver (RFC 9230)
 	loginLimiter   *loginRateLimiter
 	apiRateLimiter *apiRateLimiter
-	tracer         *otel.Tracer  // OpenTelemetry tracing
-	stopCh         chan struct{} // Channel to signal shutdown
-	stopOnce       sync.Once     // Ensure Stop is idempotent
-	bootstrapMu    sync.Mutex    // Serialize bootstrap to prevent TOCTOU race
+	tracer         *otel.Tracer   // OpenTelemetry tracing
+	stopCh         chan struct{}  // Channel to signal shutdown
+	stopOnce       sync.Once      // Ensure Stop is idempotent
+	rateLimitWg    sync.WaitGroup // Tracks rateLimitCleanupLoop goroutine
+	bootstrapMu    sync.Mutex     // Serialize bootstrap to prevent TOCTOU race
 
 	// Goroutine leak detection baseline
 	goroutineBaseline int64
@@ -394,10 +397,12 @@ func (s *Server) WithDashboard(ds *dashboard.Server) *Server {
 
 // NewServer creates a new API server.
 func NewServer(cfg config.HTTPConfig, zm *zone.Manager, c *cache.Cache, reload func() error, dnsHandler server.Handler, cl *cluster.Cluster, ds *dashboard.Server) *Server {
-	return &Server{
+	s := &Server{
 		config:          cfg,
 		zoneManager:     zm,
 		cache:           c,
+		cacheService:    NewCacheService(c),
+		zoneService:     NewZoneService(zm),
 		reloadFunc:      reload,
 		dnsHandler:      dnsHandler,
 		cluster:         cl,
@@ -408,11 +413,20 @@ func NewServer(cfg config.HTTPConfig, zm *zone.Manager, c *cache.Cache, reload f
 		},
 		apiRateLimiter: newAPIRateLimiter(),
 	}
+	return s
 }
 
 // WithBlocklist sets the blocklist for the API server.
 func (s *Server) WithBlocklist(bl *blocklist.Blocklist) *Server {
 	s.blocklist = bl
+	s.blocklistService = NewBlocklistService(bl)
+	return s
+}
+
+// withBlocklist sets blocklist and its service directly (used by tests).
+func (s *Server) withBlocklist(bl *blocklist.Blocklist) *Server {
+	s.blocklist = bl
+	s.blocklistService = NewBlocklistService(bl)
 	return s
 }
 
@@ -516,6 +530,7 @@ func (s *Server) Start() error {
 
 	// Start rate limiter cleanup goroutine
 	s.stopCh = make(chan struct{})
+	s.rateLimitWg.Add(1)
 	go s.rateLimitCleanupLoop()
 
 	mux := http.NewServeMux()
@@ -625,8 +640,13 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/openapi.json", s.handleOpenAPISpec)
 	mux.HandleFunc("/api/docs", s.handleSwaggerUI)
 
-	// WebSocket endpoint
-	mux.HandleFunc("/ws", s.dashboardServer.ServeHTTP)
+	// WebSocket endpoint. Guard against a nil dashboard server: production
+	// always wires one (WithDashboard), but a Server built without it would
+	// otherwise register a method value bound to a nil receiver and panic on
+	// the first /ws request.
+	if s.dashboardServer != nil {
+		mux.HandleFunc("/ws", s.dashboardServer.ServeHTTP)
+	}
 
 	// SPA static assets
 	spaHandler := dashboard.SPAHandler()
@@ -639,7 +659,7 @@ func (s *Server) Start() error {
 	if s.tracer != nil {
 		handler = otel.Middleware(s.tracer)(handler)
 	}
-	handler = securityHeadersMiddleware(s.corsMiddleware(s.authMiddleware(handler)))
+	handler = s.rateLimitMiddleware(s.loggingMiddleware(securityHeadersMiddleware(s.corsMiddleware(s.authMiddleware(handler)))))
 
 	s.httpServer = &http.Server{
 		Addr:              s.config.Bind,
@@ -691,6 +711,9 @@ func (s *Server) Stop() error {
 		}
 	})
 
+	// Wait for the rate limit cleanup goroutine to exit.
+	s.rateLimitWg.Wait()
+
 	if s.httpServer == nil {
 		return nil
 	}
@@ -703,6 +726,7 @@ func (s *Server) Stop() error {
 
 // rateLimitCleanupLoop periodically cleans up stale entries from rate limiters.
 func (s *Server) rateLimitCleanupLoop() {
+	defer s.rateLimitWg.Done() // Signal that we've exited
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -784,12 +808,14 @@ func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// X-Requested-With is sent by the dashboard's api() helper (CSRF hint);
+		// list it so cross-origin dev setups don't fail the preflight.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
 
 		if r.Method == "OPTIONS" {
 			if allowOrigin == "" && origin != "" {
 				// Origin was present but not allowed — reject preflight
-				http.Error(w, "origin not allowed", http.StatusForbidden)
+				s.writeError(w, http.StatusForbidden, "origin not allowed")
 				return
 			}
 			w.WriteHeader(http.StatusOK)
@@ -855,12 +881,6 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if s.config.DoWSEnabled && s.config.DoWSPath != "" && r.URL.Path == s.config.DoWSPath {
-			// Rate limit WebSocket connections to prevent connection exhaustion
-			ip := getClientIP(r)
-			if s.apiRateLimiter.checkRateLimit(ip) {
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
-				return
-			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -875,26 +895,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
-		// VULN-055: Apply the API rate limit to every /api/ request BEFORE
-		// any auth decision, so unauthenticated scans and failed-auth
-		// brute-force attempts also consume budget. Previously the limiter
-		// only fired inside the successful-auth branches, which left the
-		// login/credential-stuffing surface unthrottled.
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			ip := getClientIP(r)
-			if s.apiRateLimiter.checkRateLimit(ip) {
-				resetTime := s.apiRateLimiter.getResetTime(ip)
-				w.Header().Set("Retry-After", strconv.Itoa(int(resetTime.Seconds())+1))
-				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
-				return
-			}
-		}
-
 		// SECURITY: If neither AuthToken nor authStore is configured,
 		// authentication is required. Deny all API requests.
 		// To allow unauthenticated access, set auth_token or configure users.
 		if s.config.AuthToken == "" && s.authStore == nil {
-			http.Error(w, `{"error":"authentication required: set auth_token or configure users"}`, http.StatusUnauthorized)
+			writeErrorJSON(w, http.StatusUnauthorized, "authentication required: set auth_token or configure users")
 			return
 		}
 

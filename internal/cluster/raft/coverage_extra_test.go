@@ -87,11 +87,26 @@ func TestLastLogInfoEmpty(t *testing.T) {
 	}
 }
 
+// mkLog builds a contiguous log of n entries honoring the positional
+// invariant (entry at slice position p has global index p+1). The final
+// entry carries lastTerm; earlier entries use term 1.
+func mkLog(n int, lastTerm Term) []entry {
+	es := make([]entry, n)
+	for i := range es {
+		es[i] = entry{Index: Index(i + 1), Term: 1}
+	}
+	if n > 0 {
+		es[n-1].Term = lastTerm
+	}
+	return es
+}
+
 func TestLastLogInfoNonEmpty(t *testing.T) {
 	n := NewNode(Config{NodeID: "n1"}, nil, &mockTransport{})
 	defer n.Stop()
 	n.mu.Lock()
-	n.log = []entry{{Index: 5, Term: 3}}
+	// lastIndex is positional: 5 contiguous entries ⇒ last index 5.
+	n.log = mkLog(5, 3)
 	n.mu.Unlock()
 	idx, trm := n.lastLogInfo()
 	if idx != 5 || trm != 3 {
@@ -111,11 +126,11 @@ func TestIsLogUpToDate(t *testing.T) {
 		candidateTerm  Term
 		expectUpToDate bool
 	}{
-		{"same_term_longer_candidate", []entry{{Index: 2, Term: 1}}, 3, 1, true},
-		{"same_term_shorter_candidate", []entry{{Index: 5, Term: 1}}, 3, 1, false},
-		{"higher_candidate_term", []entry{{Index: 10, Term: 1}}, 1, 2, true},
-		{"lower_candidate_term", []entry{{Index: 1, Term: 2}}, 5, 1, false},
-		{"equal_last_entry", []entry{{Index: 3, Term: 2}}, 3, 2, true},
+		{"same_term_longer_candidate", mkLog(2, 1), 3, 1, true},
+		{"same_term_shorter_candidate", mkLog(5, 1), 3, 1, false},
+		{"higher_candidate_term", mkLog(10, 1), 1, 2, true},
+		{"lower_candidate_term", mkLog(1, 2), 5, 1, false},
+		{"equal_last_entry", mkLog(3, 2), 3, 2, true},
 		{"empty_receiver_log", nil, 1, 1, true},
 	}
 	for _, tt := range tests {
@@ -409,9 +424,10 @@ func TestHandleVoteRequestHigherTermConversion(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMaybeAdvanceCommitIndex(t *testing.T) {
-	// maybeAdvanceCommitIndex uses `break` after setting commitIndex, so it only
-	// advances to the FIRST index with quorum. To commit index 3, call it 3 times
-	// or structure the log so only index 3 has quorum.
+	// maybeAdvanceCommitIndex advances to the HIGHEST index replicated on a
+	// quorum in a single call (the old code broke after the first such index
+	// and needed N calls — wrong, it under-committed). With both followers at
+	// matchIndex 3 and all entries in the current term, one call commits 3.
 	n := NewNode(Config{NodeID: "leader"}, []NodeID{"f1", "f2"}, &mockTransport{})
 	defer n.Stop()
 	n.mu.Lock()
@@ -426,20 +442,9 @@ func TestMaybeAdvanceCommitIndex(t *testing.T) {
 	n.matchIndex["f2"] = 3
 	n.mu.Unlock()
 
-	// First call commits index 1 (breaks after first quorum)
-	n.maybeAdvanceCommitIndex()
-	if ci := n.CommitIndex(); ci != 1 {
-		t.Errorf("after 1st call: commitIndex = %d, want 1", ci)
-	}
-	// Second call commits index 2
-	n.maybeAdvanceCommitIndex()
-	if ci := n.CommitIndex(); ci != 2 {
-		t.Errorf("after 2nd call: commitIndex = %d, want 2", ci)
-	}
-	// Third call commits index 3
 	n.maybeAdvanceCommitIndex()
 	if ci := n.CommitIndex(); ci != 3 {
-		t.Errorf("after 3rd call: commitIndex = %d, want 3", ci)
+		t.Errorf("commitIndex = %d, want 3 (highest quorum index in one pass)", ci)
 	}
 }
 
@@ -546,17 +551,49 @@ func TestHandleAppendResponseFailureDecrementsNextIndex(t *testing.T) {
 	n.matchIndex["f1"] = 0
 	n.mu.Unlock()
 
+	// A failed AppendEntries carries the follower's MatchIndex hint: the
+	// leader backs nextIndex up to hint+1 in one step rather than crawling
+	// down by one per round-trip.
 	n.handleAppendResponse(AppendResponse{
-		Term:    1,
-		Success: false,
-		From:    "f1",
+		Term:       1,
+		Success:    false,
+		From:       "f1",
+		MatchIndex: 2,
+	})
+
+	n.mu.Lock()
+	ni := n.nextIndex["f1"]
+	n.mu.Unlock()
+	if ni != 3 {
+		t.Errorf("nextIndex[f1] = %d, want 3 (hint 2 + 1)", ni)
+	}
+}
+
+// TestHandleAppendResponseFailureDecrementsByOne covers the fallback when
+// the follower's hint isn't lower than the current nextIndex: the leader
+// still makes progress by decrementing one step.
+func TestHandleAppendResponseFailureDecrementsByOne(t *testing.T) {
+	n := NewNode(Config{NodeID: "leader"}, []NodeID{"f1"}, &mockTransport{})
+	defer n.Stop()
+	n.mu.Lock()
+	n.state = StateLeader
+	n.currentTerm = 1
+	n.nextIndex["f1"] = 5
+	n.matchIndex["f1"] = 0
+	n.mu.Unlock()
+
+	n.handleAppendResponse(AppendResponse{
+		Term:       1,
+		Success:    false,
+		From:       "f1",
+		MatchIndex: 10, // hint not below nextIndex ⇒ plain decrement
 	})
 
 	n.mu.Lock()
 	ni := n.nextIndex["f1"]
 	n.mu.Unlock()
 	if ni != 4 {
-		t.Errorf("nextIndex[f1] = %d, want 4", ni)
+		t.Errorf("nextIndex[f1] = %d, want 4 (decrement fallback)", ni)
 	}
 }
 
@@ -2210,8 +2247,8 @@ func TestSnapshotterReadSnapshot_RejectsOversizedFields(t *testing.T) {
 	t.Run("peerLen above cap", func(t *testing.T) {
 		var buf bytes.Buffer
 		buf.Write(header)
-		buf.Write(put64(0))                       // dataLen = 0
-		buf.Write(put32(1))                       // mCount = 1
+		buf.Write(put64(0))                          // dataLen = 0
+		buf.Write(put32(1))                          // mCount = 1
 		buf.Write(put32(uint32(maxNodeIDBytes + 1))) // peerLen above cap
 
 		_, err := snap.readSnapshot(&buf)

@@ -1928,3 +1928,77 @@ func TestKVStoreSaveDataIntegrity(t *testing.T) {
 		t.Errorf("Data lost after save+reopen: got %q, want 'value'", result)
 	}
 }
+
+// TestTxCommit_RevertsOnSaveFailure regresses an ACID violation: when a writable
+// Commit's save() failed, the mutated-but-unpersisted in-memory state was left
+// visible to every future transaction (and lost on crash). A failed commit must
+// be atomic — revert to the last durable state, mirroring Rollback.
+func TestTxCommit_RevertsOnSaveFailure(t *testing.T) {
+	dir := t.TempDir()
+	// OpenKVStore takes a DIRECTORY; the data file lives inside it, so a chmod
+	// on `dir` is what makes save()'s os.CreateTemp fail.
+	store, err := OpenKVStore(dir)
+	if err != nil {
+		t.Fatalf("OpenKVStore: %v", err)
+	}
+	defer store.Close()
+
+	// Baseline: persist key "a"=1.
+	tx, err := store.Begin(true)
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	b, err := tx.CreateBucketIfNotExists([]byte("bkt"))
+	if err != nil {
+		t.Fatalf("CreateBucket: %v", err)
+	}
+	if err := b.Put([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("baseline commit: %v", err)
+	}
+
+	// Make the data dir un-writable so save()'s os.CreateTemp fails.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	defer os.Chmod(dir, 0o700) // restore so t.TempDir cleanup can remove it
+
+	// Mutate and commit — the save must fail.
+	tx2, err := store.Begin(true)
+	if err != nil {
+		t.Fatalf("Begin 2: %v", err)
+	}
+	b2, err := tx2.CreateBucketIfNotExists([]byte("bkt"))
+	if err != nil {
+		t.Fatalf("CreateBucket 2: %v", err)
+	}
+	if err := b2.Put([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("Put 2: %v", err)
+	}
+	if err := tx2.Commit(); err == nil {
+		t.Fatal("expected commit to fail with a read-only data dir")
+	}
+
+	// Restore perms and verify the failed commit was reverted: "b" must be
+	// absent (never persisted) and the durable "a" still present.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("restore chmod: %v", err)
+	}
+	rtx, err := store.Begin(false)
+	if err != nil {
+		t.Fatalf("Begin read: %v", err)
+	}
+	defer rtx.Rollback()
+	rb := rtx.Bucket([]byte("bkt"))
+	if rb == nil {
+		t.Fatal("bucket vanished after failed commit")
+	}
+	if rb.Get([]byte("b")) != nil {
+		t.Error("uncommitted key 'b' is visible after a failed commit (ACID violation)")
+	}
+	if got := rb.Get([]byte("a")); string(got) != "1" {
+		t.Errorf("durable key 'a' = %q after failed commit, want \"1\"", got)
+	}
+}

@@ -595,3 +595,36 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("Expected EDNS0BufSize 4096, got %d", cfg.EDNS0BufSize)
 	}
 }
+
+// TestQuestionMatches locks the response-question validation used by the UDP/TCP
+// transports: a response must echo the asked question (name case-insensitively,
+// type and class exactly) or it is dropped — a buggy/malicious authoritative
+// server must not be able to have an off-question answer cached under the
+// queried key.
+func TestQuestionMatches(t *testing.T) {
+	mk := func(name string, qt, qc uint16) *protocol.Message {
+		n, err := protocol.ParseName(name)
+		if err != nil {
+			t.Fatalf("ParseName(%q): %v", name, err)
+		}
+		return &protocol.Message{Questions: []*protocol.Question{{Name: n, QType: qt, QClass: qc}}}
+	}
+	query := mk("www.Example.com.", protocol.TypeA, protocol.ClassIN)
+
+	cases := []struct {
+		name string
+		resp *protocol.Message
+		want bool
+	}{
+		{"case-insensitive echo", mk("www.example.com.", protocol.TypeA, protocol.ClassIN), true},
+		{"different name", mk("evil.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"different qtype", mk("www.example.com.", protocol.TypeAAAA, protocol.ClassIN), false},
+		{"different qclass", mk("www.example.com.", protocol.TypeA, protocol.ClassCH), false},
+		{"empty response question", &protocol.Message{}, false},
+	}
+	for _, tc := range cases {
+		if got := questionMatches(query, tc.resp); got != tc.want {
+			t.Errorf("%s: questionMatches = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

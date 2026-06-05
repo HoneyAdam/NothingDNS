@@ -61,7 +61,7 @@ func TestAPIRateLimiter_Cleanup_DropsStaleEntries(t *testing.T) {
 		now.Add(-2 * time.Second),
 	}
 	r.requests["2.2.2.2"] = []time.Time{
-		now.Add(-2 * time.Second), // outside
+		now.Add(-2 * time.Second),        // outside
 		now.Add(-100 * time.Millisecond), // inside
 	}
 	r.mu.Unlock()

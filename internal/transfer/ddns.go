@@ -411,7 +411,7 @@ func ApplyUpdate(z *zone.Zone, update *UpdateRequest) error {
 	// wrapping is fine because errors.Is unwraps fmt.Errorf chains.
 	for _, precond := range update.Prerequisites {
 		if err := checkPrerequisiteOnZone(z, precond); err != nil {
-			return fmt.Errorf("%w: %v", ErrPrereqFailed, err)
+			return fmt.Errorf("%w: %w", ErrPrereqFailed, err)
 		}
 	}
 

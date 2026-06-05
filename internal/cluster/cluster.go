@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"reflect"
@@ -267,10 +268,21 @@ func (c *Cluster) initRaft() error {
 		return fmt.Errorf("raft consensus requires at least one peer in config")
 	}
 
-	// Build peer list
+	// Build peer list and the NodeID→RPC-address map. Skip an entry that
+	// names this node itself: the Raft peer set must EXCLUDE self (quorum is
+	// computed as a majority of peers+1), and a node must not try to dial
+	// itself for RequestVote/AppendEntries.
 	var peerIDs []raft.NodeID
+	peerAddrs := make(map[raft.NodeID]string)
 	for _, p := range c.config.Peers {
-		peerIDs = append(peerIDs, raft.NodeID(p.NodeID))
+		if p.NodeID == c.config.NodeID {
+			continue
+		}
+		id := raft.NodeID(p.NodeID)
+		peerIDs = append(peerIDs, id)
+		if p.Addr != "" {
+			peerAddrs[id] = p.Addr
+		}
 	}
 
 	// Create self node entry for nodeList (used for gossip compatibility)
@@ -303,15 +315,21 @@ func (c *Cluster) initRaft() error {
 	raftNode, err := raft.NewClusterIntegration(
 		raft.NodeID(c.config.NodeID),
 		peerIDs,
+		peerAddrs,
 		raftAddr,
 		dataDir,
 		c.config.EncryptionKey,
 		c.config.SnapshotEncryptionKey,
+		c.logger,
 	)
 	if err != nil {
 		return fmt.Errorf("creating Raft node: %w", err)
 	}
 	c.raft = raftNode
+
+	// Project committed Raft zone commands onto the local zone store so DNS
+	// data converges across the cluster.
+	c.raft.SetApplyHook(c.applyRaftZoneCommand)
 
 	return nil
 }
@@ -737,6 +755,88 @@ func (c *Cluster) JoinSeed(seedAddr string) error {
 	return c.gossip.Join(seedAddr)
 }
 
+// RaftLeaderID returns the current Raft leader's node ID, or "" if not in
+// Raft mode or no leader has been observed yet.
+func (c *Cluster) RaftLeaderID() string {
+	if c.consensus != ConsensusRaft || c.raft == nil {
+		return ""
+	}
+	return string(c.raft.GetLeaderID())
+}
+
+// IsRaftMode reports whether the cluster runs Raft consensus (as opposed to
+// gossip/SWIM). Zone writes are replicated through Raft only in this mode.
+func (c *Cluster) IsRaftMode() bool {
+	return c.consensus == ConsensusRaft && c.raft != nil
+}
+
+// SetZoneApplyFunc registers the callback that projects committed Raft zone
+// commands onto the real zone store. No-op outside Raft mode.
+func (c *Cluster) SetZoneApplyFunc(fn func(raft.ZoneCommand)) {
+	if c.raft != nil {
+		c.raft.SetApplyHook(fn)
+	}
+}
+
+// IsNotLeaderError reports whether err is a "not the leader" error and, if
+// so, returns the known leader's node ID (may be empty during an election).
+func (c *Cluster) IsNotLeaderError(err error) (string, bool) {
+	var nl *raft.ErrNotLeader
+	if errors.As(err, &nl) {
+		return string(nl.LeaderID), true
+	}
+	return "", false
+}
+
+// proposeZoneChange replicates a zone mutation through Raft and waits for it
+// to be applied locally. Returns *raft.ErrNotLeader (with the known leader)
+// when called on a follower.
+func (c *Cluster) proposeZoneChange(cmd raft.ZoneCommand) error {
+	if !c.IsRaftMode() {
+		return fmt.Errorf("cluster is not in Raft mode")
+	}
+	if !c.raft.IsLeader() {
+		return &raft.ErrNotLeader{LeaderID: c.raft.GetLeaderID()}
+	}
+	return c.raft.ProposeZoneChangeWait(cmd, 5*time.Second)
+}
+
+// ProposeAddRecord replicates an add-record mutation through Raft.
+func (c *Cluster) ProposeAddRecord(zoneName, name, rtype, class string, ttl uint32, data string) error {
+	return c.proposeZoneChange(raft.ZoneCommand{
+		Type: "add_record", Zone: zoneName, Name: name,
+		RRTypeStr: rtype, Class: class, TTL: ttl, RData: []string{data},
+	})
+}
+
+// ProposeDeleteRecord replicates a delete-record mutation through Raft.
+func (c *Cluster) ProposeDeleteRecord(zoneName, name, rtype string) error {
+	return c.proposeZoneChange(raft.ZoneCommand{
+		Type: "del_record", Zone: zoneName, Name: name, RRTypeStr: rtype,
+	})
+}
+
+// ProposeUpdateRecord replicates an update-record mutation through Raft.
+func (c *Cluster) ProposeUpdateRecord(zoneName, name, rtype, oldData, class string, ttl uint32, data string) error {
+	return c.proposeZoneChange(raft.ZoneCommand{
+		Type: "update_record", Zone: zoneName, Name: name, RRTypeStr: rtype,
+		OldData: oldData, Class: class, TTL: ttl, RData: []string{data},
+	})
+}
+
+// ProposeCreateZone replicates a zone-creation through Raft.
+func (c *Cluster) ProposeCreateZone(name string, ttl uint32, adminEmail string, nameservers []string) error {
+	return c.proposeZoneChange(raft.ZoneCommand{
+		Type: "create_zone", Zone: name, TTL: ttl,
+		AdminEmail: adminEmail, Nameservers: nameservers,
+	})
+}
+
+// ProposeDeleteZone replicates a zone-deletion through Raft.
+func (c *Cluster) ProposeDeleteZone(name string) error {
+	return c.proposeZoneChange(raft.ZoneCommand{Type: "delete_zone", Zone: name})
+}
+
 // AddNodeViaLeader proposes adding a node to the Raft cluster. Only
 // works in Raft consensus mode and only on the current leader. When
 // called on a follower returns *raft.ErrNotLeader carrying the known
@@ -800,6 +900,64 @@ func (c *Cluster) handleCacheInvalid(keys []string) {
 
 	for _, handler := range c.handlers {
 		handler.OnCacheInvalid(keys)
+	}
+}
+
+// applyRaftZoneCommand projects a committed Raft ZoneCommand onto the local
+// zone store. Runs on every node (leader and followers) as entries are
+// applied, so all replicas converge to the same DNS data. Errors are logged,
+// not fatal — a single bad command must not stall the apply loop.
+func (c *Cluster) applyRaftZoneCommand(cmd raft.ZoneCommand) {
+	if c.zoneManager == nil {
+		c.logger.Warnf("raft apply: zoneManager not configured, ignoring %s for %s", cmd.Type, cmd.Zone)
+		return
+	}
+	data := ""
+	if len(cmd.RData) > 0 {
+		data = cmd.RData[0]
+	}
+	class := cmd.Class
+	if class == "" {
+		class = "IN"
+	}
+	var err error
+	switch cmd.Type {
+	case "add_record":
+		err = c.zoneManager.AddRecord(cmd.Zone, zone.Record{
+			Name: cmd.Name, Type: cmd.RRTypeStr, TTL: cmd.TTL, Class: class, RData: data,
+		})
+	case "del_record":
+		err = c.zoneManager.DeleteRecord(cmd.Zone, cmd.Name, cmd.RRTypeStr)
+	case "update_record":
+		err = c.zoneManager.UpdateRecord(cmd.Zone, cmd.Name, cmd.RRTypeStr, cmd.OldData, zone.Record{
+			Name: cmd.Name, Type: cmd.RRTypeStr, TTL: cmd.TTL, Class: class, RData: data,
+		})
+	case "create_zone":
+		ttl := cmd.TTL
+		if ttl == 0 {
+			ttl = 3600
+		}
+		if len(cmd.Nameservers) == 0 {
+			c.logger.Warnf("raft apply: create_zone for %s missing nameservers", cmd.Zone)
+			return
+		}
+		soa := &zone.SOARecord{
+			TTL: ttl, MName: cmd.Nameservers[0], RName: cmd.AdminEmail,
+			Serial: 1, Refresh: 3600, Retry: 600, Expire: 604800, Minimum: 86400,
+		}
+		var ns []zone.NSRecord
+		for _, n := range cmd.Nameservers {
+			ns = append(ns, zone.NSRecord{TTL: ttl, NSDName: n})
+		}
+		err = c.zoneManager.CreateZone(cmd.Zone, ttl, soa, ns)
+	case "delete_zone":
+		err = c.zoneManager.DeleteZone(cmd.Zone)
+	default:
+		c.logger.Warnf("raft apply: unknown command type %q for zone %s", cmd.Type, cmd.Zone)
+		return
+	}
+	if err != nil {
+		c.logger.Warnf("raft apply: %s on zone %s failed: %v", cmd.Type, cmd.Zone, err)
 	}
 }
 
@@ -901,12 +1059,7 @@ func (c *Cluster) cacheSyncLoop() {
 	for event := range c.cacheSyncChan {
 		switch event.Type {
 		case "invalidate":
-			// In Raft mode, also use gossip for cache invalidation broadcast
-			if c.consensus == ConsensusRaft && c.gossip != nil {
-				if err := c.gossip.BroadcastCacheInvalidation(event.Keys); err != nil {
-					c.logger.Warnf("Failed to broadcast cache invalidation: %v", err)
-				}
-			} else if c.gossip != nil {
+			if c.gossip != nil {
 				if err := c.gossip.BroadcastCacheInvalidation(event.Keys); err != nil {
 					c.logger.Warnf("Failed to broadcast cache invalidation: %v", err)
 				}

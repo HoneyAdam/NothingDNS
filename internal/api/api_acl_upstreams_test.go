@@ -560,6 +560,7 @@ func TestHandleUpstreams_GetWithLoadBalancer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLoadBalancer: %v", err)
 	}
+	t.Cleanup(func() { _ = lb.Close() })
 	s.upstreamLB = lb
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/upstreams", nil)

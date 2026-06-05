@@ -107,46 +107,60 @@ func newFrameReader(r io.Reader, aead cipher.AEAD) *frameReader {
 	return &frameReader{r: r, aead: aead}
 }
 
-// readFramed reads and decodes a framed message into msg.
-// Returns the msgType that was on the wire (useful for AEAD key selection).
+// readFramed reads a framed message and decodes it into msg.
+// Returns the msgType that was on the wire.
 func (fr *frameReader) readFramed(msg any) (uint8, error) {
-	// Read header.
+	msgType, payload, err := fr.readFrameBytes()
+	if err != nil {
+		return msgType, err
+	}
+	if len(payload) == 0 {
+		return msgType, nil
+	}
+	return msgType, decodeNative(msg, payload)
+}
+
+// readFrameBytes reads one frame and returns its message type and decoded
+// plaintext payload, WITHOUT decoding into a Go value. The caller chooses the
+// target struct based on msgType — essential on the server side, which can't
+// know which message type is arriving until it reads the header.
+func (fr *frameReader) readFrameBytes() (uint8, []byte, error) {
 	var header [frameHeaderSize]byte
 	if _, err := io.ReadFull(fr.r, header[:]); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	msgType := header[0]
 	length := binary.BigEndian.Uint32(header[1:])
 	if length > maxRPCMessageBytes {
-		return msgType, fmt.Errorf("frame length %d exceeds max %d", length, maxRPCMessageBytes)
+		return msgType, nil, fmt.Errorf("frame length %d exceeds max %d", length, maxRPCMessageBytes)
 	}
 
 	if fr.aead == nil {
-		// Plaintext path: read payload and decode.
+		// Plaintext path.
 		if length == 0 {
-			return msgType, nil
+			return msgType, nil, nil
 		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(fr.r, payload); err != nil {
-			return msgType, err
+			return msgType, nil, err
 		}
-		return msgType, decodeNative(msg, payload)
+		return msgType, payload, nil
 	}
 
 	// AEAD path: read nonce+ciphertext+tag, then Open.
 	if length < uint32(fr.aead.NonceSize()+fr.aead.Overhead()) {
-		return msgType, fmt.Errorf("ciphertext too short for AEAD")
+		return msgType, nil, fmt.Errorf("ciphertext too short for AEAD")
 	}
 	ciphertext := make([]byte, length)
 	if _, err := io.ReadFull(fr.r, ciphertext); err != nil {
-		return msgType, err
+		return msgType, nil, err
 	}
 	// AAD binds the msgType to prevent cross-protocol replay.
 	plaintext, err := fr.aead.Open(nil, ciphertext[:fr.aead.NonceSize()], ciphertext[fr.aead.NonceSize():], []byte{msgType})
 	if err != nil {
-		return msgType, fmt.Errorf("aead open: %w", err)
+		return msgType, nil, fmt.Errorf("aead open: %w", err)
 	}
-	return msgType, decodeNative(msg, plaintext)
+	return msgType, plaintext, nil
 }
 
 // encodeNative encodes a native Go value to bytes (replaces gob for RPC).

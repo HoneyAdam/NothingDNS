@@ -154,13 +154,26 @@ type GossipInfo struct {
 	PingReceived     uint64 `json:"ping_received"`
 }
 
+// RaftInfo is the Raft-consensus sub-object in the cluster status response.
+// Present only when the cluster runs in Raft mode.
+type RaftInfo struct {
+	State        string `json:"state"`         // Leader | Follower | Candidate
+	Term         int64  `json:"term"`          // current Raft term
+	CommitIndex  int64  `json:"commit_index"`  // highest committed log index
+	AppliedIndex int64  `json:"applied_index"` // highest applied log index
+	IsLeader     bool   `json:"is_leader"`     // whether this node is the leader
+	LeaderID     string `json:"leader_id"`     // current leader, "" if unknown
+}
+
 // ClusterStatusResponse is returned by GET /api/v1/cluster/status.
 type ClusterStatusResponse struct {
 	NodeID     string     `json:"node_id"`
+	Consensus  string     `json:"consensus"` // "raft" or "swim"
 	NodeCount  int        `json:"node_count"`
 	AliveCount int        `json:"alive_count"`
 	Healthy    bool       `json:"healthy"`
 	Gossip     GossipInfo `json:"gossip"`
+	Raft       *RaftInfo  `json:"raft,omitempty"`
 	// Aggregated cluster-wide metrics
 	Metrics ClusterMetricsInfo `json:"metrics"`
 }

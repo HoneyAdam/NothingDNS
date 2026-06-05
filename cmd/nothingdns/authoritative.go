@@ -206,7 +206,10 @@ func (h *integratedHandler) buildReferralResponse(query *protocol.Message, z *zo
 				}
 				glueName, err := protocol.ParseName(glue.Name)
 				if err != nil {
-					glueName, _ = protocol.ParseName(nsTarget)
+					// Malformed glue record name in zone data; skip it instead
+					// of silently using nsTarget as a fallback name.
+					h.logger.Debugf("skipping malformed glue name %q for NS %q in zone %q: %v", glue.Name, nsTarget, z.Origin, err)
+					continue
 				}
 				glueRR := &protocol.ResourceRecord{
 					Name:  glueName,
