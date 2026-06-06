@@ -42,8 +42,10 @@ type ClusterIntegration struct {
 
 	// snapshotFn produces the full state-machine snapshot payload (the real
 	// zone store, serialized). Used by the leader to take/send snapshots.
-	// Guarded by mu.
+	// restoreFn loads a snapshot payload into the real store; used at boot to
+	// restore the latest persisted snapshot. Guarded by mu.
 	snapshotFn func() ([]byte, error)
+	restoreFn  func([]byte) error
 
 	// applyMu serializes state-machine application with snapshot capture, so a
 	// snapshot reads a consistent (appliedIndex, zone-store) pair.
@@ -128,12 +130,10 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]s
 		return nil, fmt.Errorf("wal: %w", err)
 	}
 
-	// Load WAL entries into node, then install the WAL as the node's durable
-	// log persister so future appends/truncations are written through.
-	if entries, err := wal.ReadAll(); err == nil && len(entries) > 0 {
-		// Replay entries into node's log.
-		node.log = append(node.log, entries...)
-	}
+	// Install the WAL as the node's durable log persister. The WAL is NOT
+	// replayed here — bootstrapState() (in Start, after the snapshot fns are
+	// wired) loads the latest snapshot first and then replays only the
+	// post-snapshot WAL tail.
 	node.SetLogPersister(wal)
 
 	// Create snapshotter — L-6: encrypted at rest if a snapshot key
@@ -173,8 +173,52 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]s
 	return ci, nil
 }
 
+// bootstrapState reconstructs durable state at startup: restore the latest
+// persisted snapshot (if any) into the store and indices, then replay only the
+// WAL entries that follow the snapshot. Called once, before the node starts.
+func (ci *ClusterIntegration) bootstrapState() {
+	var snapIndex Index
+
+	ci.mu.RLock()
+	restore := ci.restoreFn
+	ci.mu.RUnlock()
+
+	if ci.snapshotter != nil {
+		if snap, err := ci.snapshotter.Load(); err == nil && snap != nil && snap.LastIndex > 0 {
+			if restore != nil {
+				if err := restore(snap.Data); err != nil {
+					ci.logger.Errorf("raft: restoring boot snapshot failed: %v", err)
+				}
+			}
+			ci.node.lastSnapshot = snap.LastIndex
+			ci.node.lastSnapshotTerm = snap.LastTerm
+			ci.node.snapshotBytes = snap.Data
+			ci.node.lastApplied = snap.LastIndex
+			ci.node.commitIndex = snap.LastIndex
+			ci.appliedIndex = snap.LastIndex
+			ci.lastAppliedTerm = snap.LastTerm
+			snapIndex = snap.LastIndex
+			ci.logger.Infof("raft: booted from snapshot at index %d (term %d)", snap.LastIndex, snap.LastTerm)
+		}
+	}
+
+	// Replay only the post-snapshot WAL tail into the log.
+	if entries, err := ci.wal.ReadAll(); err == nil {
+		for _, e := range entries {
+			if e.Index > snapIndex {
+				ci.node.log = append(ci.node.log, e)
+			}
+		}
+	} else {
+		ci.logger.Warnf("raft: reading WAL at boot failed: %v", err)
+	}
+}
+
 // Start starts the Raft integration.
 func (ci *ClusterIntegration) Start() error {
+	// Reconstruct durable state (snapshot + WAL tail) before the node runs.
+	ci.bootstrapState()
+
 	// Start RPC server
 	ci.rpcServer.Start()
 
@@ -472,6 +516,7 @@ func (a snapshotAdapter) Restore(data []byte) error {
 func (ci *ClusterIntegration) SetSnapshotFns(snapshot func() ([]byte, error), restore func([]byte) error) {
 	ci.mu.Lock()
 	ci.snapshotFn = snapshot
+	ci.restoreFn = restore
 	ci.mu.Unlock()
 	ci.node.SetStateMachine(snapshotAdapter{snapshot: snapshot, restore: restore})
 	// When a snapshot is installed, fast-forward our applied index. Set

@@ -153,6 +153,9 @@ type logPersister interface {
 	Write(e entry) error
 	// TruncateAfter discards entries with Index > keepThrough.
 	TruncateAfter(keepThrough Index) error
+	// CompactBefore discards entries with Index <= through (subsumed by a
+	// snapshot), keeping the post-snapshot tail.
+	CompactBefore(through Index) error
 	// Sync flushes buffered writes to stable storage.
 	Sync() error
 }
@@ -897,6 +900,11 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	n.commitIndex = req.LastIndex
 	n.log = make([]entry, 0) // Discard all log entries before snapshot
 	n.snapshotBytes = req.Data
+	if n.persister != nil {
+		if err := n.persister.CompactBefore(req.LastIndex); err != nil {
+			util.Errorf("raft: WAL compaction to %d failed: %v", req.LastIndex, err)
+		}
+	}
 	// Fast-forward the integration's applied index so its apply loop doesn't
 	// try to re-apply entries the snapshot already subsumes.
 	if n.onSnapshotInstalled != nil {
@@ -974,6 +982,11 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	n.commitIndex = req.LastIndex
 	n.log = make([]entry, 0)
 	n.snapshotBytes = req.Data
+	if n.persister != nil {
+		if err := n.persister.CompactBefore(req.LastIndex); err != nil {
+			util.Errorf("raft: WAL compaction to %d failed: %v", req.LastIndex, err)
+		}
+	}
 	if n.onSnapshotInstalled != nil {
 		n.onSnapshotInstalled(req.LastIndex)
 	}
@@ -1155,6 +1168,12 @@ func (n *Node) installLeaderSnapshot(index Index, term Term, data []byte) {
 	n.lastSnapshot = index
 	n.lastSnapshotTerm = term
 	n.snapshotBytes = data
+	// Bound the WAL: entries up to the snapshot are now redundant.
+	if n.persister != nil {
+		if err := n.persister.CompactBefore(index); err != nil {
+			util.Errorf("raft: WAL compaction to %d failed: %v", index, err)
+		}
+	}
 }
 
 // sendInstallSnapshot streams a snapshot to a peer and, on success,
