@@ -587,8 +587,46 @@ func (r *Resolver) resolveNSAddresses(ctx context.Context, deleg *delegation) {
 	}
 }
 
-// lookupNSAddresses resolves A and AAAA records for an NS name using
-// the resolver itself (recursive call). Falls back to cache.
+// nsRecursionKey carries how many nested NS-address resolutions deep we are,
+// so resolving a glueless nameserver (which may itself be glueless) cannot
+// recurse without bound. maxNSRecursion caps the chain.
+type nsRecursionKey struct{}
+
+const maxNSRecursion = 4
+
+func nsRecursionDepth(ctx context.Context) int {
+	if d, ok := ctx.Value(nsRecursionKey{}).(int); ok {
+		return d
+	}
+	return 0
+}
+
+// collectUpstreamAddrs extracts usable A/AAAA upstream addresses from an
+// answer section, applying the private-IP filter.
+func (r *Resolver) collectUpstreamAddrs(answers []*protocol.ResourceRecord) []string {
+	var addrs []string
+	for _, rr := range answers {
+		var ip net.IP
+		switch a := rr.Data.(type) {
+		case *protocol.RDataA:
+			ip = net.IP(a.Address[:])
+		case *protocol.RDataAAAA:
+			ip = net.IP(a.Address[:])
+		default:
+			continue
+		}
+		if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+			continue
+		}
+		addrs = append(addrs, withPort(ip.String(), "53"))
+	}
+	return addrs
+}
+
+// lookupNSAddresses resolves A and AAAA records for an NS name. It first checks
+// the cache, and on a miss recursively resolves the name through the resolver
+// itself (depth-bounded) — without this, out-of-bailiwick glueless nameservers
+// could never be reached cold-cache and most domains would SERVFAIL.
 func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []string {
 	var addrs []string
 
@@ -622,6 +660,22 @@ func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []strin
 						addrs = append(addrs, withPort(ip.String(), "53"))
 					}
 				}
+			}
+		}
+	}
+
+	// Cache miss: recursively resolve the nameserver's own address. This is the
+	// path that reaches out-of-bailiwick glueless NS. Bound the recursion so a
+	// chain (or cycle) of glueless delegations can't run away.
+	if len(addrs) == 0 {
+		if d := nsRecursionDepth(ctx); d < maxNSRecursion {
+			childCtx := context.WithValue(ctx, nsRecursionKey{}, d+1)
+			for _, qt := range []uint16{protocol.TypeA, protocol.TypeAAAA} {
+				resp, err := r.resolve(childCtx, nsName, qt, 0)
+				if err != nil || resp == nil {
+					continue
+				}
+				addrs = append(addrs, r.collectUpstreamAddrs(resp.Answers)...)
 			}
 		}
 	}
