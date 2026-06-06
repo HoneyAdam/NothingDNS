@@ -1606,15 +1606,6 @@ func (gp *GossipProtocol) decrypt(ciphertext []byte) ([]byte, error) {
 	return gp.aead.Open(nil, nonce, data, nil)
 }
 
-// decryptWithAAD decrypts with additional authenticated data.
-func (gp *GossipProtocol) decryptWithAAD(ciphertext []byte, aad []byte) ([]byte, error) {
-	if len(ciphertext) < gp.aead.NonceSize()+gp.aead.Overhead() {
-		return nil, fmt.Errorf("gossip decrypt: ciphertext too short")
-	}
-	nonce := ciphertext[:gp.aead.NonceSize()]
-	data := ciphertext[gp.aead.NonceSize():]
-	return gp.aead.Open(nil, nonce, data, aad)
-}
 
 // encodeMessage encodes a message with its payload.
 // For internal use; sequence numbers are managed by sendMessage.
@@ -1639,13 +1630,15 @@ func encodePayload(payload any) ([]byte, error) {
 // This prevents downgrade attacks where an attacker strips encryption.
 // If the message protocol version is incompatible, it is logged and skipped.
 func (gp *GossipProtocol) decodeMessage(data []byte, msg *Message) error {
-	// VULN-045/046: AAD binding requires decrypt-with-AAD + sequence on wire.
-	// Preserve original ciphertext so we can re-verify with the reconstructed AAD.
-	ciphertext := data
-
-	// Try decryption first if encryption is enabled.
+	// Decryption is mandatory when encryption is enabled (downgrade guard).
+	// The AES-256-GCM tag authenticates the whole JSON payload, which already
+	// includes From/Type/Sequence — so those fields are integrity-protected by
+	// the single Open below. (The previous code sealed with an AAD over the
+	// same fields and then tried a SECOND, nil-AAD decrypt to "peek" at them
+	// first; a ciphertext sealed with an AAD can never open with a nil AAD, so
+	// every encrypted message was dropped. The AAD was redundant with the
+	// in-payload authenticated fields anyway.)
 	if gp.aead != nil {
-		// Decrypt to get the JSON payload so we can read msg fields for AAD reconstruction.
 		decrypted, err := gp.decrypt(data)
 		if err != nil {
 			return fmt.Errorf("gossip decrypt: message appears unencrypted but encryption is enabled: %w", err)
@@ -1655,15 +1648,6 @@ func (gp *GossipProtocol) decodeMessage(data []byte, msg *Message) error {
 
 	if err := json.Unmarshal(data, msg); err != nil {
 		return err
-	}
-
-	// VULN-046: Re-verify ciphertext with AAD binding (senderID:msgType:sequence).
-	// AAD binds the message to a specific sender and type to prevent cross-peer replay.
-	if gp.aead != nil {
-		aad := []byte(fmt.Sprintf("%s:%d:%d", msg.From, msg.Type, msg.Sequence))
-		if _, err := gp.decryptWithAAD(ciphertext, aad); err != nil {
-			return fmt.Errorf("gossip AAD verification failed: %w", err)
-		}
 	}
 
 	// Reject incompatible protocol versions BEFORE bumping the
@@ -1711,11 +1695,13 @@ func (gp *GossipProtocol) sendMessage(msgType MessageType, payload []byte, addr 
 		return err
 	}
 
-	// Encrypt if enabled — AAD binds sender identity + msgType + sequence
+	// Encrypt if enabled. From/Type/Sequence live inside the JSON, so the GCM
+	// tag authenticates them directly — no separate AAD needed (and a separate
+	// AAD over those fields is unusable on receive, since the receiver can't
+	// read them to rebuild the AAD before decrypting). Replay protection is the
+	// per-sender sequence check in decodeMessage.
 	if gp.aead != nil {
-		selfID := gp.nodeList.GetSelf().ID
-		aad := []byte(fmt.Sprintf("%s:%d:%d", selfID, msgType, seq))
-		data, err = gp.encryptWithAAD(data, aad)
+		data, err = gp.encrypt(data)
 		if err != nil {
 			return err
 		}

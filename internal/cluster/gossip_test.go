@@ -1101,6 +1101,55 @@ func TestGossipProtocol_DecodeMessage_ZeroSeqSkipsCheck(t *testing.T) {
 	}
 }
 
+func TestGossipProtocol_EncryptedRoundTrip(t *testing.T) {
+	// Regression: encrypted gossip previously dropped EVERY message — the
+	// sender sealed with an AAD while the receiver tried a nil-AAD decrypt
+	// first, which can never open an AAD-sealed ciphertext. A message encrypted
+	// the way sendMessage does it must now decode successfully with fields intact.
+	self := &Node{ID: "self", State: NodeStateAlive, Addr: "127.0.0.1"}
+	nl := NewNodeList(self)
+	cfg := DefaultGossipConfig()
+	cfg.BindPort = 17986
+	cfg.EncryptionKey = make([]byte, 32)
+	rand.Read(cfg.EncryptionKey)
+
+	gp, _ := NewGossipProtocol(cfg, nl, true)
+	gp.Start()
+	defer gp.Stop()
+
+	msg := Message{
+		Type:            MessageTypePing,
+		From:            "peer-node",
+		Timestamp:       time.Now(),
+		Payload:         []byte{1, 2, 3},
+		ProtocolVersion: cfg.ProtocolVersion,
+		Sequence:        7,
+	}
+	data, _ := json.Marshal(msg)
+	encrypted, err := gp.encrypt(data) // same path sendMessage now uses
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if len(encrypted) <= len(data) {
+		t.Fatalf("ciphertext should include nonce+tag, got %d <= %d", len(encrypted), len(data))
+	}
+
+	var decoded Message
+	if err := gp.decodeMessage(encrypted, &decoded); err != nil {
+		t.Fatalf("decodeMessage rejected a validly-encrypted message: %v", err)
+	}
+	if decoded.From != "peer-node" || decoded.Type != MessageTypePing || decoded.Sequence != 7 {
+		t.Fatalf("round-trip corrupted fields: %+v", decoded)
+	}
+
+	// A tampered ciphertext must still be rejected.
+	bad := append([]byte(nil), encrypted...)
+	bad[len(bad)-1] ^= 0xff
+	if err := gp.decodeMessage(bad, &Message{}); err == nil {
+		t.Error("tampered ciphertext was accepted")
+	}
+}
+
 func TestGossipProtocol_DecodeMessage_AADBindingFailure(t *testing.T) {
 	// This test verifies that decodeMessage with encryption rejects wrong AAD.
 	// We test the AAD verification path by checking that decryptWithAAD is called.
