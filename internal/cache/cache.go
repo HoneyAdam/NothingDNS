@@ -381,8 +381,13 @@ func (c *Cache) Get(key string) *Entry {
 	}
 
 	s.mu.Lock()
-	// Verify entry is still in the map (could have been evicted).
-	if _, ok := s.entries[key]; ok {
+	// Verify the SAME entry is still mapped to key. An identity check (not just
+	// key presence) is required: between the unlocked read above and acquiring
+	// this lock, a concurrent Set may have replaced this key with a new Entry.
+	// Calling moveToFront on the stale, already-removed Entry would corrupt the
+	// intrusive LRU list (double-remove → nil front/back). Mirrors the
+	// identity-checked expiry path above.
+	if e, ok := s.entries[key]; ok && e == entry {
 		s.moveToFront(entry)
 	}
 	s.mu.Unlock()
