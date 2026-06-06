@@ -1606,7 +1606,6 @@ func (gp *GossipProtocol) decrypt(ciphertext []byte) ([]byte, error) {
 	return gp.aead.Open(nil, nonce, data, nil)
 }
 
-
 // encodeMessage encodes a message with its payload.
 // For internal use; sequence numbers are managed by sendMessage.
 func encodeMessage(msgType MessageType, from string, protocolVersion uint32, payload []byte) ([]byte, error) {
