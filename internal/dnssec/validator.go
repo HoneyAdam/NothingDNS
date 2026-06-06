@@ -244,15 +244,21 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 	// Start with trust anchor zone
 	currentZone := anchor.Zone
 
-	// Fetch DNSKEY for trust anchor zone and validate
-	dnsKeys, err := v.fetchDNSKEY(ctx, currentZone)
+	// Fetch DNSKEY (+ its RRSIGs) for the trust anchor zone and validate.
+	dnsKeys, dnskeySigs, err := v.fetchDNSKEYAndSigs(ctx, currentZone)
 	if err != nil {
 		return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", currentZone, err)
 	}
 
-	// Validate at least one DNSKEY matches the trust anchor
-	if !v.validateTrustAnchor(anchor, dnsKeys) {
+	// The anchor authenticates the KSK; the KSK's self-signature over the whole
+	// DNSKEY RRset authenticates the rest of the keys. Both are required —
+	// otherwise an injected DNSKEY would be trusted (DNSSEC bypass).
+	anchorKSKs := v.keysMatchingAnchor(anchor, dnsKeys)
+	if len(anchorKSKs) == 0 {
 		return nil, false, fmt.Errorf("trust anchor validation failed for %s", currentZone)
+	}
+	if !v.verifyDNSKEYSelfSignature(dnsKeys, dnskeySigs, anchorKSKs) {
+		return nil, false, fmt.Errorf("DNSKEY RRset for %s not self-signed by the anchored KSK", currentZone)
 	}
 
 	// Fetch NSEC3PARAM for trust anchor zone (if using NSEC3)
@@ -302,15 +308,22 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 			break
 		}
 
-		// Fetch DNSKEY for child zone
-		childKeys, err := v.fetchDNSKEY(ctx, childZone)
+		// Fetch DNSKEY (+ its RRSIGs) for the child zone.
+		childKeys, childSigs, err := v.fetchDNSKEYAndSigs(ctx, childZone)
 		if err != nil {
 			return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", childZone, err)
 		}
 
-		// Validate DS records against parent keys
-		if !v.validateDelegation(chain[len(chain)-1], dsRecords, childKeys) {
+		// The DS authenticates the child's KSK; the KSK's self-signature over
+		// the whole DNSKEY RRset authenticates the rest. Require both — without
+		// the self-signature check an injected DNSKEY would be trusted and could
+		// forge "Secure" answers (DNSSEC bypass).
+		dsKSKs := v.keysMatchingDS(dsRecords, childKeys)
+		if len(dsKSKs) == 0 {
 			return nil, false, fmt.Errorf("delegation validation failed for %s", childZone)
+		}
+		if !v.verifyDNSKEYSelfSignature(childKeys, childSigs, dsKSKs) {
+			return nil, false, fmt.Errorf("DNSKEY RRset for %s not self-signed by the DS-matched KSK", childZone)
 		}
 
 		// Fetch NSEC3PARAM for child zone (if using NSEC3)
@@ -408,6 +421,115 @@ func (v *Validator) validateDelegation(parent *chainLink, dsRecords, childKeys [
 	}
 
 	return false
+}
+
+// keysMatchingDS returns the child DNSKEYs (KSKs) that a parent DS record
+// authenticates. Same KeyTrap bound as validateDelegation.
+func (v *Validator) keysMatchingDS(dsRecords, childKeys []*protocol.ResourceRecord) []*protocol.ResourceRecord {
+	var matched []*protocol.ResourceRecord
+	ops := 0
+	for _, dsRR := range dsRecords {
+		ds, ok := dsRR.Data.(*protocol.RDataDS)
+		if !ok {
+			continue
+		}
+		for _, keyRR := range childKeys {
+			dnskey, ok := keyRR.Data.(*protocol.RDataDNSKEY)
+			if !ok {
+				continue
+			}
+			if ops >= maxDelegationOps {
+				return matched
+			}
+			ops++
+			if ds.KeyTag != protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey) {
+				continue
+			}
+			if ds.Algorithm != dnskey.Algorithm {
+				continue
+			}
+			digest := calculateDSDigestFromDNSKEY(keyRR.Name.String(), dnskey, ds.DigestType)
+			if bytesEqual(digest, ds.Digest) {
+				matched = append(matched, keyRR)
+			}
+		}
+	}
+	return matched
+}
+
+// keysMatchingAnchor returns the DNSKEYs that the configured trust anchor
+// authenticates (by DS digest or by raw public key).
+func (v *Validator) keysMatchingAnchor(anchor *TrustAnchor, dnsKeys []*protocol.ResourceRecord) []*protocol.ResourceRecord {
+	var matched []*protocol.ResourceRecord
+	for _, rr := range dnsKeys {
+		dnskey, ok := rr.Data.(*protocol.RDataDNSKEY)
+		if !ok {
+			continue
+		}
+		keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
+		if anchor.KeyTag != keyTag || anchor.Algorithm != dnskey.Algorithm {
+			continue
+		}
+		if len(anchor.Digest) > 0 {
+			digest := calculateDSDigestFromDNSKEY(rr.Name.String(), dnskey, anchor.DigestType)
+			if bytesEqual(digest, anchor.Digest) {
+				matched = append(matched, rr)
+				continue
+			}
+		}
+		if len(anchor.PublicKey) > 0 && bytesEqual(anchor.PublicKey, dnskey.PublicKey) {
+			matched = append(matched, rr)
+		}
+	}
+	return matched
+}
+
+// verifyDNSKEYSelfSignature authenticates an entire DNSKEY RRset. The DS (or
+// trust anchor) only proves that ONE key in the set — the KSK — is genuine. The
+// other keys (the ZSKs that actually sign answers) are trusted ONLY because the
+// KSK signs the whole DNSKEY RRset with an RRSIG. Without verifying that
+// self-signature, an on-path attacker could append their own DNSKEY to the
+// fetched RRset and use it to forge "Secure" answers — the genuine KSK still
+// matches the DS, so the delegation check passes. At least one RRSIG(DNSKEY)
+// must validate under a DS/anchor-matched KSK over the full RRset; injecting a
+// key changes the RRset and breaks that signature.
+func (v *Validator) verifyDNSKEYSelfSignature(keys, sigs, trustedKSKs []*protocol.ResourceRecord) bool {
+	if len(trustedKSKs) == 0 {
+		return false
+	}
+	for _, sigRR := range sigs {
+		rrsig, ok := sigRR.Data.(*protocol.RDataRRSIG)
+		if !ok || rrsig.TypeCovered != protocol.TypeDNSKEY {
+			continue
+		}
+		if v.validateRRSIG(keys, rrsig, trustedKSKs) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchDNSKEYAndSigs fetches a zone's DNSKEY RRset together with the RRSIG(s)
+// covering it, in a single query, so the RRset's self-signature can be checked.
+func (v *Validator) fetchDNSKEYAndSigs(ctx context.Context, zone string) (keys, sigs []*protocol.ResourceRecord, err error) {
+	if v.resolver == nil {
+		return nil, nil, fmt.Errorf("no resolver configured")
+	}
+	msg, err := v.resolver.Query(ctx, zone, protocol.TypeDNSKEY)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, rr := range msg.Answers {
+		switch rr.Type {
+		case protocol.TypeDNSKEY:
+			keys = append(keys, rr)
+		case protocol.TypeRRSIG:
+			if sig, ok := rr.Data.(*protocol.RDataRRSIG); ok && sig.TypeCovered == protocol.TypeDNSKEY {
+				sigs = append(sigs, rr)
+			}
+		}
+	}
+	return keys, sigs, nil
 }
 
 // KeyTrap mitigation caps (VULN-040 / CVE-2023-50387).

@@ -31,6 +31,27 @@ func (m *mockResolver) Query(ctx context.Context, name string, qtype uint16) (*p
 	}), nil
 }
 
+// makeDNSKEYRRSIG signs a zone's DNSKEY RRset with its (KSK) private key and
+// returns the RRSIG record. buildChain now requires the DNSKEY RRset to be
+// self-signed by the DS/anchor-matched KSK, so mock DNSKEY responses must carry
+// this signature.
+func makeDNSKEYRRSIG(t *testing.T, zone string, priv *ecdsa.PrivateKey, dnskey *protocol.RDataDNSKEY, dnskeyRRs []*protocol.ResourceRecord) *protocol.ResourceRecord {
+	t.Helper()
+	signer := NewSigner(zone, DefaultSignerConfig())
+	sk := &SigningKey{
+		PrivateKey: &PrivateKey{Algorithm: dnskey.Algorithm, Key: priv},
+		DNSKEY:     dnskey,
+		KeyTag:     protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey),
+		IsKSK:      true,
+	}
+	now := uint32(time.Now().Unix())
+	rrsig, err := signer.SignRRSet(dnskeyRRs, sk, now-3600, now+3600)
+	if err != nil {
+		t.Fatalf("signing DNSKEY RRset for %s: %v", zone, err)
+	}
+	return rrsig
+}
+
 func TestValidationResultString(t *testing.T) {
 	tests := []struct {
 		result   ValidationResult
@@ -899,14 +920,14 @@ func TestBuildChainBasic(t *testing.T) {
 	store := NewTrustAnchorStore()
 	store.AddAnchor(anchor)
 
-	// Set up mock resolver that returns the DNSKEY
+	// Set up mock resolver that returns the DNSKEY + its self-signature
 	rootName, _ := protocol.ParseName("example.com.")
+	dnskeyRR := &protocol.ResourceRecord{Name: rootName, Type: protocol.TypeDNSKEY, Data: dnskeyData}
+	dnskeySig := makeDNSKEYRRSIG(t, "example.com.", privKey, dnskeyData, []*protocol.ResourceRecord{dnskeyRR})
 	mock := &mockResolver{
 		responses: map[string]*protocol.Message{
 			"example.com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
-				Answers: []*protocol.ResourceRecord{
-					{Name: rootName, Type: protocol.TypeDNSKEY, Data: dnskeyData},
-				},
+				Answers: []*protocol.ResourceRecord{dnskeyRR, dnskeySig},
 			},
 		},
 	}
@@ -925,6 +946,66 @@ func TestBuildChainBasic(t *testing.T) {
 	}
 	if !chain[0].validated {
 		t.Error("Chain link should be validated")
+	}
+}
+
+func TestBuildChain_RejectsInjectedDNSKEY(t *testing.T) {
+	// Security regression (audit CRITICAL): an on-path attacker who appends
+	// their own DNSKEY to the fetched RRset must NOT have it trusted. The KSK's
+	// RRSIG covers only the genuine RRset, so once the attacker's key is added
+	// the self-signature no longer validates and the chain must be rejected.
+	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("genkey: %v", err)
+	}
+	pub := &PublicKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: &privKey.PublicKey}
+	keyData, _ := packECDSAPublicKey(pub)
+	dnskeyData := &protocol.RDataDNSKEY{
+		Flags:     protocol.DNSKEYFlagZone | protocol.DNSKEYFlagSEP,
+		Protocol:  3,
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		PublicKey: keyData,
+	}
+	anchor := &TrustAnchor{
+		Zone:       "example.com.",
+		KeyTag:     protocol.CalculateKeyTag(dnskeyData.Flags, dnskeyData.Algorithm, dnskeyData.PublicKey),
+		Algorithm:  protocol.AlgorithmECDSAP256SHA256,
+		DigestType: 2,
+		Digest:     calculateDSDigestFromDNSKEY("example.com.", dnskeyData, 2),
+		ValidFrom:  time.Now().Add(-time.Hour),
+	}
+	store := NewTrustAnchorStore()
+	store.AddAnchor(anchor)
+
+	rootName, _ := protocol.ParseName("example.com.")
+	legitRR := &protocol.ResourceRecord{Name: rootName, Type: protocol.TypeDNSKEY, Data: dnskeyData}
+	// RRSIG over ONLY the genuine key — exactly what a real signer publishes.
+	sig := makeDNSKEYRRSIG(t, "example.com.", privKey, dnskeyData, []*protocol.ResourceRecord{legitRR})
+
+	// Attacker forges and injects their own DNSKEY into the served RRset.
+	evilPriv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	evilPub := &PublicKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: &evilPriv.PublicKey}
+	evilData, _ := packECDSAPublicKey(evilPub)
+	evilRR := &protocol.ResourceRecord{Name: rootName, Type: protocol.TypeDNSKEY, Data: &protocol.RDataDNSKEY{
+		Flags:     protocol.DNSKEYFlagZone,
+		Protocol:  3,
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		PublicKey: evilData,
+	}}
+
+	mock := &mockResolver{
+		responses: map[string]*protocol.Message{
+			"example.com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
+				Answers: []*protocol.ResourceRecord{legitRR, evilRR, sig},
+			},
+		},
+	}
+	config := DefaultValidatorConfig()
+	config.Enabled = true
+	v := NewValidator(config, store, mock)
+
+	if _, _, err := v.buildChain(context.Background(), anchor, []string{}); err == nil {
+		t.Fatal("buildChain accepted a DNSKEY RRset with an injected key — DNSSEC bypass not prevented")
 	}
 }
 
@@ -1044,12 +1125,15 @@ func TestBuildChainWithDelegation(t *testing.T) {
 	parentName, _ := protocol.ParseName("com.")
 	childName, _ := protocol.ParseName("example.")
 
+	parentDnskeyRR := &protocol.ResourceRecord{Name: parentName, Type: protocol.TypeDNSKEY, Data: parentDnskey}
+	parentDnskeySig := makeDNSKEYRRSIG(t, "com.", privKey, parentDnskey, []*protocol.ResourceRecord{parentDnskeyRR})
+	childDnskeyRR := &protocol.ResourceRecord{Name: childName, Type: protocol.TypeDNSKEY, Data: childDnskey}
+	childDnskeySig := makeDNSKEYRRSIG(t, "example.", childPrivKey, childDnskey, []*protocol.ResourceRecord{childDnskeyRR})
+
 	mock := &mockResolver{
 		responses: map[string]*protocol.Message{
 			"com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
-				Answers: []*protocol.ResourceRecord{
-					{Name: parentName, Type: protocol.TypeDNSKEY, Data: parentDnskey},
-				},
+				Answers: []*protocol.ResourceRecord{parentDnskeyRR, parentDnskeySig},
 			},
 			"example.|" + strconv.Itoa(int(protocol.TypeDS)): {
 				Answers: []*protocol.ResourceRecord{
@@ -1066,9 +1150,7 @@ func TestBuildChainWithDelegation(t *testing.T) {
 				},
 			},
 			"example.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
-				Answers: []*protocol.ResourceRecord{
-					{Name: childName, Type: protocol.TypeDNSKEY, Data: childDnskey},
-				},
+				Answers: []*protocol.ResourceRecord{childDnskeyRR, childDnskeySig},
 			},
 		},
 	}
@@ -1134,12 +1216,12 @@ func TestBuildChainUnsignedDelegation(t *testing.T) {
 	}
 
 	parentName, _ := protocol.ParseName("com.")
+	parentDnskeyRR := &protocol.ResourceRecord{Name: parentName, Type: protocol.TypeDNSKEY, Data: dnskeyData}
+	parentDnskeySig := makeDNSKEYRRSIG(t, "com.", privKey, dnskeyData, []*protocol.ResourceRecord{parentDnskeyRR})
 	mock := &mockResolver{
 		responses: map[string]*protocol.Message{
 			"com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
-				Answers: []*protocol.ResourceRecord{
-					{Name: parentName, Type: protocol.TypeDNSKEY, Data: dnskeyData},
-				},
+				Answers: []*protocol.ResourceRecord{parentDnskeyRR, parentDnskeySig},
 			},
 			// example.com. DS query returns empty (unsigned delegation)
 		},
@@ -2277,13 +2359,14 @@ func TestValidateResponseFullChain(t *testing.T) {
 		Data:  rrsig,
 	}
 
-	// Set up mock resolver
+	// Set up mock resolver. The DNSKEY RRset must carry its self-signature so
+	// the chain can authenticate it (DS proves only the KSK).
+	dnskeyRR := &protocol.ResourceRecord{Name: name, Type: protocol.TypeDNSKEY, Data: dnskeyData}
+	dnskeySig := makeDNSKEYRRSIG(t, "example.com.", privKey, dnskeyData, []*protocol.ResourceRecord{dnskeyRR})
 	mock := &mockResolver{
 		responses: map[string]*protocol.Message{
 			"example.com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
-				Answers: []*protocol.ResourceRecord{
-					{Name: name, Type: protocol.TypeDNSKEY, Data: dnskeyData},
-				},
+				Answers: []*protocol.ResourceRecord{dnskeyRR, dnskeySig},
 			},
 		},
 	}
