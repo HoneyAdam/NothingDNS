@@ -106,6 +106,39 @@ func (w *WAL) TruncateAfter(keepThrough Index) error {
 	return w.logFile.Sync()
 }
 
+// CompactBefore removes every entry whose Index is <= through, keeping the
+// suffix, and rewrites the file in place. Called after a snapshot subsumes the
+// log prefix so the WAL stays bounded and a restart replays only the
+// post-snapshot tail.
+func (w *WAL) CompactBefore(through Index) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	all, err := w.readAllLocked()
+	if err != nil {
+		return err
+	}
+	kept := all[:0]
+	for _, e := range all {
+		if e.Index > through {
+			kept = append(kept, e)
+		}
+	}
+
+	if err := w.logFile.Truncate(0); err != nil {
+		return fmt.Errorf("truncate WAL: %w", err)
+	}
+	if _, err := w.logFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek WAL: %w", err)
+	}
+	for _, e := range kept {
+		if err := w.writeLocked(e); err != nil {
+			return err
+		}
+	}
+	return w.logFile.Sync()
+}
+
 // ReadAll reads all entries from the WAL.
 func (w *WAL) ReadAll() ([]entry, error) {
 	w.mu.Lock()
