@@ -26,12 +26,13 @@ const nav = [
   { to: '/about', icon: Info, label: 'About' },
 ];
 
-export function Sidebar({ connected }: { connected: boolean }) {
+export function Sidebar({ connected, streamError }: { connected: boolean; streamError?: string | null }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const { theme, setTheme } = useTheme();
   const loc = useLocation();
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
+  const streamLabel = connected ? 'Live queries' : streamError ? 'Stream offline' : 'Stream idle';
 
   // Close mobile menu on route change
   useEffect(() => { setMobileOpen(false); }, [loc.pathname]);
@@ -89,9 +90,9 @@ export function Sidebar({ connected }: { connected: boolean }) {
           })}
         </nav>
         <div className="border-t p-2 space-y-1">
-          <div className={cn('flex items-center gap-2 px-3 py-2 text-xs', collapsed && 'justify-center px-2')}>
+          <div className={cn('flex items-center gap-2 px-3 py-2 text-xs', collapsed && 'justify-center px-2')} title={streamError || streamLabel}>
             {connected ? <Wifi className="h-3.5 w-3.5 text-success shrink-0" /> : <WifiOff className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
-            {!collapsed && <span className={connected ? 'text-success' : 'text-muted-foreground'}>{connected ? 'Live' : 'Disconnected'}</span>}
+            {!collapsed && <span className={connected ? 'text-success' : 'text-muted-foreground'}>{streamLabel}</span>}
           </div>
           <button onClick={() => setTheme(theme === 'dark' ? 'light' : theme === 'light' ? 'system' : 'dark')} className={cn('flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors w-full cursor-pointer', collapsed && 'justify-center px-2')}>
             <ThemeIcon className="h-3.5 w-3.5 shrink-0" />{!collapsed && <span className="capitalize">{theme} mode</span>}
