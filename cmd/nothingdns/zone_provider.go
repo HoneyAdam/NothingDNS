@@ -206,8 +206,10 @@ func (p *radixZoneProvider) FindZones(qname string) []ZoneMatch {
 }
 
 func (p *radixZoneProvider) ListZones() map[string]*zone.Zone {
-	// Radix tree doesn't provide a List method, return nil
-	return nil
+	if p.tree == nil {
+		return nil
+	}
+	return p.tree.List()
 }
 
 func (p *radixZoneProvider) GetZone(origin string) (*zone.Zone, bool) {
@@ -218,7 +220,7 @@ func (p *radixZoneProvider) GetZone(origin string) (*zone.Zone, bool) {
 	if zone == nil {
 		return nil, false
 	}
-	return zone, zone.Origin == origin
+	return zone, canonicalize(zone.Origin) == canonicalize(origin)
 }
 
 // sortZonesByLength sorts zones by origin length descending.

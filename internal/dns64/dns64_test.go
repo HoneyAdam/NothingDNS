@@ -224,6 +224,19 @@ func TestShouldSynthesize(t *testing.T) {
 		t.Fatal("expected ShouldSynthesize=false when AAAA answers exist")
 	}
 
+	malformedResp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess},
+		},
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+		},
+	}
+	if !s.ShouldSynthesize(aaaaQuestion, malformedResp) {
+		t.Fatal("expected ShouldSynthesize=true when malformed answers contain no AAAA")
+	}
+
 	// A query -> false
 	if s.ShouldSynthesize(aQuestion, emptyResp) {
 		t.Fatal("expected ShouldSynthesize=false for A query")
@@ -287,6 +300,40 @@ func TestSynthesizeResponse_SkipsExcludedAddresses(t *testing.T) {
 	}
 	if got, want := net.IP(aaaa.Address[:]), s.SynthesizeAAAA(net.ParseIP("198.51.100.7").To4()); !got.Equal(want) {
 		t.Errorf("synthesized AAAA for wrong address: got %v, want %v", got, want)
+	}
+}
+
+func TestSynthesizeResponse_SkipsMalformedAnswers(t *testing.T) {
+	s, err := NewSynthesizer("64:ff9b::", 96)
+	if err != nil {
+		t.Fatal(err)
+	}
+	question := &protocol.Question{
+		Name:   protocol.NewName([]string{"example", "com"}, true),
+		QType:  protocol.TypeAAAA,
+		QClass: protocol.ClassIN,
+	}
+	var addr [4]byte
+	copy(addr[:], net.ParseIP("198.51.100.7").To4())
+	aResp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeAAAA, Data: &protocol.RDataA{Address: addr}},
+			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeA, TTL: 300, Data: &protocol.RDataA{Address: addr}},
+		},
+	}
+
+	out := s.SynthesizeResponse(question, aResp)
+	if out == nil {
+		t.Fatal("SynthesizeResponse returned nil")
+	}
+	if len(out.Answers) != 1 {
+		t.Fatalf("synthesized AAAA count = %d, want 1", len(out.Answers))
+	}
+	if out.Answers[0] == nil || out.Answers[0].Type != protocol.TypeAAAA {
+		t.Fatalf("unexpected synthesized answer: %+v", out.Answers[0])
 	}
 }
 
@@ -516,5 +563,41 @@ func TestSynthesizeResponse_NilInputs(t *testing.T) {
 	}
 	if got := s.SynthesizeResponse(nil, &protocol.Message{}); got != nil {
 		t.Fatal("expected nil for nil question")
+	}
+	if got := s.SynthesizeResponse(&protocol.Question{QType: protocol.TypeAAAA, QClass: protocol.ClassIN}, &protocol.Message{}); got != nil {
+		t.Fatal("expected nil for nil question name")
+	}
+}
+
+func TestSynthesizerNilReceiverSafe(t *testing.T) {
+	var s *Synthesizer
+	q := &protocol.Question{
+		Name:   protocol.NewName([]string{"example", "com"}, true),
+		QType:  protocol.TypeAAAA,
+		QClass: protocol.ClassIN,
+	}
+	resp := &protocol.Message{}
+
+	if got := s.SynthesizeAAAA(net.ParseIP("192.0.2.1")); got != nil {
+		t.Fatalf("nil SynthesizeAAAA() = %v, want nil", got)
+	}
+	if got := s.ExtractIPv4(net.ParseIP("64:ff9b::c000:0201")); got != nil {
+		t.Fatalf("nil ExtractIPv4() = %v, want nil", got)
+	}
+	if s.ShouldSynthesize(q, resp) {
+		t.Fatal("nil ShouldSynthesize() = true, want false")
+	}
+	if got := s.SynthesizeResponse(q, resp); got != nil {
+		t.Fatalf("nil SynthesizeResponse() = %#v, want nil", got)
+	}
+	if err := s.AddExcludeNet("192.0.2.0/24"); err == nil {
+		t.Fatal("nil AddExcludeNet() error = nil, want error")
+	}
+	if s.IsExcluded(net.ParseIP("192.0.2.1")) {
+		t.Fatal("nil IsExcluded() = true, want false")
+	}
+	s.SetEnabled(true)
+	if s.IsEnabled() {
+		t.Fatal("nil IsEnabled() = true, want false")
 	}
 }

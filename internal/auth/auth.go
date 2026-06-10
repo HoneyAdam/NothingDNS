@@ -353,6 +353,10 @@ func (s *Store) verifyTokenSignature(token, signature string) bool {
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+func tokenExpiredAt(token *Token, now time.Time) bool {
+	return token == nil || !now.Before(token.ExpiresAt)
+}
+
 // ValidateToken checks if a token is valid and returns the associated user.
 func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 	s.mu.RLock()
@@ -368,7 +372,7 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 		return nil, fmt.Errorf("invalid token signature")
 	}
 
-	if time.Now().After(token.ExpiresAt) {
+	if tokenExpiredAt(token, time.Now()) {
 		s.mu.RUnlock()
 		s.mu.Lock()
 		// Re-check token presence under the write lock. Two concurrent
@@ -399,12 +403,13 @@ func (s *Store) ValidateToken(tokenStr string) (*User, error) {
 	// an atomic.Int64 of UnixNano or move the write under s.mu.Lock.
 
 	user, ok := s.users[token.Username]
+	publicUser := clonePublicUser(user)
 	s.mu.RUnlock()
 	if !ok {
 		return nil, fmt.Errorf("user not found")
 	}
 
-	return user, nil
+	return publicUser, nil
 }
 
 // RevokeToken invalidates a token.
@@ -486,7 +491,7 @@ func (s *Store) CreateUser(username, password string, role Role) (*User, error) 
 		UpdatedAt: now,
 	}
 	s.users[username] = user
-	return user, nil
+	return clonePublicUser(user), nil
 }
 
 // UpdateUser updates an existing user's password or role.
@@ -526,7 +531,7 @@ func (s *Store) UpdateUser(username, password string, role Role) (*User, error) 
 		delete(s.activeSessions, username)
 	}
 
-	return user, nil
+	return clonePublicUser(user), nil
 }
 
 // DeleteUser removes a user.
@@ -556,13 +561,7 @@ func (s *Store) ListUsers() []*User {
 
 	users := make([]*User, 0, len(s.users))
 	for _, u := range s.users {
-		users = append(users, &User{
-			Username:      u.Username,
-			Role:          u.Role,
-			CreatedAt:     u.CreatedAt,
-			UpdatedAt:     u.UpdatedAt,
-			IsAutoCreated: u.IsAutoCreated,
-		})
+		users = append(users, clonePublicUser(u))
 	}
 	return users
 }
@@ -576,12 +575,20 @@ func (s *Store) GetUser(username string) (*User, error) {
 	if !ok {
 		return nil, fmt.Errorf("user not found")
 	}
+	return clonePublicUser(user), nil
+}
+
+func clonePublicUser(user *User) *User {
+	if user == nil {
+		return nil
+	}
 	return &User{
-		Username:  user.Username,
-		Role:      user.Role,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-	}, nil
+		Username:      user.Username,
+		Role:          user.Role,
+		CreatedAt:     user.CreatedAt,
+		UpdatedAt:     user.UpdatedAt,
+		IsAutoCreated: user.IsAutoCreated,
+	}
 }
 
 // dummyHash is a pre-computed hash used to equalize login timing when the
@@ -756,7 +763,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		tmp.Close()
 		return fmt.Errorf("chmod temp: %w", err)
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if err := util.WriteFull(tmp, data); err != nil {
 		tmp.Close()
 		return fmt.Errorf("write temp: %w", err)
 	}
@@ -827,7 +834,7 @@ func (s *Store) LoadTokensSigned(path string) error {
 	// Load tokens, filtering out expired and malformed entries (LOW-008).
 	now := time.Now()
 	for token, t := range tokens {
-		if t == nil || t.Token == "" || t.Username == "" || now.After(t.ExpiresAt) {
+		if t == nil || t.Token == "" || t.Username == "" || tokenExpiredAt(t, now) {
 			delete(tokens, token)
 			continue
 		}

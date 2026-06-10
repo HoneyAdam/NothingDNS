@@ -306,12 +306,15 @@ func (s *XoTServer) handleMessage(conn net.Conn, msg []byte) {
 	protocolMsg, err := protocol.UnpackMessage(msg)
 	if err != nil {
 		// Send FORMERR response
-		s.sendErrorResponse(conn, nil, protocol.RcodeFormatError)
+		if err := s.sendErrorResponse(conn, nil, protocol.RcodeFormatError); err != nil {
+			return
+		}
 		return
 	}
 
-	// Get client IP for access control
-	clientIP := conn.RemoteAddr().(*net.TCPAddr).IP
+	// Get client IP for access control. Tests and wrapped connections may not
+	// expose a *net.TCPAddr even though production XoT uses TCP/TLS.
+	clientIP := xotClientIP(conn)
 
 	// Determine message type and handle accordingly
 	if len(protocolMsg.Questions) > 0 {
@@ -328,20 +331,26 @@ func (s *XoTServer) handleMessage(conn net.Conn, msg []byte) {
 	}
 
 	// Unsupported request type - send NOTIMP
-	s.sendErrorResponse(conn, protocolMsg, protocol.RcodeNotImplemented)
+	if err := s.sendErrorResponse(conn, protocolMsg, protocol.RcodeNotImplemented); err != nil {
+		return
+	}
 }
 
 // handleAXFRRequest processes an AXFR request over XoT.
 func (s *XoTServer) handleAXFRRequest(conn net.Conn, req *protocol.Message, clientIP net.IP) {
 	// Check if client is allowed by IP
 	if !s.isAllowed(clientIP) {
-		s.sendErrorResponse(conn, req, protocol.RcodeRefused)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeRefused); err != nil {
+			return
+		}
 		return
 	}
 
 	// Get zone name from question
-	if len(req.Questions) != 1 {
-		s.sendErrorResponse(conn, req, protocol.RcodeFormatError)
+	if req == nil || len(req.Questions) != 1 || req.Questions[0].Name == nil {
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeFormatError); err != nil {
+			return
+		}
 		return
 	}
 
@@ -352,33 +361,43 @@ func (s *XoTServer) handleAXFRRequest(conn net.Conn, req *protocol.Message, clie
 	z, ok := s.zones[strings.ToLower(zoneName)]
 	s.zonesMu.RUnlock()
 	if !ok {
-		s.sendErrorResponse(conn, req, protocol.RcodeNameError)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeNameError); err != nil {
+			return
+		}
 		return
 	}
 
 	// Generate AXFR records using the same logic as AXFRServer
 	records, err := s.generateAXFRRecords(z)
 	if err != nil {
-		s.sendErrorResponse(conn, req, protocol.RcodeServerFailure)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeServerFailure); err != nil {
+			return
+		}
 		return
 	}
 
 	// Send AXFR response: SOA + all records + SOA (multiple messages allowed)
 	// RFC 5936: AXFR response is a sequence of messages, each with SOA at start/end of whole transfer
-	s.sendAXFRResponse(conn, records)
+	if err := s.sendAXFRResponse(conn, records); err != nil {
+		return
+	}
 }
 
 // handleIXFRRequest processes an IXFR request over XoT.
 func (s *XoTServer) handleIXFRRequest(conn net.Conn, req *protocol.Message, clientIP net.IP) {
 	// Check if client is allowed by IP
 	if !s.isAllowed(clientIP) {
-		s.sendErrorResponse(conn, req, protocol.RcodeRefused)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeRefused); err != nil {
+			return
+		}
 		return
 	}
 
 	// Get zone name from question
-	if len(req.Questions) != 1 {
-		s.sendErrorResponse(conn, req, protocol.RcodeFormatError)
+	if req == nil || len(req.Questions) != 1 || req.Questions[0].Name == nil {
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeFormatError); err != nil {
+			return
+		}
 		return
 	}
 
@@ -389,33 +408,69 @@ func (s *XoTServer) handleIXFRRequest(conn net.Conn, req *protocol.Message, clie
 	z, ok := s.zones[strings.ToLower(zoneName)]
 	s.zonesMu.RUnlock()
 	if !ok {
-		s.sendErrorResponse(conn, req, protocol.RcodeNameError)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeNameError); err != nil {
+			return
+		}
 		return
 	}
 
 	// For IXFR, we need to check if the client has a serial number
 	// RFC 1995: IXFR uses SOA to determine if incremental transfer is possible
-	var clientSOASerial uint32
-	if len(req.Additionals) > 0 {
-		// Check for EDNS0 or TSIG with SOA
-		for _, rr := range req.Additionals {
-			if rr.Type == protocol.TypeSOA {
-				if soa, ok := rr.Data.(*protocol.RDataSOA); ok {
-					clientSOASerial = soa.Serial
-					break
-				}
-			}
-		}
-	}
+	clientSOASerial := extractIXFRClientSerial(req)
 
 	// Generate IXFR response
 	records, err := s.generateIXFRRecords(z, clientSOASerial)
 	if err != nil {
-		s.sendErrorResponse(conn, req, protocol.RcodeServerFailure)
+		if err := s.sendErrorResponse(conn, req, protocol.RcodeServerFailure); err != nil {
+			return
+		}
 		return
 	}
 
-	s.sendAXFRResponse(conn, records)
+	if err := s.sendAXFRResponse(conn, records); err != nil {
+		return
+	}
+}
+
+func extractIXFRClientSerial(req *protocol.Message) uint32 {
+	if req == nil {
+		return 0
+	}
+	for _, rr := range req.Authorities {
+		if rr == nil {
+			continue
+		}
+		if rr.Type == protocol.TypeSOA {
+			if soa, ok := rr.Data.(*protocol.RDataSOA); ok {
+				return soa.Serial
+			}
+		}
+	}
+	for _, rr := range req.Additionals {
+		if rr == nil {
+			continue
+		}
+		if rr.Type == protocol.TypeSOA {
+			if soa, ok := rr.Data.(*protocol.RDataSOA); ok {
+				return soa.Serial
+			}
+		}
+	}
+	return 0
+}
+
+func xotClientIP(conn net.Conn) net.IP {
+	if conn == nil || conn.RemoteAddr() == nil {
+		return nil
+	}
+	if tcpAddr, ok := conn.RemoteAddr().(*net.TCPAddr); ok && tcpAddr != nil {
+		return tcpAddr.IP
+	}
+	host, _, err := net.SplitHostPort(conn.RemoteAddr().String())
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
 }
 
 // isAllowed checks if a client IP is allowed for XoT.
@@ -434,6 +489,9 @@ func (s *XoTServer) isAllowed(clientIP net.IP) bool {
 
 // generateAXFRRecords generates AXFR response records for a zone.
 func (s *XoTServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceRecord, error) {
+	if z == nil {
+		return nil, fmt.Errorf("zone is nil")
+	}
 	if z.SOA == nil {
 		return nil, fmt.Errorf("zone has no SOA record")
 	}
@@ -475,7 +533,7 @@ func (s *XoTServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceRecor
 	z.RLock()
 	for name, recs := range z.Records {
 		for _, rec := range recs {
-			rr, err := s.zoneRecordToRR(name, rec, z.Origin)
+			rr, err := s.zoneRecordToRR(name, rec)
 			if err != nil {
 				continue
 			}
@@ -497,9 +555,16 @@ func (s *XoTServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceRecor
 }
 
 // generateIXFRRecords generates IXFR response records.
-// If serial hasn't changed, returns SOA only. Otherwise returns incremental changes
+// If the client serial is current or newer, returns SOA only. Otherwise returns incremental changes
 // from the journal store, or falls back to full AXFR if no journal is available.
 func (s *XoTServer) generateIXFRRecords(z *zone.Zone, clientSerial uint32) ([]*protocol.ResourceRecord, error) {
+	if z == nil {
+		return nil, fmt.Errorf("zone is nil")
+	}
+	if z.SOA == nil {
+		return nil, fmt.Errorf("zone has no SOA record")
+	}
+
 	origin, err := protocol.ParseName(z.Origin)
 	if err != nil {
 		return nil, fmt.Errorf("parsing zone origin: %w", err)
@@ -515,9 +580,9 @@ func (s *XoTServer) generateIXFRRecords(z *zone.Zone, clientSerial uint32) ([]*p
 		return nil, fmt.Errorf("parsing SOA rname: %w", err)
 	}
 
-	// Check if incremental transfer is possible
-	if z.SOA.Serial != 0 && clientSerial != 0 && clientSerial == z.SOA.Serial {
-		// Client has current serial - send SOA only (no changes)
+	// Check if incremental transfer is needed using RFC 1982 serial arithmetic.
+	if z.SOA.Serial != 0 && clientSerial != 0 && !serialIsNewer(z.SOA.Serial, clientSerial) {
+		// Client has current or newer serial - send SOA only (no changes)
 		return []*protocol.ResourceRecord{
 			{
 				Name:  origin,
@@ -552,10 +617,10 @@ func (s *XoTServer) generateIXFRRecords(z *zone.Zone, clientSerial uint32) ([]*p
 // buildIncrementalIXFR builds an incremental IXFR response from journal entries.
 // Follows RFC 1995 pattern: SOA, deleted, SOA, added, ... for each change.
 func (s *XoTServer) buildIncrementalIXFR(entries []*IXFRJournalEntry, z *zone.Zone, origin *protocol.Name, mname, rname *protocol.Name, clientSerial uint32) ([]*protocol.ResourceRecord, error) {
-	// Find starting index: entries with Serial > clientSerial
+	// Find starting index using RFC 1982 serial arithmetic.
 	startIdx := -1
 	for i, entry := range entries {
-		if entry.Serial > clientSerial {
+		if serialIsNewer(entry.Serial, clientSerial) {
 			startIdx = i
 			break
 		}
@@ -594,6 +659,7 @@ func (s *XoTServer) buildIncrementalIXFR(entries []*IXFRJournalEntry, z *zone.Zo
 	records = append(records, currentSOA)
 
 	// Process each journal entry
+	previousSerial := clientSerial
 	for i := startIdx; i < len(entries); i++ {
 		entry := entries[i]
 
@@ -606,7 +672,7 @@ func (s *XoTServer) buildIncrementalIXFR(entries []*IXFRJournalEntry, z *zone.Zo
 			Data: &protocol.RDataSOA{
 				MName:   mname,
 				RName:   rname,
-				Serial:  entry.Serial,
+				Serial:  previousSerial,
 				Refresh: z.SOA.Refresh,
 				Retry:   z.SOA.Retry,
 				Expire:  z.SOA.Expire,
@@ -650,6 +716,8 @@ func (s *XoTServer) buildIncrementalIXFR(entries []*IXFRJournalEntry, z *zone.Zo
 			}
 			records = append(records, rr)
 		}
+
+		previousSerial = entry.Serial
 	}
 
 	// Final SOA with current serial
@@ -659,19 +727,19 @@ func (s *XoTServer) buildIncrementalIXFR(entries []*IXFRJournalEntry, z *zone.Zo
 }
 
 // zoneRecordToRR converts a zone record to a protocol resource record.
-func (s *XoTServer) zoneRecordToRR(name string, rec zone.Record, origin string) (*protocol.ResourceRecord, error) {
+func (s *XoTServer) zoneRecordToRR(name string, rec zone.Record) (*protocol.ResourceRecord, error) {
 	owner, err := protocol.ParseName(name)
 	if err != nil {
 		return nil, err
 	}
 
-	rrtype := protocol.StringToType[rec.Type]
+	rrtype := protocol.RecordTypeFromText(rec.Type)
 	if rrtype == 0 {
 		return nil, fmt.Errorf("unknown record type: %s", rec.Type)
 	}
 
 	// Parse RData based on type
-	rdata, err := parseXoTRData(rrtype, rec.RData, origin)
+	rdata, err := parseRData(rrtype, rec.RData)
 	if err != nil {
 		return nil, err
 	}
@@ -694,7 +762,7 @@ func (s *XoTServer) changeToRR(change zone.RecordChange) (*protocol.ResourceReco
 		return nil, err
 	}
 
-	rdata, err := parseXoTRData(change.Type, change.RData, "")
+	rdata, err := parseRData(change.Type, change.RData)
 	if err != nil {
 		return nil, err
 	}
@@ -735,7 +803,7 @@ func canonicalLess(a, b *protocol.ResourceRecord) bool {
 }
 
 // sendErrorResponse sends a DNS error response over the TLS connection.
-func (s *XoTServer) sendErrorResponse(conn net.Conn, reqMsg *protocol.Message, rcode uint8) {
+func (s *XoTServer) sendErrorResponse(conn net.Conn, reqMsg *protocol.Message, rcode uint8) error {
 	// Use the request ID if available, otherwise 0
 	id := uint16(0)
 	if reqMsg != nil && reqMsg.Header.ID != 0 {
@@ -753,27 +821,26 @@ func (s *XoTServer) sendErrorResponse(conn net.Conn, reqMsg *protocol.Message, r
 	buf := make([]byte, 2+65535)
 	n, err := resp.Pack(buf[2:])
 	if err != nil {
-		return
+		return err
 	}
 
-	// Write length prefix + response
-	buf[0] = byte(n >> 8)
-	buf[1] = byte(n)
-	_, _ = conn.Write(buf[:2+n])
+	return writeXoTFrame(conn, buf[:2+n], n)
 }
 
 // sendAXFRResponse sends AXFR/IXFR records over the TLS connection.
 // Multiple messages may be sent, each length-prefixed.
-func (s *XoTServer) sendAXFRResponse(conn net.Conn, records []*protocol.ResourceRecord) {
+func (s *XoTServer) sendAXFRResponse(conn net.Conn, records []*protocol.ResourceRecord) error {
 	if len(records) == 0 {
-		return
+		return nil
 	}
 
 	// Split records into messages (target ~16KB per message for efficiency)
 	const maxRecordsPerMessage = 50
 	chunkSize := maxRecordsPerMessage
 
-	conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+	if err := conn.SetWriteDeadline(time.Now().Add(60 * time.Second)); err != nil {
+		return err
+	}
 
 	for i := 0; i < len(records); i += chunkSize {
 		end := i + chunkSize
@@ -793,122 +860,52 @@ func (s *XoTServer) sendAXFRResponse(conn net.Conn, records []*protocol.Resource
 		buf := make([]byte, 2+65535)
 		n, err := msg.Pack(buf[2:])
 		if err != nil {
-			return
+			return err
 		}
 
-		// Write length prefix + message
-		buf[0] = byte(n >> 8)
-		buf[1] = byte(n)
-		if _, err := conn.Write(buf[:2+n]); err != nil {
-			return
+		if err := writeXoTFrame(conn, buf[:2+n], n); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-// parseXoTRData parses record data based on type.
-func parseXoTRData(rrtype uint16, rdataStr, origin string) (protocol.RData, error) {
-	switch rrtype {
-	case protocol.TypeA:
-		ip := net.ParseIP(rdataStr)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid A record: %s", rdataStr)
-		}
-		ipv4 := ip.To4()
-		if ipv4 == nil {
-			return nil, fmt.Errorf("a record requires IPv4")
-		}
-		var addr [4]byte
-		copy(addr[:], ipv4)
-		return &protocol.RDataA{Address: addr}, nil
-
-	case protocol.TypeAAAA:
-		ip := net.ParseIP(rdataStr)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid AAAA record: %s", rdataStr)
-		}
-		var addr [16]byte
-		copy(addr[:], ip.To16())
-		return &protocol.RDataAAAA{Address: addr}, nil
-
-	case protocol.TypeCNAME:
-		name, err := protocol.ParseName(rdataStr)
+func writeXoTFrame(conn net.Conn, frame []byte, payloadLen int) error {
+	frame[0] = byte(payloadLen >> 8)
+	frame[1] = byte(payloadLen)
+	for len(frame) > 0 {
+		n, err := conn.Write(frame)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		return &protocol.RDataCNAME{CName: name}, nil
-
-	case protocol.TypeNS:
-		name, err := protocol.ParseName(rdataStr)
-		if err != nil {
-			return nil, err
+		if n <= 0 {
+			return io.ErrShortWrite
 		}
-		return &protocol.RDataNS{NSDName: name}, nil
-
-	case protocol.TypeMX:
-		var pref uint16
-		var exchange string
-		_, err := fmt.Sscanf(rdataStr, "%d %s", &pref, &exchange)
-		if err != nil {
-			exchange = strings.TrimSpace(rdataStr)
-		}
-		name, err := protocol.ParseName(exchange)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataMX{Preference: pref, Exchange: name}, nil
-
-	case protocol.TypeTXT:
-		text := strings.Trim(rdataStr, "\"")
-		return &protocol.RDataTXT{Strings: []string{text}}, nil
-
-	case protocol.TypePTR:
-		name, err := protocol.ParseName(rdataStr)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataPTR{PtrDName: name}, nil
-
-	case protocol.TypeSRV:
-		var priority, weight, port uint16
-		var target string
-		_, err := fmt.Sscanf(rdataStr, "%d %d %d %s", &priority, &weight, &port, &target)
-		if err != nil {
-			return nil, fmt.Errorf("invalid SRV record: %s", rdataStr)
-		}
-		name, err := protocol.ParseName(target)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataSRV{
-			Priority: priority,
-			Weight:   weight,
-			Port:     port,
-			Target:   name,
-		}, nil
-
-	default:
-		return &protocol.RDataRaw{TypeVal: rrtype, Data: []byte(rdataStr)}, nil
+		frame = frame[n:]
 	}
+	return nil
 }
 
 // Close closes the XoT server.
 func (s *XoTServer) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.closed {
+		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	if s.stopCh != nil {
 		close(s.stopCh)
-		s.wg.Wait()
 	}
+	listener := s.listener
+	s.mu.Unlock()
 
-	if s.listener != nil {
-		return s.listener.Close()
+	var err error
+	if listener != nil {
+		err = listener.Close()
 	}
-	return nil
+	s.wg.Wait()
+	return err
 }
 
 // Addr returns the listening address of the server.

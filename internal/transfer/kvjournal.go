@@ -28,8 +28,20 @@ type KVJournalStore struct {
 // NewKVJournalStore creates a new file-based IXFR journal store.
 // Pass a 32-byte hmacKey for integrity protection, or nil for legacy mode.
 func NewKVJournalStore(dataDir string, hmacKey ...[]byte) *KVJournalStore {
+	return newKVJournalStore(dataDir, hmacKey...)
+}
+
+// OpenKVJournalStore creates the journal root directory and returns a store.
+func OpenKVJournalStore(dataDir string, hmacKey ...[]byte) (*KVJournalStore, error) {
+	store := newKVJournalStore(dataDir, hmacKey...)
+	if err := os.MkdirAll(store.dataDir, 0700); err != nil {
+		return nil, fmt.Errorf("creating IXFR journal dir: %w", err)
+	}
+	return store, nil
+}
+
+func newKVJournalStore(dataDir string, hmacKey ...[]byte) *KVJournalStore {
 	journalDir := filepath.Join(dataDir, "ixfr-journals")
-	_ = os.MkdirAll(journalDir, 0755)
 	var key []byte
 	if len(hmacKey) > 0 {
 		key = hmacKey[0]
@@ -43,6 +55,12 @@ func NewKVJournalStore(dataDir string, hmacKey ...[]byte) *KVJournalStore {
 
 // SetMaxJournalSize sets the maximum number of entries to keep per zone.
 func (s *KVJournalStore) SetMaxJournalSize(size int) {
+	if s == nil {
+		return
+	}
+	if size < 0 {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.maxJournalSize = size
@@ -59,6 +77,13 @@ func (s *KVJournalStore) zoneDir(zoneName string) string {
 // sibling ".tmp" file, fsynced, then atomically renamed into place; the
 // parent directory is fsynced too so the new dirent is durable.
 func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) error {
+	if s == nil {
+		return fmt.Errorf("journal store is nil")
+	}
+	if entry == nil {
+		return fmt.Errorf("journal entry is nil")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -117,36 +142,14 @@ func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) err
 		_ = dirFd.Close()
 	}
 
-	s.trimAfterWriteLocked(zoneName)
+	if err := s.trimJournalToLocked(zoneName, s.maxJournalSize); err != nil {
+		return fmt.Errorf("trim journal: %w", err)
+	}
 	return nil
 }
 
-// trimAfterWriteLocked trims old journal entries after a write.
-// Caller must hold s.mu.
-func (s *KVJournalStore) trimAfterWriteLocked(zoneName string) {
-	dir := s.zoneDir(zoneName)
-	entries, err := loadEntriesFromDir(dir, s.hmacKey)
-	if err != nil {
-		return
-	}
-
-	if len(entries) <= s.maxJournalSize {
-		return
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Serial > entries[j].Serial
-	})
-
-	toRemove := entries[s.maxJournalSize:]
-	for _, entry := range toRemove {
-		filename := filepath.Join(dir, fmt.Sprintf("%d.journal", entry.Serial))
-		os.Remove(filename)
-	}
-}
-
 // writeEntry writes a single journal entry in TLV+HMAC format.
-func (s *KVJournalStore) writeEntry(f *os.File, entry *IXFRJournalEntry) error {
+func (s *KVJournalStore) writeEntry(w io.Writer, entry *IXFRJournalEntry) error {
 	payload, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -163,12 +166,28 @@ func (s *KVJournalStore) writeEntry(f *os.File, entry *IXFRJournalEntry) error {
 	hm.Write(payload)
 	copy(frame[7+len(payload):], hm.Sum(nil))
 
-	_, err = f.Write(frame)
-	return err
+	return writeJournalFrame(w, frame)
+}
+
+func writeJournalFrame(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
+	}
+	return nil
 }
 
 // LoadEntries loads all journal entries for a zone from disk.
 func (s *KVJournalStore) LoadEntries(zoneName string) ([]*IXFRJournalEntry, error) {
+	if s == nil {
+		return nil, fmt.Errorf("journal store is nil")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -187,20 +206,28 @@ func (s *KVJournalStore) LoadEntries(zoneName string) ([]*IXFRJournalEntry, erro
 
 // Truncate removes old entries keeping only the most recent keepCount entries.
 func (s *KVJournalStore) Truncate(zoneName string, keepCount int) error {
+	if s == nil {
+		return fmt.Errorf("journal store is nil")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.trimJournalLocked(zoneName)
+	return s.trimJournalToLocked(zoneName, keepCount)
 }
 
-// trimJournalLocked removes old journal entries (caller must hold mu).
-func (s *KVJournalStore) trimJournalLocked(zoneName string) error {
+// trimJournalToLocked removes old journal entries, keeping the newest keepCount
+// entries. Caller must hold mu.
+func (s *KVJournalStore) trimJournalToLocked(zoneName string, keepCount int) error {
+	if keepCount < 0 {
+		return fmt.Errorf("invalid keepCount: %d", keepCount)
+	}
+
 	dir := s.zoneDir(zoneName)
 	entries, err := loadEntriesFromDir(dir, s.hmacKey)
 	if err != nil {
 		return err
 	}
 
-	if len(entries) <= s.maxJournalSize {
+	if len(entries) <= keepCount {
 		return nil
 	}
 
@@ -208,10 +235,12 @@ func (s *KVJournalStore) trimJournalLocked(zoneName string) error {
 		return entries[i].Serial > entries[j].Serial
 	})
 
-	toRemove := entries[s.maxJournalSize:]
+	toRemove := entries[keepCount:]
 	for _, entry := range toRemove {
 		filename := filepath.Join(dir, fmt.Sprintf("%d.journal", entry.Serial))
-		os.Remove(filename)
+		if err := os.Remove(filename); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove old journal %s: %w", filename, err)
+		}
 	}
 
 	return nil

@@ -18,6 +18,7 @@ func TestParseNameWithErrors(t *testing.T) {
 		{"label with underscore", "foo_bar.example.com", ""}, // underscore is allowed
 		{"wildcard name", "*.example.com", ""},
 		{"label too long", strings.Repeat("a", 64) + ".com", "too long"},
+		{"name too long", strings.Repeat("a.", 128), "too long"},
 		{"invalid character in label", "foo bar.example.com", "invalid"},
 		{"label with @", "foo@bar.example.com", "invalid"},
 	}
@@ -37,6 +38,34 @@ func TestParseNameWithErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestParseNameAcceptsMaximumWireLength(t *testing.T) {
+	labels := make([]string, maxLabels)
+	for i := range labels {
+		labels[i] = "a"
+	}
+
+	name, err := ParseName(strings.Join(labels, ".") + ".")
+	if err != nil {
+		t.Fatalf("ParseName should accept a 255-byte wire name: %v", err)
+	}
+	if got := name.WireLength(); got != MaxNameLength {
+		t.Fatalf("WireLength = %d, want %d", got, MaxNameLength)
+	}
+}
+
+func TestPackNameRejectsTooManyLabelsBeforeCompression(t *testing.T) {
+	labels := make([]string, maxLabels+1)
+	for i := range labels {
+		labels[i] = "a"
+	}
+
+	name := NewName(labels, true)
+	buf := make([]byte, 512)
+	if _, err := PackName(name, buf, 0, map[string]int{}); err == nil {
+		t.Fatal("PackName should reject names with too many labels")
 	}
 }
 
@@ -114,6 +143,18 @@ func TestNameEqual(t *testing.T) {
 	}
 	if n1.Equal(n4) {
 		t.Error("Equal should return false when FQDN differs")
+	}
+}
+
+func TestNameEqualNil(t *testing.T) {
+	n, _ := ParseName("example.com.")
+	if n.Equal(nil) {
+		t.Fatal("Equal(nil) should return false")
+	}
+
+	var nilName *Name
+	if nilName.Equal(n) {
+		t.Fatal("nil receiver Equal should return false")
 	}
 }
 
@@ -293,6 +334,7 @@ func TestWireNameLength(t *testing.T) {
 	}{
 		{"root name", []byte{0x00}, 0, 1, false},
 		{"simple name", []byte{0x07, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0x00}, 0, 9, false},
+		{"six labels", []byte{1, 'a', 1, 'b', 1, 'c', 1, 'd', 1, 'e', 1, 'f', 0x00}, 0, 13, false},
 		{"with pointer", []byte{0xC0, 0x00}, 0, 2, false},
 		{"invalid offset", []byte{0x00}, -1, 0, true},
 		{"label too long", []byte{64, 'a', 'a', 'a'}, 0, 0, true},
@@ -320,22 +362,27 @@ func TestWireNameLength(t *testing.T) {
 // TestCompareNames tests CompareNames function
 func TestCompareNames(t *testing.T) {
 	tests := []struct {
-		a, b string
+		name string
+		a    *Name
+		b    *Name
 		want int
 	}{
-		{"example.com.", "example.com.", 0},
-		{"a.example.com.", "b.example.com.", -1},
-		{"b.example.com.", "a.example.com.", 1},
-		{"example.com.", "org.", -1}, // com < org
+		{"equal", must(ParseName("example.com.")), must(ParseName("example.com.")), 0},
+		{"less", must(ParseName("a.example.com.")), must(ParseName("b.example.com.")), -1},
+		{"greater", must(ParseName("b.example.com.")), must(ParseName("a.example.com.")), 1},
+		{"tld_order", must(ParseName("example.com.")), must(ParseName("org.")), -1}, // com < org
+		{"nil_equal_root", nil, must(ParseName(".")), 0},
+		{"nil_before_non_root", nil, must(ParseName("example.com.")), -1},
+		{"non_root_after_nil", must(ParseName("example.com.")), nil, 1},
 	}
 
 	for _, tt := range tests {
-		a, _ := ParseName(tt.a)
-		b, _ := ParseName(tt.b)
-		got := CompareNames(a, b)
-		if got != tt.want {
-			t.Errorf("CompareNames(%q, %q) = %d, want %d", tt.a, tt.b, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got := CompareNames(tt.a, tt.b)
+			if got != tt.want {
+				t.Errorf("CompareNames() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -353,6 +400,12 @@ func TestIsSubdomain(t *testing.T) {
 	}
 	if IsSubdomain(other, parent) {
 		t.Error("other.org should not be subdomain of example.com")
+	}
+	if !IsSubdomain(child, nil) {
+		t.Error("any DNS name should be subdomain of root/nil parent")
+	}
+	if IsSubdomain(nil, parent) {
+		t.Error("nil/root child should not be subdomain of non-root parent")
 	}
 }
 

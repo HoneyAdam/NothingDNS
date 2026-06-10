@@ -3,7 +3,9 @@ package cluster
 import (
 	"crypto/rand"
 	"encoding/json"
+	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -56,6 +58,61 @@ func TestNewGossipProtocol(t *testing.T) {
 
 	if gp.nodeList != nl {
 		t.Error("NodeList not properly set")
+	}
+}
+
+func TestNewGossipProtocolNormalizesInvalidConfig(t *testing.T) {
+	self := &Node{ID: "self", State: NodeStateAlive}
+	nl := NewNodeList(self)
+	cfg := GossipConfig{
+		BindPort:       pickFreePort(),
+		GossipInterval: -time.Millisecond,
+		ProbeInterval:  -time.Second,
+		ProbeTimeout:   -time.Second,
+		SuspicionMult:  -1,
+		RetransmitMult: -1,
+		GossipNodes:    -1,
+		IndirectChecks: -1,
+	}
+
+	gp, err := NewGossipProtocol(cfg, nl, true)
+	if err != nil {
+		t.Fatalf("NewGossipProtocol() error = %v", err)
+	}
+
+	if gp.config.BindAddr != "0.0.0.0" {
+		t.Fatalf("BindAddr = %q, want 0.0.0.0", gp.config.BindAddr)
+	}
+	if gp.config.GossipInterval != 200*time.Millisecond {
+		t.Fatalf("GossipInterval = %v, want 200ms", gp.config.GossipInterval)
+	}
+	if gp.config.ProbeInterval != time.Second {
+		t.Fatalf("ProbeInterval = %v, want 1s", gp.config.ProbeInterval)
+	}
+	if gp.config.ProbeTimeout != 500*time.Millisecond {
+		t.Fatalf("ProbeTimeout = %v, want 500ms", gp.config.ProbeTimeout)
+	}
+	if gp.config.SuspicionMult != 4 {
+		t.Fatalf("SuspicionMult = %d, want 4", gp.config.SuspicionMult)
+	}
+	if gp.config.RetransmitMult != 4 {
+		t.Fatalf("RetransmitMult = %d, want 4", gp.config.RetransmitMult)
+	}
+	if gp.config.GossipNodes != 3 {
+		t.Fatalf("GossipNodes = %d, want 3", gp.config.GossipNodes)
+	}
+	if gp.config.IndirectChecks != 3 {
+		t.Fatalf("IndirectChecks = %d, want 3", gp.config.IndirectChecks)
+	}
+	if gp.config.ProtocolVersion != 1 {
+		t.Fatalf("ProtocolVersion = %d, want 1", gp.config.ProtocolVersion)
+	}
+
+	if err := gp.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if err := gp.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
 	}
 }
 
@@ -1099,6 +1156,57 @@ func TestGossipProtocol_DecodeMessage_ZeroSeqSkipsCheck(t *testing.T) {
 	if err != nil {
 		t.Errorf("Expected legacy message to be accepted despite zero seq, got error: %v", err)
 	}
+}
+
+func TestGossipProtocol_SendMessageRejectsPartialDatagram(t *testing.T) {
+	self := &Node{ID: "self", State: NodeStateAlive, Addr: "127.0.0.1"}
+	nl := NewNodeList(self)
+	gp, err := NewGossipProtocol(DefaultGossipConfig(), nl, true)
+	if err != nil {
+		t.Fatalf("NewGossipProtocol: %v", err)
+	}
+	conn := &partialGossipUDPConn{maxWrite: 1}
+	gp.conn = conn
+
+	dst := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 7946}
+	err = gp.sendMessage(MessageTypePing, []byte{1, 2, 3}, dst)
+	if err != io.ErrShortWrite {
+		t.Fatalf("sendMessage error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if sent := atomic.LoadUint64(&gp.messagesSent); sent != 0 {
+		t.Fatalf("messagesSent = %d, want 0 for failed datagram", sent)
+	}
+	if conn.writes != 1 {
+		t.Fatalf("sendMessage should not retry UDP datagrams, got %d writes", conn.writes)
+	}
+}
+
+type partialGossipUDPConn struct {
+	maxWrite int
+	writes   int
+}
+
+func (c *partialGossipUDPConn) ReadFromUDP([]byte) (int, *net.UDPAddr, error) {
+	return 0, nil, io.EOF
+}
+
+func (c *partialGossipUDPConn) WriteToUDP(p []byte, _ *net.UDPAddr) (int, error) {
+	c.writes++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	if c.maxWrite < len(p) {
+		return c.maxWrite, nil
+	}
+	return len(p), nil
+}
+
+func (c *partialGossipUDPConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (c *partialGossipUDPConn) Close() error {
+	return nil
 }
 
 func TestGossipProtocol_EncryptedRoundTrip(t *testing.T) {

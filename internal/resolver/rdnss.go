@@ -39,13 +39,16 @@ type RDNSSOptionTLV struct {
 // NewRDNSSOption creates a new RDNSS option.
 func NewRDNSSOption(lifetime time.Duration, servers []net.IP) *RDNSSOption {
 	return &RDNSSOption{
-		Lifetime: uint32(lifetime.Seconds()),
-		Servers:  append([]net.IP(nil), servers...),
+		Lifetime: durationSeconds32(lifetime),
+		Servers:  cloneIPList(servers),
 	}
 }
 
 // Validate checks if the RDNSS option is valid per RFC 8106.
 func (r *RDNSSOption) Validate() error {
+	if r == nil {
+		return fmt.Errorf("RDNSS: nil option")
+	}
 	if len(r.Servers) == 0 {
 		return fmt.Errorf("RDNSS: at least one server address required")
 	}
@@ -71,56 +74,89 @@ func (r *RDNSSOption) Validate() error {
 
 // ToTLV converts RDNSS option to TLV format for Router Advertisements.
 func (r *RDNSSOption) ToTLV() *RDNSSOptionTLV {
-	// Calculate length: 1 (type) + 1 (length) + 4 (lifetime) + (16 * num_addrs)
-	numAddrs := len(r.Servers)
-	length := 1 + 1 + 4 + (16 * numAddrs)
+	if r == nil {
+		return nil
+	}
+	lengthUnits := rdnssOptionLengthUnits(len(r.Servers))
+	if lengthUnits > 0xff {
+		lengthUnits = 0xff
+	}
 
 	return &RDNSSOptionTLV{
-		Type:      31,                // RDNSS option type
-		Length:    uint8(length / 8), // Length is in 8-byte units
+		Type:      31, // RDNSS option type
+		Length:    uint8(lengthUnits),
 		Lifetime:  r.Lifetime,
-		Addresses: r.Servers,
+		Addresses: cloneIPList(r.Servers),
 	}
 }
 
 // ParseRDNSSOption parses an RDNSS option from TLV format.
 func ParseRDNSSOption(tlv *RDNSSOptionTLV) (*RDNSSOption, error) {
+	if tlv == nil {
+		return nil, fmt.Errorf("RDNSS: nil option")
+	}
 	if tlv.Type != 31 {
 		return nil, fmt.Errorf("RDNSS: invalid option type: %d", tlv.Type)
 	}
 
 	// Calculate expected length
 	numAddrs := len(tlv.Addresses)
-	expectedLength := uint8((1 + 1 + 4 + (16 * numAddrs)) / 8)
-	if tlv.Length != expectedLength {
+	expectedLength := rdnssOptionLengthUnits(numAddrs)
+	if expectedLength > 0xff {
+		return nil, fmt.Errorf("RDNSS: option too long: %d 8-byte units (max 255)", expectedLength)
+	}
+	if tlv.Length != uint8(expectedLength) {
 		return nil, fmt.Errorf("RDNSS: invalid length: expected %d, got %d", expectedLength, tlv.Length)
 	}
 
-	return &RDNSSOption{
+	opt := &RDNSSOption{
 		Lifetime: tlv.Lifetime,
-		Servers:  tlv.Addresses,
-	}, nil
+		Servers:  cloneIPList(tlv.Addresses),
+	}
+	if err := opt.Validate(); err != nil {
+		return nil, err
+	}
+	return opt, nil
+}
+
+func cloneIPList(ips []net.IP) []net.IP {
+	if ips == nil {
+		return nil
+	}
+	out := make([]net.IP, len(ips))
+	for i, ip := range ips {
+		out[i] = append(net.IP(nil), ip...)
+	}
+	return out
+}
+
+func rdnssOptionLengthUnits(numAddrs int) int {
+	// Calculate length: 1 (type) + 1 (length) + 4 (lifetime) + (16 * num_addrs)
+	length := 1 + 1 + 4 + (16 * numAddrs)
+	return length / 8
 }
 
 // IsExpired returns true if the RDNSS option has expired.
 func (r *RDNSSOption) IsExpired() bool {
+	if r == nil {
+		return true
+	}
 	return r.Lifetime == 0
 }
 
 // RemainingLifetime returns the remaining lifetime based on when the option was received.
 func (r *RDNSSOption) RemainingLifetime(receivedAt time.Time) time.Duration {
-	if r.Lifetime == 0 {
+	if r == nil {
 		return 0
 	}
-	if r.Lifetime == 0xFFFFFFFF {
-		return time.Duration(1<<32-1) * time.Second // Infinite
-	}
-	elapsed := time.Since(receivedAt)
-	return time.Duration(r.Lifetime)*time.Second - elapsed
+	return remainingLifetimeAt(r.Lifetime, receivedAt, time.Now())
 }
 
 // String returns a human-readable representation.
 func (r *RDNSSOption) String() string {
+	if r == nil {
+		return "RDNSS{}"
+	}
 	return fmt.Sprintf("RDNSS{lifetime=%d servers=%v}", r.Lifetime, r.Servers)
 }
 
@@ -141,13 +177,41 @@ type DNSSLOption struct {
 // NewDNSSLOption creates a new DNSSL option.
 func NewDNSSLOption(lifetime time.Duration, domains []string) *DNSSLOption {
 	return &DNSSLOption{
-		Lifetime:      uint32(lifetime.Seconds()),
+		Lifetime:      durationSeconds32(lifetime),
 		SearchDomains: append([]string(nil), domains...),
 	}
 }
 
+func durationSeconds32(d time.Duration) uint32 {
+	seconds := int64(d / time.Second)
+	if seconds <= 0 {
+		return 0
+	}
+	if seconds > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(seconds)
+}
+
+func remainingLifetimeAt(lifetime uint32, receivedAt, now time.Time) time.Duration {
+	if lifetime == 0 {
+		return 0
+	}
+	if lifetime == 0xFFFFFFFF {
+		return time.Duration(1<<32-1) * time.Second
+	}
+	remaining := time.Duration(lifetime)*time.Second - now.Sub(receivedAt)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
 // Validate checks if the DNSSL option is valid per RFC 8106.
 func (d *DNSSLOption) Validate() error {
+	if d == nil {
+		return fmt.Errorf("DNSSL: nil option")
+	}
 	if len(d.SearchDomains) == 0 {
 		return fmt.Errorf("DNSSL: at least one search domain required")
 	}
@@ -165,6 +229,10 @@ func (d *DNSSLOption) Validate() error {
 		}
 	}
 
+	if units := dnsslOptionLengthUnits(d.SearchDomains); units > 0xff {
+		return fmt.Errorf("DNSSL: option too long: %d 8-byte units (max 255)", units)
+	}
+
 	return nil
 }
 
@@ -174,24 +242,17 @@ func (d *DNSSLOption) Validate() error {
 // Length field reports the entire option size in 8-byte units, padded
 // to a multiple of 8 per RFC 8106.
 func (d *DNSSLOption) ToTLV() *DNSSLTLV {
-	// 2 bytes (type+length) + 2 reserved + 4 (lifetime) + encoded domains
-	// (per RFC 8106 §5.2 the option header is type+length+reserved+lifetime
-	// = 8 bytes before the domain list).
-	encodedLen := 0
-	for _, domain := range d.SearchDomains {
-		encodedLen += encodeDNSSLDomain(domain)
-		encodedLen += 1 // per-domain zero terminator (RFC 1035 §3.1)
+	if d == nil {
+		return nil
 	}
-
-	totalBytes := 8 + encodedLen
-	// Pad to 8-byte boundary.
-	if pad := totalBytes % 8; pad != 0 {
-		totalBytes += 8 - pad
+	lengthUnits := dnsslOptionLengthUnits(d.SearchDomains)
+	if lengthUnits > 0xff {
+		lengthUnits = 0xff
 	}
 
 	return &DNSSLTLV{
 		Type:          32, // DNSSL option type
-		Length:        uint8(totalBytes / 8),
+		Length:        uint8(lengthUnits),
 		Lifetime:      d.Lifetime,
 		SearchDomains: d.SearchDomains,
 	}
@@ -207,14 +268,29 @@ type DNSSLTLV struct {
 
 // ParseDNSSLOption parses a DNSSL option from TLV format.
 func ParseDNSSLOption(tlv *DNSSLTLV) (*DNSSLOption, error) {
+	if tlv == nil {
+		return nil, fmt.Errorf("DNSSL: nil option")
+	}
 	if tlv.Type != 32 {
 		return nil, fmt.Errorf("DNSSL: invalid option type: %d", tlv.Type)
 	}
 
-	return &DNSSLOption{
+	expectedLength := dnsslOptionLengthUnits(tlv.SearchDomains)
+	if expectedLength > 0xff {
+		return nil, fmt.Errorf("DNSSL: option too long: %d 8-byte units (max 255)", expectedLength)
+	}
+	if tlv.Length != uint8(expectedLength) {
+		return nil, fmt.Errorf("DNSSL: invalid length: expected %d, got %d", expectedLength, tlv.Length)
+	}
+
+	opt := &DNSSLOption{
 		Lifetime:      tlv.Lifetime,
 		SearchDomains: tlv.SearchDomains,
-	}, nil
+	}
+	if err := opt.Validate(); err != nil {
+		return nil, err
+	}
+	return opt, nil
 }
 
 // encodeDNSSLDomain returns the wire-format byte count of a DNS domain
@@ -236,25 +312,45 @@ func encodeDNSSLDomain(domain string) int {
 	return n
 }
 
+func dnsslOptionLengthUnits(domains []string) int {
+	// 2 bytes (type+length) + 2 reserved + 4 (lifetime) + encoded domains
+	// (per RFC 8106 §5.2 the option header is type+length+reserved+lifetime
+	// = 8 bytes before the domain list).
+	encodedLen := 0
+	for _, domain := range domains {
+		encodedLen += encodeDNSSLDomain(domain)
+		encodedLen += 1 // per-domain zero terminator (RFC 1035 §3.1)
+	}
+
+	totalBytes := 8 + encodedLen
+	// Pad to 8-byte boundary.
+	if pad := totalBytes % 8; pad != 0 {
+		totalBytes += 8 - pad
+	}
+	return totalBytes / 8
+}
+
 // IsExpired returns true if the DNSSL option has expired.
 func (d *DNSSLOption) IsExpired() bool {
+	if d == nil {
+		return true
+	}
 	return d.Lifetime == 0
 }
 
 // RemainingLifetime returns the remaining lifetime.
 func (d *DNSSLOption) RemainingLifetime(receivedAt time.Time) time.Duration {
-	if d.Lifetime == 0 {
+	if d == nil {
 		return 0
 	}
-	if d.Lifetime == 0xFFFFFFFF {
-		return time.Duration(1<<32-1) * time.Second
-	}
-	elapsed := time.Since(receivedAt)
-	return time.Duration(d.Lifetime)*time.Second - elapsed
+	return remainingLifetimeAt(d.Lifetime, receivedAt, time.Now())
 }
 
 // String returns a human-readable representation.
 func (d *DNSSLOption) String() string {
+	if d == nil {
+		return "DNSSL{}"
+	}
 	return fmt.Sprintf("DNSSL{lifetime=%d domains=%v}", d.Lifetime, d.SearchDomains)
 }
 
@@ -285,25 +381,37 @@ func NewDNSConfig() *DNSConfig {
 
 // AddRDNSS adds an RDNSS option.
 func (dc *DNSConfig) AddRDNSS(opt *RDNSSOption) {
+	if dc == nil {
+		return
+	}
 	dc.RDNSS = append(dc.RDNSS, opt)
 }
 
 // AddDNSSL adds a DNSSL option.
 func (dc *DNSConfig) AddDNSSL(opt *DNSSLOption) {
+	if dc == nil {
+		return
+	}
 	dc.DNSSL = append(dc.DNSSL, opt)
 }
 
 // GetServers returns all unique DNS servers from RDNSS options.
 func (dc *DNSConfig) GetServers() []net.IP {
+	if dc == nil {
+		return nil
+	}
 	seen := make(map[string]bool)
 	var servers []net.IP
 
 	for _, rdnss := range dc.RDNSS {
+		if rdnss == nil {
+			continue
+		}
 		for _, server := range rdnss.Servers {
 			addrStr := server.String()
 			if !seen[addrStr] {
 				seen[addrStr] = true
-				servers = append(servers, server)
+				servers = append(servers, append(net.IP(nil), server...))
 			}
 		}
 	}
@@ -313,10 +421,16 @@ func (dc *DNSConfig) GetServers() []net.IP {
 
 // GetSearchDomains returns all unique search domains from DNSSL options.
 func (dc *DNSConfig) GetSearchDomains() []string {
+	if dc == nil {
+		return nil
+	}
 	seen := make(map[string]bool)
 	var domains []string
 
 	for _, dnssl := range dc.DNSSL {
+		if dnssl == nil {
+			continue
+		}
 		for _, domain := range dnssl.SearchDomains {
 			if !seen[domain] {
 				seen[domain] = true
@@ -330,11 +444,17 @@ func (dc *DNSConfig) GetSearchDomains() []string {
 
 // IsEmpty returns true if no DNS configuration is present.
 func (dc *DNSConfig) IsEmpty() bool {
+	if dc == nil {
+		return true
+	}
 	return len(dc.RDNSS) == 0 && len(dc.DNSSL) == 0
 }
 
 // RemoveExpired removes expired options.
 func (dc *DNSConfig) RemoveExpired() {
+	if dc == nil {
+		return
+	}
 	// Filter RDNSS
 	var validRDNSS []*RDNSSOption
 	for _, r := range dc.RDNSS {

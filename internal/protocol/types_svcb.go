@@ -23,6 +23,143 @@ const (
 	SvcParamKeyDOHPath       = 7
 )
 
+const maxSvcParamValueLen = 0xffff
+
+func validateSvcParamOrder(key, previousKey uint16, havePrevious bool) error {
+	if havePrevious && key <= previousKey {
+		return fmt.Errorf("SvcParam keys must be strictly increasing: key %d after %d", key, previousKey)
+	}
+	return nil
+}
+
+func validateSvcParamValue(p SvcParam) error {
+	switch p.Key {
+	case SvcParamKeyMandatory:
+		if len(p.Value) == 0 || len(p.Value)%2 != 0 {
+			return fmt.Errorf("invalid SvcParam %s length: %d", svcParamName(p.Key), len(p.Value))
+		}
+		if err := validateMandatoryValue(p.Value); err != nil {
+			return fmt.Errorf("invalid SvcParam %s: %w", svcParamName(p.Key), err)
+		}
+	case SvcParamKeyALPN:
+		if err := validateALPNValue(p.Value); err != nil {
+			return fmt.Errorf("invalid SvcParam %s: %w", svcParamName(p.Key), err)
+		}
+	case SvcParamKeyNoDefaultALPN:
+		if len(p.Value) != 0 {
+			return fmt.Errorf("invalid SvcParam %s length: %d", svcParamName(p.Key), len(p.Value))
+		}
+	case SvcParamKeyPort:
+		if len(p.Value) != 2 {
+			return fmt.Errorf("invalid SvcParam %s length: %d", svcParamName(p.Key), len(p.Value))
+		}
+	case SvcParamKeyIPv4Hint:
+		if len(p.Value) == 0 || len(p.Value)%net.IPv4len != 0 {
+			return fmt.Errorf("invalid SvcParam %s length: %d", svcParamName(p.Key), len(p.Value))
+		}
+	case SvcParamKeyIPv6Hint:
+		if len(p.Value) == 0 || len(p.Value)%net.IPv6len != 0 {
+			return fmt.Errorf("invalid SvcParam %s length: %d", svcParamName(p.Key), len(p.Value))
+		}
+	}
+	return nil
+}
+
+func validateSvcParams(params []SvcParam) error {
+	keys := make(map[uint16]struct{}, len(params))
+	mandatory := make([]uint16, 0)
+	var previousKey uint16
+	havePreviousKey := false
+	hasALPN := false
+	hasNoDefaultALPN := false
+
+	for _, p := range params {
+		if err := validateSvcParamOrder(p.Key, previousKey, havePreviousKey); err != nil {
+			return err
+		}
+		if len(p.Value) > maxSvcParamValueLen {
+			return fmt.Errorf("SvcParam value too long: %d bytes (max 65535)", len(p.Value))
+		}
+		if err := validateSvcParamValue(p); err != nil {
+			return err
+		}
+
+		keys[p.Key] = struct{}{}
+		if p.Key == SvcParamKeyALPN {
+			hasALPN = true
+		}
+		if p.Key == SvcParamKeyNoDefaultALPN {
+			hasNoDefaultALPN = true
+		}
+		if p.Key == SvcParamKeyMandatory {
+			mandatory = mandatoryKeys(p.Value)
+		}
+		previousKey = p.Key
+		havePreviousKey = true
+	}
+
+	if hasNoDefaultALPN && !hasALPN {
+		return fmt.Errorf("invalid SvcParams: no-default-alpn requires alpn")
+	}
+	for _, key := range mandatory {
+		if _, ok := keys[key]; !ok {
+			return fmt.Errorf("invalid SvcParams: mandatory key %s is missing", svcParamName(key))
+		}
+	}
+	return nil
+}
+
+func validateMandatoryValue(value []byte) error {
+	var previousKey uint16
+	havePreviousKey := false
+	for _, key := range mandatoryKeys(value) {
+		if key == SvcParamKeyMandatory {
+			return fmt.Errorf("must not include mandatory")
+		}
+		if err := validateSvcParamOrder(key, previousKey, havePreviousKey); err != nil {
+			return err
+		}
+		previousKey = key
+		havePreviousKey = true
+	}
+	return nil
+}
+
+func mandatoryKeys(value []byte) []uint16 {
+	keys := make([]uint16, 0, len(value)/2)
+	for i := 0; i+2 <= len(value); i += 2 {
+		keys = append(keys, Uint16(value[i:]))
+	}
+	return keys
+}
+
+func validateALPNValue(value []byte) error {
+	if len(value) == 0 {
+		return fmt.Errorf("empty protocol list")
+	}
+
+	offset := 0
+	for offset < len(value) {
+		protoLen := int(value[offset])
+		offset++
+		if protoLen == 0 {
+			return fmt.Errorf("empty protocol identifier")
+		}
+		if offset+protoLen > len(value) {
+			return fmt.Errorf("truncated protocol identifier")
+		}
+		offset += protoLen
+	}
+	return nil
+}
+
+func svcParamName(key uint16) string {
+	if name, ok := svcParamKeyToString[key]; ok {
+		return name
+	}
+	return fmt.Sprintf("key%d", key)
+}
+
 // svcParamKeyToString maps SvcParam keys to their string representation.
 var svcParamKeyToString = map[uint16]string{
 	SvcParamKeyMandatory:     "mandatory",
@@ -34,6 +171,18 @@ var svcParamKeyToString = map[uint16]string{
 	SvcParamKeyIPv6Hint:      "ipv6hint",
 	SvcParamKeyDOHPath:       "dohpath",
 }
+
+// svcParamKeysByName is the reverse of svcParamKeyToString. Together they form
+// the single source of truth for SvcParam name⇄number mappings: both
+// parseSvcParam and svcParamKeyFromString (rdata_text.go) consult this map, so
+// a new SvcParamKey only needs to be added to svcParamKeyToString above.
+var svcParamKeysByName = func() map[string]uint16 {
+	m := make(map[string]uint16, len(svcParamKeyToString))
+	for key, name := range svcParamKeyToString {
+		m[name] = key
+	}
+	return m
+}()
 
 // SvcParam represents a single SvcParam key-value pair in an SVCB/HTTPS record.
 type SvcParam struct {
@@ -54,6 +203,10 @@ func (r *RDataSVCB) Type() uint16 { return TypeSVCB }
 // Pack serializes the SVCB record to wire format.
 // Per RFC 9460 Section 2.2, the TargetName MUST NOT use name compression.
 func (r *RDataSVCB) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SVCB record")
+	}
+
 	startOffset := offset
 
 	// SvcPriority (2 bytes)
@@ -71,7 +224,11 @@ func (r *RDataSVCB) Pack(buf []byte, offset int) (int, error) {
 	offset += n
 
 	// SvcParams — must be in strictly increasing key order per RFC 9460
-	for _, p := range r.Params {
+	params := svcParamsForMode(r.Priority, r.Params)
+	if err := validateSvcParams(params); err != nil {
+		return 0, err
+	}
+	for _, p := range params {
 		// Key (2 bytes) + ValueLength (2 bytes) + Value
 		if offset+4+len(p.Value) > len(buf) {
 			return 0, ErrBufferTooSmall
@@ -89,6 +246,10 @@ func (r *RDataSVCB) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the SVCB record from wire format.
 func (r *RDataSVCB) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SVCB record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -108,11 +269,14 @@ func (r *RDataSVCB) Unpack(buf []byte, offset int, rdlength uint16) (int, error)
 	if err != nil {
 		return 0, err
 	}
+	if offset+n > endOffset {
+		return 0, ErrBufferTooSmall
+	}
 	r.Target = target
 	offset += n
 
 	// SvcParams — consume remaining bytes
-	r.Params = nil
+	params := make([]SvcParam, 0)
 	for offset < endOffset {
 		if offset+4 > endOffset {
 			return 0, ErrBufferTooSmall
@@ -129,14 +293,34 @@ func (r *RDataSVCB) Unpack(buf []byte, offset int, rdlength uint16) (int, error)
 		copy(value, buf[offset:offset+valueLen])
 		offset += valueLen
 
-		r.Params = append(r.Params, SvcParam{Key: key, Value: value})
+		params = append(params, SvcParam{Key: key, Value: value})
 	}
+	if r.Priority == 0 {
+		r.Params = nil
+		return offset - startOffset, nil
+	}
+
+	// Deliberately lenient: no validateSvcParams here. Per RFC 9460 §4.3 a
+	// recursive resolver/forwarder treats SvcParams as opaque data and passes
+	// them through verbatim; the RR-malformed rules (strictly increasing keys,
+	// no-default-alpn requires alpn, mandatory-key presence, per-key value
+	// shapes) apply to the consuming end client, which rejects the individual
+	// RR at RRSet level. Rejecting here would make one quirky SVCB/HTTPS
+	// record from an upstream fail the entire message (including valid A/AAAA
+	// answers) and falsely mark the upstream unhealthy. Only the structural
+	// wire-format bounds checks above are required to parse safely. Pack still
+	// validates: records WE emit must be well-formed.
+	r.Params = params
 
 	return offset - startOffset, nil
 }
 
 // String returns a human-readable representation of the SVCB record.
 func (r *RDataSVCB) String() string {
+	if r == nil {
+		return ""
+	}
+
 	target := "."
 	if r.Target != nil {
 		target = r.Target.String()
@@ -146,8 +330,13 @@ func (r *RDataSVCB) String() string {
 		return fmt.Sprintf("%d %s", r.Priority, target)
 	}
 
-	parts := make([]string, 0, len(r.Params))
-	for _, p := range r.Params {
+	params := svcParamsForMode(r.Priority, r.Params)
+	if len(params) == 0 {
+		return fmt.Sprintf("%d %s", r.Priority, target)
+	}
+
+	parts := make([]string, 0, len(params))
+	for _, p := range params {
 		parts = append(parts, formatSvcParam(p))
 	}
 	return fmt.Sprintf("%d %s %s", r.Priority, target, strings.Join(parts, " "))
@@ -155,20 +344,35 @@ func (r *RDataSVCB) String() string {
 
 // Len returns the wire length of the SVCB record.
 func (r *RDataSVCB) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	length := 2 // Priority
 	if r.Target == nil {
 		length++ // root label only
 	} else {
 		length += r.Target.WireLength()
 	}
-	for _, p := range r.Params {
+	for _, p := range svcParamsForMode(r.Priority, r.Params) {
 		length += 4 + len(p.Value) // key (2) + length (2) + value
 	}
 	return length
 }
 
+func svcParamsForMode(priority uint16, params []SvcParam) []SvcParam {
+	if priority == 0 {
+		return nil
+	}
+	return params
+}
+
 // Copy creates a deep copy of the SVCB record.
 func (r *RDataSVCB) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	var target *Name
 	if r.Target != nil {
 		target = NewName(r.Target.Labels, r.Target.FQDN)
@@ -199,12 +403,20 @@ func (r *RDataHTTPS) Type() uint16 { return TypeHTTPS }
 
 // Pack serializes the HTTPS record to wire format.
 func (r *RDataHTTPS) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil HTTPS record")
+	}
+
 	inner := &RDataSVCB{Priority: r.Priority, Target: r.Target, Params: r.Params}
 	return inner.Pack(buf, offset)
 }
 
 // Unpack deserializes the HTTPS record from wire format.
 func (r *RDataHTTPS) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil HTTPS record")
+	}
+
 	inner := &RDataSVCB{}
 	n, err := inner.Unpack(buf, offset, rdlength)
 	if err != nil {
@@ -218,18 +430,30 @@ func (r *RDataHTTPS) Unpack(buf []byte, offset int, rdlength uint16) (int, error
 
 // String returns a human-readable representation of the HTTPS record.
 func (r *RDataHTTPS) String() string {
+	if r == nil {
+		return ""
+	}
+
 	inner := &RDataSVCB{Priority: r.Priority, Target: r.Target, Params: r.Params}
 	return inner.String()
 }
 
 // Len returns the wire length of the HTTPS record.
 func (r *RDataHTTPS) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	inner := &RDataSVCB{Priority: r.Priority, Target: r.Target, Params: r.Params}
 	return inner.Len()
 }
 
 // Copy creates a deep copy of the HTTPS record.
 func (r *RDataHTTPS) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	var target *Name
 	if r.Target != nil {
 		target = NewName(r.Target.Labels, r.Target.FQDN)

@@ -399,6 +399,14 @@ func TestAnycastGroupGetHealthyBackends(t *testing.T) {
 	if len(healthy) != 2 {
 		t.Errorf("Expected 2 healthy backends, got %d", len(healthy))
 	}
+	healthy[0].PhysicalIP = "203.0.113.1"
+	healthy[0].healthy = false
+	if group.Backends[0].PhysicalIP == "203.0.113.1" {
+		t.Fatal("GetHealthyBackends returned internal backend pointer")
+	}
+	if !group.Backends[0].IsHealthy() {
+		t.Fatal("GetHealthyBackends mutation changed internal backend health")
+	}
 }
 
 func TestAnycastGroupGetActiveBackendWithIndexReset(t *testing.T) {

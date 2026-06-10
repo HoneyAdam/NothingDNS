@@ -60,6 +60,20 @@ func TestWithZonesMu(t *testing.T) {
 	}
 }
 
+func TestWithZonesMu_Nil(t *testing.T) {
+	s := NewAXFRServer(map[string]*zone.Zone{}, WithZonesMu(nil))
+
+	if s.zonesMu == nil {
+		t.Fatal("expected default zonesMu to be retained")
+	}
+
+	z := zone.NewZone("example.com.")
+	s.AddZone(z)
+	if got := s.zones["example.com."]; got != z {
+		t.Fatalf("AddZone after WithZonesMu(nil) stored %v, want zone", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SetZonesMu
 // ---------------------------------------------------------------------------
@@ -81,10 +95,17 @@ func TestSetZonesMu(t *testing.T) {
 
 func TestSetZonesMu_Nil(t *testing.T) {
 	s := NewAXFRServer(map[string]*zone.Zone{})
+	original := s.zonesMu
 	s.SetZonesMu(nil)
 
-	if s.zonesMu != nil {
-		t.Error("expected zonesMu to be nil after SetZonesMu(nil)")
+	if s.zonesMu != original {
+		t.Error("expected SetZonesMu(nil) to retain the existing mutex")
+	}
+
+	z := zone.NewZone("example.com.")
+	s.AddZone(z)
+	if got := s.zones["example.com."]; got != z {
+		t.Fatalf("AddZone after SetZonesMu(nil) stored %v, want zone", got)
 	}
 }
 

@@ -39,6 +39,9 @@ type LoadBalancer struct {
 	// Load balancing strategy
 	strategy Strategy
 
+	// Query timeout
+	timeout time.Duration
+
 	// Health check configuration
 	healthCheck     time.Duration
 	failoverTimeout time.Duration
@@ -91,7 +94,7 @@ func (cb *circuitBreaker) shouldAllow() bool {
 		return true
 	case cbOpen:
 		// Check if reset timeout has passed
-		if time.Since(cb.lastFailure) > cb.resetTimeout {
+		if circuitBreakerResetReachedAt(cb.lastFailure, time.Now(), cb.resetTimeout) {
 			cb.state = cbHalfOpen
 			return true
 		}
@@ -101,6 +104,10 @@ func (cb *circuitBreaker) shouldAllow() bool {
 	default:
 		return true
 	}
+}
+
+func circuitBreakerResetReachedAt(lastFailure, now time.Time, resetTimeout time.Duration) bool {
+	return !now.Before(lastFailure.Add(resetTimeout))
 }
 
 // recordSuccess resets the circuit breaker on successful request.
@@ -171,6 +178,9 @@ type LoadBalancerConfig struct {
 	// Load balancing strategy
 	Strategy string
 
+	// Query timeout
+	Timeout time.Duration
+
 	// Health check interval
 	HealthCheck time.Duration
 
@@ -223,6 +233,7 @@ func NewLoadBalancer(config LoadBalancerConfig) (*LoadBalancer, error) {
 		anycastGroups:   make(map[string]*AnycastGroup),
 		servers:         make([]*Server, 0),
 		strategy:        StrategyFromString(config.Strategy),
+		timeout:         config.Timeout,
 		healthCheck:     config.HealthCheck,
 		failoverTimeout: config.FailoverTimeout,
 		udpPool:         make(map[string]*sync.Pool),
@@ -235,16 +246,29 @@ func NewLoadBalancer(config LoadBalancerConfig) (*LoadBalancer, error) {
 	}
 
 	// Set defaults
-	if lb.healthCheck == 0 {
+	if lb.timeout <= 0 {
+		lb.timeout = 5 * time.Second
+	}
+	if lb.healthCheck <= 0 {
 		lb.healthCheck = 30 * time.Second
 	}
-	if lb.failoverTimeout == 0 {
+	if lb.failoverTimeout <= 0 {
 		lb.failoverTimeout = 5 * time.Second
 	}
 
 	// Initialize anycast groups
 	for _, groupConfig := range config.AnycastGroups {
-		group := NewAnycastGroup(groupConfig.AnycastIP, lb.healthCheck, lb.failoverTimeout)
+		groupHealthCheck := lb.healthCheck
+		if groupConfig.HealthCheck != "" {
+			parsed, err := time.ParseDuration(groupConfig.HealthCheck)
+			if err != nil {
+				return nil, fmt.Errorf("invalid health check duration for anycast group %s: %w", groupConfig.AnycastIP, err)
+			}
+			if parsed > 0 {
+				groupHealthCheck = parsed
+			}
+		}
+		group := NewAnycastGroup(groupConfig.AnycastIP, groupHealthCheck, lb.failoverTimeout)
 
 		for _, backendConfig := range groupConfig.Backends {
 			backend := &AnycastBackend{
@@ -267,7 +291,7 @@ func NewLoadBalancer(config LoadBalancerConfig) (*LoadBalancer, error) {
 		server := &Server{
 			Address:     addr,
 			Network:     "udp",
-			Timeout:     5 * time.Second,
+			Timeout:     lb.timeout,
 			healthy:     true,
 			HealthCheck: lb.healthCheck,
 		}
@@ -302,6 +326,13 @@ func (lb *LoadBalancer) Close() error {
 		lb.wg.Wait()
 	}
 	return nil
+}
+
+func (lb *LoadBalancer) queryTimeout() time.Duration {
+	if lb.timeout <= 0 {
+		return 5 * time.Second
+	}
+	return lb.timeout
 }
 
 // Query forwards a DNS query using load balancing.
@@ -660,18 +691,19 @@ func (lb *LoadBalancer) queryUDP(address string, msg *protocol.Message) (*protoc
 	}
 	packed := buf[:n]
 
-	conn, err := net.DialTimeout("udp", address, 5*time.Second)
+	timeout := lb.queryTimeout()
+	conn, err := net.DialTimeout("udp", address, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial udp: %w", err)
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, fmt.Errorf("set deadline: %w", err)
 	}
 
 	start := time.Now()
-	if _, err := conn.Write(packed); err != nil {
+	if _, err := writePacket(conn, packed); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
@@ -750,13 +782,14 @@ func (lb *LoadBalancer) queryTCP(address string, msg *protocol.Message) (*protoc
 	}
 	packed := buf[:n]
 
-	conn, err := net.DialTimeout("tcp", address, 5*time.Second)
+	timeout := lb.queryTimeout()
+	conn, err := net.DialTimeout("tcp", address, timeout)
 	if err != nil {
 		return nil, fmt.Errorf("dial tcp: %w", err)
 	}
 	defer conn.Close()
 
-	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, fmt.Errorf("set deadline: %w", err)
 	}
 
@@ -765,12 +798,12 @@ func (lb *LoadBalancer) queryTCP(address string, msg *protocol.Message) (*protoc
 	}
 	length := uint16(len(packed))
 	lengthBuf := []byte{byte(length >> 8), byte(length)}
-	if _, err := conn.Write(lengthBuf); err != nil {
+	if err := util.WriteFull(conn, lengthBuf); err != nil {
 		return nil, fmt.Errorf("send length: %w", err)
 	}
 
 	start := time.Now()
-	if _, err := conn.Write(packed); err != nil {
+	if err := util.WriteFull(conn, packed); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
@@ -864,9 +897,10 @@ func (lb *LoadBalancer) checkHealth() {
 				util.Warnf("health check UDP failed for %s: %v, trying TCP", s.Address, err)
 				if _, tcpErr := lb.queryTCP(s.Address, query); tcpErr != nil {
 					util.Debugf("health check TCP failed for %s: %v", s.Address, tcpErr)
+					s.markFailure()
 				}
 			}
-			// queryUDP/TCP already mark success/failure
+			// queryUDP/queryTCP mark success on successful probes.
 		}(server)
 	}
 
@@ -936,7 +970,7 @@ func (lb *LoadBalancer) GetAnycastGroups() map[string]*AnycastGroup {
 
 	result := make(map[string]*AnycastGroup)
 	for k, v := range lb.anycastGroups {
-		result[k] = v
+		result[k] = v.snapshot()
 	}
 	return result
 }

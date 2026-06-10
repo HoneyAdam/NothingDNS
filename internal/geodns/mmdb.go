@@ -347,6 +347,9 @@ func mmdbParseMetadata(data []byte) (nodeCount uint32, recordSize uint32, ipVers
 	if !ok {
 		return 0, 0, 0, 0, nil, &mmdbDecodeError{"metadata.node_count missing or wrong type"}
 	}
+	if nc > uint64(^uint32(0)) {
+		return 0, 0, 0, 0, nil, fmt.Errorf("geodns/mmdb: node_count too large %d", nc)
+	}
 	rs, ok := m["record_size"].(uint64)
 	if !ok {
 		return 0, 0, 0, 0, nil, &mmdbDecodeError{"metadata.record_size missing or wrong type"}
@@ -369,12 +372,13 @@ func mmdbParseMetadata(data []byte) (nodeCount uint32, recordSize uint32, ipVers
 // node. record_size is 24/28/32. The two records of one node share bits
 // when record_size == 28.
 func mmdbReadRecord(data []byte, nodeIdx uint32, recordSize uint32, isRight bool) (uint32, error) {
-	nodeByteSize := (recordSize * 2) / 8
-	nodeStart := nodeIdx * nodeByteSize
-	if int(nodeStart)+int(nodeByteSize) > len(data) {
+	nodeByteSize := uint64(recordSize*2) / 8
+	nodeStart := uint64(nodeIdx) * nodeByteSize
+	nodeEnd := nodeStart + nodeByteSize
+	if nodeEnd < nodeStart || nodeEnd > uint64(len(data)) {
 		return 0, &mmdbDecodeError{"tree node past end of file"}
 	}
-	node := data[nodeStart : nodeStart+nodeByteSize]
+	node := data[int(nodeStart):int(nodeEnd)]
 
 	switch recordSize {
 	case 24:
@@ -435,8 +439,12 @@ func mmdbLookup(data []byte, nodeCount, recordSize uint32, ip net.IP, ipBits int
 			return 0, false, nil
 		}
 		if rec > nodeCount {
-			treeBytes := nodeCount * (recordSize * 2) / 8
-			return treeBytes + (rec - nodeCount), true, nil
+			treeBytes := uint64(nodeCount) * uint64(recordSize*2) / 8
+			dataOffset := treeBytes + uint64(rec-nodeCount)
+			if dataOffset > uint64(^uint32(0)) {
+				return 0, false, &mmdbDecodeError{"data offset exceeds uint32"}
+			}
+			return uint32(dataOffset), true, nil
 		}
 		// Descend into next node.
 		nodeIdx = rec

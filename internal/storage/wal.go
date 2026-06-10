@@ -96,12 +96,27 @@ func DefaultWALOptions() WALOptions {
 	}
 }
 
+func normalizeWALOptions(opts WALOptions) WALOptions {
+	defaults := DefaultWALOptions()
+	if opts.MaxSegmentSize <= WALHeaderSize {
+		opts.MaxSegmentSize = defaults.MaxSegmentSize
+	}
+	if opts.SyncInterval <= 0 {
+		opts.SyncInterval = defaults.SyncInterval
+	}
+	if opts.PreallocateSize < 0 {
+		opts.PreallocateSize = 0
+	}
+	return opts
+}
+
 // OpenWAL opens or creates a WAL in the specified directory
 func OpenWAL(dir string, opts WALOptions) (*WAL, error) {
 	// Create directory if it doesn't exist
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create directory: %w", err)
 	}
+	opts = normalizeWALOptions(opts)
 
 	wal := &WAL{
 		dir:      dir,
@@ -216,6 +231,9 @@ func (wal *WAL) loadSegments() error {
 	var segments []segmentInfo
 
 	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
 		name := entry.Name()
 		if !strings.HasPrefix(name, WALFilePrefix) || !strings.HasSuffix(name, WALFileSuffix) {
 			continue
@@ -349,17 +367,11 @@ func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 		return 0, fmt.Errorf("encode entry: %w", err)
 	}
 
-	// Write to active segment. Use file.WriteAt-style retry: if Write
-	// returns a short count (rare but possible on some filesystems or
-	// when the OS interrupts mid-syscall), advancing only `n` would
-	// leave a torn entry at the current offset and corrupt every
-	// subsequent Append. Truncate the segment back to its pre-Append
-	// size on error so recovery sees a clean log.
-	n, err := wal.active.file.Write(buf)
-	if err != nil || n != len(buf) {
-		if err == nil {
-			err = io.ErrShortWrite
-		}
+	// Write the full entry before advancing the segment size. If the
+	// writer makes no progress or returns an error after a partial write,
+	// truncate back to the pre-Append size so recovery sees a clean log.
+	n, err := writeWALBuffer(wal.active.file, buf)
+	if err != nil {
 		if rollbackErr := wal.rollbackActiveAppend(wal.active.size); rollbackErr != nil {
 			return 0, fmt.Errorf("write entry: %w; rollback failed: %w", err, rollbackErr)
 		}
@@ -430,12 +442,9 @@ func (wal *WAL) appendLocked(entryType byte, data []byte) (uint64, error) {
 		return 0, fmt.Errorf("encode entry: %w", err)
 	}
 
-	n, err := wal.active.file.Write(buf)
-	if err != nil || n != len(buf) {
+	n, err := writeWALBuffer(wal.active.file, buf)
+	if err != nil {
 		// Same torn-write rollback as Append — see comment there.
-		if err == nil {
-			err = io.ErrShortWrite
-		}
 		if rollbackErr := wal.rollbackActiveAppend(wal.active.size); rollbackErr != nil {
 			return 0, fmt.Errorf("write entry: %w; rollback failed: %w", err, rollbackErr)
 		}
@@ -446,6 +455,21 @@ func (wal *WAL) appendLocked(entryType byte, data []byte) (uint64, error) {
 	wal.syncPending = true
 
 	return uint64(wal.active.size), nil
+}
+
+func writeWALBuffer(w io.Writer, data []byte) (int, error) {
+	total := 0
+	for total < len(data) {
+		n, err := w.Write(data[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 func (wal *WAL) rollbackActiveAppend(size int64) error {
@@ -757,19 +781,25 @@ func (wal *WAL) Close() error {
 
 	wal.mu.Lock()
 	// Final sync
+	var closeErr error
 	if wal.syncPending {
-		_ = wal.syncLocked()
+		if err := wal.syncLocked(); err != nil {
+			closeErr = fmt.Errorf("final sync: %w", err)
+		}
 	}
 
 	// Close all segments
 	for _, seg := range wal.segments {
 		if seg.file != nil {
-			seg.file.Close()
+			if err := seg.file.Close(); err != nil && closeErr == nil {
+				closeErr = fmt.Errorf("close segment %d: %w", seg.ID, err)
+			}
+			seg.file = nil
 		}
 	}
 	wal.mu.Unlock()
 
-	return nil
+	return closeErr
 }
 
 // Stats returns WAL statistics
@@ -827,26 +857,29 @@ func (wal *WAL) NewReader() *WALReader {
 // on; any multi-entry stream returned garbage from the second
 // Next() onward.
 //
-// Use bytes.Buffer.Next(length), which reads and advances past
-// `length` bytes from the front — exactly what we want after the
-// header+payload was decoded.
+// Keep the header in the buffer until the full payload is available.
+// Otherwise a large entry that spans multiple file reads loses its
+// header before the payload arrives, and the next loop interprets
+// payload bytes as a fresh header.
 func (r *WALReader) Next() (*WALEntry, error) {
 	for {
 		// Try to read from current buffer
 		if r.buf.Len() >= WALHeaderSize {
-			header := make([]byte, WALHeaderSize)
-			if _, err := io.ReadFull(r.buf, header); err != nil {
-				return nil, err
-			}
-
+			header := r.buf.Bytes()[:WALHeaderSize]
 			length := binary.BigEndian.Uint32(header[5:9])
-			if r.buf.Len() >= int(length) {
-				entry, err := r.wal.decodeEntry(append(header, r.buf.Bytes()[:length]...))
+			if int64(length) > MaxSegmentSize {
+				return nil, ErrCorruptEntry
+			}
+			entrySize := WALHeaderSize + int(length)
+			if r.buf.Len() >= entrySize {
+				entryBuf := make([]byte, entrySize)
+				copy(entryBuf, r.buf.Bytes()[:entrySize])
+				entry, err := r.wal.decodeEntry(entryBuf)
 				if err != nil {
 					return nil, err
 				}
-				// Advance past the payload bytes we just decoded.
-				r.buf.Next(int(length))
+				// Advance past the complete entry we just decoded.
+				r.buf.Next(entrySize)
 				return entry, nil
 			}
 		}

@@ -58,7 +58,8 @@ const (
 	// maxKVPayload caps untrusted on-disk TLV payload length before
 	// allocation. M-1 / L-N1. Package-level so both readTLV and
 	// readEncryptedTLV can reference it.
-	maxKVPayload = 64 << 20 // 64 MiB
+	maxKVPayload     = 64 << 20 // 64 MiB
+	maxLegacyGOBFile = 1 << 20  // 1 MiB
 )
 
 // Store errors
@@ -347,8 +348,16 @@ func (s *KVStore) readTLV(r io.Reader) error {
 // destination type is pinned to the known struct at compile time. We add a post-decode
 // sanity check to catch malformed data.
 func (s *KVStore) readGOB(f *os.File) error {
-	// Limit reader to prevent memory exhaustion from large GOB streams
-	lr := io.LimitReader(f, 1<<20) // 1MB max
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("gob stat: %w", err)
+	}
+	if info.Size() > maxLegacyGOBFile {
+		return fmt.Errorf("gob file %d exceeds max %d", info.Size(), maxLegacyGOBFile)
+	}
+
+	// Limit reader to prevent memory exhaustion from large GOB streams.
+	lr := io.LimitReader(f, maxLegacyGOBFile)
 	if err := gob.NewDecoder(lr).Decode(&s.root); err != nil {
 		return fmt.Errorf("gob decode: %w", err)
 	}
@@ -484,12 +493,10 @@ func (s *KVStore) writeTLV(w io.Writer) error {
 		out = append(out, aad[1:3]...) // version
 		out = append(out, nonce...)
 		out = append(out, ct...)
-		_, err = w.Write(out)
-		return err
+		return util.WriteFull(w, out)
 	}
 
-	_, err = w.Write(frame)
-	return err
+	return util.WriteFull(w, frame)
 }
 
 // readEncryptedTLV decrypts an AES-GCM-wrapped TLV frame and feeds
@@ -660,15 +667,15 @@ func (s *KVStore) Close() error {
 	if s.closed {
 		return nil
 	}
-	s.closed = true
-
-	s.rwtx = nil
-	for _, tx := range s.txs {
-		tx.closed = true
-	}
 
 	if err := s.save(); err != nil {
 		return err
+	}
+
+	s.closed = true
+	s.rwtx = nil
+	for _, tx := range s.txs {
+		tx.closed = true
 	}
 
 	// L-N3: best-effort key zeroize. Go GC means full eradication is
@@ -691,7 +698,26 @@ func (s *KVStore) Close() error {
 func (s *KVStore) Stats() StoreStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.stats
+	bucketCount, keyCount := countBucketData(s.root)
+	return StoreStats{
+		TxCount:     atomic.LoadInt64(&s.stats.TxCount),
+		OpenTxCount: atomic.LoadInt64(&s.stats.OpenTxCount),
+		BucketCount: bucketCount,
+		KeyCount:    keyCount,
+	}
+}
+
+func countBucketData(data *bucketData) (bucketCount, keyCount int64) {
+	if data == nil {
+		return 0, 0
+	}
+	keyCount += int64(len(data.Entries))
+	for _, child := range data.Buckets {
+		childBuckets, childKeys := countBucketData(child)
+		bucketCount += 1 + childBuckets
+		keyCount += childKeys
+	}
+	return bucketCount, keyCount
 }
 
 // Path returns the database path
@@ -740,13 +766,15 @@ func (tx *Tx) Commit() error {
 	tx.store.rwtx = nil
 	tx.closed = true
 	tx.store.removeTx(tx)
-
-	for _, fn := range tx.commitHandlers {
-		fn()
-	}
+	commitHandlers := append([]func(){}, tx.commitHandlers...)
 
 	atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
 	tx.store.mu.Unlock()
+
+	for _, fn := range commitHandlers {
+		fn()
+	}
+
 	return nil
 }
 

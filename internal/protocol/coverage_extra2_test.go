@@ -364,6 +364,23 @@ func TestRDataNAPTRUnpackRegexpDataTooShort(t *testing.T) {
 	}
 }
 
+func TestRDataNAPTRUnpackRejectsRegexpPastRDLength(t *testing.T) {
+	buf := []byte{
+		0x00, 0x01, // Order
+		0x00, 0x01, // Preference
+		0x01, 'U', // Flags
+		0x01, 'S', // Service
+		0x03, 'a', // Regexp length=3, but rdlength only includes 1 byte of data
+		'b', 'c', // Bytes after RDLENGTH must not be consumed
+		0x00, // Replacement root
+	}
+	r := &RDataNAPTR{}
+	_, err := r.Unpack(buf, 0, 10)
+	if err == nil {
+		t.Fatal("NAPTR.Unpack should reject regexp data that extends past RDLENGTH")
+	}
+}
+
 // ============================================================================
 // types.go RDataNAPTR.Unpack (91.7%) - replacement name error
 // ============================================================================
@@ -381,6 +398,23 @@ func TestRDataNAPTRUnpackReplacementError(t *testing.T) {
 	_, err := r.Unpack(buf, 0, 14)
 	if err == nil {
 		t.Error("NAPTR.Unpack should fail when replacement name is invalid")
+	}
+}
+
+func TestRDataNAPTRUnpackRejectsTrailingRData(t *testing.T) {
+	buf := []byte{
+		0x00, 0x01, // Order
+		0x00, 0x01, // Preference
+		0x01, 'U', // Flags
+		0x01, 'S', // Service
+		0x00, // Empty Regexp
+		0x00, // Replacement root
+		0xAA, // Trailing byte inside RDLENGTH
+	}
+	r := &RDataNAPTR{}
+	_, err := r.Unpack(buf, 0, uint16(len(buf)))
+	if err == nil {
+		t.Fatal("NAPTR.Unpack should reject trailing bytes after replacement")
 	}
 }
 
@@ -792,6 +826,48 @@ func TestMessagePackBufferSmallerThanWireLength(t *testing.T) {
 	_, err := msg.Pack(buf)
 	if err == nil {
 		t.Error("Pack should fail when buffer smaller than WireLength")
+	}
+}
+
+func TestMessagePackRejectsSectionCountOverflow(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Message)
+	}{
+		{
+			name: "questions",
+			setup: func(msg *Message) {
+				msg.Questions = make([]*Question, 0x10000)
+			},
+		},
+		{
+			name: "answers",
+			setup: func(msg *Message) {
+				msg.Answers = make([]*ResourceRecord, 0x10000)
+			},
+		},
+		{
+			name: "authorities",
+			setup: func(msg *Message) {
+				msg.Authorities = make([]*ResourceRecord, 0x10000)
+			},
+		},
+		{
+			name: "additionals",
+			setup: func(msg *Message) {
+				msg.Additionals = make([]*ResourceRecord, 0x10000)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := NewMessage(Header{ID: 0x1234, Flags: NewQueryFlags()})
+			tt.setup(msg)
+			if _, err := msg.Pack(make([]byte, HeaderLen)); err == nil {
+				t.Fatal("Pack should reject section counts that overflow DNS header uint16 fields")
+			}
+		})
 	}
 }
 
@@ -1287,6 +1363,59 @@ func TestUnpackResourceRecordCNAMEUnpackError(t *testing.T) {
 	_, _, err := UnpackResourceRecord(buf, 0)
 	if err == nil {
 		t.Error("UnpackResourceRecord should fail when CNAME rdata has truncated name")
+	}
+}
+
+func TestUnpackResourceRecordRejectsRDataShortRead(t *testing.T) {
+	name := []byte{0x03, 'f', 'o', 'o', 0x03, 'c', 'o', 'm', 0x00}
+	fixedFields := make([]byte, 10)
+	PutUint16(fixedFields[0:], TypeCNAME)
+	PutUint16(fixedFields[2:], ClassIN)
+	PutUint32(fixedFields[4:], 300)
+	PutUint16(fixedFields[8:], 2)
+
+	// CNAME RDATA is the root name (one zero byte) plus one extra byte.
+	// The name unpacker consumes only the root-name byte; accepting that
+	// short read would desynchronize the next resource record boundary.
+	rdata := []byte{0x00, 0xAA}
+
+	buf := append(name, fixedFields...)
+	buf = append(buf, rdata...)
+
+	_, _, err := UnpackResourceRecord(buf, 0)
+	if err == nil {
+		t.Fatal("UnpackResourceRecord should reject RDATA that consumes less than RDLENGTH")
+	}
+}
+
+func TestUnpackResourceRecordUnknownTypeUsesRawData(t *testing.T) {
+	name := []byte{0x03, 'f', 'o', 'o', 0x03, 'c', 'o', 'm', 0x00}
+	rdata := []byte{0xde, 0xad, 0xbe, 0xef}
+	fixedFields := make([]byte, 10)
+	PutUint16(fixedFields[0:], 65280)
+	PutUint16(fixedFields[2:], ClassIN)
+	PutUint32(fixedFields[4:], 300)
+	PutUint16(fixedFields[8:], uint16(len(rdata)))
+
+	buf := append(name, fixedFields...)
+	buf = append(buf, rdata...)
+
+	rr, n, err := UnpackResourceRecord(buf, 0)
+	if err != nil {
+		t.Fatalf("UnpackResourceRecord() error = %v", err)
+	}
+	if n != len(buf) {
+		t.Fatalf("consumed = %d, want %d", n, len(buf))
+	}
+	raw, ok := rr.Data.(*RDataRaw)
+	if !ok {
+		t.Fatalf("Data type = %T, want *RDataRaw", rr.Data)
+	}
+	if raw.TypeVal != 65280 {
+		t.Fatalf("raw TypeVal = %d, want 65280", raw.TypeVal)
+	}
+	if string(raw.Data) != string(rdata) {
+		t.Fatalf("raw Data = %x, want %x", raw.Data, rdata)
 	}
 }
 

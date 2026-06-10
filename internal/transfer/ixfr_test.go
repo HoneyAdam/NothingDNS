@@ -32,6 +32,20 @@ func TestNewIXFRServer(t *testing.T) {
 	}
 }
 
+func TestNewIXFRServer_NilAXFRServer(t *testing.T) {
+	server := NewIXFRServer(nil)
+
+	if server == nil {
+		t.Fatal("NewIXFRServer(nil) returned nil")
+	}
+	if server.axfrServer == nil {
+		t.Fatal("NewIXFRServer(nil) left axfrServer nil")
+	}
+	if server.zones == nil {
+		t.Fatal("NewIXFRServer(nil) left zones nil")
+	}
+}
+
 func TestIXFRServer_SetMaxJournalSize(t *testing.T) {
 	axfrServer := NewAXFRServer(make(map[string]*zone.Zone), WithAllowList([]string{"127.0.0.0/8"}))
 	server := NewIXFRServer(axfrServer)
@@ -40,6 +54,36 @@ func TestIXFRServer_SetMaxJournalSize(t *testing.T) {
 
 	if server.maxJournalSize != 50 {
 		t.Errorf("Expected maxJournalSize 50, got %d", server.maxJournalSize)
+	}
+}
+
+func TestIXFRServer_SetMaxJournalSize_InvalidIgnored(t *testing.T) {
+	server := NewIXFRServer(NewAXFRServer(nil, WithAllowList([]string{"127.0.0.0/8"})))
+
+	server.SetMaxJournalSize(5)
+	server.SetMaxJournalSize(0)
+	server.SetMaxJournalSize(-1)
+
+	if server.maxJournalSize != 5 {
+		t.Fatalf("maxJournalSize = %d, want 5 after invalid sizes are ignored", server.maxJournalSize)
+	}
+
+	server.RecordChange("example.com.", 1, 2, nil, nil)
+	if len(server.journals["example.com."]) != 1 {
+		t.Fatalf("journal length = %d, want 1", len(server.journals["example.com."]))
+	}
+}
+
+func TestIXFRServer_RecordChange_ZeroValueServer(t *testing.T) {
+	var server IXFRServer
+
+	server.RecordChange("example.com.", 1, 2, nil, nil)
+
+	if server.maxJournalSize != 100 {
+		t.Fatalf("maxJournalSize = %d, want default 100", server.maxJournalSize)
+	}
+	if len(server.journals["example.com."]) != 1 {
+		t.Fatalf("journal length = %d, want 1", len(server.journals["example.com."]))
 	}
 }
 
@@ -127,6 +171,19 @@ func TestIXFRServer_extractClientSerial(t *testing.T) {
 	if serial2 != 0 {
 		t.Errorf("Expected serial 0 for request without SOA, got %d", serial2)
 	}
+
+	req3 := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{nil, soaRR},
+	}
+	serial3 := server.extractClientSerial(req3)
+	if serial3 != 2024010101 {
+		t.Errorf("Expected serial 2024010101 with nil authority skipped, got %d", serial3)
+	}
+
+	serial4 := server.extractClientSerial(nil)
+	if serial4 != 0 {
+		t.Errorf("Expected serial 0 for nil request, got %d", serial4)
+	}
 }
 
 func TestIXFRServer_generateSingleSOA(t *testing.T) {
@@ -211,7 +268,7 @@ func TestIXFRServer_changeToRR(t *testing.T) {
 		RData: "192.0.2.1",
 	}
 
-	rr, err := server.changeToRR(change, "example.com.")
+	rr, err := server.changeToRR(change)
 	if err != nil {
 		t.Fatalf("changeToRR() error = %v", err)
 	}
@@ -445,6 +502,77 @@ func TestIXFRServer_HandleIXFR_NoZone(t *testing.T) {
 
 	if err == nil {
 		t.Error("Expected error for non-existent zone")
+	}
+}
+
+func TestIXFRServer_HandleIXFR_InvalidRequest(t *testing.T) {
+	server := NewIXFRServer(NewAXFRServer(nil, WithAllowList([]string{"127.0.0.0/8"})))
+	clientIP := net.ParseIP("127.0.0.1")
+
+	tests := []struct {
+		name string
+		req  *protocol.Message
+		want string
+	}{
+		{
+			name: "nil request",
+			req:  nil,
+			want: "IXFR request is nil",
+		},
+		{
+			name: "nil question",
+			req: &protocol.Message{
+				Questions: []*protocol.Question{nil},
+			},
+			want: "IXFR question is invalid",
+		},
+		{
+			name: "nil question name",
+			req: &protocol.Message{
+				Questions: []*protocol.Question{
+					{
+						QType:  protocol.TypeIXFR,
+						QClass: protocol.ClassIN,
+					},
+				},
+			},
+			want: "IXFR question is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := server.HandleIXFR(tt.req, clientIP)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("HandleIXFR() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestIXFRServer_HandleIXFR_NilZone(t *testing.T) {
+	zones := map[string]*zone.Zone{"example.com.": nil}
+	axfrServer := NewAXFRServer(zones, WithAllowList([]string{"127.0.0.0/8"}))
+	server := NewIXFRServer(axfrServer)
+
+	name, _ := protocol.ParseName("example.com.")
+	req := &protocol.Message{
+		Header: protocol.Header{
+			ID:      1234,
+			QDCount: 1,
+		},
+		Questions: []*protocol.Question{
+			{
+				Name:   name,
+				QType:  protocol.TypeIXFR,
+				QClass: protocol.ClassIN,
+			},
+		},
+	}
+
+	_, err := server.HandleIXFR(req, net.ParseIP("127.0.0.1"))
+	if err == nil || !strings.Contains(err.Error(), "zone is nil") {
+		t.Fatalf("HandleIXFR() error = %v, want zone is nil", err)
 	}
 }
 
@@ -721,6 +849,26 @@ func TestIXFRServer_generateIncrementalIXFR_NoJournal(t *testing.T) {
 	}
 }
 
+func TestIXFRServer_generateIncrementalIXFR_NilJournalEntry(t *testing.T) {
+	axfrServer := NewAXFRServer(make(map[string]*zone.Zone), WithAllowList([]string{"127.0.0.0/8"}))
+	server := NewIXFRServer(axfrServer)
+
+	z := zone.NewZone("example.com.")
+	z.SOA = &zone.SOARecord{
+		MName:   "ns1.example.com.",
+		RName:   "admin.example.com.",
+		Serial:  2024010103,
+		Refresh: 3600,
+	}
+
+	server.journals["example.com."] = []*IXFRJournalEntry{nil}
+
+	_, err := server.generateIncrementalIXFR(z, 2024010101)
+	if err == nil || !strings.Contains(err.Error(), "journal entry 0 is nil") {
+		t.Fatalf("generateIncrementalIXFR() error = %v, want journal entry 0 is nil", err)
+	}
+}
+
 func TestIXFRServer_generateIncrementalIXFR_SerialNotInRange(t *testing.T) {
 	axfrServer := NewAXFRServer(make(map[string]*zone.Zone), WithAllowList([]string{"127.0.0.0/8"}))
 	server := NewIXFRServer(axfrServer)
@@ -793,7 +941,7 @@ func TestIXFRServer_changeToRR_InvalidRData(t *testing.T) {
 		RData: "invalid-ip-address", // Invalid IP
 	}
 
-	_, err := server.changeToRR(change, "example.com.")
+	_, err := server.changeToRR(change)
 	if err == nil {
 		t.Error("Expected error for invalid RData")
 	}

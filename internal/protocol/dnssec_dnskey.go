@@ -131,6 +131,10 @@ func (r *RDataDNSKEY) Type() uint16 { return TypeDNSKEY }
 
 // Pack serializes the DNSKEY record to wire format.
 func (r *RDataDNSKEY) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil DNSKEY record")
+	}
+
 	startOffset := offset
 
 	// Flags (2 bytes)
@@ -167,6 +171,10 @@ func (r *RDataDNSKEY) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the DNSKEY record from wire format.
 func (r *RDataDNSKEY) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil DNSKEY record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -202,16 +210,28 @@ func (r *RDataDNSKEY) Unpack(buf []byte, offset int, rdlength uint16) (int, erro
 
 // String returns the DNSKEY record in presentation format.
 func (r *RDataDNSKEY) String() string {
+	if r == nil {
+		return ""
+	}
+
 	return fmt.Sprintf("%d %d %d %s", r.Flags, r.Protocol, r.Algorithm, base64Encode(r.PublicKey))
 }
 
 // Len returns the wire length of the DNSKEY record.
 func (r *RDataDNSKEY) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	return 4 + len(r.PublicKey)
 }
 
 // Copy creates a deep copy of the DNSKEY record.
 func (r *RDataDNSKEY) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	keyCopy := make([]byte, len(r.PublicKey))
 	copy(keyCopy, r.PublicKey)
 	return &RDataDNSKEY{
@@ -224,33 +244,57 @@ func (r *RDataDNSKEY) Copy() RData {
 
 // IsZoneKey returns true if this is a zone key (Zone flag set).
 func (r *RDataDNSKEY) IsZoneKey() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.Flags&DNSKEYFlagZone != 0
 }
 
 // IsSEP returns true if this is a Secure Entry Point (SEP flag set).
 // SEP keys are typically KSKs (Key Signing Keys).
 func (r *RDataDNSKEY) IsSEP() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.Flags&DNSKEYFlagSEP != 0
 }
 
 // IsKSK returns true if this is a Key Signing Key (Zone + SEP flags set).
 func (r *RDataDNSKEY) IsKSK() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.IsZoneKey() && r.IsSEP()
 }
 
 // IsZSK returns true if this is a Zone Signing Key (Zone flag set, SEP not set).
 func (r *RDataDNSKEY) IsZSK() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.IsZoneKey() && !r.IsSEP()
 }
 
 // IsRevoked returns true if the key has been revoked.
 func (r *RDataDNSKEY) IsRevoked() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.Flags&DNSKEYFlagRevoke != 0
 }
 
 // CalculateKeyTag computes the key tag (key identifier) for this DNSKEY.
 // This is used in RRSIG and DS records to identify which key signed the data.
 func (r *RDataDNSKEY) CalculateKeyTag() uint16 {
+	if r == nil {
+		return 0
+	}
+
 	return CalculateKeyTag(r.Flags, r.Algorithm, r.PublicKey)
 }
 

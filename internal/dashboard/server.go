@@ -85,6 +85,10 @@ type DashboardStats struct {
 
 // GetRecentQueries returns a paginated copy of recent queries.
 func (ds *DashboardStats) GetRecentQueries(offset, limit int) ([]*QueryEvent, int) {
+	if offset < 0 || limit <= 0 {
+		return nil, 0
+	}
+
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 
@@ -99,9 +103,22 @@ func (ds *DashboardStats) GetRecentQueries(offset, limit int) ([]*QueryEvent, in
 	if offset >= total {
 		return nil, 0
 	}
-	queries := make([]*QueryEvent, end-offset)
-	copy(queries, ds.RecentQueries[offset:end])
-	return queries, total
+	return cloneQueryEvents(ds.RecentQueries[offset:end]), total
+}
+
+func cloneQueryEvents(events []*QueryEvent) []*QueryEvent {
+	if len(events) == 0 {
+		return nil
+	}
+	clones := make([]*QueryEvent, len(events))
+	for i, event := range events {
+		if event == nil {
+			continue
+		}
+		eventCopy := *event
+		clones[i] = &eventCopy
+	}
+	return clones
 }
 
 // GetRecentQueriesFiltered returns recent queries whose domain contains the
@@ -113,6 +130,9 @@ func (ds *DashboardStats) GetRecentQueries(offset, limit int) ([]*QueryEvent, in
 func (ds *DashboardStats) GetRecentQueriesFiltered(offset, limit int, filter string) ([]*QueryEvent, int) {
 	if filter == "" {
 		return ds.GetRecentQueries(offset, limit)
+	}
+	if offset < 0 || limit <= 0 {
+		return nil, 0
 	}
 
 	ds.mu.RLock()
@@ -134,9 +154,7 @@ func (ds *DashboardStats) GetRecentQueriesFiltered(offset, limit int, filter str
 	if end > total {
 		end = total
 	}
-	page := make([]*QueryEvent, end-offset)
-	copy(page, matched[offset:end])
-	return page, total
+	return cloneQueryEvents(matched[offset:end]), total
 }
 
 // TopDomainsEntry represents a domain with its query count.
@@ -147,6 +165,10 @@ type TopDomainsEntry struct {
 
 // GetTopDomains returns the top N most-queried domains.
 func (ds *DashboardStats) GetTopDomains(limit int) []TopDomainsEntry {
+	if limit <= 0 {
+		return nil
+	}
+
 	ds.mu.RLock()
 	defer ds.mu.RUnlock()
 
@@ -156,7 +178,13 @@ func (ds *DashboardStats) GetTopDomains(limit int) []TopDomainsEntry {
 
 	countByDomain := make(map[string]int)
 	for _, q := range ds.RecentQueries {
+		if q == nil {
+			continue
+		}
 		countByDomain[q.Domain]++
+	}
+	if len(countByDomain) == 0 {
+		return nil
 	}
 
 	type domainCount struct {
@@ -218,8 +246,15 @@ func (s *Server) SetZoneManager(zm *zone.Manager) {
 // SetAllowedOrigins sets the allowed CORS origins for WebSocket connections.
 func (s *Server) SetAllowedOrigins(origins []string) {
 	s.mu.Lock()
-	s.allowedOrigins = origins
+	s.allowedOrigins = cloneStrings(origins)
 	s.mu.Unlock()
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string(nil), values...)
 }
 
 // SetAuthStore sets the auth store for WebSocket authentication.
@@ -340,7 +375,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	defer s.stats.mu.RUnlock()
 
 	resp := &StatsAPIResponse{
-		Uptime:          time.Since(s.stats.Uptime).Seconds(),
+		Uptime:          nonNegativeSecondsSince(s.stats.Uptime, time.Now()),
 		QueriesTotal:    s.stats.QueriesTotal,
 		QueriesPerSec:   s.stats.QueriesPerSec,
 		CacheHitRate:    s.stats.CacheHitRate,
@@ -354,6 +389,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		util.Warnf("dashboard: failed to encode stats: %v", err)
 	}
+}
+
+func nonNegativeSecondsSince(start, now time.Time) float64 {
+	if now.Before(start) {
+		return 0
+	}
+	return now.Sub(start).Seconds()
 }
 
 // handleQueryStream handles query stream requests
@@ -443,7 +485,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// websocket.Handshake variadic call must not see a torn slice
 	// during reslicing.
 	s.mu.RLock()
-	origins := s.allowedOrigins
+	origins := cloneStrings(s.allowedOrigins)
 	s.mu.RUnlock()
 
 	conn, err := websocket.Handshake(w, r, origins...)
@@ -468,10 +510,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 // RecordQuery records a query event and broadcasts it
 func (s *Server) RecordQuery(event *QueryEvent) {
+	if event == nil {
+		return
+	}
+	eventCopy := *event
+	storedEvent := &eventCopy
+
 	// Update stats
 	s.stats.mu.Lock()
 	s.stats.QueriesTotal++
-	s.stats.RecentQueries = append(s.stats.RecentQueries, event)
+	s.stats.RecentQueries = append(s.stats.RecentQueries, storedEvent)
 
 	// Keep only last 100 queries
 	if len(s.stats.RecentQueries) > 100 {
@@ -481,7 +529,7 @@ func (s *Server) RecordQuery(event *QueryEvent) {
 
 	// Broadcast to connected clients
 	select {
-	case s.broadcastChan <- event:
+	case s.broadcastChan <- storedEvent:
 	default:
 		// Channel full, drop event
 	}
@@ -675,5 +723,27 @@ type BroadcastMessage struct {
 
 // GetStats returns current dashboard statistics
 func (s *Server) GetStats() *DashboardStats {
-	return s.stats
+	s.stats.mu.RLock()
+	defer s.stats.mu.RUnlock()
+
+	recentQueries := make([]*QueryEvent, len(s.stats.RecentQueries))
+	for i, query := range s.stats.RecentQueries {
+		if query == nil {
+			continue
+		}
+		queryCopy := *query
+		recentQueries[i] = &queryCopy
+	}
+
+	return &DashboardStats{
+		Uptime:          s.stats.Uptime,
+		QueriesTotal:    s.stats.QueriesTotal,
+		QueriesPerSec:   s.stats.QueriesPerSec,
+		CacheHitRate:    s.stats.CacheHitRate,
+		BlockedQueries:  s.stats.BlockedQueries,
+		ActiveClients:   s.stats.ActiveClients,
+		ZoneCount:       s.stats.ZoneCount,
+		UpstreamLatency: s.stats.UpstreamLatency,
+		RecentQueries:   recentQueries,
+	}
 }

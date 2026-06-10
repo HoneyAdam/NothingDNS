@@ -101,18 +101,18 @@ func TestHandleUpdate_ACLRefused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// parseUpdates – ClassNONE / ClassANY paths (delete name, delete RRSet, delete specific)
+// parseUpdates – ClassANY / ClassNONE paths (delete name, delete RRSet, delete specific)
 // ---------------------------------------------------------------------------
 
-func TestParseUpdates_ClassNONE_DeleteName(t *testing.T) {
+func TestParseUpdates_ClassANY_DeleteName(t *testing.T) {
 	handler := NewDynamicDNSHandler(make(map[string]*zone.Zone))
 	name, _ := protocol.ParseName("www.example.com.")
 
 	updates := []*protocol.ResourceRecord{
 		{
 			Name:  name,
-			Class: protocol.ClassNONE,
-			Type:  protocol.TypeANY, // ClassNONE + TypeANY => DeleteName
+			Class: protocol.ClassANY,
+			Type:  protocol.TypeANY, // ClassANY + TypeANY => DeleteName
 		},
 	}
 
@@ -128,15 +128,15 @@ func TestParseUpdates_ClassNONE_DeleteName(t *testing.T) {
 	}
 }
 
-func TestParseUpdates_ClassNONE_DeleteRRSet(t *testing.T) {
+func TestParseUpdates_ClassANY_DeleteRRSet(t *testing.T) {
 	handler := NewDynamicDNSHandler(make(map[string]*zone.Zone))
 	name, _ := protocol.ParseName("www.example.com.")
 
 	updates := []*protocol.ResourceRecord{
 		{
 			Name:  name,
-			Class: protocol.ClassNONE,
-			Type:  protocol.TypeA, // ClassNONE + non-TypeANY => DeleteRRSet
+			Class: protocol.ClassANY,
+			Type:  protocol.TypeA, // ClassANY + non-TypeANY => DeleteRRSet
 		},
 	}
 
@@ -152,14 +152,14 @@ func TestParseUpdates_ClassNONE_DeleteRRSet(t *testing.T) {
 	}
 }
 
-func TestParseUpdates_ClassANY_DeleteSpecific(t *testing.T) {
+func TestParseUpdates_ClassNONE_DeleteSpecific(t *testing.T) {
 	handler := NewDynamicDNSHandler(make(map[string]*zone.Zone))
 	name, _ := protocol.ParseName("www.example.com.")
 
 	updates := []*protocol.ResourceRecord{
 		{
 			Name:  name,
-			Class: protocol.ClassANY,
+			Class: protocol.ClassNONE,
 			Type:  protocol.TypeA,
 			Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}},
 		},
@@ -176,7 +176,7 @@ func TestParseUpdates_ClassANY_DeleteSpecific(t *testing.T) {
 		t.Errorf("expected UpdateOpDelete, got %d", result[0].Operation)
 	}
 	if result[0].RData == "" {
-		t.Error("expected non-empty RData for ClassANY delete specific")
+		t.Error("expected non-empty RData for ClassNONE delete specific")
 	}
 }
 
@@ -219,13 +219,13 @@ func TestParseUpdates_MultipleOperations(t *testing.T) {
 			TTL: 3600, Data: &protocol.RDataA{Address: [4]byte{10, 0, 0, 1}},
 		},
 		{ // DeleteName
-			Name: name, Class: protocol.ClassNONE, Type: protocol.TypeANY,
+			Name: name, Class: protocol.ClassANY, Type: protocol.TypeANY,
 		},
 		{ // DeleteRRSet
-			Name: name, Class: protocol.ClassNONE, Type: protocol.TypeA,
+			Name: name, Class: protocol.ClassANY, Type: protocol.TypeA,
 		},
 		{ // Delete specific
-			Name: name, Class: protocol.ClassANY, Type: protocol.TypeA,
+			Name: name, Class: protocol.ClassNONE, Type: protocol.TypeA,
 			Data: &protocol.RDataA{Address: [4]byte{10, 0, 0, 2}},
 		},
 	}
@@ -272,6 +272,9 @@ func TestParsePrerequisites_ValueDependent(t *testing.T) {
 	}
 	if result[0].Class != protocol.ClassIN {
 		t.Errorf("expected ClassIN, got %d", result[0].Class)
+	}
+	if result[0].RData != "192.0.2.1" {
+		t.Errorf("expected RData 192.0.2.1, got %q", result[0].RData)
 	}
 }
 
@@ -477,6 +480,37 @@ func TestZoneDeleteRecord_WithoutTrailingDot(t *testing.T) {
 	}
 }
 
+func TestApplyOperationAdd_NormalizesRelativeOwner(t *testing.T) {
+	z := zone.NewZone("example.com.")
+
+	err := applyOperationToZone(z, UpdateOperation{
+		Name:      " NewHost ",
+		Type:      protocol.TypeA,
+		TTL:       300,
+		RData:     "192.0.2.55",
+		Operation: UpdateOpAdd,
+	})
+	if err != nil {
+		t.Fatalf("applyOperationToZone add: %v", err)
+	}
+
+	if _, exists := z.Records[" NewHost "]; exists {
+		t.Fatal("relative owner should not be stored as raw key")
+	}
+	records := z.Records["newhost.example.com."]
+	if len(records) != 1 {
+		t.Fatalf("records at normalized owner = %d, want 1", len(records))
+	}
+	if records[0].Name != "newhost.example.com." {
+		t.Fatalf("record owner = %q, want normalized absolute owner", records[0].Name)
+	}
+
+	zoneDeleteRRSet(z, "newhost", protocol.TypeA)
+	if _, exists := z.Records["newhost.example.com."]; exists {
+		t.Fatal("normalized add should be removable by relative delete")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // zoneDeleteRRSet – name without trailing dot
 // ---------------------------------------------------------------------------
@@ -551,6 +585,30 @@ func TestApplyUpdate_PreconditionFailure_NotExists(t *testing.T) {
 	err := ApplyUpdate(z, update)
 	if err == nil {
 		t.Fatal("expected error when prerequisite fails (RRset exists but should not)")
+	}
+}
+
+func TestApplyUpdate_ParsedPreconditionExistsValueRejectsWrongRData(t *testing.T) {
+	z := newTestZoneWithRecords()
+	handler := NewDynamicDNSHandler(make(map[string]*zone.Zone))
+	name, _ := protocol.ParseName("www.example.com.")
+
+	prereqs := handler.parsePrerequisites([]*protocol.ResourceRecord{
+		{
+			Name:  name,
+			Type:  protocol.TypeA,
+			Class: protocol.ClassIN,
+			Data:  &protocol.RDataA{Address: [4]byte{10, 0, 0, 99}},
+		},
+	})
+
+	update := &UpdateRequest{
+		ZoneName:      "example.com.",
+		Prerequisites: prereqs,
+	}
+
+	if err := ApplyUpdate(z, update); err == nil {
+		t.Fatal("expected parsed value-dependent prerequisite to reject wrong RData")
 	}
 }
 

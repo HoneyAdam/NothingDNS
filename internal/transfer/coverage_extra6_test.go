@@ -539,6 +539,44 @@ func TestBuildSignedData_WithPreviousMAC_Extra6(t *testing.T) {
 	}
 }
 
+func TestBuildSignedData_RejectsOutOfRangeTimeSigned_Extra6(t *testing.T) {
+	msg := &protocol.Message{
+		Header: protocol.Header{ID: 1234, QDCount: 1},
+		Questions: []*protocol.Question{
+			{Name: mustParseName6("example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		timeSigned time.Time
+		want       string
+	}{
+		{
+			name:       "before epoch",
+			timeSigned: time.Unix(-1, 0),
+			want:       "before Unix epoch",
+		},
+		{
+			name:       "above 48 bit range",
+			timeSigned: time.Unix(int64(maxTSIGTimeSigned)+1, 0),
+			want:       "exceeds 48-bit Unix time",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := buildSignedData(msg, "test.key.", nil, HmacSHA256, tt.timeSigned, 300, 1234)
+			if err == nil {
+				t.Fatal("buildSignedData() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("buildSignedData() error = %q, want substring %q", err.Error(), tt.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Full AXFR Transfer with TSIG via TCP server - dead code (same TSIG issue)
 // ---------------------------------------------------------------------------

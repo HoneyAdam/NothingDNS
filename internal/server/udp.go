@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -69,7 +70,7 @@ func (r *rateLimiter) Allow(ip string) bool {
 
 	now := time.Now()
 	e, ok := r.entries[ip]
-	if !ok || now.Sub(e.windowStart) > r.window {
+	if !ok || rateWindowExpiredAt(e.windowStart, now, r.window) {
 		// Cap map size to prevent memory exhaustion from spoofed sources.
 		// Pre-fix this just returned false once the cap was hit, so any
 		// genuine new client (or peer rotating through new source ports
@@ -81,7 +82,7 @@ func (r *rateLimiter) Allow(ip string) bool {
 		// tick.
 		if !ok && len(r.entries) >= r.maxEntries {
 			for k, v := range r.entries {
-				if now.Sub(v.windowStart) > r.window {
+				if rateWindowExpiredAt(v.windowStart, now, r.window) {
 					delete(r.entries, k)
 				}
 			}
@@ -105,10 +106,14 @@ func (r *rateLimiter) Prune() {
 
 	now := time.Now()
 	for ip, e := range r.entries {
-		if now.Sub(e.windowStart) > r.window {
+		if rateWindowExpiredAt(e.windowStart, now, r.window) {
 			delete(r.entries, ip)
 		}
 	}
+}
+
+func rateWindowExpiredAt(windowStart, now time.Time, window time.Duration) bool {
+	return !now.Before(windowStart.Add(window))
 }
 
 // UDPConn is a wrapper around *net.UDPConn for testing/mocking.
@@ -362,27 +367,7 @@ func (s *UDPServer) handleRequest(req *udpRequest) {
 		Addr:     req.addr,
 		Protocol: "udp",
 	}
-
-	// Check for EDNS0 in additional section
-	for _, rr := range msg.Additionals {
-		if rr != nil && rr.Type == protocol.TypeOPT {
-			client.HasEDNS0 = true
-			client.EDNS0UDPSize = rr.Class // UDP payload size is in Class field
-
-			// Check for Client Subnet option
-			if optData, ok := rr.Data.(*protocol.RDataOPT); ok {
-				for _, opt := range optData.Options {
-					if opt.Code == protocol.OptionCodeClientSubnet {
-						if ecs, err := protocol.UnpackEDNS0ClientSubnet(opt.Data); err == nil {
-							client.ClientSubnet = ecs
-						}
-						break
-					}
-				}
-			}
-			break
-		}
-	}
+	populateEDNS0ClientInfo(client, msg)
 
 	// Create response writer
 	maxSize := ResponseSizeLimit(client)
@@ -437,6 +422,7 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 		if cap(buf) < MaxUDPPayloadSize {
 			buf = make([]byte, MaxUDPPayloadSize)
 		} else {
+			buf = buf[:MaxUDPPayloadSize]
 			defer w.server.responsePool.Put(&buf)
 		}
 	}
@@ -444,8 +430,18 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 		buf = make([]byte, MaxUDPPayloadSize)
 	}
 
-	// Pack the response
-	n, err := msg.Pack(buf)
+	// Pack the response. The common path packs straight into the pooled
+	// buffer; Pack performs the only WireLength traversal internally. Only
+	// when the response exceeds the pooled buffer (rare, before
+	// record-boundary truncation has a chance to run) do we compute the
+	// wire length, allocate an exact-size temporary, and repack so we can
+	// decide from the actual packed length.
+	packBuf := buf
+	n, err := msg.Pack(packBuf)
+	if errors.Is(err, protocol.ErrBufferTooSmall) {
+		packBuf = make([]byte, msg.WireLength())
+		n, err = msg.Pack(packBuf)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -460,7 +456,7 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 		for len(msg.Answers) > 0 {
 			// Remove one answer at a time from the end
 			msg.Answers = msg.Answers[:len(msg.Answers)-1]
-			n, err = msg.Pack(buf)
+			n, err = msg.Pack(packBuf)
 			if err != nil {
 				return 0, err
 			}
@@ -472,7 +468,7 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 		// If still too large (or no answers left), send header + question only
 		if n > w.maxSize || len(msg.Answers) == 0 {
 			msg.Answers = nil
-			n, err = msg.Pack(buf)
+			n, err = msg.Pack(packBuf)
 			if err != nil {
 				return 0, err
 			}
@@ -484,7 +480,7 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 	if !ok {
 		return 0, fmt.Errorf("udp: expected *net.UDPAddr, got %T", w.client.Addr)
 	}
-	sent, err := w.server.conn.WriteToUDP(buf[:n], addr)
+	sent, err := w.server.conn.WriteToUDP(packBuf[:n], addr)
 	if err == nil {
 		atomic.AddUint64(&w.server.packetsSent, 1)
 	}
@@ -501,11 +497,11 @@ func truncateRRSet(answers []*protocol.ResourceRecord, maxSize int) []*protocol.
 	var result []*protocol.ResourceRecord
 
 	for _, rr := range answers {
-		if rr == nil || rr.Data == nil {
+		if rr == nil || rr.Name == nil || isNilRData(rr.Data) {
 			continue
 		}
 
-		rrSize := 12 + len(rr.Name.Labels) + rr.Data.Len() // Approximate
+		rrSize := rr.WireLength()
 		if size+rrSize > maxSize {
 			break
 		}
@@ -516,12 +512,27 @@ func truncateRRSet(answers []*protocol.ResourceRecord, maxSize int) []*protocol.
 	return result
 }
 
+func isNilRData(data protocol.RData) bool {
+	if data == nil {
+		return true
+	}
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // Stop gracefully shuts down the server.
 func (s *UDPServer) Stop() error {
 	s.cancel()
 
 	if s.conn != nil {
-		return s.conn.Close()
+		if err := s.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }

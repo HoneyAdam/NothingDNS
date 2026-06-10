@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/nothingdns/nothingdns/internal/api"
@@ -377,8 +378,12 @@ func (h *DNSToolsHandler) callZoneCreate(args map[string]interface{}) (*ToolResu
 		return errorResult("Zone manager not configured"), nil
 	}
 
+	ttl, err := getTTLDefault(args, "ttl", 3600)
+	if err != nil {
+		return nil, err
+	}
 	opts := ZoneOptions{
-		TTL:        getIntDefault(args, "ttl", 3600),
+		TTL:        ttl,
 		AdminEmail: getString(args, "admin_email"),
 	}
 
@@ -419,7 +424,10 @@ func (h *DNSToolsHandler) callRecordAdd(args map[string]interface{}) (*ToolResul
 	name := getString(args, "name")
 	rtype := getString(args, "type")
 	value := getString(args, "value")
-	ttl := getIntDefault(args, "ttl", 3600)
+	ttl, err := getTTLDefault(args, "ttl", 3600)
+	if err != nil {
+		return nil, err
+	}
 
 	if zone == "" || name == "" || rtype == "" || value == "" {
 		return nil, fmt.Errorf("zone, name, type, and value are required")
@@ -737,11 +745,49 @@ func getStringDefault(args map[string]interface{}, key, def string) string {
 
 func getIntDefault(args map[string]interface{}, key string, def int) int {
 	if v, ok := args[key]; ok {
-		if f, ok := v.(float64); ok {
-			return int(f)
+		if i, ok := intValue(v); ok {
+			return i
 		}
 	}
 	return def
+}
+
+func getTTLDefault(args map[string]interface{}, key string, def int) (int, error) {
+	v, ok := args[key]
+	if !ok {
+		return def, nil
+	}
+	ttl, ok := intValue(v)
+	if !ok {
+		return 0, fmt.Errorf("%s must be an integer", key)
+	}
+	if ttl < 0 {
+		return 0, fmt.Errorf("%s cannot be negative", key)
+	}
+	const maxTTL = int64(^uint32(0))
+	if int64(ttl) > maxTTL {
+		return 0, fmt.Errorf("%s exceeds maximum DNS TTL", key)
+	}
+	return ttl, nil
+}
+
+func intValue(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case float64:
+		if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n {
+			return 0, false
+		}
+		const maxInt = int(^uint(0) >> 1)
+		const minInt = -maxInt - 1
+		if n < float64(minInt) || n > float64(maxInt) {
+			return 0, false
+		}
+		return int(n), true
+	default:
+		return 0, false
+	}
 }
 
 func textResult(text string) *ToolResult {

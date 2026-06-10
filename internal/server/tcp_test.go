@@ -300,6 +300,27 @@ func TestTCPServerStats(t *testing.T) {
 	}
 }
 
+func TestTCPServerDecrementIPConnDeletesZeroCount(t *testing.T) {
+	server := NewTCPServer("127.0.0.1:0", nil)
+	const ip = "192.0.2.1"
+
+	server.ipConnCount[ip] = 2
+	server.decrementIPConn(ip)
+	if got := server.ipConnCount[ip]; got != 1 {
+		t.Fatalf("count after first decrement = %d, want 1", got)
+	}
+
+	server.decrementIPConn(ip)
+	if _, ok := server.ipConnCount[ip]; ok {
+		t.Fatal("expected per-IP connection counter entry to be deleted at zero")
+	}
+
+	server.decrementIPConn(ip)
+	if _, ok := server.ipConnCount[ip]; ok {
+		t.Fatal("unexpected counter entry after decrementing absent IP")
+	}
+}
+
 // TestTCPServerClientInfo tests ClientInfo is populated correctly.
 func TestTCPServerClientInfo(t *testing.T) {
 	var receivedClientInfo *ClientInfo
@@ -349,5 +370,164 @@ func TestTCPServerClientInfo(t *testing.T) {
 
 	if receivedClientInfo.Addr == nil {
 		t.Error("Addr should not be nil")
+	}
+}
+
+// newLargeTestResponse builds a response whose wire form exceeds the pooled
+// frame buffer (defaultFrameBufSize / MaxUDPPayloadSize), to exercise the
+// rare buffer-too-small fallback in the response write paths.
+func newLargeTestResponse(t *testing.T, answers int) *protocol.Message {
+	t.Helper()
+
+	q, err := protocol.NewQuestion("oversized.example.com.", protocol.TypeA, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion failed: %v", err)
+	}
+	resp := &protocol.Message{
+		Header:    protocol.Header{ID: 0xFA11, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Questions: []*protocol.Question{q},
+	}
+	name := mustParseName("oversized.example.com.")
+	for i := 0; i < answers; i++ {
+		resp.AddAnswer(&protocol.ResourceRecord{
+			Name:  name,
+			Type:  protocol.TypeA,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, byte(i)}},
+		})
+	}
+	return resp
+}
+
+// TestPackFramedDNSPayloadFallbackLargerThanFrameBuf exercises the rare
+// path: the response does not fit the supplied (pool-sized) frame buffer,
+// so packFramedDNSPayload must detect ErrBufferTooSmall, allocate an
+// exact-size frame, and pack the full message into it untruncated.
+func TestPackFramedDNSPayloadFallbackLargerThanFrameBuf(t *testing.T) {
+	msg := newLargeTestResponse(t, 300)
+	if msg.WireLength() <= defaultFrameBufSize {
+		t.Fatalf("test response wire length = %d, want > %d", msg.WireLength(), defaultFrameBufSize)
+	}
+
+	frameBuf := make([]byte, defaultFrameBufSize)
+	frame, n, err := packFramedDNSPayload(msg, frameBuf, TCPMaxMessageSize, "TCP")
+	if err != nil {
+		t.Fatalf("packFramedDNSPayload failed: %v", err)
+	}
+	if n <= len(frameBuf)-2 {
+		t.Fatalf("payload length %d fits the original buffer; fallback not exercised", n)
+	}
+	if &frame[0] == &frameBuf[0] {
+		t.Fatal("expected a fallback-allocated frame, got the original buffer")
+	}
+	if len(frame) < n+2 {
+		t.Fatalf("returned frame too short for payload+prefix: len=%d, need %d", len(frame), n+2)
+	}
+
+	got, err := protocol.UnpackMessage(frame[2 : 2+n])
+	if err != nil {
+		t.Fatalf("fallback-packed response unpack failed: %v", err)
+	}
+	if got.Header.Flags.TC {
+		t.Fatal("response within maxSize must not be truncated")
+	}
+	if len(got.Answers) != 300 {
+		t.Fatalf("answer count = %d, want 300", len(got.Answers))
+	}
+}
+
+// TestPackFramedDNSPayloadFallbackThenTruncate verifies that when the
+// response both exceeds the frame buffer and the transport maxSize, the
+// fallback frame is used and record-boundary truncation still applies.
+func TestPackFramedDNSPayloadFallbackThenTruncate(t *testing.T) {
+	msg := newLargeTestResponse(t, 300)
+	frameBuf := make([]byte, defaultFrameBufSize)
+
+	const maxSize = 2000
+	frame, n, err := packFramedDNSPayload(msg, frameBuf, maxSize, "TCP")
+	if err != nil {
+		t.Fatalf("packFramedDNSPayload failed: %v", err)
+	}
+	if n > maxSize {
+		t.Fatalf("payload length %d exceeds maxSize %d after truncation", n, maxSize)
+	}
+
+	got, err := protocol.UnpackMessage(frame[2 : 2+n])
+	if err != nil {
+		t.Fatalf("truncated response unpack failed: %v", err)
+	}
+	if !got.Header.Flags.TC {
+		t.Fatal("expected TC bit on truncated response")
+	}
+	if len(got.Answers) == 0 || len(got.Answers) >= 300 {
+		t.Fatalf("answer count after truncation = %d, want record-boundary reduction", len(got.Answers))
+	}
+}
+
+// TestTCPServerLargeResponseExceedsPooledBuffer runs the fallback end to
+// end: the handler writes a response larger than the pooled frame buffer
+// and the client must receive it whole over the framed TCP stream.
+func TestTCPServerLargeResponseExceedsPooledBuffer(t *testing.T) {
+	handler := HandlerFunc(func(w ResponseWriter, req *protocol.Message) {
+		resp := newLargeTestResponse(t, 300)
+		resp.Header.ID = req.Header.ID
+		if _, err := w.Write(resp); err != nil {
+			t.Errorf("Write failed: %v", err)
+		}
+	})
+
+	server := NewTCPServer("127.0.0.1:0", handler)
+	if err := server.Listen(); err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer server.Stop()
+
+	go server.Serve()
+	time.Sleep(10 * time.Millisecond)
+
+	client, err := net.Dial("tcp", server.Addr().String())
+	if err != nil {
+		t.Fatalf("Failed to dial: %v", err)
+	}
+	defer client.Close()
+
+	query, err := protocol.NewQuery(0x4242, "oversized.example.com.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("Failed to create query: %v", err)
+	}
+	buf := make([]byte, 512)
+	n, err := query.Pack(buf[2:])
+	if err != nil {
+		t.Fatalf("Failed to pack query: %v", err)
+	}
+	binary.BigEndian.PutUint16(buf[0:], uint16(n))
+	if _, err := client.Write(buf[:n+2]); err != nil {
+		t.Fatalf("Failed to send query: %v", err)
+	}
+
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var lengthBuf [2]byte
+	if _, err := io.ReadFull(client, lengthBuf[:]); err != nil {
+		t.Fatalf("Failed to read length: %v", err)
+	}
+	respLen := binary.BigEndian.Uint16(lengthBuf[:])
+	if int(respLen) <= defaultFrameBufSize-2 {
+		t.Fatalf("response length %d fits the pooled buffer; fallback not exercised", respLen)
+	}
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(client, respBuf); err != nil {
+		t.Fatalf("Failed to read response: %v", err)
+	}
+
+	resp, err := protocol.UnpackMessage(respBuf)
+	if err != nil {
+		t.Fatalf("Failed to unpack response: %v", err)
+	}
+	if resp.Header.Flags.TC {
+		t.Fatal("large TCP response must not be truncated below TCPMaxMessageSize")
+	}
+	if len(resp.Answers) != 300 {
+		t.Fatalf("answer count = %d, want 300", len(resp.Answers))
 	}
 }

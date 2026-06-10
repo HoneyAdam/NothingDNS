@@ -147,16 +147,8 @@ func (j *CookieJar) ValidateServerCookie(clientCookie [ClientCookieLen]byte, ser
 
 	// Check freshness: timestamp must be within 2x rotation interval.
 	now := uint32(time.Now().Unix())
-	maxAge := uint32(j.rotationInterval.Seconds() * 2)
-	if maxAge == 0 {
-		maxAge = 1
-	}
-	// Handle time going backwards gracefully.
-	if now > ts && (now-ts) > maxAge {
-		return false
-	}
-	// Reject cookies from the future (with 1-second tolerance for clock skew).
-	if ts > now && (ts-now) > 1 {
+	maxAge := serverCookieMaxAgeSeconds(j.rotationInterval)
+	if !serverCookieTimestampFresh(ts, now, maxAge) {
 		return false
 	}
 
@@ -316,6 +308,31 @@ func buildServerCookie(clientCookie [ClientCookieLen]byte, clientIP net.IP, ts u
 	copy(cookie[8:], sum[:8])
 
 	return cookie
+}
+
+func serverCookieMaxAgeSeconds(rotationInterval time.Duration) uint32 {
+	if rotationInterval <= 0 {
+		return 1
+	}
+
+	const maxUint32 = ^uint32(0)
+	maxBeforeDouble := time.Duration(int64(maxUint32) * int64(time.Second) / 2)
+	if rotationInterval > maxBeforeDouble {
+		return maxUint32
+	}
+
+	maxAge := uint32((int64(rotationInterval) * 2) / int64(time.Second))
+	if maxAge == 0 {
+		return 1
+	}
+	return maxAge
+}
+
+func serverCookieTimestampFresh(ts, now, maxAge uint32) bool {
+	if now-ts <= maxAge {
+		return true
+	}
+	return ts-now <= 1
 }
 
 // normalizeIP returns a consistent byte representation of an IP address.

@@ -60,7 +60,7 @@ func Verify0x20(query, response string) bool {
 // echoes back the exact 0x20-encoded query name. Returns true if the
 // response has at least one question and its name matches byte-for-byte.
 func verify0x20Response(encodedName string, resp *protocol.Message) bool {
-	if len(resp.Questions) == 0 {
+	if resp == nil || len(resp.Questions) == 0 || resp.Questions[0] == nil || resp.Questions[0].Name == nil {
 		return false
 	}
 	return Verify0x20(encodedName, resp.Questions[0].Name.String())

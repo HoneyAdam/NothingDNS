@@ -32,6 +32,7 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 		lbConfig := upstream.LoadBalancerConfig{
 			Servers:         cfg.Upstream.Servers,
 			Strategy:        cfg.Upstream.Strategy,
+			Timeout:         parseDurationOrDefault(cfg.Resolution.Timeout, 5*time.Second),
 			HealthCheck:     parseDurationOrDefault(cfg.Upstream.HealthCheck, 30*time.Second),
 			FailoverTimeout: parseDurationOrDefault(cfg.Upstream.FailoverTimeout, 5*time.Second),
 			Region:          cfg.Upstream.Topology.Region,

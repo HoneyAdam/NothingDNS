@@ -107,17 +107,33 @@ func TestCache_AddAndGet(t *testing.T) {
 		Domain:       "local",
 		HostName:     "test.local",
 		Port:         8080,
+		TXT:          map[string]string{"path": "/dns"},
 		TTL:          120,
 	}
 
 	cache.Add(svc)
+	svc.InstanceName = "Mutated Source"
+	svc.TXT["path"] = "/mutated"
 
-	got := cache.Get(svc.FullServiceName())
+	got := cache.Get("Test Service._http._tcp.local.")
 	if got == nil {
 		t.Fatal("Get returned nil for added service")
 	}
-	if got.InstanceName != svc.InstanceName {
-		t.Errorf("InstanceName = %q, want %q", got.InstanceName, svc.InstanceName)
+	if got.InstanceName != "Test Service" {
+		t.Errorf("InstanceName = %q, want %q", got.InstanceName, "Test Service")
+	}
+	if got.TXT["path"] != "/dns" {
+		t.Errorf("TXT path = %q, want /dns", got.TXT["path"])
+	}
+
+	got.InstanceName = "Mutated Result"
+	got.TXT["path"] = "/changed"
+	again := cache.Get("Test Service._http._tcp.local.")
+	if again.InstanceName != "Test Service" {
+		t.Fatal("Get returned internal service pointer")
+	}
+	if again.TXT["path"] != "/dns" {
+		t.Fatal("Get returned internal TXT map")
 	}
 }
 
@@ -125,7 +141,7 @@ func TestCache_GetServices(t *testing.T) {
 	cache := NewCache()
 
 	services := []*Service{
-		{InstanceName: "Svc1", ServiceType: "_http._tcp", Domain: "local", TTL: 120},
+		{InstanceName: "Svc1", ServiceType: "_http._tcp", Domain: "local", TXT: map[string]string{"id": "1"}, TTL: 120},
 		{InstanceName: "Svc2", ServiceType: "_http._tcp", Domain: "local", TTL: 120},
 		{InstanceName: "Svc3", ServiceType: "_ssh._tcp", Domain: "local", TTL: 120},
 	}
@@ -138,10 +154,73 @@ func TestCache_GetServices(t *testing.T) {
 	if len(httpServices) != 2 {
 		t.Errorf("GetServices(_http._tcp) returned %d services, want 2", len(httpServices))
 	}
+	for _, svc := range httpServices {
+		svc.InstanceName = "Mutated List Result"
+		if svc.TXT != nil {
+			svc.TXT["id"] = "mutated"
+		}
+	}
+	httpServices[0] = nil
+	httpServices = cache.GetServices("_http._tcp")
+	if len(httpServices) != 2 || httpServices[0] == nil {
+		t.Fatal("GetServices returned internal result slice")
+	}
+	for _, svc := range httpServices {
+		if svc.InstanceName == "Mutated List Result" {
+			t.Fatal("GetServices returned internal service pointer")
+		}
+		if svc.TXT["id"] == "mutated" {
+			t.Fatal("GetServices returned internal TXT map")
+		}
+	}
 
 	sshServices := cache.GetServices("_ssh._tcp")
 	if len(sshServices) != 1 {
 		t.Errorf("GetServices(_ssh._tcp) returned %d services, want 1", len(sshServices))
+	}
+}
+
+func TestCache_ExactExpiryBoundary(t *testing.T) {
+	cache := NewCache()
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	key := "Svc1._http._tcp.local."
+
+	cache.entries[key] = &cacheEntry{
+		service: &Service{
+			InstanceName: "Svc1",
+			ServiceType:  "_http._tcp",
+			Domain:       "local",
+			TTL:          120,
+		},
+		expiresAt: now,
+	}
+	cache.entries["Svc2._http._tcp.local."] = &cacheEntry{
+		service: &Service{
+			InstanceName: "Svc2",
+			ServiceType:  "_http._tcp",
+			Domain:       "local",
+			TTL:          120,
+		},
+		expiresAt: now.Add(time.Nanosecond),
+	}
+
+	if !mdnsCacheExpiredAt(now, now) {
+		t.Fatal("mDNS cache entry should be expired exactly at expiresAt")
+	}
+	if cache.getAt(key, now) != nil {
+		t.Fatal("Get should exclude service exactly at expiresAt")
+	}
+	services := cache.getServicesAt("_http._tcp", now)
+	if len(services) != 1 || services[0].InstanceName != "Svc2" {
+		t.Fatalf("GetServices at exact expiry returned %v, want only Svc2", services)
+	}
+
+	cache.expireAt(now)
+	if _, exists := cache.entries[key]; exists {
+		t.Fatal("Expire should remove service exactly at expiresAt")
+	}
+	if _, exists := cache.entries["Svc2._http._tcp.local."]; !exists {
+		t.Fatal("Expire should keep service before expiresAt")
 	}
 }
 

@@ -90,6 +90,9 @@ func WithLogger(logger *util.Logger) AXFRServerOption {
 
 // NewAXFRServer creates a new AXFR server
 func NewAXFRServer(zones map[string]*zone.Zone, opts ...AXFRServerOption) *AXFRServer {
+	if zones == nil {
+		zones = make(map[string]*zone.Zone)
+	}
 	s := &AXFRServer{
 		zones:     zones,
 		zonesMu:   &sync.RWMutex{},
@@ -106,6 +109,9 @@ func NewAXFRServer(zones map[string]*zone.Zone, opts ...AXFRServerOption) *AXFRS
 // Use this when multiple components share the same zones map.
 func WithZonesMu(mu *sync.RWMutex) AXFRServerOption {
 	return func(s *AXFRServer) {
+		if mu == nil {
+			return
+		}
 		s.zonesMu = mu
 	}
 }
@@ -113,11 +119,17 @@ func WithZonesMu(mu *sync.RWMutex) AXFRServerOption {
 // SetZonesMu sets an external mutex to protect the zones map.
 // Use this when multiple components share the same zones map.
 func (s *AXFRServer) SetZonesMu(mu *sync.RWMutex) {
+	if mu == nil {
+		return
+	}
 	s.zonesMu = mu
 }
 
 // AddZone adds a zone to the server
 func (s *AXFRServer) AddZone(z *zone.Zone) {
+	if z == nil {
+		return
+	}
 	s.zonesMu.Lock()
 	s.zones[strings.ToLower(z.Origin)] = z
 	s.zonesMu.Unlock()
@@ -147,17 +159,27 @@ func (s *AXFRServer) IsAllowed(clientIP net.IP) bool {
 // Returns the AXFR response records and the TSIG key used to verify the request (if any).
 // Callers should use the returned key to sign response messages per RFC 2845.
 func (s *AXFRServer) HandleAXFR(req *protocol.Message, clientIP net.IP) ([]*protocol.ResourceRecord, *TSIGKey, error) {
+	if s == nil {
+		return nil, nil, fmt.Errorf("AXFR server is nil")
+	}
+
 	// Check if client is allowed by IP
 	if !s.IsAllowed(clientIP) {
 		return nil, nil, fmt.Errorf("client %s not authorized for AXFR", clientIP)
 	}
 
 	// Validate request
+	if req == nil {
+		return nil, nil, fmt.Errorf("AXFR request is nil")
+	}
 	if len(req.Questions) != 1 {
 		return nil, nil, fmt.Errorf("AXFR requires exactly one question")
 	}
 
 	question := req.Questions[0]
+	if question == nil || question.Name == nil {
+		return nil, nil, fmt.Errorf("AXFR question is invalid")
+	}
 	if question.QType != protocol.TypeAXFR {
 		return nil, nil, fmt.Errorf("invalid query type for AXFR: %d", question.QType)
 	}
@@ -224,6 +246,9 @@ func (s *AXFRServer) HandleAXFR(req *protocol.Message, clientIP net.IP) ([]*prot
 // generateAXFRRecords generates the AXFR response records for a zone
 // Per RFC 5936: SOA + all records (sorted) + SOA
 func (s *AXFRServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceRecord, error) {
+	if z == nil {
+		return nil, fmt.Errorf("zone is nil")
+	}
 	if z.SOA == nil {
 		return nil, fmt.Errorf("zone has no SOA record")
 	}
@@ -244,7 +269,7 @@ func (s *AXFRServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceReco
 	z.RLock()
 	for name, zoneRecordsList := range z.Records {
 		for _, rec := range zoneRecordsList {
-			rr, err := s.zoneRecordToRR(name, rec, z.Origin)
+			rr, err := s.zoneRecordToRR(name, rec)
 			if err != nil {
 				util.Warnf("axfr: skipping record %s/%s: %v", name, rec.Type, err)
 				continue
@@ -332,19 +357,19 @@ func (s *AXFRServer) createZONEMDRR(zonemd *zone.ZONEMD, origin *protocol.Name) 
 }
 
 // zoneRecordToRR converts a zone.Record to protocol.ResourceRecord
-func (s *AXFRServer) zoneRecordToRR(name string, rec zone.Record, origin string) (*protocol.ResourceRecord, error) {
+func (s *AXFRServer) zoneRecordToRR(name string, rec zone.Record) (*protocol.ResourceRecord, error) {
 	owner, err := protocol.ParseName(name)
 	if err != nil {
 		return nil, err
 	}
 
-	rrtype := protocol.StringToType[rec.Type]
+	rrtype := protocol.RecordTypeFromText(rec.Type)
 	if rrtype == 0 {
 		return nil, fmt.Errorf("unknown record type: %s", rec.Type)
 	}
 
 	// Parse RData based on type
-	rdata, err := parseRData(rrtype, rec.RData, origin)
+	rdata, err := parseRData(rrtype, rec.RData)
 	if err != nil {
 		return nil, err
 	}
@@ -358,95 +383,17 @@ func (s *AXFRServer) zoneRecordToRR(name string, rec zone.Record, origin string)
 	}, nil
 }
 
-// parseRData parses RData based on record type
-func parseRData(rrtype uint16, rdataStr, origin string) (protocol.RData, error) {
-	switch rrtype {
-	case protocol.TypeA:
-		ip := net.ParseIP(rdataStr)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid A record: %s", rdataStr)
-		}
-		ipv4 := ip.To4()
-		if ipv4 == nil {
-			return nil, fmt.Errorf("a record requires IPv4 address, got: %s", rdataStr)
-		}
-		var addr [4]byte
-		copy(addr[:], ipv4)
-		return &protocol.RDataA{Address: addr}, nil
-
-	case protocol.TypeAAAA:
-		ip := net.ParseIP(rdataStr)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid AAAA record: %s", rdataStr)
-		}
-		var addr [16]byte
-		copy(addr[:], ip.To16())
-		return &protocol.RDataAAAA{Address: addr}, nil
-
-	case protocol.TypeCNAME:
-		name, err := protocol.ParseName(rdataStr)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataCNAME{CName: name}, nil
-
-	case protocol.TypeNS:
-		name, err := protocol.ParseName(rdataStr)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataNS{NSDName: name}, nil
-
-	case protocol.TypeMX:
-		// Parse: preference exchange
-		var pref uint16
-		var exchange string
-		_, err := fmt.Sscanf(rdataStr, "%d %s", &pref, &exchange)
-		if err != nil {
-			// Try without preference (default to 0)
-			exchange = strings.TrimSpace(rdataStr)
-		}
-		name, err := protocol.ParseName(exchange)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataMX{Preference: pref, Exchange: name}, nil
-
-	case protocol.TypeTXT:
-		// Handle quoted and unquoted text
-		text := strings.Trim(rdataStr, "\"")
-		return &protocol.RDataTXT{Strings: []string{text}}, nil
-
-	case protocol.TypePTR:
-		name, err := protocol.ParseName(rdataStr)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataPTR{PtrDName: name}, nil
-
-	case protocol.TypeSRV:
-		// Parse: priority weight port target
-		var priority, weight, port uint16
-		var target string
-		_, err := fmt.Sscanf(rdataStr, "%d %d %d %s", &priority, &weight, &port, &target)
-		if err != nil {
-			return nil, fmt.Errorf("invalid SRV record: %s", rdataStr)
-		}
-		name, err := protocol.ParseName(target)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataSRV{
-			Priority: priority,
-			Weight:   weight,
-			Port:     port,
-			Target:   name,
-		}, nil
-
-	default:
-		// For unknown types, store as raw data
-		return &protocol.RDataRaw{TypeVal: rrtype, Data: []byte(rdataStr)}, nil
+// parseRData parses presentation-format RData via the shared protocol-package
+// text parser, which understands the full set of record types (TLSA, SVCB,
+// NAPTR, DS, DNSKEY, ...). Unparseable rdata is an error so call sites skip
+// the record instead of shipping presentation bytes as wire data.
+func parseRData(rrtype uint16, rdataStr string) (protocol.RData, error) {
+	typeName := protocol.TypeString(rrtype)
+	rdata := protocol.ParseRDataText(typeName, rdataStr)
+	if rdata == nil {
+		return nil, fmt.Errorf("unparseable rdata for type %s: %q", typeName, rdataStr)
 	}
+	return rdata, nil
 }
 
 // hasTSIG checks if a message has a TSIG record
@@ -611,10 +558,10 @@ func (c *AXFRClient) sendMessage(conn net.Conn, msg *protocol.Message) error {
 		return fmt.Errorf("message too large for TCP: %d bytes", n)
 	}
 
-	// Write length prefix + message in a single Write call
+	// Write length prefix + message fully; TCP may accept only a prefix.
 	buf[0] = byte(n >> 8)
 	buf[1] = byte(n)
-	_, err = conn.Write(buf[:2+n])
+	err = util.WriteFull(conn, buf[:2+n])
 	return err
 }
 

@@ -1,6 +1,7 @@
 package blocklist
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -436,6 +437,38 @@ func TestLoadURL_EmptyBody(t *testing.T) {
 	stats := bl.Stats()
 	if stats.TotalBlocks != 0 {
 		t.Errorf("Expected 0 blocks from empty body, got %d", stats.TotalBlocks)
+	}
+}
+
+func TestLoadURL_ResponseBodyTooLargeDoesNotInstallPartialEntries(t *testing.T) {
+	origMax := maxRemoteBlocklistBody
+	maxRemoteBlocklistBody = int64(len("0.0.0.0 before.example\n"))
+	defer func() {
+		maxRemoteBlocklistBody = origMax
+	}()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.WriteString(w, "0.0.0.0 before.example\n0.0.0.0 after.example\n"); err != nil {
+			t.Errorf("writing oversized blocklist: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	bl := New(Config{Enabled: true})
+	bl.httpClient = newRedirectClient(srv)
+
+	err := bl.loadURL("https://8.8.8.8/too-large")
+	if err == nil {
+		t.Fatal("expected error for oversized remote blocklist")
+	}
+	if !strings.Contains(err.Error(), "maximum response body size") {
+		t.Errorf("expected response body size error, got: %v", err)
+	}
+	if bl.IsBlocked("before.example") {
+		t.Error("partial blocklist entry should not be installed after oversized response")
+	}
+	if got := len(bl.sourceEntries["https://8.8.8.8/too-large"]); got != 0 {
+		t.Errorf("partial source entries installed = %d, want 0", got)
 	}
 }
 

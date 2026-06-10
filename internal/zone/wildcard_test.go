@@ -126,6 +126,17 @@ func TestLookupWildcardOutOfZone(t *testing.T) {
 	}
 }
 
+func TestLookupWildcardPartialLabelSuffixOutOfZone(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"*.example.com.": {{Name: "*.example.com.", Type: "A", TTL: 300, RData: "10.0.0.1"}},
+	})
+
+	_, _, found := z.LookupWildcard("badexample.com.", "A")
+	if found {
+		t.Error("expected no wildcard match for partial-label suffix outside zone")
+	}
+}
+
 func TestLookupWildcardCaseInsensitive(t *testing.T) {
 	z := newTestZone("example.com.", map[string][]Record{
 		"*.example.com.": {{Name: "*.example.com.", Type: "A", TTL: 300, RData: "10.0.0.1"}},
@@ -230,6 +241,19 @@ func TestFindDelegationDeepQuery(t *testing.T) {
 	}
 }
 
+func TestFindDelegationPartialLabelSuffixOutOfZone(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"sub.example.com.": {
+			{Name: "sub.example.com.", Type: "NS", TTL: 86400, RData: "ns1.sub.example.com."},
+		},
+	})
+
+	_, _, found := z.FindDelegation("www.badexample.com.")
+	if found {
+		t.Error("expected no delegation for partial-label suffix outside zone")
+	}
+}
+
 func TestFindGlue(t *testing.T) {
 	z := newTestZone("example.com.", map[string][]Record{
 		"ns1.sub.example.com.": {
@@ -301,5 +325,32 @@ func TestLookupWildcardMultipleTypes(t *testing.T) {
 	}
 	if len(recs) != 1 || recs[0].Type != "MX" {
 		t.Errorf("expected 1 MX record, got %+v", recs)
+	}
+}
+
+func TestLookupWildcardAnyReturnsCopy(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"*.example.com.": {
+			{Name: "*.example.com.", Type: "A", TTL: 300, RData: "10.0.0.1"},
+			{Name: "*.example.com.", Type: "MX", TTL: 300, RData: "10 mail.example.com."},
+		},
+	})
+
+	recs, _, found := z.LookupWildcard("foo.example.com.", "ANY")
+	if !found {
+		t.Fatal("expected wildcard match")
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected 2 records, got %d", len(recs))
+	}
+
+	recs[0].RData = "198.51.100.1"
+
+	recs, _, found = z.LookupWildcard("bar.example.com.", "ANY")
+	if !found {
+		t.Fatal("expected wildcard match after mutating returned records")
+	}
+	if recs[0].RData != "10.0.0.1" {
+		t.Fatalf("LookupWildcard returned mutable zone state: got %q", recs[0].RData)
 	}
 }

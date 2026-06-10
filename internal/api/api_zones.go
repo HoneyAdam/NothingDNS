@@ -225,6 +225,12 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// KV durability is handled by the zone.Manager mutation hook (installed
+	// by KVPersistence.Enable), so every mutation path — REST, MCP, Raft
+	// apply — persists automatically. Persistence is best-effort (logged,
+	// not surfaced): previously these handlers returned 500 on a KV persist
+	// failure even though the mutation had already succeeded in memory.
+
 	s.writeJSON(w, http.StatusCreated, &MessageNameResponse{
 		Message: fmt.Sprintf("Zone %s created", req.Name),
 		Name:    req.Name,
@@ -246,6 +252,7 @@ func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request, name s
 		s.writeError(w, http.StatusNotFound, sanitizeError(err, "Failed to delete zone"))
 		return
 	}
+	// KV removal handled by the zone.Manager mutation hook (deleted=true).
 
 	s.writeJSON(w, http.StatusOK, &MessageResponse{
 		Message: fmt.Sprintf("Zone %s deleted", name),
@@ -368,8 +375,8 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request, zone
 		return
 	}
 
-	if req.Name == "" || req.Type == "" {
-		s.writeError(w, http.StatusBadRequest, "name and type are required")
+	if req.Name == "" || req.Type == "" || req.OldData == "" || req.Data == "" {
+		s.writeError(w, http.StatusBadRequest, "name, type, old_data, and data are required")
 		return
 	}
 
@@ -513,15 +520,15 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 	// Validate zone/CIDR compatibility
 	zoneOrigin := z.Origin
-	if _, err := validateZoneCIDR(zoneOrigin, ones); err != nil {
+	if _, err := validateZoneCIDRNetwork(zoneOrigin, ip4, ones); err != nil {
 		s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Invalid request"))
 		return
 	}
 
 	// Analyze all records in one lock
 	z.RLock()
-	existingPTR := z.Records["PTR"]
-	existingA := z.Records["A"]
+	existingPTR := bulkPTRRecordsOfTypeLocked(z, "PTR")
+	existingA := bulkPTRRecordsOfTypeLocked(z, "A")
 	z.RUnlock()
 
 	changes := make([]ReverseDNSChange, 0, numIPs)
@@ -548,7 +555,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 		var oldPTR string
 		ptrExist := false
 		for _, rec := range existingPTR {
-			if rec.Name == revRecord || rec.Name == revRecord+"." {
+			if bulkPTROwnerMatches(rec.Name, revRecord, zoneOrigin) {
 				ptrExist = true
 				oldPTR = rec.RData
 				break
@@ -560,7 +567,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 		aExist := false
 		if req.AddA {
 			for _, rec := range existingA {
-				if rec.Name == ptrName || rec.Name == ptrName+"." {
+				if bulkPTROwnerMatches(rec.Name, ptrName, zoneOrigin) {
 					aExist = true
 					oldA = rec.RData
 					break
@@ -578,6 +585,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 		if ptrExist && !req.Override {
 			ch.Action = "skip"
+			ch.OldPTR = oldPTR
 			skip++
 		} else if ptrExist && req.Override {
 			ch.Action = "override"
@@ -591,15 +599,13 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 			ch.AName = ptrName
 			ch.AExist = aExist
 			if aExist && !req.Override {
-				ch.Action = "skip"
-				skip++
+				ch.OldA = oldA
 			} else if aExist && req.Override {
-				if ch.Action == "add" {
-					ch.Action = "override"
-				}
 				ch.OldA = oldA
 				overrideA++
-			} else if !aExist {
+			} else if !aExist && ch.Action != "skip" {
+				// Skip entries are not applied at all (no PTR, no A),
+				// so they must not be counted as pending A additions.
 				addA++
 			}
 		}
@@ -625,13 +631,17 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 	added, addedA, exists, existsA, skipped := 0, 0, 0, 0, 0
 	for _, ch := range changes {
 		if ch.Action == "skip" {
+			// Non-override mode with an existing PTR: do not mutate anything
+			// for this entry — neither the PTR nor a forward A record.
 			skipped++
 			continue
 		}
-
 		if ch.Action == "override" || ch.Action == "add" {
 			if ch.PTRExist {
-				_ = s.zoneManager.DeleteRecord(zoneName, ch.RevRecord, "PTR")
+				if err := s.zoneManager.DeleteRecord(zoneName, ch.RevRecord, "PTR"); err != nil {
+					s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete existing PTR record: %v", err))
+					return
+				}
 			}
 			rec := zone.Record{
 				Name:  ch.RevRecord,
@@ -650,7 +660,14 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 		if req.AddA && ch.AName != "" {
 			if ch.AExist {
-				_ = s.zoneManager.DeleteRecord(zoneName, ch.AName, "A")
+				if !req.Override {
+					existsA++
+					continue
+				}
+				if err := s.zoneManager.DeleteRecord(zoneName, ch.AName, "A"); err != nil {
+					s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to delete existing A record: %v", err))
+					return
+				}
 			}
 			aRec := zone.Record{
 				Name:  ch.AName,
@@ -679,6 +696,33 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 		ExistsA: existsA,
 		Skipped: skipped,
 	})
+}
+
+func bulkPTRRecordsOfTypeLocked(z *zone.Zone, rrtype string) []zone.Record {
+	rrtype = strings.ToUpper(rrtype)
+	records := make([]zone.Record, 0)
+	for _, ownerRecords := range z.Records {
+		for _, rec := range ownerRecords {
+			if strings.ToUpper(rec.Type) == rrtype {
+				records = append(records, rec)
+			}
+		}
+	}
+	return records
+}
+
+func bulkPTROwnerMatches(recordName, owner, zoneOrigin string) bool {
+	recordName = strings.TrimSuffix(strings.ToLower(recordName), ".")
+	owner = strings.TrimSuffix(strings.ToLower(owner), ".")
+	if recordName == owner {
+		return true
+	}
+
+	zoneOrigin = strings.TrimSuffix(strings.ToLower(zoneOrigin), ".")
+	if zoneOrigin == "" || owner == zoneOrigin || strings.HasSuffix(owner, "."+zoneOrigin) {
+		return false
+	}
+	return recordName == owner+"."+zoneOrigin
 }
 
 // handlePtr6Lookup performs a reverse lookup for an IPv6 address.
@@ -720,13 +764,9 @@ func (s *Server) handlePtr6Lookup(w http.ResponseWriter, r *http.Request, zoneNa
 	defer z.RUnlock()
 
 	// Search for PTR record
-	for _, rec := range z.Records["PTR"] {
-		fqdn := rec.Name
-		if !strings.HasSuffix(fqdn, ".") {
-			fqdn += "."
-		}
+	for _, rec := range bulkPTRRecordsOfTypeLocked(z, "PTR") {
 		target := ptrName + "."
-		if fqdn == target || rec.Name == ptrName {
+		if bulkPTROwnerMatches(rec.Name, ptrName, z.Origin) {
 			s.writeJSON(w, http.StatusOK, PTRLookupResponse{
 				IP:      ipStr,
 				PTR:     ptrName,

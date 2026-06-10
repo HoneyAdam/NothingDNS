@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 )
 
@@ -200,24 +199,23 @@ func cmdServer(args []string) error {
 		}
 
 	case "health":
-		url := strings.TrimRight(globalFlags.Server, "/") + "/health"
-		req, err := http.NewRequest("GET", url, nil)
+		req, err := buildAPIRequest("GET", "/health", "")
 		if err != nil {
-			fmt.Printf("Server unhealthy: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("server unhealthy: %w", err)
 		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			fmt.Printf("Server unhealthy: %v\n", err)
-			os.Exit(1)
+			return fmt.Errorf("server unhealthy: %w", err)
 		}
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("reading health response: %w", err)
+		}
 		if resp.StatusCode == http.StatusOK {
 			fmt.Printf("Server healthy: %s", string(body))
 		} else {
-			fmt.Printf("Server unhealthy (HTTP %d): %s\n", resp.StatusCode, string(body))
-			os.Exit(1)
+			return fmt.Errorf("server unhealthy (HTTP %d): %s", resp.StatusCode, string(body))
 		}
 
 	default:

@@ -111,14 +111,13 @@ func UnmarshalYAML(data string) (*Config, error) {
 
 // UnmarshalYAMLWithEnv parses YAML with optional environment variable expansion.
 func UnmarshalYAMLWithEnv(data string, expandEnv bool) (*Config, error) {
-	if expandEnv {
-		data = expandEnvVars(data)
-	}
-
 	parser := NewParser(data)
 	node, err := parser.ParseMapping()
 	if err != nil {
 		return nil, fmt.Errorf("parse error: %w", err)
+	}
+	if expandEnv {
+		expandNodeEnvVars(node)
 	}
 
 	cfg := DefaultConfig()
@@ -127,6 +126,19 @@ func UnmarshalYAMLWithEnv(data string, expandEnv bool) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func expandNodeEnvVars(node *Node) {
+	if node == nil {
+		return
+	}
+	if node.Type == NodeScalar {
+		node.Value = expandEnvVars(node.Value)
+		return
+	}
+	for _, child := range node.Children {
+		expandNodeEnvVars(child)
+	}
 }
 
 // expandEnvVars expands ${VAR} and $VAR in the input.
@@ -200,7 +212,8 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 	"shutdown_timeout": {}, "acl": {}, "rrl": {},
 	"blocklist": {}, "rpz": {}, "geodns": {}, "dns64": {},
 	"cookie": {}, "cluster": {}, "storage": {}, "slave_zones": {},
-	"transfer": {}, "views": {},
+	"transfer": {}, "views": {}, "dso": {}, "idna": {}, "mdns": {}, "odoh": {},
+	"catalog": {}, "yang": {},
 }
 
 // documentedButUnwiredKeys lists stale documented keys that operators
@@ -214,8 +227,8 @@ var knownTopLevelConfigKeys = map[string]struct{}{
 // Move keys out of here only when the corresponding section is
 // actually wired through unmarshalToConfig.
 var documentedButUnwiredKeys = map[string]struct{}{
-	"api": {}, "auth": {}, "ddns": {}, "dso": {},
-	"idna": {}, "mdns": {}, "odoh": {}, "resolver": {},
+	"api": {}, "auth": {}, "ddns": {},
+	"resolver": {},
 }
 
 // unmarshalToConfig unmarshals a node tree into a Config struct.
@@ -309,9 +322,14 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 
 	// Memory limit
 	if mlNode := node.Get("memory_limit_mb"); mlNode != nil && mlNode.Value != "" {
-		if v, err := strconv.Atoi(mlNode.Value); err == nil && v > 0 {
-			cfg.MemoryLimitMB = v
+		v, err := strconv.Atoi(mlNode.Value)
+		if err != nil {
+			return fmt.Errorf("memory_limit_mb: invalid integer %q: %w", mlNode.Value, err)
 		}
+		if v < 0 {
+			return fmt.Errorf("memory_limit_mb: must be non-negative, got %d", v)
+		}
+		cfg.MemoryLimitMB = v
 	}
 
 	// ACL rules
@@ -384,6 +402,7 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 
 	// Storage config (L-6)
 	if storageNode := node.Get("storage"); storageNode != nil {
+		cfg.Storage.DataDir = storageNode.GetString("data_dir")
 		cfg.Storage.EncryptionKey = storageNode.GetString("encryption_key")
 	}
 
@@ -407,7 +426,10 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 				if slave.RetryInterval == "" {
 					slave.RetryInterval = "5m"
 				}
-				slave.MaxRetries = getInt(slaveNode, "max_retries", 0)
+				var err error
+				if slave.MaxRetries, err = getRequiredInt(slaveNode, "max_retries", 0); err != nil {
+					return fmt.Errorf("slave_zones: %w", err)
+				}
 
 				// Parse masters
 				if mastersNode := slaveNode.Get("masters"); mastersNode != nil {
@@ -427,6 +449,77 @@ func unmarshalToConfig(node *Node, cfg *Config) error {
 	if transferNode := node.Get("transfer"); transferNode != nil {
 		cfg.Transfer.AllowList = getStringSlice(transferNode, "allow_list", cfg.Transfer.AllowList)
 		cfg.Transfer.RequireTSIG = getBool(transferNode, "require_tsig", cfg.Transfer.RequireTSIG)
+	}
+
+	// IDNA config
+	if idnaNode := node.Get("idna"); idnaNode != nil {
+		cfg.IDNA.Enabled = getBool(idnaNode, "enabled", cfg.IDNA.Enabled)
+		cfg.IDNA.UseSTD3Rules = getBool(idnaNode, "use_std3_rules", cfg.IDNA.UseSTD3Rules)
+		cfg.IDNA.AllowUnassigned = getBool(idnaNode, "allow_unassigned", cfg.IDNA.AllowUnassigned)
+		cfg.IDNA.CheckBidi = getBool(idnaNode, "check_bidi", cfg.IDNA.CheckBidi)
+		cfg.IDNA.CheckJoiner = getBool(idnaNode, "check_joiner", cfg.IDNA.CheckJoiner)
+	}
+
+	// mDNS config
+	if mdnsNode := node.Get("mdns"); mdnsNode != nil {
+		cfg.MDNS.Enabled = getBool(mdnsNode, "enabled", cfg.MDNS.Enabled)
+		cfg.MDNS.MulticastIP = getString(mdnsNode, "multicast_ip", cfg.MDNS.MulticastIP)
+		if portNode := mdnsNode.Get("port"); portNode != nil && portNode.Value != "" {
+			var err error
+			if cfg.MDNS.Port, err = getRequiredInt(mdnsNode, "port", cfg.MDNS.Port); err != nil {
+				return fmt.Errorf("mdns: %w", err)
+			}
+		}
+		cfg.MDNS.Browser = getBool(mdnsNode, "browser", cfg.MDNS.Browser)
+		cfg.MDNS.HostName = getString(mdnsNode, "hostname", cfg.MDNS.HostName)
+	}
+
+	// ODoH config
+	if odohNode := node.Get("odoh"); odohNode != nil {
+		cfg.ODoH.Enabled = getBool(odohNode, "enabled", cfg.ODoH.Enabled)
+		cfg.ODoH.Bind = getString(odohNode, "bind", cfg.ODoH.Bind)
+		cfg.ODoH.TargetURL = getString(odohNode, "target_url", cfg.ODoH.TargetURL)
+		cfg.ODoH.ProxyURL = getString(odohNode, "proxy_url", cfg.ODoH.ProxyURL)
+		var err error
+		if cfg.ODoH.KEM, err = getRequiredInt(odohNode, "kem", cfg.ODoH.KEM); err != nil {
+			return fmt.Errorf("odoh: %w", err)
+		}
+		if cfg.ODoH.KDF, err = getRequiredInt(odohNode, "kdf", cfg.ODoH.KDF); err != nil {
+			return fmt.Errorf("odoh: %w", err)
+		}
+		if cfg.ODoH.AEAD, err = getRequiredInt(odohNode, "aead", cfg.ODoH.AEAD); err != nil {
+			return fmt.Errorf("odoh: %w", err)
+		}
+	}
+
+	// Catalog Zone config
+	if catalogNode := node.Get("catalog"); catalogNode != nil {
+		cfg.Catalog.Enabled = getBool(catalogNode, "enabled", cfg.Catalog.Enabled)
+		cfg.Catalog.CatalogZone = getString(catalogNode, "catalog_zone", cfg.Catalog.CatalogZone)
+		cfg.Catalog.ProducerClass = getString(catalogNode, "producer_class", cfg.Catalog.ProducerClass)
+		cfg.Catalog.ConsumerClass = getString(catalogNode, "consumer_class", cfg.Catalog.ConsumerClass)
+	}
+
+	// DSO config
+	if dsoNode := node.Get("dso"); dsoNode != nil {
+		cfg.DSO.Enabled = getBool(dsoNode, "enabled", cfg.DSO.Enabled)
+		cfg.DSO.SessionTimeout = getString(dsoNode, "session_timeout", cfg.DSO.SessionTimeout)
+		if maxSessionsNode := dsoNode.Get("max_sessions"); maxSessionsNode != nil && maxSessionsNode.Value != "" {
+			var err error
+			if cfg.DSO.MaxSessions, err = getRequiredInt(dsoNode, "max_sessions", cfg.DSO.MaxSessions); err != nil {
+				return fmt.Errorf("dso: %w", err)
+			}
+		}
+		cfg.DSO.HeartbeatInterval = getString(dsoNode, "heartbeat_interval", cfg.DSO.HeartbeatInterval)
+	}
+
+	// YANG config
+	if yangNode := node.Get("yang"); yangNode != nil {
+		cfg.YANG.Enabled = getBool(yangNode, "enabled", cfg.YANG.Enabled)
+		cfg.YANG.EnableCLI = getBool(yangNode, "enable_cli", cfg.YANG.EnableCLI)
+		cfg.YANG.EnableNETCONF = getBool(yangNode, "enable_netconf", cfg.YANG.EnableNETCONF)
+		cfg.YANG.NETCONFBind = getString(yangNode, "netconf_bind", cfg.YANG.NETCONFBind)
+		cfg.YANG.Models = getStringSlice(yangNode, "models", cfg.YANG.Models)
 	}
 
 	// Parse views (split-horizon)
@@ -467,15 +560,6 @@ func getStringSlice(node *Node, key string, defaultValue []string) []string {
 	return defaultValue
 }
 
-func getInt(node *Node, key string, defaultValue int) int {
-	if child := node.Get(key); child != nil && child.Type == NodeScalar {
-		if v, err := strconv.Atoi(child.Value); err == nil {
-			return v
-		}
-	}
-	return defaultValue
-}
-
 func getBool(node *Node, key string, defaultValue bool) bool {
 	if child := node.Get(key); child != nil && child.Type == NodeScalar {
 		switch strings.ToLower(child.Value) {
@@ -499,8 +583,20 @@ func (c *Config) Validate() []string {
 	// from a shipped template (VULN-050).
 	errors = append(errors, c.validateSecrets()...)
 
+	// Validate DNS Cookie configuration
+	errors = append(errors, c.validateCookie()...)
+
+	// Validate DSO configuration
+	errors = append(errors, c.validateDSO()...)
+
+	// Validate extension configurations
+	errors = append(errors, c.validateExtensions()...)
+
 	// Validate upstream configuration
 	errors = append(errors, c.validateUpstream()...)
+
+	// Validate recursive resolution configuration
+	errors = append(errors, c.validateResolution()...)
 
 	// Validate cache configuration
 	errors = append(errors, c.validateCache()...)

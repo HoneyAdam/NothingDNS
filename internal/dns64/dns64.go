@@ -64,6 +64,10 @@ func NewSynthesizer(prefix string, prefixLen int) (*Synthesizer, error) {
 // SynthesizeAAAA embeds an IPv4 address into the NAT64 prefix per RFC 6052.
 // Returns nil if ipv4 is not a valid 4-byte IPv4 address.
 func (s *Synthesizer) SynthesizeAAAA(ipv4 net.IP) net.IP {
+	if s == nil {
+		return nil
+	}
+
 	v4 := ipv4.To4()
 	if v4 == nil {
 		return nil
@@ -156,6 +160,10 @@ func (s *Synthesizer) SynthesizeAAAA(ipv4 net.IP) net.IP {
 // from a synthesized IPv6 address. Returns nil if ipv6 does not match the
 // configured prefix.
 func (s *Synthesizer) ExtractIPv4(ipv6 net.IP) net.IP {
+	if s == nil {
+		return nil
+	}
+
 	v6 := ipv6.To16()
 	if v6 == nil {
 		return nil
@@ -218,6 +226,10 @@ func (s *Synthesizer) ExtractIPv4(ipv6 net.IP) net.IP {
 //   - The question asks for AAAA records
 //   - The response contains no AAAA answers (or is NXDOMAIN / NOERROR without AAAA)
 func (s *Synthesizer) ShouldSynthesize(question *protocol.Question, response *protocol.Message) bool {
+	if s == nil {
+		return false
+	}
+
 	s.mu.RLock()
 	enabled := s.enabled
 	s.mu.RUnlock()
@@ -237,6 +249,9 @@ func (s *Synthesizer) ShouldSynthesize(question *protocol.Question, response *pr
 
 	// If the response already contains AAAA answers, no synthesis needed.
 	for _, rr := range response.Answers {
+		if rr == nil {
+			continue
+		}
 		if rr.Type == protocol.TypeAAAA {
 			return false
 		}
@@ -251,7 +266,7 @@ func (s *Synthesizer) ShouldSynthesize(question *protocol.Question, response *pr
 // It copies the header, converts each A answer to a synthesized AAAA answer,
 // preserves TTLs, and sets the question type to AAAA.
 func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aResponse *protocol.Message) *protocol.Message {
-	if originalQuestion == nil || aResponse == nil {
+	if s == nil || originalQuestion == nil || originalQuestion.Name == nil || aResponse == nil {
 		return nil
 	}
 
@@ -281,8 +296,11 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 
 	// Synthesize AAAA records from A records.
 	for _, rr := range aResponse.Answers {
+		if rr == nil || rr.Name == nil || rr.Type != protocol.TypeA {
+			continue
+		}
 		aData, ok := rr.Data.(*protocol.RDataA)
-		if !ok {
+		if !ok || aData == nil {
 			continue
 		}
 
@@ -318,6 +336,10 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 // AddExcludeNet adds a CIDR network to the exclusion list. AAAA responses with
 // addresses in excluded networks pass through without synthesis.
 func (s *Synthesizer) AddExcludeNet(cidr string) error {
+	if s == nil {
+		return fmt.Errorf("nil DNS64 synthesizer")
+	}
+
 	_, ipnet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		return fmt.Errorf("invalid CIDR %q: %w", cidr, err)
@@ -332,6 +354,10 @@ func (s *Synthesizer) AddExcludeNet(cidr string) error {
 // IsExcluded reports whether ip falls within any of the configured exclusion
 // networks.
 func (s *Synthesizer) IsExcluded(ip net.IP) bool {
+	if s == nil {
+		return false
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -345,6 +371,10 @@ func (s *Synthesizer) IsExcluded(ip net.IP) bool {
 
 // SetEnabled enables or disables DNS64 synthesis.
 func (s *Synthesizer) SetEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+
 	s.mu.Lock()
 	s.enabled = enabled
 	s.mu.Unlock()
@@ -352,6 +382,10 @@ func (s *Synthesizer) SetEnabled(enabled bool) {
 
 // IsEnabled reports whether DNS64 synthesis is currently enabled.
 func (s *Synthesizer) IsEnabled() bool {
+	if s == nil {
+		return false
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.enabled

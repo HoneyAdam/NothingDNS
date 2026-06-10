@@ -20,7 +20,10 @@ func TestEncodeDecodeJournalEntry(t *testing.T) {
 		},
 	}
 
-	encoded := EncodeJournalEntry(original)
+	encoded, err := EncodeJournalEntry(original)
+	if err != nil {
+		t.Fatalf("EncodeJournalEntry: %v", err)
+	}
 	decoded, err := DecodeJournalEntry(encoded)
 	if err != nil {
 		t.Fatalf("DecodeJournalEntry: %v", err)
@@ -57,7 +60,10 @@ func TestEncodeDecodeJournalEntryEmpty(t *testing.T) {
 		Deleted:   nil,
 	}
 
-	encoded := EncodeJournalEntry(original)
+	encoded, err := EncodeJournalEntry(original)
+	if err != nil {
+		t.Fatalf("EncodeJournalEntry: %v", err)
+	}
 	decoded, err := DecodeJournalEntry(encoded)
 	if err != nil {
 		t.Fatalf("DecodeJournalEntry: %v", err)
@@ -95,7 +101,10 @@ func TestEncodeDecodeJournalEntryTypes(t *testing.T) {
 		Deleted: nil,
 	}
 
-	encoded := EncodeJournalEntry(original)
+	encoded, err := EncodeJournalEntry(original)
+	if err != nil {
+		t.Fatalf("EncodeJournalEntry: %v", err)
+	}
 	decoded, err := DecodeJournalEntry(encoded)
 	if err != nil {
 		t.Fatalf("DecodeJournalEntry: %v", err)
@@ -110,5 +119,45 @@ func TestEncodeDecodeJournalEntryTypes(t *testing.T) {
 		if got.Name != want.Name || got.Type != want.Type || got.TTL != want.TTL || got.RData != want.RData {
 			t.Errorf("Added[%d] = %+v, want %+v", i, got, want)
 		}
+	}
+}
+
+func TestEncodeJournalEntryRejectsOversizedFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry *IXFRJournalEntry
+	}{
+		{
+			name: "name",
+			entry: &IXFRJournalEntry{
+				Added: []zone.RecordChange{{Name: string(make([]byte, 0x10000))}},
+			},
+		},
+		{
+			name: "rdata",
+			entry: &IXFRJournalEntry{
+				Added: []zone.RecordChange{{Name: "www.example.com.", RData: string(make([]byte, 0x10000))}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := EncodeJournalEntry(tt.entry); err == nil {
+				t.Fatal("EncodeJournalEntry should reject fields that cannot fit in uint16 length prefixes")
+			}
+		})
+	}
+}
+
+func TestDecodeJournalEntryRejectsTrailingBytes(t *testing.T) {
+	encoded, err := EncodeJournalEntry(&IXFRJournalEntry{Serial: 1, Timestamp: time.Now()})
+	if err != nil {
+		t.Fatalf("EncodeJournalEntry: %v", err)
+	}
+	encoded = append(encoded, 0xAA)
+
+	if _, err := DecodeJournalEntry(encoded); err == nil {
+		t.Fatal("DecodeJournalEntry should reject trailing bytes after deleted changes")
 	}
 }

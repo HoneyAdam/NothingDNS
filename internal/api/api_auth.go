@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -25,7 +24,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Check IP-based rate limit
 	ip := getClientIP(r)
 	if rejected, delay := s.loginLimiter.checkRateLimit(ip); rejected {
-		w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())))
+		w.Header().Set("Retry-After", retryAfterSeconds(delay))
 		s.writeError(w, http.StatusTooManyRequests, "Too many requests, try again later")
 		return
 	}
@@ -38,7 +37,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Check account-based rate limit (username lockout) — keyed by (IP, username) pair
 	if rejected, delay := s.loginLimiter.checkUserRateLimit(ip, req.Username); rejected {
-		w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())))
+		w.Header().Set("Retry-After", retryAfterSeconds(delay))
 		s.writeError(w, http.StatusTooManyRequests, "Account locked due to too many failed attempts")
 		return
 	}
@@ -82,7 +81,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(s.authStore.TokenExpiry().Seconds()),
+		MaxAge:   cookieMaxAgeSeconds(s.authStore.TokenExpiry()),
 	})
 
 	s.writeJSON(w, http.StatusOK, &LoginResponse{
@@ -218,7 +217,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   int(s.authStore.TokenExpiry().Seconds()),
+		MaxAge:   cookieMaxAgeSeconds(s.authStore.TokenExpiry()),
 	})
 
 	s.writeJSON(w, http.StatusOK, &BootstrapResponse{

@@ -13,9 +13,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/server"
 )
 
-// TestDoHPOST_BodyExceedsMaxSize tests that handlePOST returns an error when
-// the POST body exceeds MaxDNSMessageSize (65535 bytes), triggering the
-// io.ReadAll error path from http.MaxBytesReader.
+// TestDoHPOST_BodyExceedsMaxSize tests that handlePOST rejects bodies
+// above MaxDNSMessageSize instead of silently truncating them.
 func TestDoHPOST_BodyExceedsMaxSize(t *testing.T) {
 	handler := NewHandler(&mockDNSHandler{})
 
@@ -31,8 +30,8 @@ func TestDoHPOST_BodyExceedsMaxSize(t *testing.T) {
 
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Errorf("Expected status %d for oversized body, got %d", http.StatusBadRequest, rr.Code)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("Expected status %d for oversized body, got %d", http.StatusRequestEntityTooLarge, rr.Code)
 	}
 }
 
@@ -227,6 +226,20 @@ func TestServeJSON_POST_InvalidJSON(t *testing.T) {
 	}
 }
 
+func TestServeJSON_POST_BodyExceedsMaxSize(t *testing.T) {
+	handler := NewHandler(&mockDNSHandler{})
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query?name=example.com", bytes.NewReader(make([]byte, MaxDNSMessageSize+1)))
+	req.Header.Set("Content-Type", ContentTypeDNSJSON)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("Expected status %d for oversized JSON body, got %d", http.StatusRequestEntityTooLarge, rr.Code)
+	}
+}
+
 // TestServeJSON_NoDNSResponse tests when DNS handler doesn't produce a response
 func TestServeJSON_NoDNSResponse(t *testing.T) {
 	handler := NewHandler(server.HandlerFunc(func(w server.ResponseWriter, r *protocol.Message) {
@@ -234,6 +247,23 @@ func TestServeJSON_NoDNSResponse(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/dns-query?name=example.com&type=A", nil)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("Expected status 500 when no DNS response, got %d", rr.Code)
+	}
+}
+
+func TestServeHTTP_WireNoDNSResponse(t *testing.T) {
+	handler := NewHandler(server.HandlerFunc(func(w server.ResponseWriter, r *protocol.Message) {
+		// Don't write any response
+	}))
+
+	queryData, _ := createTestQuery()
+	encoded := base64.RawURLEncoding.EncodeToString(queryData)
+	req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+encoded, nil)
 	rr := httptest.NewRecorder()
 
 	handler.ServeHTTP(rr, req)

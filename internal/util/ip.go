@@ -64,10 +64,22 @@ type IPRange struct {
 
 // Contains returns true if the IP is within the range.
 func (r *IPRange) Contains(ip net.IP) bool {
-	if IsIPv4(r.Start) != IsIPv4(ip) {
+	if r == nil || r.Start == nil || r.End == nil || ip == nil {
 		return false
 	}
-	return bytesCompare(ip, r.Start) >= 0 && bytesCompare(ip, r.End) <= 0
+	start := IPToBytes(r.Start)
+	end := IPToBytes(r.End)
+	target := IPToBytes(ip)
+	if start == nil || end == nil || target == nil {
+		return false
+	}
+	if len(start) != len(end) || len(start) != len(target) {
+		return false
+	}
+	if bytesCompare(start, end) > 0 {
+		return false
+	}
+	return bytesCompare(target, start) >= 0 && bytesCompare(target, end) <= 0
 }
 
 // bytesCompare compares two byte slices.
@@ -110,11 +122,17 @@ func ParseCIDR(s string) (*CIDR, error) {
 
 // Contains returns true if the IP is within the CIDR.
 func (c *CIDR) Contains(ip net.IP) bool {
+	if c == nil || c.IP == nil || c.Mask == nil || ip == nil {
+		return false
+	}
 	return ip.Mask(c.Mask).Equal(c.IP.Mask(c.Mask))
 }
 
 // String returns the CIDR in string format.
 func (c *CIDR) String() string {
+	if c == nil || c.IP == nil || c.Mask == nil {
+		return ""
+	}
 	ones, _ := c.Mask.Size()
 	return fmt.Sprintf("%s/%d", c.IP.String(), ones)
 }
@@ -138,6 +156,9 @@ func ParseCIDRList(cidrs []string) (CIDRList, error) {
 // Contains returns true if any CIDR in the list contains the IP.
 func (l CIDRList) Contains(ip net.IP) bool {
 	for _, c := range l {
+		if c == nil {
+			continue
+		}
 		if c.Contains(ip) {
 			return true
 		}
@@ -215,8 +236,9 @@ func NormalizeIP(ip net.IP) net.IP {
 type IPFamily int
 
 const (
-	IPv4 IPFamily = iota
-	IPv6
+	UnknownIPFamily IPFamily = -1
+	IPv4            IPFamily = 0
+	IPv6            IPFamily = 1
 )
 
 // Family returns the IP family (IPv4 or IPv6).
@@ -236,7 +258,10 @@ func GetIPFamily(ip net.IP) IPFamily {
 	if IsIPv4(ip) {
 		return IPv4
 	}
-	return IPv6
+	if IsIPv6(ip) {
+		return IPv6
+	}
+	return UnknownIPFamily
 }
 
 // ReverseDNS returns the reverse DNS lookup name for an IP address.

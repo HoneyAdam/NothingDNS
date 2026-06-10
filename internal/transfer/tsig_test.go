@@ -139,6 +139,109 @@ func TestPackUnpackTSIGRecord(t *testing.T) {
 	}
 }
 
+func TestPackTSIGRecordRejectsInvalidLengths(t *testing.T) {
+	tests := []struct {
+		name string
+		tsig *TSIGRecord
+		want string
+	}{
+		{
+			name: "nil record",
+			tsig: nil,
+			want: "nil TSIG record",
+		},
+		{
+			name: "oversized MAC",
+			tsig: &TSIGRecord{
+				Algorithm:  HmacSHA256,
+				TimeSigned: time.Unix(1234567890, 0),
+				Fudge:      300,
+				MAC:        make([]byte, maxTSIGWireFieldLen+1),
+			},
+			want: "TSIG MAC too large",
+		},
+		{
+			name: "oversized other data",
+			tsig: &TSIGRecord{
+				Algorithm:  HmacSHA256,
+				TimeSigned: time.Unix(1234567890, 0),
+				Fudge:      300,
+				OtherData:  make([]byte, maxTSIGWireFieldLen+1),
+			},
+			want: "TSIG other data too large",
+		},
+		{
+			name: "other length mismatch",
+			tsig: &TSIGRecord{
+				Algorithm:  HmacSHA256,
+				TimeSigned: time.Unix(1234567890, 0),
+				Fudge:      300,
+				OtherLen:   1,
+				OtherData:  []byte{1, 2},
+			},
+			want: "TSIG other length mismatch",
+		},
+		{
+			name: "time signed before epoch",
+			tsig: &TSIGRecord{
+				Algorithm:  HmacSHA256,
+				TimeSigned: time.Unix(-1, 0),
+				Fudge:      300,
+			},
+			want: "before Unix epoch",
+		},
+		{
+			name: "time signed above 48 bit range",
+			tsig: &TSIGRecord{
+				Algorithm:  HmacSHA256,
+				TimeSigned: time.Unix(int64(maxTSIGTimeSigned)+1, 0),
+				Fudge:      300,
+			},
+			want: "exceeds 48-bit Unix time",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := PackTSIGRecord(tt.tsig)
+			if err == nil {
+				t.Fatal("PackTSIGRecord accepted invalid length data")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("PackTSIGRecord error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestPackTSIGRecordWithOtherData(t *testing.T) {
+	tsig := &TSIGRecord{
+		Algorithm:  HmacSHA256,
+		TimeSigned: time.Unix(1234567890, 0),
+		Fudge:      300,
+		MAC:        []byte("test-mac"),
+		OriginalID: 0x1234,
+		Error:      TSIGErrBadTime,
+		OtherLen:   6,
+		OtherData:  []byte{0, 0, 0, 1, 0, 2},
+	}
+
+	packed, err := PackTSIGRecord(tsig)
+	if err != nil {
+		t.Fatalf("PackTSIGRecord() error = %v", err)
+	}
+	unpacked, n, err := UnpackTSIGRecord(packed, 0)
+	if err != nil {
+		t.Fatalf("UnpackTSIGRecord() error = %v", err)
+	}
+	if n != len(packed) {
+		t.Fatalf("UnpackTSIGRecord consumed %d bytes, want %d", n, len(packed))
+	}
+	if unpacked.OtherLen != tsig.OtherLen || !bytes.Equal(unpacked.OtherData, tsig.OtherData) {
+		t.Fatalf("OtherData = len %d data %v, want len %d data %v", unpacked.OtherLen, unpacked.OtherData, tsig.OtherLen, tsig.OtherData)
+	}
+}
+
 func TestCalculateMAC(t *testing.T) {
 	key := []byte("test-key-data-for-hmac")
 	data := []byte("message to be authenticated")

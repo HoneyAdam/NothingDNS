@@ -305,7 +305,11 @@ func TestExpandGenerate(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.template, func(t *testing.T) {
-			got := expandGenerate(tt.template, tt.iter)
+			got, err := expandGenerate(tt.template, tt.iter)
+			if err != nil {
+				t.Fatalf("expandGenerate(%q, %d) unexpected error: %v",
+					tt.template, tt.iter, err)
+			}
 			if got != tt.want {
 				t.Errorf("expandGenerate(%q, %d) = %q, want %q",
 					tt.template, tt.iter, got, tt.want)
@@ -330,10 +334,41 @@ func TestApplyGenerateModifier(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.modifier, func(t *testing.T) {
-			got := applyGenerateModifier(tt.iter, tt.modifier)
+			got, err := applyGenerateModifier(tt.iter, tt.modifier)
+			if err != nil {
+				t.Fatalf("applyGenerateModifier(%d, %q) unexpected error: %v",
+					tt.iter, tt.modifier, err)
+			}
 			if got != tt.want {
 				t.Errorf("applyGenerateModifier(%d, %q) = %q, want %q",
 					tt.iter, tt.modifier, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateInvalidModifierErrors(t *testing.T) {
+	tests := []string{
+		"$ORIGIN example.com.\n$GENERATE 1-2 host${bad,3,d} A 192.0.2.$\n",
+		"$ORIGIN example.com.\n$GENERATE 1-2 host${0,bad,d} A 192.0.2.$\n",
+		"$ORIGIN example.com.\n$GENERATE 1-2 host${0,-1,d} A 192.0.2.$\n",
+		"$ORIGIN example.com.\n$GENERATE 1-2 host${0,3,z} A 192.0.2.$\n",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			if _, err := ParseFile("test.zone", strings.NewReader(input)); err == nil {
+				t.Fatal("expected error for invalid $GENERATE modifier")
+			}
+		})
+	}
+}
+
+func TestApplyGenerateModifierRejectsInvalidValues(t *testing.T) {
+	tests := []string{"bad,3,d", "0,bad,d", "0,-1,d", "0,3,z"}
+	for _, modifier := range tests {
+		t.Run(modifier, func(t *testing.T) {
+			if got, err := applyGenerateModifier(1, modifier); err == nil {
+				t.Fatalf("expected error for modifier %q, got %q", modifier, got)
 			}
 		})
 	}

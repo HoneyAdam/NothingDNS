@@ -50,6 +50,7 @@ var (
 	ErrDecryptionFailed = errors.New("decryption failed")
 	ErrInvalidNonce     = errors.New("invalid nonce")
 	ErrTooManyDHPairs   = errors.New("too many DH pairs for this context")
+	errBodyTooLarge     = errors.New("odoh body too large")
 )
 
 // HPKE AEAD algorithms supported by ODoH.
@@ -227,7 +228,11 @@ func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("proxy returned status: %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading proxy response: %w", err)
+	}
+	return respBody, nil
 }
 
 // getTargetPublicKey returns the target's public key.
@@ -308,7 +313,7 @@ func (c *ObliviousClient) sendToProxy(msg *ObliviousDNSMessage) (*ObliviousDNSMe
 		return nil, fmt.Errorf("proxy returned status: %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -372,8 +377,12 @@ func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := readLimitedODoHBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -408,7 +417,11 @@ func (p *ObliviousProxy) forwardRaw(body []byte) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("target returned status: %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading target response: %w", err)
+	}
+	return respBody, nil
 }
 
 // NewObliviousTarget creates a new ODoH target resolver. The target
@@ -479,8 +492,12 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := readLimitedODoHBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -522,10 +539,23 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(encryptedResponse)
 }
 
+func readLimitedODoHBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBodySize {
+		return nil, errBodyTooLarge
+	}
+	return body, nil
+}
+
 // PublicKey returns the raw X25519 public key bytes. Most clients want
 // ConfigContents()/ConfigsObject() instead.
 func (t *ObliviousTarget) PublicKey() []byte {
-	return t.pubKey
+	pubKey := make([]byte, len(t.pubKey))
+	copy(pubKey, t.pubKey)
+	return pubKey
 }
 
 // ConfigContents returns the marshaled ObliviousDoHConfigContents
@@ -546,7 +576,11 @@ func (t *ObliviousTarget) ConfigsObject() []byte {
 	if t.keyPair == nil {
 		return nil
 	}
-	return t.keyPair.configsObject()
+	cfgs, err := t.keyPair.configsObject()
+	if err != nil {
+		return nil
+	}
+	return cfgs
 }
 
 // decapsulateQuery decrypts a DNS query using HPKE.
@@ -801,16 +835,17 @@ func clearBytes(b []byte) {
 func buildProxyRequest(msg *ObliviousDNSMessage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Write public key length and value
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.PublicKey)))
-	buf.Write(msg.PublicKey)
-
-	// Write ciphertext length and value
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.Ciphertext)))
-	buf.Write(msg.Ciphertext)
+	if err := writeU16Bytes(&buf, "public key", msg.PublicKey); err != nil {
+		return nil, err
+	}
+	if err := writeU16Bytes(&buf, "ciphertext", msg.Ciphertext); err != nil {
+		return nil, err
+	}
 
 	// Write nonce
-	buf.Write(msg.Nonce)
+	if _, err := buf.Write(msg.Nonce); err != nil {
+		return nil, err
+	}
 
 	return buf.Bytes(), nil
 }
@@ -824,7 +859,7 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 		return nil, err
 	}
 	pubKey := make([]byte, pubLen)
-	if _, err := r.Read(pubKey); err != nil {
+	if _, err := io.ReadFull(r, pubKey); err != nil {
 		return nil, err
 	}
 
@@ -834,14 +869,17 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 		return nil, err
 	}
 	ciphertext := make([]byte, ctLen)
-	if _, err := r.Read(ciphertext); err != nil {
+	if _, err := io.ReadFull(r, ciphertext); err != nil {
 		return nil, err
 	}
 
 	// Read nonce (12 bytes for AES-GCM)
 	nonce := make([]byte, 12)
-	if _, err := r.Read(nonce); err != nil {
+	if _, err := io.ReadFull(r, nonce); err != nil {
 		return nil, err
+	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("trailing data after nonce: %d bytes", r.Len())
 	}
 
 	return &ObliviousDNSMessage{
@@ -854,20 +892,33 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 func buildProxyResponse(msg *ObliviousDNSMessage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Write public key
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.PublicKey)))
-	buf.Write(msg.PublicKey)
-
-	// Write ciphertext
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.Ciphertext)))
-	buf.Write(msg.Ciphertext)
+	if err := writeU16Bytes(&buf, "public key", msg.PublicKey); err != nil {
+		return nil, err
+	}
+	if err := writeU16Bytes(&buf, "ciphertext", msg.Ciphertext); err != nil {
+		return nil, err
+	}
 
 	// Write nonce
-	buf.Write(msg.Nonce)
+	if _, err := buf.Write(msg.Nonce); err != nil {
+		return nil, err
+	}
 
 	return buf.Bytes(), nil
 }
 
 func parseProxyResponse(body []byte) (*ObliviousDNSMessage, error) {
 	return parseProxyRequest(body) // Same format
+}
+
+func writeU16Bytes(buf *bytes.Buffer, field string, b []byte) error {
+	n, err := u16Length(field, len(b))
+	if err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, n); err != nil {
+		return err
+	}
+	_, err = buf.Write(b)
+	return err
 }

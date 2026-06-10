@@ -92,7 +92,9 @@ func TestParsePort(t *testing.T) {
 		{"valid port", "443", 443},
 		{"valid port high", "8443", 8443},
 		{"non-numeric", "abc", 0},
-		{"partial numeric", "12abc", 12},
+		{"partial numeric", "12abc", 0},
+		{"negative", "-1", 0},
+		{"overflow", "65536", 0},
 	}
 
 	for _, tt := range tests {

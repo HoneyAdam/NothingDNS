@@ -207,9 +207,9 @@ func TestHandleNotificationsInitialized(t *testing.T) {
 
 	resp := server.HandleRequest(context.Background(), req)
 
-	// Notification should return nil result with no error
-	if resp.Error != nil {
-		t.Errorf("Unexpected error: %v", resp.Error)
+	// JSON-RPC notifications do not produce responses.
+	if resp != nil {
+		t.Errorf("Expected no response for notification, got %+v", resp)
 	}
 
 	if !server.initialized {
@@ -982,6 +982,48 @@ func TestHandleMessage(t *testing.T) {
 	}
 }
 
+func TestHandleMessageNotificationHasNoResponse(t *testing.T) {
+	handler := &MockHandler{}
+	server := NewServer("test-server", "1.0.0", handler)
+	transport := NewSSETransport(server)
+
+	resp, err := transport.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","method":"notifications/initialized"}`))
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if len(resp) != 0 {
+		t.Fatalf("Expected no response for notification, got %s", string(resp))
+	}
+	if !server.initialized {
+		t.Fatal("Expected server to be initialized after notification")
+	}
+}
+
+func TestHandleMessageNullIDStillResponds(t *testing.T) {
+	handler := &MockHandler{}
+	server := NewServer("test-server", "1.0.0", handler)
+	transport := NewSSETransport(server)
+
+	resp, err := transport.HandleMessage(context.Background(), []byte(`{"jsonrpc":"2.0","method":"ping","id":null}`))
+	if err != nil {
+		t.Fatalf("HandleMessage failed: %v", err)
+	}
+	if len(resp) == 0 {
+		t.Fatal("Expected response for request with id:null")
+	}
+
+	var response Response
+	if err := json.Unmarshal(resp, &response); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if response.Error != nil {
+		t.Fatalf("Unexpected error: %v", response.Error)
+	}
+	if response.ID != nil {
+		t.Fatalf("Expected null response ID, got %v", response.ID)
+	}
+}
+
 func TestHandleMessageWithInvalidJSON(t *testing.T) {
 	handler := &MockHandler{}
 	server := NewServer("test-server", "1.0.0", handler)
@@ -1134,8 +1176,8 @@ func TestRequestResponseIDTypes(t *testing.T) {
 	// Test with nil ID (notification)
 	req.ID = nil
 	resp = server.HandleRequest(context.Background(), req)
-	if resp.ID != nil {
-		t.Errorf("Expected nil ID, got %v", resp.ID)
+	if resp != nil {
+		t.Errorf("Expected no response for notification, got %+v", resp)
 	}
 }
 

@@ -486,8 +486,8 @@ func TestManager_CreateSession(t *testing.T) {
 	if session.MaxPayload != cfg.MaxPayloadSize {
 		t.Errorf("session MaxPayload = %d, want %d", session.MaxPayload, cfg.MaxPayloadSize)
 	}
-	if session.KeepaliveTime != cfg.InactivityTimeout/3 {
-		t.Errorf("session KeepaliveTime = %v, want %v", session.KeepaliveTime, cfg.InactivityTimeout/3)
+	if session.KeepaliveTime != MinKeepaliveInterval {
+		t.Errorf("session KeepaliveTime = %v, want %v", session.KeepaliveTime, MinKeepaliveInterval)
 	}
 
 	// Verify session is stored
@@ -881,7 +881,6 @@ func TestManager_ExtractTLVs(t *testing.T) {
 func TestManager_BuildDSOResponse(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.AllowPlainTCP = true
-	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
 	req := &protocol.Message{
@@ -898,22 +897,43 @@ func TestManager_BuildDSOResponse(t *testing.T) {
 		NewSessionIDTLV(12345),
 	}
 
-	resp := m.buildDSOResponse(req, tlvs)
+	resp, err := m.buildDSOResponse(req, tlvs)
+	if err != nil {
+		t.Fatalf("buildDSOResponse: %v", err)
+	}
 
 	if !resp.Header.Flags.QR {
 		t.Error("response QR should be true")
 	}
-	if resp.Header.ARCount != 2 {
-		t.Errorf("ARCount = %d, want 2", resp.Header.ARCount)
+	if resp.Header.QDCount != 0 || resp.Header.ANCount != 0 ||
+		resp.Header.NSCount != 0 || resp.Header.ARCount != 0 {
+		t.Errorf("section counts = Q:%d A:%d NS:%d AR:%d, want all zero",
+			resp.Header.QDCount, resp.Header.ANCount, resp.Header.NSCount, resp.Header.ARCount)
 	}
 	if resp.Header.ID != 42 {
 		t.Errorf("ID = %d, want 42 (should mirror request)", resp.Header.ID)
+	}
+	first, consumed, err := UnpackTLV(resp.RawBody, 0)
+	if err != nil {
+		t.Fatalf("first response TLV unpack: %v", err)
+	}
+	if first.Type != DSOTLVKeepalive {
+		t.Errorf("first response TLV type = %d, want %d", first.Type, DSOTLVKeepalive)
+	}
+	second, consumed2, err := UnpackTLV(resp.RawBody, consumed)
+	if err != nil {
+		t.Fatalf("second response TLV unpack: %v", err)
+	}
+	if second.Type != DSOTLVSessionID {
+		t.Errorf("second response TLV type = %d, want %d", second.Type, DSOTLVSessionID)
+	}
+	if consumed+consumed2 != len(resp.RawBody) {
+		t.Errorf("response RawBody consumed %d bytes, want %d", consumed+consumed2, len(resp.RawBody))
 	}
 }
 
 func TestManager_BuildDSOResponse_EmptyTLVs(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AllowPlainTCP = true
 	cfg.AllowPlainTCP = true
 	m := NewManager(cfg, nil)
 
@@ -924,13 +944,19 @@ func TestManager_BuildDSOResponse_EmptyTLVs(t *testing.T) {
 		},
 	}
 
-	resp := m.buildDSOResponse(req, nil)
+	resp, err := m.buildDSOResponse(req, nil)
+	if err != nil {
+		t.Fatalf("buildDSOResponse: %v", err)
+	}
 
 	if !resp.Header.Flags.QR {
 		t.Error("response QR should be true")
 	}
 	if resp.Header.ARCount != 0 {
 		t.Errorf("ARCount = %d, want 0", resp.Header.ARCount)
+	}
+	if len(resp.RawBody) != 0 {
+		t.Errorf("RawBody length = %d, want 0", len(resp.RawBody))
 	}
 }
 
@@ -995,6 +1021,84 @@ func TestManager_SendKeepalive_ClosedSession(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for closed session")
 	}
+}
+
+func TestManager_SendKeepalive_RetriesPartialWrites(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	m := NewManager(cfg, nil)
+	conn := &partialWriteConn{maxWrite: 3}
+	session := &Session{
+		ID:            1,
+		Conn:          conn,
+		CreatedAt:     time.Now(),
+		LastActivity:  time.Now().Add(-time.Minute),
+		KeepaliveTime: 5 * time.Second,
+		MaxPayload:    DefaultMaxPayloadSize,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+
+	if err := m.SendKeepalive(session); err != nil {
+		t.Fatalf("SendKeepalive returned error: %v", err)
+	}
+	if conn.calls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.calls)
+	}
+	frameLen := int(conn.written[0])<<8 | int(conn.written[1])
+	if got, want := len(conn.written), 2+frameLen; got != want {
+		t.Fatalf("written frame length = %d, want %d", got, want)
+	}
+	if !session.LastActivity.After(session.CreatedAt) {
+		t.Fatal("SendKeepalive should update session activity after a full write")
+	}
+}
+
+type partialWriteConn struct {
+	maxWrite int
+	written  []byte
+	calls    int
+}
+
+func (c *partialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(p) {
+		n = len(p)
+	}
+	c.written = append(c.written, p[:n]...)
+	return n, nil
+}
+
+func (c *partialWriteConn) Close() error {
+	return nil
+}
+
+func (c *partialWriteConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return nil
 }
 
 func TestManager_SendKeepalive_NilLogger(t *testing.T) {
@@ -1076,16 +1180,20 @@ func TestDSOTLVTypeConstants(t *testing.T) {
 	types := []struct {
 		name  string
 		value uint16
+		want  uint16
 	}{
-		{"DSOTLVPadding", DSOTLVPadding},
-		{"DSOTLVKeepalive", DSOTLVKeepalive},
-		{"DSOTLVRetryDelay", DSOTLVRetryDelay},
-		{"DSOTLVSessionID", DSOTLVSessionID},
-		{"DSOTLVEncryption", DSOTLVEncryption},
-		{"DSOTLVMaximumPayload", DSOTLVMaximumPayload},
+		{"DSOTLVReserved", DSOTLVReserved, 0x0000},
+		{"DSOTLVKeepalive", DSOTLVKeepalive, 0x0001},
+		{"DSOTLVRetryDelay", DSOTLVRetryDelay, 0x0002},
+		{"DSOTLVPadding", DSOTLVPadding, 0x0003},
+		{"DSOTLVSessionID", DSOTLVSessionID, 0xF800},
+		{"DSOTLVEncryption", DSOTLVEncryption, 0xF801},
+		{"DSOTLVMaximumPayload", DSOTLVMaximumPayload, 0xF802},
 	}
 	for _, tt := range types {
-		_ = tt.value // Ensure constants are accessible
+		if tt.value != tt.want {
+			t.Errorf("%s = %#04x, want %#04x", tt.name, tt.value, tt.want)
+		}
 	}
 }
 
@@ -1096,10 +1204,9 @@ func TestNewRetryDelayTLV_ZeroDelay(t *testing.T) {
 	if tlv.Type != DSOTLVRetryDelay {
 		t.Errorf("Type = %d, want %d", tlv.Type, DSOTLVRetryDelay)
 	}
-	// 0ms / 100 = 0 units
-	gotUnits := binary.BigEndian.Uint32(tlv.Value)
-	if gotUnits != 0 {
-		t.Errorf("delay units = %d, want 0", gotUnits)
+	gotMS := binary.BigEndian.Uint32(tlv.Value)
+	if gotMS != 0 {
+		t.Errorf("delay milliseconds = %d, want 0", gotMS)
 	}
 }
 
@@ -1108,6 +1215,19 @@ func TestNewRetryDelayTLV_LargeDelay(t *testing.T) {
 	tlv := NewRetryDelayTLV(delay)
 	if len(tlv.Value) != 4 {
 		t.Errorf("Value length = %d, want 4", len(tlv.Value))
+	}
+}
+
+func TestNewRetryDelayTLV_ClampsDurationToWireRange(t *testing.T) {
+	tlv := NewRetryDelayTLV(-time.Millisecond)
+	if got := binary.BigEndian.Uint32(tlv.Value); got != 0 {
+		t.Errorf("negative retry delay milliseconds = %d, want 0", got)
+	}
+
+	overflow := time.Duration(int64(^uint32(0))+1) * time.Millisecond
+	tlv = NewRetryDelayTLV(overflow)
+	if got := binary.BigEndian.Uint32(tlv.Value); got != ^uint32(0) {
+		t.Errorf("overflow retry delay milliseconds = %d, want %d", got, uint32(^uint32(0)))
 	}
 }
 
@@ -1164,6 +1284,9 @@ func TestCreateDSOMessage_EmptyTLVs(t *testing.T) {
 	if msg.Header.ARCount != 0 {
 		t.Errorf("ARCount = %d, want 0", msg.Header.ARCount)
 	}
+	if len(msg.RawBody) != 0 {
+		t.Errorf("RawBody length = %d, want 0", len(msg.RawBody))
+	}
 }
 
 func TestCreateDSOMessage_MultipleTLVs(t *testing.T) {
@@ -1177,8 +1300,24 @@ func TestCreateDSOMessage_MultipleTLVs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDSOMessage failed: %v", err)
 	}
-	if msg.Header.ARCount != 3 {
-		t.Errorf("ARCount = %d, want 3", msg.Header.ARCount)
+	if msg.Header.QDCount != 0 || msg.Header.ANCount != 0 ||
+		msg.Header.NSCount != 0 || msg.Header.ARCount != 0 {
+		t.Errorf("section counts = Q:%d A:%d NS:%d AR:%d, want all zero",
+			msg.Header.QDCount, msg.Header.ANCount, msg.Header.NSCount, msg.Header.ARCount)
+	}
+	offset := 0
+	for i, want := range []uint16{DSOTLVKeepalive, DSOTLVSessionID, DSOTLVPadding} {
+		got, consumed, err := UnpackTLV(msg.RawBody, offset)
+		if err != nil {
+			t.Fatalf("TLV %d unpack: %v", i, err)
+		}
+		if got.Type != want {
+			t.Errorf("TLV %d type = %d, want %d", i, got.Type, want)
+		}
+		offset += consumed
+	}
+	if offset != len(msg.RawBody) {
+		t.Errorf("consumed RawBody length = %d, want %d", offset, len(msg.RawBody))
 	}
 }
 
@@ -1220,22 +1359,35 @@ func TestNewKeepaliveTLV_ZeroTimeouts(t *testing.T) {
 	if tlv.Type != DSOTLVKeepalive {
 		t.Errorf("Type = %d, want %d", tlv.Type, DSOTLVKeepalive)
 	}
-	primary := binary.BigEndian.Uint32(tlv.Value[0:])
-	secondary := binary.BigEndian.Uint32(tlv.Value[4:])
-	if primary != 0 {
-		t.Errorf("primary units = %d, want 0", primary)
+	primaryMS := binary.BigEndian.Uint32(tlv.Value[0:])
+	secondaryMS := binary.BigEndian.Uint32(tlv.Value[4:])
+	if primaryMS != 0 {
+		t.Errorf("primary milliseconds = %d, want 0", primaryMS)
 	}
-	if secondary != 0 {
-		t.Errorf("secondary units = %d, want 0", secondary)
+	if secondaryMS != 0 {
+		t.Errorf("secondary milliseconds = %d, want 0", secondaryMS)
 	}
 }
 
-func TestNewKeepaliveTLV_SubMillisecond(t *testing.T) {
-	// 50ms should round to 0 units (50/100 = 0)
+func TestNewKeepaliveTLV_MillisecondWireValues(t *testing.T) {
 	tlv := NewKeepaliveTLV(50*time.Millisecond, 50*time.Millisecond)
 	primary := binary.BigEndian.Uint32(tlv.Value[0:])
+	if primary != 50 {
+		t.Errorf("primary milliseconds for 50ms = %d, want 50", primary)
+	}
+}
+
+func TestNewKeepaliveTLV_ClampsDurationToWireRange(t *testing.T) {
+	overflow := time.Duration(int64(^uint32(0))+1) * time.Millisecond
+	tlv := NewKeepaliveTLV(-time.Second, overflow)
+
+	primary := binary.BigEndian.Uint32(tlv.Value[0:])
 	if primary != 0 {
-		t.Errorf("primary units for 50ms = %d, want 0", primary)
+		t.Errorf("negative primary milliseconds = %d, want 0", primary)
+	}
+	secondary := binary.BigEndian.Uint32(tlv.Value[4:])
+	if secondary != ^uint32(0) {
+		t.Errorf("overflow secondary milliseconds = %d, want %d", secondary, uint32(^uint32(0)))
 	}
 }
 
@@ -1259,6 +1411,23 @@ func TestTLV_Size_LargeValue(t *testing.T) {
 	tlv := &TLV{Type: 0, Value: make([]byte, 1000)}
 	if tlv.Size() != 1004 {
 		t.Errorf("Size() = %d, want 1004", tlv.Size())
+	}
+}
+
+func TestTLV_PackRejectsValueLengthOverflow(t *testing.T) {
+	tlv := &TLV{Type: DSOTLVPadding, Value: make([]byte, 0x10000)}
+
+	if _, err := tlv.Pack(make([]byte, tlv.Size()), 0); err == nil {
+		t.Fatal("TLV.Pack should reject values that cannot fit in the 16-bit TLV length field")
+	}
+}
+
+func TestCreateDSOMessageRejectsTLVLengthOverflow(t *testing.T) {
+	_, err := CreateDSOMessage([]*TLV{
+		{Type: DSOTLVPadding, Value: make([]byte, 0x10000)},
+	})
+	if err == nil {
+		t.Fatal("CreateDSOMessage should reject values that cannot fit in the 16-bit TLV length field")
 	}
 }
 

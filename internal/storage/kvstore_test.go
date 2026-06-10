@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"os"
@@ -64,6 +65,94 @@ func TestKVStore_HMACRoundTrip(t *testing.T) {
 		return nil
 	}); err != nil {
 		t.Fatalf("View: %v", err)
+	}
+}
+
+func TestKVStore_WriteTLVCompletesPartialWrites(t *testing.T) {
+	hmacKey := make([]byte, 32)
+	aeadKey := make([]byte, 32)
+	for i := range hmacKey {
+		hmacKey[i] = byte(i + 1)
+		aeadKey[i] = byte(255 - i)
+	}
+
+	tests := []struct {
+		name    string
+		aeadKey []byte
+		read    func(*KVStore, *bytes.Buffer) error
+	}{
+		{
+			name: "plain",
+			read: func(store *KVStore, buf *bytes.Buffer) error {
+				return store.readTLV(bytes.NewReader(buf.Bytes()))
+			},
+		},
+		{
+			name:    "encrypted",
+			aeadKey: aeadKey,
+			read: func(store *KVStore, buf *bytes.Buffer) error {
+				return store.readEncryptedTLV(bytes.NewReader(buf.Bytes()))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &KVStore{
+				root: &bucketData{
+					Entries: map[string][]byte{"key": []byte("value")},
+					Buckets: map[string]*bucketData{},
+				},
+				hmacKey: hmacKey,
+				aeadKey: tt.aeadKey,
+			}
+			writer := &chunkedWriter{maxWrite: 3}
+
+			if err := source.writeTLV(writer); err != nil {
+				t.Fatalf("writeTLV: %v", err)
+			}
+			if writer.calls < 2 {
+				t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+			}
+
+			loaded := &KVStore{hmacKey: hmacKey, aeadKey: tt.aeadKey}
+			if err := tt.read(loaded, &writer.buf); err != nil {
+				t.Fatalf("read TLV: %v", err)
+			}
+			got := loaded.root.Entries["key"]
+			if string(got) != "value" {
+				t.Fatalf("loaded value = %q, want %q", got, "value")
+			}
+		})
+	}
+}
+
+func TestKVStoreReadGOBRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.gob")
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(&bucketData{
+		Entries: map[string][]byte{"key": []byte("value")},
+		Buckets: map[string]*bucketData{},
+	}); err != nil {
+		t.Fatalf("gob encode: %v", err)
+	}
+	if buf.Len() > maxLegacyGOBFile {
+		t.Fatalf("test fixture gob is unexpectedly large: %d", buf.Len())
+	}
+	buf.Write(make([]byte, maxLegacyGOBFile-buf.Len()+1))
+
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+
+	store := &KVStore{}
+	if err := store.readGOB(f); err == nil {
+		t.Fatal("readGOB accepted a legacy GOB file larger than the documented cap")
 	}
 }
 
@@ -618,6 +707,51 @@ func TestKVStoreOnCommit(t *testing.T) {
 	}
 }
 
+func TestKVStoreOnCommitRunsAfterUnlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := OpenKVStore(path)
+	if err != nil {
+		t.Fatalf("OpenKVStore failed: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		var handlerErr error
+		err := store.Update(func(tx *Tx) error {
+			tx.OnCommit(func() {
+				handlerErr = store.View(func(viewTx *Tx) error {
+					if bucket := viewTx.Bucket([]byte("test")); bucket == nil {
+						return ErrBucketNotFound
+					}
+					return nil
+				})
+			})
+
+			_, err := tx.CreateBucketIfNotExists([]byte("test"))
+			return err
+		})
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- handlerErr
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Update with reentrant OnCommit handler failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("OnCommit handler blocked while opening a read transaction")
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+}
+
 func TestKVStoreStats(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 
@@ -631,6 +765,106 @@ func TestKVStoreStats(t *testing.T) {
 
 	if stats.TxCount != 0 {
 		t.Errorf("Expected 0 transactions, got %d", stats.TxCount)
+	}
+
+	err = store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("test"))
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte("key1"), []byte("value1")); err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte("key2"), []byte("value2")); err != nil {
+			return err
+		}
+		child, err := bucket.CreateBucketIfNotExists([]byte("child"))
+		if err != nil {
+			return err
+		}
+		return child.Put([]byte("nested"), []byte("value3"))
+	})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	tx, err := store.Begin(false)
+	if err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+	stats = store.Stats()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback failed: %v", err)
+	}
+
+	if stats.TxCount != 2 {
+		t.Errorf("Expected 2 transactions, got %d", stats.TxCount)
+	}
+	if stats.OpenTxCount != 1 {
+		t.Errorf("Expected 1 open transaction, got %d", stats.OpenTxCount)
+	}
+	if stats.BucketCount != 2 {
+		t.Errorf("Expected 2 buckets, got %d", stats.BucketCount)
+	}
+	if stats.KeyCount != 3 {
+		t.Errorf("Expected 3 keys, got %d", stats.KeyCount)
+	}
+}
+
+func TestKVStoreStatsConcurrentReadOnlyTransactions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := OpenKVStore(path)
+	if err != nil {
+		t.Fatalf("OpenKVStore failed: %v", err)
+	}
+	defer store.Close()
+
+	err = store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("test"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("key"), []byte("value"))
+	})
+	if err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	const goroutines = 8
+	const iterations = 100
+	start := make(chan struct{})
+	errCh := make(chan error, goroutines)
+	var wg sync.WaitGroup
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				tx, err := store.Begin(false)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				_ = store.Stats()
+				if err := tx.Rollback(); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("concurrent stats transaction failed: %v", err)
+		}
 	}
 }
 
@@ -700,6 +934,54 @@ func TestKVStoreCloseTwice(t *testing.T) {
 	// Close again (should be safe)
 	if err := store.Close(); err != nil {
 		t.Fatalf("Second close failed: %v", err)
+	}
+}
+
+func TestKVStoreCloseFailureLeavesStoreOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := OpenKVStore(path)
+	if err != nil {
+		t.Fatalf("OpenKVStore failed: %v", err)
+	}
+
+	if err := store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("test"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("key"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("Update failed: %v", err)
+	}
+
+	if err := os.RemoveAll(path); err != nil {
+		t.Fatalf("RemoveAll failed: %v", err)
+	}
+	if err := store.Close(); err == nil {
+		t.Fatal("Close should fail when the backing directory is missing")
+	}
+	if err := os.MkdirAll(path, 0755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+
+	err = store.View(func(tx *Tx) error {
+		bucket := tx.Bucket([]byte("test"))
+		if bucket == nil {
+			t.Fatal("expected bucket after failed Close")
+		}
+		got := bucket.Get([]byte("key"))
+		if string(got) != "value" {
+			t.Fatalf("value after failed Close = %q, want value", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("View after failed Close returned error: %v", err)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close after recreating backing directory failed: %v", err)
 	}
 }
 

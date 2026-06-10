@@ -3,11 +3,13 @@ package doh
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
@@ -28,7 +30,10 @@ const (
 	MaxPaddingSize = 512
 )
 
-var secureRandomReader io.Reader = rand.Reader
+var (
+	secureRandomReader io.Reader = rand.Reader
+	errBodyTooLarge              = errors.New("doh body too large")
+)
 
 // Handler handles DNS over HTTPS requests (RFC 8484).
 type Handler struct {
@@ -83,6 +88,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Invalid request", http.StatusBadRequest)
 		return
 	}
@@ -103,6 +112,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Create DoH response writer and handle the query
 	rw := newDoHResponseWriter(w, r, query, h.padding)
 	h.dnsHandler.ServeDNS(rw, query)
+	if !rw.written {
+		http.Error(w, "no DNS response generated", http.StatusInternalServerError)
+	}
 }
 
 // isJSONRequest returns true if the request should be handled as a JSON API
@@ -136,14 +148,16 @@ func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported Content-Type", http.StatusBadRequest)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, MaxDNSMessageSize)
+		r.Body = http.MaxBytesReader(w, r.Body, MaxDNSMessageSize+1)
 		defer r.Body.Close()
 
 		var data []byte
-		// Use LimitReader to prevent unbounded allocation even if MaxBytesReader
-		// limit is reached
-		data, err = io.ReadAll(io.LimitReader(r.Body, MaxDNSMessageSize))
+		data, err = readLimitedDoHBody(r.Body)
 		if err != nil {
+			if errors.Is(err, errBodyTooLarge) {
+				http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "failed to read body", http.StatusBadRequest)
 			return
 		}
@@ -266,14 +280,25 @@ func (h *Handler) handlePOST(w http.ResponseWriter, r *http.Request) ([]byte, er
 	}
 
 	// Limit body size to prevent abuse
-	r.Body = http.MaxBytesReader(w, r.Body, MaxDNSMessageSize)
+	r.Body = http.MaxBytesReader(w, r.Body, MaxDNSMessageSize+1)
 	defer r.Body.Close()
 
-	data, err := io.ReadAll(io.LimitReader(r.Body, MaxDNSMessageSize))
+	data, err := readLimitedDoHBody(r.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read body: %w", err)
 	}
 
+	return data, nil
+}
+
+func readLimitedDoHBody(r io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, MaxDNSMessageSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxDNSMessageSize {
+		return nil, errBodyTooLarge
+	}
 	return data, nil
 }
 
@@ -369,11 +394,11 @@ func parsePort(port string) int {
 	if port == "" {
 		return 0
 	}
-	var p int
-	if _, err := fmt.Sscanf(port, "%d", &p); err != nil {
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
 		return 0
 	}
-	return p
+	return int(p)
 }
 
 // generatePadding generates random padding per RFC 7830.

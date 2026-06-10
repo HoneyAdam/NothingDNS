@@ -874,4 +874,9 @@ func TestObliviousTargetPublicKey(t *testing.T) {
 	if !bytes.Equal(pubKey, target.pubKey) {
 		t.Error("PublicKey() does not match internal pubKey")
 	}
+
+	pubKey[0] ^= 0xff
+	if bytes.Equal(pubKey, target.pubKey) {
+		t.Fatal("PublicKey() returned internal pubKey slice")
+	}
 }

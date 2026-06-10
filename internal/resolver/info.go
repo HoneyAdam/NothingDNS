@@ -89,6 +89,9 @@ func (ri *ResolverInfo) AddCapability(cap string) {
 
 // HasCapability checks if a capability is present.
 func (ri *ResolverInfo) HasCapability(cap string) bool {
+	if ri == nil {
+		return false
+	}
 	for _, c := range ri.Capabilities {
 		if c == cap {
 			return true
@@ -118,6 +121,13 @@ const (
 	ResponderOptionCodeUpstreamInfo = 4
 )
 
+const (
+	respInfoMaxByteLen = 0xff
+	respInfoHostname   = 0
+	respInfoIPv4       = 4
+	respInfoIPv6       = 6
+)
+
 // RESPInfoWireFormat represents RESPInfo in wire format.
 type RESPInfoWireFormat struct {
 	// Information Type
@@ -132,15 +142,23 @@ type RESPInfoWireFormat struct {
 
 // ToWire converts RESPInfo to wire format.
 func (ri *ResolverInfo) ToWire(infoType uint8, ttl uint32) (*RESPInfoWireFormat, error) {
+	if err := ri.Validate(); err != nil {
+		return nil, err
+	}
+
 	var data []byte
+	var err error
 
 	switch infoType {
 	case ResponderOptionCodeResolverInfo:
-		data = ri.serializeBasic()
+		data, err = ri.serializeBasic()
 	case ResponderOptionCodeExtendedInfo:
-		data = ri.serializeExtended()
+		data, err = ri.serializeExtended()
 	default:
 		return nil, fmt.Errorf("unknown info type: %d", infoType)
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	return &RESPInfoWireFormat{
@@ -151,33 +169,45 @@ func (ri *ResolverInfo) ToWire(infoType uint8, ttl uint32) (*RESPInfoWireFormat,
 }
 
 // serializeBasic serializes basic resolver info.
-func (ri *ResolverInfo) serializeBasic() []byte {
+func (ri *ResolverInfo) serializeBasic() ([]byte, error) {
 	var data []byte
 
 	// ID as length-prefixed string
 	idBytes := []byte(ri.ID)
+	if len(idBytes) > respInfoMaxByteLen {
+		return nil, fmt.Errorf("resolver info ID too long: %d bytes (max 255)", len(idBytes))
+	}
 	data = append(data, byte(len(idBytes)))
 	data = append(data, idBytes...)
 
 	// Version as length-prefixed string
 	versionBytes := []byte(ri.Version)
+	if len(versionBytes) > respInfoMaxByteLen {
+		return nil, fmt.Errorf("resolver info version too long: %d bytes (max 255)", len(versionBytes))
+	}
 	data = append(data, byte(len(versionBytes)))
 	data = append(data, versionBytes...)
 
-	return data
+	return data, nil
 }
 
 // serializeExtended serializes extended resolver info.
-func (ri *ResolverInfo) serializeExtended() []byte {
+func (ri *ResolverInfo) serializeExtended() ([]byte, error) {
 	var data []byte
 
 	// ID
 	idBytes := []byte(ri.ID)
+	if len(idBytes) > respInfoMaxByteLen {
+		return nil, fmt.Errorf("resolver info ID too long: %d bytes (max 255)", len(idBytes))
+	}
 	data = append(data, byte(len(idBytes)))
 	data = append(data, idBytes...)
 
 	// Version
 	versionBytes := []byte(ri.Version)
+	if len(versionBytes) > respInfoMaxByteLen {
+		return nil, fmt.Errorf("resolver info version too long: %d bytes (max 255)", len(versionBytes))
+	}
 	data = append(data, byte(len(versionBytes)))
 	data = append(data, versionBytes...)
 
@@ -202,6 +232,9 @@ func (ri *ResolverInfo) serializeExtended() []byte {
 	data = append(data, byte(ri.CacheSize))
 
 	// Number of upstreams
+	if len(ri.Upstreams) > respInfoMaxByteLen {
+		return nil, fmt.Errorf("resolver info upstream count too large: %d (max 255)", len(ri.Upstreams))
+	}
 	data = append(data, byte(len(ri.Upstreams)))
 
 	// Upstream addresses
@@ -210,20 +243,24 @@ func (ri *ResolverInfo) serializeExtended() []byte {
 		if ip := net.ParseIP(upstream); ip != nil {
 			// IP address - mark with prefix
 			if ip.To4() != nil {
-				data = append(data, 4) // IPv4 marker
+				data = append(data, respInfoIPv4)
 				data = append(data, ip.To4()...)
 			} else {
-				data = append(data, 6) // IPv6 marker
+				data = append(data, respInfoIPv6)
 				data = append(data, ip.To16()...)
 			}
 		} else {
-			// Hostname - length-prefixed
+			if len(upstream) > respInfoMaxByteLen {
+				return nil, fmt.Errorf("resolver info upstream hostname too long: %d bytes (max 255)", len(upstream))
+			}
+			// Hostname - explicit marker plus length to avoid collisions with IP markers.
+			data = append(data, respInfoHostname)
 			data = append(data, byte(len(upstream)))
 			data = append(data, []byte(upstream)...)
 		}
 	}
 
-	return data
+	return data, nil
 }
 
 // ParseRESPInfo parses RESPInfo from wire format.
@@ -334,32 +371,44 @@ func parseExtendedRESPInfo(data []byte) (*ResolverInfo, error) {
 	upstreams := make([]string, 0, upstreamCount)
 	for i := 0; i < upstreamCount; i++ {
 		if offset >= len(data) {
-			break
+			return nil, fmt.Errorf("truncated upstream %d", i)
 		}
 		marker := data[offset]
 		offset++
 
-		if marker == 4 {
+		if marker == respInfoIPv4 {
 			// IPv4
 			if offset+4 > len(data) {
-				break
+				return nil, fmt.Errorf("truncated IPv4 upstream")
 			}
 			ip := net.IP(data[offset : offset+4])
 			upstreams = append(upstreams, ip.String())
 			offset += 4
-		} else if marker == 6 {
+		} else if marker == respInfoIPv6 {
 			// IPv6
 			if offset+16 > len(data) {
-				break
+				return nil, fmt.Errorf("truncated IPv6 upstream")
 			}
 			ip := net.IP(data[offset : offset+16])
 			upstreams = append(upstreams, ip.String())
 			offset += 16
+		} else if marker == respInfoHostname {
+			if offset >= len(data) {
+				return nil, fmt.Errorf("truncated hostname length")
+			}
+			hostnameLen := int(data[offset])
+			offset++
+			if offset+hostnameLen > len(data) {
+				return nil, fmt.Errorf("truncated hostname upstream")
+			}
+			hostname := string(data[offset : offset+hostnameLen])
+			upstreams = append(upstreams, hostname)
+			offset += hostnameLen
 		} else {
-			// Hostname
+			// Legacy hostname encoding: marker is the hostname length.
 			hostnameLen := int(marker)
 			if offset+hostnameLen > len(data) {
-				break
+				return nil, fmt.Errorf("truncated legacy hostname upstream")
 			}
 			hostname := string(data[offset : offset+hostnameLen])
 			upstreams = append(upstreams, hostname)
@@ -379,6 +428,9 @@ func parseExtendedRESPInfo(data []byte) (*ResolverInfo, error) {
 
 // String returns a human-readable representation.
 func (ri *ResolverInfo) String() string {
+	if ri == nil {
+		return "ResolverInfo{}"
+	}
 	var parts []string
 	if ri.ID != "" {
 		parts = append(parts, fmt.Sprintf("id=%s", ri.ID))

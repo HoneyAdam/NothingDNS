@@ -58,6 +58,30 @@ func TestSaveAndLoadHardState_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestWriteHardStateCompletesPartialWrites(t *testing.T) {
+	dir := t.TempDir()
+	orig := HardState{CurrentTerm: 99, VotedFor: "node-partial"}
+	writer := &chunkedWriter{maxWrite: 2}
+
+	if err := writeHardState(writer, orig); err != nil {
+		t.Fatalf("writeHardState: %v", err)
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+	if err := os.WriteFile(hardStatePath(dir), writer.buf.Bytes(), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := loadHardState(dir)
+	if err != nil {
+		t.Fatalf("loadHardState: %v", err)
+	}
+	if got != orig {
+		t.Fatalf("HardState = %+v, want %+v", got, orig)
+	}
+}
+
 func TestSaveHardState_EmptyVotedFor(t *testing.T) {
 	// votedFor == "" must serialize as zero-length and round-trip.
 	dir := t.TempDir()
@@ -79,6 +103,38 @@ func TestSaveHardState_EmptyDataDir_Refused(t *testing.T) {
 	// that would mask configuration bugs that lose election safety.
 	if err := saveHardState("", HardState{CurrentTerm: 1}); err == nil {
 		t.Error("expected error for empty dataDir")
+	}
+}
+
+func TestSaveHardState_VotedForLengthLimit(t *testing.T) {
+	dir := t.TempDir()
+	maxVotedFor := strings.Repeat("n", maxHardStateVotedForLen)
+	if err := saveHardState(dir, HardState{CurrentTerm: 1, VotedFor: NodeID(maxVotedFor)}); err != nil {
+		t.Fatalf("saveHardState should accept max-length votedFor: %v", err)
+	}
+	got, err := loadHardState(dir)
+	if err != nil {
+		t.Fatalf("loadHardState max-length votedFor: %v", err)
+	}
+	if got.VotedFor != NodeID(maxVotedFor) {
+		t.Fatalf("VotedFor length %d, want %d", len(got.VotedFor), len(maxVotedFor))
+	}
+
+	tooLong := strings.Repeat("n", maxHardStateVotedForLen+1)
+	err = saveHardState(dir, HardState{CurrentTerm: 2, VotedFor: NodeID(tooLong)})
+	if err == nil {
+		t.Fatal("saveHardState accepted votedFor value that loadHardState rejects")
+	}
+	if !strings.Contains(err.Error(), "hardstate votedFor too large") {
+		t.Fatalf("saveHardState error = %v, want votedFor too large", err)
+	}
+
+	got, err = loadHardState(dir)
+	if err != nil {
+		t.Fatalf("loadHardState after rejected save: %v", err)
+	}
+	if got.CurrentTerm != 1 || got.VotedFor != NodeID(maxVotedFor) {
+		t.Fatalf("rejected save should not replace prior hardstate, got %+v", got)
 	}
 }
 

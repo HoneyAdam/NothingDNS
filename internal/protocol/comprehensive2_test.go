@@ -454,6 +454,31 @@ func TestRRSIGIsExpired(t *testing.T) {
 	}
 }
 
+func TestRRSIGIsExpiredAtWrapBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		expiration uint32
+		now        uint32
+		want       bool
+	}{
+		{name: "same timestamp not expired", expiration: 100, now: 100, want: false},
+		{name: "normal expired", expiration: 99, now: 100, want: true},
+		{name: "normal future not expired", expiration: 101, now: 100, want: false},
+		{name: "expired across uint32 wrap", expiration: ^uint32(0), now: 1, want: true},
+		{name: "future across uint32 wrap not expired", expiration: 1, now: ^uint32(0), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rrsig := &RDataRRSIG{Expiration: tt.expiration}
+			if got := rrsig.IsExpiredAt(tt.now); got != tt.want {
+				t.Fatalf("IsExpiredAt(%d) with expiration=%d = %v, want %v",
+					tt.now, tt.expiration, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestRRSIGIsInceptionValid tests RRSIG IsInceptionValid method
 func TestRRSIGIsInceptionValid(t *testing.T) {
 	// Inception in future - invalid
@@ -466,6 +491,31 @@ func TestRRSIGIsInceptionValid(t *testing.T) {
 	past := &RDataRRSIG{Inception: uint32(time.Now().Unix()) - 3600}
 	if !past.IsInceptionValid() {
 		t.Error("Past inception should be valid")
+	}
+}
+
+func TestRRSIGIsInceptionValidAtWrapBoundary(t *testing.T) {
+	tests := []struct {
+		name      string
+		inception uint32
+		now       uint32
+		want      bool
+	}{
+		{name: "same timestamp valid", inception: 100, now: 100, want: true},
+		{name: "normal past valid", inception: 99, now: 100, want: true},
+		{name: "normal future invalid", inception: 101, now: 100, want: false},
+		{name: "past across uint32 wrap valid", inception: ^uint32(0), now: 1, want: true},
+		{name: "future across uint32 wrap invalid", inception: 1, now: ^uint32(0), want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rrsig := &RDataRRSIG{Inception: tt.inception}
+			if got := rrsig.IsInceptionValidAt(tt.now); got != tt.want {
+				t.Fatalf("IsInceptionValidAt(%d) with inception=%d = %v, want %v",
+					tt.now, tt.inception, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1129,6 +1179,9 @@ func TestEDNS0ClientSubnetMethods(t *testing.T) {
 	ecsBad := &EDNS0ClientSubnet{Family: 99}
 	if ip := ecsBad.IP(); ip != nil {
 		t.Error("IP() should return nil for unknown family")
+	}
+	if got := ecsBad.String(); got != "<invalid>/0 scope/0" {
+		t.Fatalf("String() with unknown family = %q, want invalid placeholder", got)
 	}
 }
 
@@ -1952,6 +2005,15 @@ func TestResourceRecordIsExpired(t *testing.T) {
 	if !rr.IsExpired(time.Now().Add(-15 * time.Second)) {
 		t.Error("Record should be expired")
 	}
+
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	if !rr.isExpiredAt(now, now.Add(-10*time.Second)) {
+		t.Error("Record should be expired exactly at TTL boundary")
+	}
+
+	if !(&ResourceRecord{TTL: 0}).isExpiredAt(now, now) {
+		t.Error("Record with zero TTL should be immediately expired")
+	}
 }
 
 // TestResourceRecordRemainingTTL tests ResourceRecord.RemainingTTL
@@ -1975,5 +2037,18 @@ func TestResourceRecordRemainingTTL(t *testing.T) {
 	remaining = rr.RemainingTTL(time.Now().Add(-150 * time.Second))
 	if remaining != 0 {
 		t.Errorf("RemainingTTL for expired = %d, want 0", remaining)
+	}
+
+	// Future cache timestamps can happen after clock adjustments; they must
+	// not increase the advertised TTL beyond the record's original TTL.
+	remaining = rr.RemainingTTL(time.Now().Add(1 * time.Hour))
+	if remaining != rr.TTL {
+		t.Errorf("RemainingTTL for future cachedAt = %d, want original TTL %d", remaining, rr.TTL)
+	}
+
+	maxTTLRecord := &ResourceRecord{TTL: ^uint32(0)}
+	remaining = maxTTLRecord.RemainingTTL(time.Now().Add(1 * time.Hour))
+	if remaining != maxTTLRecord.TTL {
+		t.Errorf("RemainingTTL for future cachedAt with max TTL = %d, want %d", remaining, maxTTLRecord.TTL)
 	}
 }

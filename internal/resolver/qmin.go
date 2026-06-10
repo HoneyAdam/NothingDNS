@@ -17,7 +17,7 @@ import "strings"
 
 // minimizedName returns the query name minimized to one label beyond the
 // known zone cut. If the target name is already at or within the zone cut,
-// the full name is returned unchanged.
+// the canonical lower-case full name is returned.
 //
 // Example:
 //
@@ -25,8 +25,8 @@ import "strings"
 //	minimizedName("www.example.com.", "com.") → "example.com."
 //	minimizedName("www.example.com.", "example.com.") → "www.example.com."
 func minimizedName(target, zoneCut string) string {
-	target = strings.TrimSuffix(target, ".")
-	zoneCut = strings.TrimSuffix(zoneCut, ".")
+	target = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(target), "."))
+	zoneCut = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zoneCut), "."))
 
 	if target == zoneCut || target == "" {
 		return target + "."

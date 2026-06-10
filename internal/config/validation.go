@@ -4,10 +4,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // placeholderSecretTokens is the list of substrings that must never appear in a
@@ -29,6 +31,16 @@ func looksLikePlaceholderSecret(s string) string {
 		return placeholderSecretRE.FindString(s)
 	}
 	return ""
+}
+
+func appendDurationValidation(errors []string, prefix, field, value string) []string {
+	if value == "" {
+		return errors
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q: %v", prefix, field, value, err))
+	}
+	return errors
 }
 
 // secretHasMinEntropy returns an error if the secret is below 32 bytes or
@@ -216,6 +228,10 @@ func (c *Config) validateServer() []string {
 			errors = append(errors, "http: tls_cert_file and tls_key_file are required when DoH is enabled (DoH must use HTTPS)")
 		}
 	}
+	if c.Server.HTTP.ODoHEnabled {
+		errors = appendODoHSuiteValidation(errors, "http", "odoh_kem", "odoh_kdf", "odoh_aead",
+			c.Server.HTTP.ODoHKEM, c.Server.HTTP.ODoHKDF, c.Server.HTTP.ODoHAEAD)
+	}
 
 	// Validate worker counts
 	if c.Server.UDPWorkers < 0 {
@@ -224,6 +240,111 @@ func (c *Config) validateServer() []string {
 	if c.Server.TCPWorkers < 0 {
 		errors = append(errors, "server: tcp_workers cannot be negative")
 	}
+	errors = appendDurationValidation(errors, "server", "shutdown_timeout", c.ShutdownTimeout)
+
+	return errors
+}
+
+func (c *Config) validateCookie() []string {
+	var errors []string
+
+	errors = appendDurationValidation(errors, "cookie", "secret_rotation", c.Cookie.SecretRotation)
+
+	return errors
+}
+
+func (c *Config) validateDSO() []string {
+	var errors []string
+
+	errors = appendDurationValidation(errors, "dso", "session_timeout", c.DSO.SessionTimeout)
+	errors = appendDurationValidation(errors, "dso", "heartbeat_interval", c.DSO.HeartbeatInterval)
+	if c.DSO.MaxSessions < 0 {
+		errors = append(errors, "dso: max_sessions cannot be negative")
+	}
+
+	return errors
+}
+
+func (c *Config) validateExtensions() []string {
+	var errors []string
+
+	if c.MDNS.Enabled {
+		if net.ParseIP(c.MDNS.MulticastIP) == nil {
+			errors = append(errors, fmt.Sprintf("mdns: multicast_ip %q must be a valid IP address", c.MDNS.MulticastIP))
+		}
+		if c.MDNS.Port < 1 || c.MDNS.Port > 65535 {
+			errors = append(errors, fmt.Sprintf("mdns: invalid port %d (must be 1-65535)", c.MDNS.Port))
+		}
+	}
+
+	if c.ODoH.Enabled {
+		if c.ODoH.TargetURL == "" {
+			errors = appendODoHSuiteValidation(errors, "odoh", "kem", "kdf", "aead",
+				c.ODoH.KEM, c.ODoH.KDF, c.ODoH.AEAD)
+		}
+		errors = appendURLValidation(errors, "odoh", "target_url", c.ODoH.TargetURL)
+		errors = appendURLValidation(errors, "odoh", "proxy_url", c.ODoH.ProxyURL)
+	}
+
+	if c.Catalog.Enabled {
+		errors = append(errors, "catalog: enabled but catalog zones are not wired into the daemon runtime")
+	}
+	if c.YANG.Enabled {
+		errors = append(errors, "yang: enabled but YANG services are not wired into the daemon runtime")
+	}
+
+	return errors
+}
+
+func appendURLValidation(errors []string, prefix, field, value string) []string {
+	if value == "" {
+		return errors
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q", prefix, field, value))
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q: scheme must be http or https", prefix, field, value))
+	}
+	return errors
+}
+
+func appendODoHSuiteValidation(errors []string, prefix, kemField, kdfField, aeadField string, kem, kdf, aead int) []string {
+	if !isValidODoHKEM(kem) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, kemField, kem))
+	}
+	if !isValidODoHKDF(kdf) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, kdfField, kdf))
+	}
+	if !isValidODoHAEAD(aead) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, aeadField, aead))
+	}
+	return errors
+}
+
+func isValidODoHKEM(kem int) bool {
+	return kem == 4
+}
+
+func isValidODoHKDF(kdf int) bool {
+	return kdf == 1
+}
+
+func isValidODoHAEAD(aead int) bool {
+	return aead == 1 || aead == 3
+}
+
+func (c *Config) validateResolution() []string {
+	var errors []string
+
+	if c.Resolution.MaxDepth < 0 {
+		errors = append(errors, "resolution: max_depth cannot be negative")
+	}
+	if c.Resolution.EDNS0BufferSize < 0 || c.Resolution.EDNS0BufferSize > 65535 {
+		errors = append(errors, fmt.Sprintf("resolution: edns0_buffer_size %d must be between 0-65535", c.Resolution.EDNS0BufferSize))
+	}
+	errors = appendDurationValidation(errors, "resolution", "timeout", c.Resolution.Timeout)
 
 	return errors
 }
@@ -236,6 +357,9 @@ func (c *Config) validateUpstream() []string {
 	if !validStrategies[c.Upstream.Strategy] {
 		errors = append(errors, fmt.Sprintf("upstream: invalid strategy '%s' (must be random, round_robin, or fastest)", c.Upstream.Strategy))
 	}
+
+	errors = appendDurationValidation(errors, "upstream", "health_check", c.Upstream.HealthCheck)
+	errors = appendDurationValidation(errors, "upstream", "failover_timeout", c.Upstream.FailoverTimeout)
 
 	// Validate servers (only if no anycast groups configured)
 	if len(c.Upstream.Servers) == 0 && len(c.Upstream.AnycastGroups) == 0 {
@@ -257,6 +381,8 @@ func (c *Config) validateUpstream() []string {
 		} else if !isValidIP(group.AnycastIP) {
 			errors = append(errors, fmt.Sprintf("%s: anycast_ip '%s' must be a valid IP address", prefix, group.AnycastIP))
 		}
+
+		errors = appendDurationValidation(errors, prefix, "health_check", group.HealthCheck)
 
 		if len(group.Backends) == 0 {
 			errors = append(errors, fmt.Sprintf("%s: at least one backend must be specified", prefix))
@@ -573,6 +699,8 @@ func (c *Config) validateSlaveZones() []string {
 		if slave.MaxRetries < 0 {
 			errors = append(errors, fmt.Sprintf("%s: max_retries cannot be negative", prefix))
 		}
+		errors = appendDurationValidation(errors, prefix, "timeout", slave.Timeout)
+		errors = appendDurationValidation(errors, prefix, "retry_interval", slave.RetryInterval)
 	}
 
 	return errors

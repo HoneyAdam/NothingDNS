@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -25,6 +26,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/geodns"
 	"github.com/nothingdns/nothingdns/internal/idna"
 	"github.com/nothingdns/nothingdns/internal/metrics"
+	"github.com/nothingdns/nothingdns/internal/odoh"
 	"github.com/nothingdns/nothingdns/internal/otel"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/resolver"
@@ -191,6 +193,58 @@ func TestServeDNS_EmptyQuestions(t *testing.T) {
 	}
 }
 
+func TestServeDNS_NilMessage(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.0.0.1", "udp")
+
+	h.ServeDNS(w, nil)
+
+	if w.msg == nil {
+		t.Fatal("expected a response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeFormatError {
+		t.Errorf("expected FORMERR, got rcode %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
+func TestServeDNS_NilQuestion(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.0.0.1", "udp")
+
+	msg := &protocol.Message{
+		Header:    protocol.Header{ID: 1, Flags: protocol.NewQueryFlags(), QDCount: 1},
+		Questions: []*protocol.Question{nil},
+	}
+	h.ServeDNS(w, msg)
+
+	if w.msg == nil {
+		t.Fatal("expected a response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeFormatError {
+		t.Errorf("expected FORMERR, got rcode %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
+func TestServeDNS_NilQuestionName(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.0.0.1", "udp")
+
+	msg := &protocol.Message{
+		Header: protocol.Header{ID: 1, Flags: protocol.NewQueryFlags(), QDCount: 1},
+		Questions: []*protocol.Question{
+			{QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+	h.ServeDNS(w, msg)
+
+	if w.msg == nil {
+		t.Fatal("expected a response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeFormatError {
+		t.Errorf("expected FORMERR, got rcode %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
 func TestServeDNS_Blocklist(t *testing.T) {
 	h := newTestHandler()
 
@@ -299,6 +353,46 @@ func TestServeDNS_FeedsDashboardQueryLog(t *testing.T) {
 	}
 	if e.Protocol != "udp" {
 		t.Errorf("event protocol = %q, want udp", e.Protocol)
+	}
+}
+
+func TestSetupStagePreservesPipelineRequestMetadata(t *testing.T) {
+	h := newTestHandler()
+	w := newCaptureWriter("10.1.2.3", "udp")
+	start := time.Now().Add(-time.Second)
+	q := &query{
+		reqID:         "request-from-wrapper",
+		start:         start,
+		currentWriter: w,
+	}
+
+	handled, err := setupStage(h)(context.Background(), q, w)
+	if err != nil {
+		t.Fatalf("setupStage error: %v", err)
+	}
+	if handled {
+		t.Fatal("setupStage should not handle the query")
+	}
+	if q.reqID != "request-from-wrapper" {
+		t.Fatalf("setupStage rewrote reqID: got %q", q.reqID)
+	}
+	if !q.start.Equal(start) {
+		t.Fatalf("setupStage rewrote start: got %v want %v", q.start, start)
+	}
+
+	q = &query{currentWriter: w}
+	handled, err = setupStage(h)(context.Background(), q, w)
+	if err != nil {
+		t.Fatalf("setupStage fallback error: %v", err)
+	}
+	if handled {
+		t.Fatal("setupStage fallback should not handle the query")
+	}
+	if q.reqID == "" {
+		t.Fatal("setupStage should populate missing reqID")
+	}
+	if q.start.IsZero() {
+		t.Fatal("setupStage should populate missing start")
 	}
 }
 
@@ -851,6 +945,71 @@ func TestExtractTTL(t *testing.T) {
 	}
 }
 
+func TestNegativeCacheTTL(t *testing.T) {
+	if ttl, ok := negativeCacheTTL(nil); ok || ttl != 0 {
+		t.Fatalf("negativeCacheTTL(nil) = (%d, %v), want (0, false)", ttl, ok)
+	}
+
+	resp := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{TTL: 300},
+			{TTL: 300, Data: &protocol.RDataA{}},
+			{TTL: 600, Data: &protocol.RDataSOA{Minimum: 120}},
+		},
+	}
+	ttl, ok := negativeCacheTTL(resp)
+	if !ok {
+		t.Fatal("negativeCacheTTL returned ok=false, want true")
+	}
+	if ttl != 120 {
+		t.Fatalf("negativeCacheTTL ttl = %d, want 120", ttl)
+	}
+}
+
+func TestSanitizePipelineResponseRemovesInvalidSections(t *testing.T) {
+	validName := mustParseName(t, "example.com.")
+	resp := &protocol.Message{
+		Questions: []*protocol.Question{
+			nil,
+			{QType: protocol.TypeA, QClass: protocol.ClassIN},
+			{Name: validName, QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Name: validName, Type: protocol.TypeA, Class: protocol.ClassIN},
+			{Name: validName, Type: protocol.TypeA, Class: protocol.ClassIN, Data: (*protocol.RDataA)(nil)},
+			{Name: validName, Type: protocol.TypeA, Class: protocol.ClassIN, Data: &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}}},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeSOA, Class: protocol.ClassIN, Data: &protocol.RDataSOA{}},
+			{Name: validName, Type: protocol.TypeSOA, Class: protocol.ClassIN, Data: (*protocol.RDataSOA)(nil)},
+			{Name: validName, Type: protocol.TypeSOA, Class: protocol.ClassIN, Data: &protocol.RDataSOA{Minimum: 300}},
+		},
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Name: validName, Type: protocol.TypeA, Class: protocol.ClassIN, Data: (*protocol.RDataA)(nil)},
+			{Name: validName, Type: protocol.TypeA, Class: protocol.ClassIN, Data: &protocol.RDataA{Address: [4]byte{192, 0, 2, 2}}},
+		},
+	}
+
+	sanitizePipelineResponse(resp)
+
+	if len(resp.Questions) != 1 || resp.Questions[0].Name == nil {
+		t.Fatalf("questions after sanitize = %+v, want one valid question", resp.Questions)
+	}
+	if len(resp.Answers) != 1 || resp.Answers[0].Data == nil {
+		t.Fatalf("answers after sanitize = %+v, want one valid answer", resp.Answers)
+	}
+	if len(resp.Authorities) != 1 || resp.Authorities[0].Name == nil || resp.Authorities[0].Data == nil {
+		t.Fatalf("authorities after sanitize = %+v, want one valid authority", resp.Authorities)
+	}
+	if len(resp.Additionals) != 1 || resp.Additionals[0].Data == nil {
+		t.Fatalf("additionals after sanitize = %+v, want one valid additional", resp.Additionals)
+	}
+}
+
 func TestHasDOBit(t *testing.T) {
 	// With DO bit set
 	msg := &protocol.Message{
@@ -1194,6 +1353,34 @@ func TestMinimizeResponse_AdditionalGluePreserved(t *testing.T) {
 	}
 	if !hasOPT {
 		t.Error("expected OPT pseudo-record to be preserved")
+	}
+}
+
+func TestMinimizeResponse_SkipsMalformedNSRecords(t *testing.T) {
+	resp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeNS, Data: (*protocol.RDataNS)(nil)},
+			{Name: mustParseName(t, "example.com."), Type: protocol.TypeNS, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataNS{}},
+			{Name: mustParseName(t, "example.com."), Type: protocol.TypeNS, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataNS{NSDName: mustParseName(t, "ns1.example.com.")}},
+		},
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Name: mustParseName(t, "ns1.example.com."), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{10, 0, 0, 1}}},
+			{Name: mustParseName(t, "unrelated.example."), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{10, 0, 0, 2}}},
+		},
+	}
+
+	minimizeResponse(resp)
+
+	if len(resp.Additionals) != 1 {
+		t.Fatalf("expected 1 valid glue additional, got %d", len(resp.Additionals))
+	}
+	if got := resp.Additionals[0].Name.String(); got != "ns1.example.com." {
+		t.Fatalf("additional owner = %q, want ns1.example.com.", got)
 	}
 }
 
@@ -1755,6 +1942,56 @@ func TestDefaultConfigValues(t *testing.T) {
 	}
 }
 
+func TestEffectiveHTTPConfigEnablesTopLevelODoH(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.ODoH.Enabled = true
+	cfg.ODoH.Bind = "127.0.0.1:9443"
+
+	httpCfg := effectiveHTTPConfig(cfg)
+
+	if !httpCfg.Enabled {
+		t.Fatal("top-level odoh.enabled should enable the API HTTP server")
+	}
+	if !httpCfg.ODoHEnabled {
+		t.Fatal("top-level odoh.enabled should enable the ODoH endpoint")
+	}
+	if httpCfg.Bind != "127.0.0.1:9443" {
+		t.Fatalf("HTTP bind = %q, want top-level ODoH bind", httpCfg.Bind)
+	}
+	if httpCfg.ODoHPath != "/odoh" {
+		t.Fatalf("ODoH path = %q, want /odoh", httpCfg.ODoHPath)
+	}
+}
+
+func TestBuildODoHConfigPrefersTopLevelSuite(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Server.HTTP.Bind = "127.0.0.1:8080"
+	cfg.Server.HTTP.ODoHKEM = 99
+	cfg.Server.HTTP.ODoHKDF = 99
+	cfg.Server.HTTP.ODoHAEAD = 99
+	cfg.ODoH.Enabled = true
+	cfg.ODoH.KEM = odoh.HPKEDHX25519
+	cfg.ODoH.KDF = odoh.HPKEKDFHKDFSHA256
+	cfg.ODoH.AEAD = odoh.HPKEAEADAES128GCM
+	cfg.ODoH.TargetURL = "https://target.example/dns-query"
+	cfg.ODoH.ProxyURL = "https://proxy.example/odoh"
+
+	odohCfg := buildODoHConfig(cfg, effectiveHTTPConfig(cfg))
+
+	if odohCfg.HPKEKEM != odoh.HPKEDHX25519 {
+		t.Fatalf("HPKEKEM = %d, want top-level %d", odohCfg.HPKEKEM, odoh.HPKEDHX25519)
+	}
+	if odohCfg.HPKEKDF != odoh.HPKEKDFHKDFSHA256 {
+		t.Fatalf("HPKEKDF = %d, want top-level %d", odohCfg.HPKEKDF, odoh.HPKEKDFHKDFSHA256)
+	}
+	if odohCfg.HPKEAEAD != odoh.HPKEAEADAES128GCM {
+		t.Fatalf("HPKEAEAD = %d, want top-level %d", odohCfg.HPKEAEAD, odoh.HPKEAEADAES128GCM)
+	}
+	if odohCfg.TargetURL != "https://target.example/dns-query" || odohCfg.ProxyURL != "https://proxy.example/odoh" {
+		t.Fatalf("unexpected proxy URLs: target=%q proxy=%q", odohCfg.TargetURL, odohCfg.ProxyURL)
+	}
+}
+
 // TestCacheIntegration tests cache integration with handler
 func TestCacheIntegration(t *testing.T) {
 	h := newTestHandler()
@@ -1808,6 +2045,19 @@ func TestParseRData_MX_InvalidParts(t *testing.T) {
 	}
 }
 
+func TestParseRData_MX_InvalidPreference(t *testing.T) {
+	tests := []string{
+		"bad mail.example.com.",
+		"-1 mail.example.com.",
+		"65536 mail.example.com.",
+	}
+	for _, rdata := range tests {
+		if mx := parseRData("MX", rdata); mx != nil {
+			t.Errorf("parseRData(MX, %q) = %T, want nil", rdata, mx)
+		}
+	}
+}
+
 func TestParseSOARData_InvalidMName(t *testing.T) {
 	longLabel := "a" + strings.Repeat("b", 64) + ".com."
 	soa := parseSOARData(longLabel + " admin.example.com. 1 3600 900 604800 86400")
@@ -1824,11 +2074,43 @@ func TestParseSOARData_InvalidRName(t *testing.T) {
 	}
 }
 
+func TestParseSOARData_InvalidNumericFields(t *testing.T) {
+	tests := []string{
+		"ns1.example.com. admin.example.com. bad 3600 900 604800 86400",
+		"ns1.example.com. admin.example.com. 1 bad 900 604800 86400",
+		"ns1.example.com. admin.example.com. 1 3600 bad 604800 86400",
+		"ns1.example.com. admin.example.com. 1 3600 900 bad 86400",
+		"ns1.example.com. admin.example.com. 1 3600 900 604800 bad",
+		"ns1.example.com. admin.example.com. 4294967296 3600 900 604800 86400",
+	}
+	for _, rdata := range tests {
+		if soa := parseSOARData(rdata); soa != nil {
+			t.Errorf("parseSOARData(%q) = %T, want nil", rdata, soa)
+		}
+	}
+}
+
 func TestParseSRVRData_InvalidTarget(t *testing.T) {
 	longLabel := "a" + strings.Repeat("b", 64) + ".com."
 	srv := parseSRVRData("10 5 8080 " + longLabel)
 	if srv != nil {
 		t.Error("expected nil for invalid SRV target")
+	}
+}
+
+func TestParseSRVRData_InvalidNumericFields(t *testing.T) {
+	tests := []string{
+		"bad 5 8080 server.example.com.",
+		"10 bad 8080 server.example.com.",
+		"10 5 bad server.example.com.",
+		"65536 5 8080 server.example.com.",
+		"10 65536 8080 server.example.com.",
+		"10 5 65536 server.example.com.",
+	}
+	for _, rdata := range tests {
+		if srv := parseSRVRData(rdata); srv != nil {
+			t.Errorf("parseSRVRData(%q) = %T, want nil", rdata, srv)
+		}
 	}
 }
 
@@ -1922,6 +2204,19 @@ func TestParseRData_CAA_ShortFields(t *testing.T) {
 	caa := parseRData("CAA", "0")
 	if caa != nil {
 		t.Error("expected nil for short CAA")
+	}
+}
+
+func TestParseRData_CAA_InvalidFlags(t *testing.T) {
+	tests := []string{
+		"bad issue letsencrypt.org",
+		"-1 issue letsencrypt.org",
+		"256 issue letsencrypt.org",
+	}
+	for _, rdata := range tests {
+		if caa := parseRData("CAA", rdata); caa != nil {
+			t.Errorf("parseRData(CAA, %q) = %T, want nil", rdata, caa)
+		}
 	}
 }
 
@@ -2031,6 +2326,30 @@ func TestExtractResponseIPs_NilData(t *testing.T) {
 	}
 }
 
+func TestExtractResponseIPs_SkipsMalformedRecords(t *testing.T) {
+	if ips := extractResponseIPs(nil); len(ips) != 0 {
+		t.Fatalf("extractResponseIPs(nil) = %d IPs, want 0", len(ips))
+	}
+	resp := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Data: (*protocol.RDataA)(nil)},
+			{Data: (*protocol.RDataAAAA)(nil)},
+			{Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+		},
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+		},
+	}
+	ips := extractResponseIPs(resp)
+	if len(ips) != 1 || !ips[0].Equal(net.IPv4(1, 2, 3, 4)) {
+		t.Fatalf("extractResponseIPs = %v, want [1.2.3.4]", ips)
+	}
+}
+
 // --- extractNSNames tests ---
 
 func TestExtractNSNames(t *testing.T) {
@@ -2056,6 +2375,24 @@ func TestExtractNSNames_NilNSDName(t *testing.T) {
 	names := extractNSNames(resp)
 	if len(names) != 0 {
 		t.Fatalf("expected 0 NS names, got %d", len(names))
+	}
+}
+
+func TestExtractNSNames_SkipsMalformedRecords(t *testing.T) {
+	if names := extractNSNames(nil); len(names) != 0 {
+		t.Fatalf("extractNSNames(nil) = %d names, want 0", len(names))
+	}
+	resp := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Data: (*protocol.RDataNS)(nil)},
+			{Data: &protocol.RDataNS{}},
+			{Data: &protocol.RDataNS{NSDName: mustParseName(t, "ns1.example.com.")}},
+		},
+	}
+	names := extractNSNames(resp)
+	if len(names) != 1 || names[0] != "ns1.example.com." {
+		t.Fatalf("extractNSNames = %v, want [ns1.example.com.]", names)
 	}
 }
 
@@ -2209,6 +2546,83 @@ func TestCacheStage_DoesNotMutateCachedMessage(t *testing.T) {
 	}
 }
 
+func TestUpstreamStage_CachesResponseCopyBeforeReplyMutation(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer pc.Close()
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg, err := protocol.UnpackMessage(buf[:n])
+			if err != nil || len(msg.Questions) == 0 {
+				continue
+			}
+			resp := &protocol.Message{
+				Header: protocol.Header{
+					ID:    msg.Header.ID,
+					Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+				},
+				Questions: msg.Questions,
+				Answers: []*protocol.ResourceRecord{{
+					Name:  msg.Questions[0].Name,
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+				}},
+				Additionals: []*protocol.ResourceRecord{{
+					Name:  mustParseName(t, "extra.example.com."),
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{9, 9, 9, 9}},
+				}},
+			}
+			packBuf := make([]byte, 4096)
+			n, err = resp.Pack(packBuf)
+			if err == nil {
+				_, _ = pc.WriteTo(packBuf[:n], addr)
+			}
+		}
+	}()
+
+	h := newTestHandler()
+	client, err := upstream.NewClient(upstream.Config{Servers: []string{pc.LocalAddr().String()}, Timeout: 5 * time.Second, HealthCheck: 0})
+	if err != nil {
+		t.Fatalf("failed to create upstream client: %v", err)
+	}
+	defer client.Close()
+	h.upstream = client
+
+	const qname = "upstream-copy.example."
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, qname, protocol.TypeA))
+	if w.msg == nil {
+		t.Fatal("expected upstream response")
+	}
+	if got := len(w.msg.Additionals); got != 0 {
+		t.Fatalf("expected served response to be minimized, got %d additionals", got)
+	}
+
+	entry := h.cache.Get(cache.MakeKey(qname, protocol.TypeA, false))
+	if entry == nil || entry.Message == nil {
+		t.Fatal("expected upstream response to be cached")
+	}
+	if got := len(entry.Message.Additionals); got != 1 {
+		t.Fatalf("cached upstream response was mutated by reply: got %d additionals, want 1", got)
+	}
+	if entry.Message.Header.ID == w.msg.Header.ID {
+		t.Fatalf("cached upstream response ID was rewritten to client ID %#x", entry.Message.Header.ID)
+	}
+}
+
 // --- cookieResponseWriter tests ---
 
 func TestCookieResponseWriter(t *testing.T) {
@@ -2254,6 +2668,24 @@ func TestCookieResponseWriter(t *testing.T) {
 	}
 }
 
+func TestCookieResponseWriter_SkipsTypedNilOPTData(t *testing.T) {
+	inner := newCaptureWriter("10.0.0.1", "udp")
+	cw := &cookieResponseWriter{inner: inner, cookieData: []byte("cookie-data")}
+	msg := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Additionals: []*protocol.ResourceRecord{
+			{Type: protocol.TypeOPT, Class: 4096, Data: (*protocol.RDataOPT)(nil)},
+		},
+	}
+
+	if _, err := cw.Write(msg); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if inner.msg == nil {
+		t.Fatal("expected inner writer to receive message")
+	}
+}
+
 // --- processCookies tests ---
 
 func TestProcessCookies_NoOPT(t *testing.T) {
@@ -2290,6 +2722,24 @@ func TestProcessCookies_NoCookieOption(t *testing.T) {
 	}
 	if !valid {
 		t.Error("expected valid=true when no cookie option")
+	}
+}
+
+func TestProcessCookies_TypedNilOPTData(t *testing.T) {
+	h := newTestHandler()
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	msg.AddAdditional(&protocol.ResourceRecord{
+		Type:  protocol.TypeOPT,
+		Class: 4096,
+		Data:  (*protocol.RDataOPT)(nil),
+	})
+
+	data, valid := h.processCookies(msg, net.ParseIP("10.0.0.1"))
+	if data != nil {
+		t.Error("expected nil cookie data for typed-nil OPT data")
+	}
+	if !valid {
+		t.Error("expected valid=true for typed-nil OPT data")
 	}
 }
 
@@ -2458,6 +2908,24 @@ func TestApplyRPZRule_UnknownAction(t *testing.T) {
 	}
 }
 
+func TestApplyRPZRuleWithError_ReturnsWriteError(t *testing.T) {
+	h := newTestHandler()
+	w := &errorWriter{client: &server.ClientInfo{Addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 12345}, Protocol: "udp"}}
+	msg := newTestQuery(t, "bad.com.", protocol.TypeA)
+	rule := &rpz.Rule{Action: rpz.ActionOverride, OverrideData: "192.0.2.1", TTL: 300, PolicyName: "test"}
+
+	handled, err := h.applyRPZRuleWithError(w, msg, msg.Questions[0], rule)
+	if !handled {
+		t.Fatal("expected RPZ override to handle the query")
+	}
+	if err == nil {
+		t.Fatal("expected RPZ override write error")
+	}
+	if !strings.Contains(err.Error(), "simulated write error") {
+		t.Fatalf("unexpected write error: %v", err)
+	}
+}
+
 // --- applyRPZResponsePolicy tests ---
 
 func TestApplyRPZResponsePolicy_NoEngine(t *testing.T) {
@@ -2590,6 +3058,28 @@ func TestBuildSignedResponse_WithDNSSEC(t *testing.T) {
 	// Should have A + RRSIG
 	if len(resp.Answers) != 2 {
 		t.Fatalf("expected 2 answers (A + RRSIG), got %d", len(resp.Answers))
+	}
+}
+
+func TestDNSSECSignatureUnixTimeBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		t    time.Time
+		want uint32
+	}{
+		{name: "before epoch", t: time.Unix(-1, 0), want: 0},
+		{name: "epoch", t: time.Unix(0, 0), want: 0},
+		{name: "normal", t: time.Unix(1234567890, 0), want: 1234567890},
+		{name: "max uint32", t: time.Unix(int64(^uint32(0)), 0), want: ^uint32(0)},
+		{name: "above max uint32", t: time.Unix(int64(^uint32(0))+1, 0), want: ^uint32(0)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := dnssecSignatureUnixTime(tt.t); got != tt.want {
+				t.Fatalf("dnssecSignatureUnixTime(%s) = %d, want %d", tt.t.Format(time.RFC3339), got, tt.want)
+			}
+		})
 	}
 }
 
@@ -2958,6 +3448,35 @@ func TestServeDNS_DNSCookie_Invalid(t *testing.T) {
 	}
 }
 
+func TestCookieStage_ReturnsBadCookieWriteError(t *testing.T) {
+	h := newTestHandler()
+	jar, err := dnscookie.NewCookieJar(time.Hour)
+	if err != nil {
+		t.Fatalf("failed to create cookie jar: %v", err)
+	}
+	h.cookieJar = jar
+
+	msg := newTestQuery(t, "example.com.", protocol.TypeA)
+	msg.SetEDNS0(4096, false)
+	opt := msg.GetOPT()
+	if optData, ok := opt.Data.(*protocol.RDataOPT); ok {
+		optData.AddOption(protocol.OptionCodeCookie, []byte("badcookie"))
+	}
+
+	w := &errorWriter{client: &server.ClientInfo{Addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 12345}, Protocol: "udp"}}
+	q := &query{msg: msg, currentWriter: w}
+	handled, err := cookieStage(h)(context.Background(), q, w)
+	if !handled {
+		t.Fatal("cookieStage should handle invalid cookies")
+	}
+	if err == nil {
+		t.Fatal("cookieStage should return write errors")
+	}
+	if !strings.Contains(err.Error(), "simulated write error") {
+		t.Fatalf("cookieStage returned unexpected error: %v", err)
+	}
+}
+
 // --- ServeDNS with ANY over UDP ---
 
 func TestServeDNS_ANY_UDP(t *testing.T) {
@@ -2991,6 +3510,33 @@ func TestServeDNS_DNAME(t *testing.T) {
 	// DNAME should synthesize CNAME and follow it
 	if w.msg.Header.Flags.RCODE != protocol.RcodeSuccess {
 		t.Errorf("expected NOERROR for DNAME, got %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
+func TestServeDNS_DNAMEDirectQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "dname.example.com.", []zone.Record{
+		{Name: "dname.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.dname.example.com. admin.dname.example.com. 1 3600 600 86400 300"},
+		{Name: "alias.dname.example.com.", TTL: 300, Class: "IN", Type: "DNAME", RData: "target.dname.example.com."},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "alias.dname.example.com.", protocol.TypeDNAME))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("DNAME answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeDNAME {
+		t.Fatalf("DNAME answer type = %d, want %d", got, protocol.TypeDNAME)
+	}
+	dname, ok := w.msg.Answers[0].Data.(*protocol.RDataDNAME)
+	if !ok {
+		t.Fatalf("DNAME answer data = %T, want *protocol.RDataDNAME", w.msg.Answers[0].Data)
+	}
+	if got, want := dname.DName.String(), "target.dname.example.com."; got != want {
+		t.Fatalf("DNAME target = %q, want %q", got, want)
 	}
 }
 
@@ -3709,7 +4255,7 @@ func TestCheckRPZResponseIP_Match(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.zone")
-	if err := os.WriteFile(rpzFile, []byte("32.1.2.3.4.rpz-ip 300 IN CNAME *\n"), 0644); err != nil {
+	if err := os.WriteFile(rpzFile, []byte("32.1.2.3.4.rpz-ip 300 IN CNAME .\n"), 0644); err != nil {
 		t.Fatalf("failed to write rpz file: %v", err)
 	}
 
@@ -3801,7 +4347,9 @@ func TestCacheManager_KVStore(t *testing.T) {
 	}
 
 	mgr2, _ := NewCacheManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
-	mgr2.LoadCacheFromKV(kvStore)
+	if err := mgr2.LoadCacheFromKV(kvStore); err != nil {
+		t.Fatalf("LoadCacheFromKV failed: %v", err)
+	}
 
 	entry := mgr2.Cache.Get(cache.MakeKey("example.com.", protocol.TypeA, false))
 	if entry == nil {
@@ -4087,7 +4635,7 @@ func TestServeDNS_Referral_RPZ_Glue(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.zone")
-	if err := os.WriteFile(rpzFile, []byte("32.1.1.168.192.rpz-ip 300 IN CNAME *\n"), 0644); err != nil {
+	if err := os.WriteFile(rpzFile, []byte("32.1.1.168.192.rpz-ip 300 IN CNAME .\n"), 0644); err != nil {
 		t.Fatalf("failed to write rpz file: %v", err)
 	}
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
@@ -4179,10 +4727,20 @@ func TestNewResolverTransport(t *testing.T) {
 }
 
 func TestResolverTransportAdapter_QueryContext(t *testing.T) {
+	// Reserve a port and close it so the query targets a known-dead server,
+	// regardless of what else happens to be listening on the machine.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve port: %v", err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+
 	tr := newResolverTransport(nil, nil)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	msg, _ := protocol.NewQuery(1, "example.com.", protocol.TypeA)
-	_, err := tr.QueryContext(ctx, msg, "127.0.0.1:5354")
+	_, err = tr.QueryContext(ctx, msg, deadAddr)
 	if err == nil {
 		t.Fatal("expected error querying non-existent server")
 	}
@@ -4280,6 +4838,30 @@ func TestNewTransferManager(t *testing.T) {
 	mgr.Stop()
 }
 
+func TestNewTransferManager_JournalStoreInitError(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataFile := filepath.Join(tmpDir, "not-a-directory")
+	if err := os.WriteFile(dataFile, []byte("not a dir"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.ZoneDir = dataFile
+	zones := make(map[string]*zone.Zone)
+	zonesMu := &sync.RWMutex{}
+
+	mgr, err := NewTransferManager(cfg, zones, zonesMu, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err == nil {
+		t.Fatal("NewTransferManager should fail when the IXFR journal directory cannot be created")
+	}
+	if mgr != nil {
+		t.Fatalf("NewTransferManager manager = %#v, want nil on journal init error", mgr)
+	}
+	if !strings.Contains(err.Error(), "initializing IXFR journal store") {
+		t.Fatalf("NewTransferManager error = %v, want IXFR journal context", err)
+	}
+}
+
 func TestLoadConfig_NonExistent(t *testing.T) {
 	cfg, err := loadConfig("/nonexistent/path/config.yaml")
 	if err != nil {
@@ -4361,6 +4943,52 @@ func TestDoQResponseWriter(t *testing.T) {
 	if rw.MaxSize() != 65535 {
 		t.Errorf("expected MaxSize 65535, got %d", rw.MaxSize())
 	}
+}
+
+func TestDoQResponseWriter_CompletesPartialWrites(t *testing.T) {
+	stream := &partialDoQStream{maxWrite: 3}
+	rw := &doqResponseWriter{stream: stream}
+	msg, err := protocol.NewQuery(1234, "example.com.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("NewQuery: %v", err)
+	}
+
+	written, err := rw.Write(msg)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if stream.calls < 2 {
+		t.Fatalf("partial stream should require multiple writes, got %d", stream.calls)
+	}
+	if written != stream.buf.Len() {
+		t.Fatalf("Write returned %d bytes, stream has %d", written, stream.buf.Len())
+	}
+
+	wire := stream.buf.Bytes()
+	if len(wire) < 3 {
+		t.Fatalf("wire frame too short: %d", len(wire))
+	}
+	payloadLen := int(wire[0])<<8 | int(wire[1])
+	if payloadLen != len(wire)-2 {
+		t.Fatalf("length prefix = %d, payload bytes = %d", payloadLen, len(wire)-2)
+	}
+	if _, err := protocol.UnpackMessage(wire[2:]); err != nil {
+		t.Fatalf("unpack payload: %v", err)
+	}
+}
+
+type partialDoQStream struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (s *partialDoQStream) Write(p []byte) (int, error) {
+	s.calls++
+	if s.maxWrite > 0 && s.maxWrite < len(p) {
+		p = p[:s.maxWrite]
+	}
+	return s.buf.Write(p)
 }
 
 func TestNewSecurityManager_FullFeatures(t *testing.T) {
@@ -5728,7 +6356,7 @@ func TestCheckRPZResponseIP_NODATA(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.zone")
-	os.WriteFile(rpzFile, []byte("32.1.2.3.4.rpz-ip 300 IN CNAME .\n"), 0644)
+	os.WriteFile(rpzFile, []byte("32.1.2.3.4.rpz-ip 300 IN CNAME *.\n"), 0644)
 
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
@@ -5841,12 +6469,44 @@ func TestLoadCacheFromKV_InvalidData(t *testing.T) {
 	mgr, _ := NewCacheManager(cfg, logger)
 
 	// Put invalid JSON into KV store
-	kv.Update(func(tx *storage.Tx) error {
+	if err := kv.Update(func(tx *storage.Tx) error {
 		bucket, _ := tx.CreateBucketIfNotExists([]byte("cache"))
 		return bucket.Put([]byte("cache_data"), []byte("not json"))
-	})
-	mgr.LoadCacheFromKV(kv)
+	}); err != nil {
+		t.Fatalf("failed to seed invalid cache data: %v", err)
+	}
+	err := mgr.LoadCacheFromKV(kv)
+	if err == nil {
+		t.Fatal("expected invalid cache data error")
+	}
+	if !strings.Contains(err.Error(), "parse cache from KV store") {
+		t.Errorf("error = %q", err.Error())
+	}
 	mgr.Stop()
+}
+
+func TestLoadCacheFromKV_ViewError(t *testing.T) {
+	tmpDir := t.TempDir()
+	kv, err := storage.OpenKVStore(filepath.Join(tmpDir, "kv.db"))
+	if err != nil {
+		t.Fatalf("failed to open kv store: %v", err)
+	}
+	if err := kv.Close(); err != nil {
+		t.Fatalf("failed to close kv store: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
+	mgr, _ := NewCacheManager(cfg, logger)
+	defer mgr.Stop()
+
+	err = mgr.LoadCacheFromKV(kv)
+	if err == nil {
+		t.Fatal("expected closed KV store error")
+	}
+	if !strings.Contains(err.Error(), "loading cache from KV store") {
+		t.Errorf("error = %q", err.Error())
+	}
 }
 
 func TestHandleNOTIFY_WriteError(t *testing.T) {
@@ -6104,8 +6764,8 @@ func TestServeDNS_RPZClientIP(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	// Client IP 10.0.0.1/32 -> NXDOMAIN
-	data := []byte("32.1.0.0.10.rpz-clientip 3600 IN CNAME .\n")
+	// Client IP 10.0.0.1/32 -> NODATA
+	data := []byte("32.1.0.0.10.rpz-clientip 3600 IN CNAME *.\n")
 	if err := os.WriteFile(rpzFile, data, 0644); err != nil {
 		t.Fatalf("failed to write rpz file: %v", err)
 	}
@@ -6119,7 +6779,7 @@ func TestServeDNS_RPZClientIP(t *testing.T) {
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
-	// CNAME . is parsed as ActionNODATA (NOERROR with 0 answers) in this RPZ implementation
+	// CNAME *. is parsed as ActionNODATA (NOERROR with 0 answers).
 	if w.msg.Header.Flags.RCODE != protocol.RcodeSuccess {
 		t.Errorf("expected NOERROR (NODATA) from RPZ client IP, got %d", w.msg.Header.Flags.RCODE)
 	}
@@ -6236,8 +6896,8 @@ func TestServeDNS_RPZResponseIP_Upstream(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	// Response IP 1.2.3.4/32 -> NXDOMAIN
-	data := []byte("32.4.3.2.1.rpz-ip 3600 IN CNAME .\n")
+	// Response IP 1.2.3.4/32 -> NODATA
+	data := []byte("32.4.3.2.1.rpz-ip 3600 IN CNAME *.\n")
 	if err := os.WriteFile(rpzFile, data, 0644); err != nil {
 		t.Fatalf("failed to write rpz file: %v", err)
 	}
@@ -6257,7 +6917,7 @@ func TestServeDNS_RPZResponseIP_Upstream(t *testing.T) {
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
-	// CNAME . is parsed as ActionNODATA (NOERROR with 0 answers) in this RPZ implementation
+	// CNAME *. is parsed as ActionNODATA (NOERROR with 0 answers).
 	if w.msg.Header.Flags.RCODE != protocol.RcodeSuccess {
 		t.Errorf("expected NOERROR (NODATA) from RPZ response IP, got %d", w.msg.Header.Flags.RCODE)
 	}
@@ -6999,7 +7659,7 @@ func TestServeDNS_RPZ_QNAMEBlock(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	os.WriteFile(rpzFile, []byte("blockme.example.com.rpz-qname 300 IN CNAME .\n"), 0644)
+	os.WriteFile(rpzFile, []byte("blockme.example.com.rpz-qname 300 IN CNAME *.\n"), 0644)
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
@@ -7008,7 +7668,7 @@ func TestServeDNS_RPZ_QNAMEBlock(t *testing.T) {
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "blockme.example.com.", protocol.TypeA))
-	// CNAME . → NODATA (NOERROR with 0 answers)
+	// CNAME *. -> NODATA (NOERROR with 0 answers)
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
@@ -7023,7 +7683,7 @@ func TestServeDNS_RPZ_Wildcard(t *testing.T) {
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
 	// Pattern *.example.com.rpz-qname matches any subdomain of example.com
-	os.WriteFile(rpzFile, []byte("*.example.com.rpz-qname 300 IN CNAME .\n"), 0644)
+	os.WriteFile(rpzFile, []byte("*.example.com.rpz-qname 300 IN CNAME *.\n"), 0644)
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
@@ -7036,7 +7696,7 @@ func TestServeDNS_RPZ_Wildcard(t *testing.T) {
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
-	// CNAME . → NODATA (NOERROR with 0 answers)
+	// CNAME *. -> NODATA (NOERROR with 0 answers)
 	if w.msg.Header.Flags.RCODE != protocol.RcodeSuccess || len(w.msg.Answers) != 0 {
 		t.Errorf("expected NOERROR NODATA, got rcode=%d answers=%d",
 			w.msg.Header.Flags.RCODE, len(w.msg.Answers))
@@ -7075,7 +7735,7 @@ func TestServeDNS_RPZ_Drop(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	// CNAME * → ActionNXDOMAIN (not Drop); TXT "drop" → ActionDrop
+	// CNAME . -> ActionNXDOMAIN; TXT "drop" -> ActionDrop.
 	os.WriteFile(rpzFile, []byte("dropme.rpz-qname 300 IN TXT \"drop\"\n"), 0644)
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
@@ -7694,6 +8354,60 @@ func TestServeDNS_DNSKEYQuery(t *testing.T) {
 	}
 }
 
+func TestServeDNS_KEYQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "key.example.com.", []zone.Record{
+		{Name: "key.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.key.example.com. admin.key.example.com. 1 3600 600 86400 300"},
+		{Name: "key.example.com.", TTL: 300, Class: "IN", Type: "KEY", RData: "257 3 13 AQIDBA=="},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "key.example.com.", protocol.TypeKEY))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("KEY answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeKEY {
+		t.Fatalf("KEY answer type = %d, want %d", got, protocol.TypeKEY)
+	}
+	key, ok := w.msg.Answers[0].Data.(*protocol.RDataDNSKEY)
+	if !ok {
+		t.Fatalf("KEY answer data = %T, want *protocol.RDataDNSKEY", w.msg.Answers[0].Data)
+	}
+	if key.Flags != 257 || key.Protocol != 3 || key.Algorithm != 13 {
+		t.Fatalf("KEY header = %d %d %d, want 257 3 13", key.Flags, key.Protocol, key.Algorithm)
+	}
+}
+
+func TestServeDNS_SIGQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "sig.example.com.", []zone.Record{
+		{Name: "sig.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.sig.example.com. admin.sig.example.com. 1 3600 600 86400 300"},
+		{Name: "sig.example.com.", TTL: 300, Class: "IN", Type: "SIG", RData: "A 13 3 300 2000000000 1000000000 12345 sig.example.com. AQIDBA=="},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "sig.example.com.", protocol.TypeSIG))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("SIG answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeSIG {
+		t.Fatalf("SIG answer type = %d, want %d", got, protocol.TypeSIG)
+	}
+	sig, ok := w.msg.Answers[0].Data.(*protocol.RDataRRSIG)
+	if !ok {
+		t.Fatalf("SIG answer data = %T, want *protocol.RDataRRSIG", w.msg.Answers[0].Data)
+	}
+	if sig.TypeCovered != protocol.TypeA || sig.Algorithm != 13 || sig.Labels != 3 || sig.KeyTag != 12345 {
+		t.Fatalf("SIG RDATA header = %d %d %d %d, want A 13 3 12345", sig.TypeCovered, sig.Algorithm, sig.Labels, sig.KeyTag)
+	}
+}
+
 func TestServeDNS_DSQuery(t *testing.T) {
 	h := newTestHandler()
 	addZoneRecords(t, h, "ds.example.com.", []zone.Record{
@@ -7705,6 +8419,33 @@ func TestServeDNS_DSQuery(t *testing.T) {
 	h.ServeDNS(w, newTestQuery(t, "ds.example.com.", protocol.TypeDS))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+}
+
+func TestServeDNS_TAQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "ta.example.com.", []zone.Record{
+		{Name: "ta.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.ta.example.com. admin.ta.example.com. 1 3600 600 86400 300"},
+		{Name: "ta.example.com.", TTL: 300, Class: "IN", Type: "TA", RData: "12345 13 2 ABCDEF1234567890"},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "ta.example.com.", protocol.TypeTA))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("TA answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeTA {
+		t.Fatalf("TA answer type = %d, want %d", got, protocol.TypeTA)
+	}
+	ta, ok := w.msg.Answers[0].Data.(*protocol.RDataDS)
+	if !ok {
+		t.Fatalf("TA answer data = %T, want *protocol.RDataDS", w.msg.Answers[0].Data)
+	}
+	if ta.KeyTag != 12345 || ta.Algorithm != 13 || ta.DigestType != 2 {
+		t.Fatalf("TA header = %d %d %d, want 12345 13 2", ta.KeyTag, ta.Algorithm, ta.DigestType)
 	}
 }
 
@@ -7726,7 +8467,7 @@ func TestServeDNS_SVCBQuery(t *testing.T) {
 	h := newTestHandler()
 	addZoneRecords(t, h, "svcb.example.com.", []zone.Record{
 		{Name: "svcb.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.svcb.example.com. admin.svcb.example.com. 1 3600 600 86400 300"},
-		{Name: "_443._tcp.svcb.example.com.", TTL: 300, Class: "IN", Type: "SVCB", RData: "1 alpn=\"h3\""}, // dummy SVCB
+		{Name: "_443._tcp.svcb.example.com.", TTL: 300, Class: "IN", Type: "SVCB", RData: "1 svc-target.svcb.example.com. alpn=\"h3\" port=8443"},
 	})
 
 	w := newCaptureWriter("10.0.0.1", "udp")
@@ -7734,19 +8475,69 @@ func TestServeDNS_SVCBQuery(t *testing.T) {
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("SVCB answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeSVCB {
+		t.Fatalf("SVCB answer type = %d, want %d", got, protocol.TypeSVCB)
+	}
+	svcb, ok := w.msg.Answers[0].Data.(*protocol.RDataSVCB)
+	if !ok {
+		t.Fatalf("SVCB answer data = %T, want *protocol.RDataSVCB", w.msg.Answers[0].Data)
+	}
+	if svcb.Priority != 1 {
+		t.Fatalf("SVCB priority = %d, want 1", svcb.Priority)
+	}
+	if got, want := svcb.Target.String(), "svc-target.svcb.example.com."; got != want {
+		t.Fatalf("SVCB target = %q, want %q", got, want)
+	}
+	if got, want := len(svcb.Params), 2; got != want {
+		t.Fatalf("SVCB params = %d, want %d", got, want)
+	}
+	if svcb.Params[0].Key != protocol.SvcParamKeyALPN || !bytes.Equal(svcb.Params[0].Value, []byte{2, 'h', '3'}) {
+		t.Fatalf("SVCB alpn param = key %d value %v, want h3", svcb.Params[0].Key, svcb.Params[0].Value)
+	}
+	if svcb.Params[1].Key != protocol.SvcParamKeyPort || !bytes.Equal(svcb.Params[1].Value, []byte{0x20, 0xfb}) {
+		t.Fatalf("SVCB port param = key %d value %v, want 8443", svcb.Params[1].Key, svcb.Params[1].Value)
+	}
 }
 
 func TestServeDNS_HTTPSQuery(t *testing.T) {
 	h := newTestHandler()
 	addZoneRecords(t, h, "https.example.com.", []zone.Record{
 		{Name: "https.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.https.example.com. admin.https.example.com. 1 3600 600 86400 300"},
-		{Name: "_443._tcp.https.example.com.", TTL: 300, Class: "IN", Type: "HTTPS", RData: "1 alpn=\"h3\""}, // dummy HTTPS
+		{Name: "_443._tcp.https.example.com.", TTL: 300, Class: "IN", Type: "HTTPS", RData: "1 . alpn=\"h2,h3\" port=443"},
 	})
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "_443._tcp.https.example.com.", protocol.TypeHTTPS))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("HTTPS answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeHTTPS {
+		t.Fatalf("HTTPS answer type = %d, want %d", got, protocol.TypeHTTPS)
+	}
+	https, ok := w.msg.Answers[0].Data.(*protocol.RDataHTTPS)
+	if !ok {
+		t.Fatalf("HTTPS answer data = %T, want *protocol.RDataHTTPS", w.msg.Answers[0].Data)
+	}
+	if https.Priority != 1 {
+		t.Fatalf("HTTPS priority = %d, want 1", https.Priority)
+	}
+	if got, want := https.Target.String(), "."; got != want {
+		t.Fatalf("HTTPS target = %q, want %q", got, want)
+	}
+	if got, want := len(https.Params), 2; got != want {
+		t.Fatalf("HTTPS params = %d, want %d", got, want)
+	}
+	if https.Params[0].Key != protocol.SvcParamKeyALPN || !bytes.Equal(https.Params[0].Value, []byte{2, 'h', '2', 2, 'h', '3'}) {
+		t.Fatalf("HTTPS alpn param = key %d value %v, want h2,h3", https.Params[0].Key, https.Params[0].Value)
+	}
+	if https.Params[1].Key != protocol.SvcParamKeyPort || !bytes.Equal(https.Params[1].Value, []byte{0x01, 0xbb}) {
+		t.Fatalf("HTTPS port param = key %d value %v, want 443", https.Params[1].Key, https.Params[1].Value)
 	}
 }
 
@@ -7761,6 +8552,19 @@ func TestServeDNS_URIQuery(t *testing.T) {
 	h.ServeDNS(w, newTestQuery(t, "_sip._udp.uri.example.com.", protocol.TypeURI))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("URI answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeURI {
+		t.Fatalf("URI answer type = %d, want %d", got, protocol.TypeURI)
+	}
+	uri, ok := w.msg.Answers[0].Data.(*protocol.RDataURI)
+	if !ok {
+		t.Fatalf("URI answer data = %T, want *protocol.RDataURI", w.msg.Answers[0].Data)
+	}
+	if uri.Priority != 10 || uri.Weight != 1 || uri.Target != "sip:services.example.com" {
+		t.Fatalf("URI RDATA = %d %d %q, want 10 1 sip:services.example.com", uri.Priority, uri.Weight, uri.Target)
 	}
 }
 
@@ -7789,6 +8593,19 @@ func TestServeDNS_SPFQuery(t *testing.T) {
 	h.ServeDNS(w, newTestQuery(t, "spf.example.com.", protocol.TypeSPF))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("SPF answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeSPF {
+		t.Fatalf("SPF answer type = %d, want %d", got, protocol.TypeSPF)
+	}
+	txt, ok := w.msg.Answers[0].Data.(*protocol.RDataTXT)
+	if !ok {
+		t.Fatalf("SPF answer data = %T, want *protocol.RDataTXT", w.msg.Answers[0].Data)
+	}
+	if len(txt.Strings) != 1 || txt.Strings[0] != "v=spf1 include:_spf.example.com ~all" {
+		t.Fatalf("SPF answer strings = %v, want unquoted SPF policy", txt.Strings)
 	}
 }
 
@@ -7846,6 +8663,19 @@ func TestServeDNS_CDNSKEYQuery(t *testing.T) {
 	if w.msg == nil {
 		t.Fatal("expected response")
 	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("CDNSKEY answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeCDNSKEY {
+		t.Fatalf("CDNSKEY answer type = %d, want %d", got, protocol.TypeCDNSKEY)
+	}
+	dnskey, ok := w.msg.Answers[0].Data.(*protocol.RDataDNSKEY)
+	if !ok {
+		t.Fatalf("CDNSKEY answer data = %T, want *protocol.RDataDNSKEY", w.msg.Answers[0].Data)
+	}
+	if dnskey.Flags != 257 || dnskey.Protocol != 3 || dnskey.Algorithm != 13 {
+		t.Fatalf("CDNSKEY header = %d %d %d, want 257 3 13", dnskey.Flags, dnskey.Protocol, dnskey.Algorithm)
+	}
 }
 
 func TestServeDNS_CDSQuery(t *testing.T) {
@@ -7859,6 +8689,19 @@ func TestServeDNS_CDSQuery(t *testing.T) {
 	h.ServeDNS(w, newTestQuery(t, "cds.example.com.", protocol.TypeCDS))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("CDS answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeCDS {
+		t.Fatalf("CDS answer type = %d, want %d", got, protocol.TypeCDS)
+	}
+	ds, ok := w.msg.Answers[0].Data.(*protocol.RDataDS)
+	if !ok {
+		t.Fatalf("CDS answer data = %T, want *protocol.RDataDS", w.msg.Answers[0].Data)
+	}
+	if ds.KeyTag != 12345 || ds.Algorithm != 13 || ds.DigestType != 2 {
+		t.Fatalf("CDS header = %d %d %d, want 12345 13 2", ds.KeyTag, ds.Algorithm, ds.DigestType)
 	}
 }
 
@@ -7876,6 +8719,114 @@ func TestServeDNS_SSHFPQuery(t *testing.T) {
 	}
 }
 
+func TestServeDNS_HINFOQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "hinfo.example.com.", []zone.Record{
+		{Name: "hinfo.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.hinfo.example.com. admin.hinfo.example.com. 1 3600 600 86400 300"},
+		{Name: "hinfo.example.com.", TTL: 300, Class: "IN", Type: "HINFO", RData: `"AMD64" "Linux"`},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "hinfo.example.com.", protocol.TypeHINFO))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("HINFO answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeHINFO {
+		t.Fatalf("HINFO answer type = %d, want %d", got, protocol.TypeHINFO)
+	}
+	hinfo, ok := w.msg.Answers[0].Data.(*protocol.RDataHINFO)
+	if !ok {
+		t.Fatalf("HINFO answer data = %T, want *protocol.RDataHINFO", w.msg.Answers[0].Data)
+	}
+	if hinfo.CPU != "AMD64" || hinfo.OS != "Linux" {
+		t.Fatalf("HINFO RDATA = %q %q, want AMD64 Linux", hinfo.CPU, hinfo.OS)
+	}
+}
+
+func TestServeDNS_RPQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "rp.example.com.", []zone.Record{
+		{Name: "rp.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.rp.example.com. admin.rp.example.com. 1 3600 600 86400 300"},
+		{Name: "rp.example.com.", TTL: 300, Class: "IN", Type: "RP", RData: "admin.example.com. txt.example.com."},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "rp.example.com.", protocol.TypeRP))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("RP answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeRP {
+		t.Fatalf("RP answer type = %d, want %d", got, protocol.TypeRP)
+	}
+	rp, ok := w.msg.Answers[0].Data.(*protocol.RDataRP)
+	if !ok {
+		t.Fatalf("RP answer data = %T, want *protocol.RDataRP", w.msg.Answers[0].Data)
+	}
+	if rp.MBox.String() != "admin.example.com." || rp.Txt.String() != "txt.example.com." {
+		t.Fatalf("RP RDATA = %s %s, want admin.example.com. txt.example.com.", rp.MBox, rp.Txt)
+	}
+}
+
+func TestServeDNS_AFSDBQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "afsdb.example.com.", []zone.Record{
+		{Name: "afsdb.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.afsdb.example.com. admin.afsdb.example.com. 1 3600 600 86400 300"},
+		{Name: "afsdb.example.com.", TTL: 300, Class: "IN", Type: "AFSDB", RData: "1 afsdb.example.com."},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "afsdb.example.com.", protocol.TypeAFSDB))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("AFSDB answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeAFSDB {
+		t.Fatalf("AFSDB answer type = %d, want %d", got, protocol.TypeAFSDB)
+	}
+	afsdb, ok := w.msg.Answers[0].Data.(*protocol.RDataAFSDB)
+	if !ok {
+		t.Fatalf("AFSDB answer data = %T, want *protocol.RDataAFSDB", w.msg.Answers[0].Data)
+	}
+	if afsdb.Subtype != 1 || afsdb.Hostname.String() != "afsdb.example.com." {
+		t.Fatalf("AFSDB RDATA = %d %s, want 1 afsdb.example.com.", afsdb.Subtype, afsdb.Hostname)
+	}
+}
+
+func TestServeDNS_KXQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "kx.example.com.", []zone.Record{
+		{Name: "kx.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.kx.example.com. admin.kx.example.com. 1 3600 600 86400 300"},
+		{Name: "kx.example.com.", TTL: 300, Class: "IN", Type: "KX", RData: "10 kx.example.com."},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "kx.example.com.", protocol.TypeKX))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("KX answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeKX {
+		t.Fatalf("KX answer type = %d, want %d", got, protocol.TypeKX)
+	}
+	kx, ok := w.msg.Answers[0].Data.(*protocol.RDataKX)
+	if !ok {
+		t.Fatalf("KX answer data = %T, want *protocol.RDataKX", w.msg.Answers[0].Data)
+	}
+	if kx.Preference != 10 || kx.Exchanger.String() != "kx.example.com." {
+		t.Fatalf("KX RDATA = %d %s, want 10 kx.example.com.", kx.Preference, kx.Exchanger)
+	}
+}
+
 func TestServeDNS_DHCIDQuery(t *testing.T) {
 	h := newTestHandler()
 	addZoneRecords(t, h, "dhcid.example.com.", []zone.Record{
@@ -7887,6 +8838,274 @@ func TestServeDNS_DHCIDQuery(t *testing.T) {
 	h.ServeDNS(w, newTestQuery(t, "dhcid.example.com.", protocol.TypeDHCID))
 	if w.msg == nil {
 		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("DHCID answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeDHCID {
+		t.Fatalf("DHCID answer type = %d, want %d", got, protocol.TypeDHCID)
+	}
+	dhcid, ok := w.msg.Answers[0].Data.(*protocol.RDataDHCID)
+	if !ok {
+		t.Fatalf("DHCID answer data = %T, want *protocol.RDataDHCID", w.msg.Answers[0].Data)
+	}
+	if got, want := dhcid.String(), "ABCDEF123456"; got != want {
+		t.Fatalf("DHCID RDATA = %q, want %q", got, want)
+	}
+}
+
+func TestServeDNS_CERTQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "cert.example.com.", []zone.Record{
+		{Name: "cert.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.cert.example.com. admin.cert.example.com. 1 3600 600 86400 300"},
+		{Name: "cert.example.com.", TTL: 300, Class: "IN", Type: "CERT", RData: "1 12345 13 AQIDBA=="},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "cert.example.com.", protocol.TypeCERT))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("CERT answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeCERT {
+		t.Fatalf("CERT answer type = %d, want %d", got, protocol.TypeCERT)
+	}
+	cert, ok := w.msg.Answers[0].Data.(*protocol.RDataCERT)
+	if !ok {
+		t.Fatalf("CERT answer data = %T, want *protocol.RDataCERT", w.msg.Answers[0].Data)
+	}
+	if cert.CertType != 1 || cert.KeyTag != 12345 || cert.Algorithm != 13 {
+		t.Fatalf("CERT header = %d %d %d, want 1 12345 13", cert.CertType, cert.KeyTag, cert.Algorithm)
+	}
+	if want := []byte{1, 2, 3, 4}; !bytes.Equal(cert.Certificate, want) {
+		t.Fatalf("CERT certificate = %v, want %v", cert.Certificate, want)
+	}
+}
+
+func TestServeDNS_OPENPGPKEYQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "openpgpkey.example.com.", []zone.Record{
+		{Name: "openpgpkey.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.openpgpkey.example.com. admin.openpgpkey.example.com. 1 3600 600 86400 300"},
+		{Name: "openpgpkey.example.com.", TTL: 300, Class: "IN", Type: "OPENPGPKEY", RData: "AQIDBAU="},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "openpgpkey.example.com.", protocol.TypeOPENPGPKEY))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("OPENPGPKEY answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeOPENPGPKEY {
+		t.Fatalf("OPENPGPKEY answer type = %d, want %d", got, protocol.TypeOPENPGPKEY)
+	}
+	openpgpkey, ok := w.msg.Answers[0].Data.(*protocol.RDataOPENPGPKEY)
+	if !ok {
+		t.Fatalf("OPENPGPKEY answer data = %T, want *protocol.RDataOPENPGPKEY", w.msg.Answers[0].Data)
+	}
+	if want := []byte{1, 2, 3, 4, 5}; !bytes.Equal(openpgpkey.PublicKey, want) {
+		t.Fatalf("OPENPGPKEY public key = %v, want %v", openpgpkey.PublicKey, want)
+	}
+}
+
+func TestServeDNS_IPSECKEYQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "ipseckey.example.com.", []zone.Record{
+		{Name: "ipseckey.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.ipseckey.example.com. admin.ipseckey.example.com. 1 3600 600 86400 300"},
+		{Name: "ipseckey.example.com.", TTL: 300, Class: "IN", Type: "IPSECKEY", RData: "10 1 2 192.0.2.1 AQIDBA=="},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "ipseckey.example.com.", protocol.TypeIPSECKEY))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("IPSECKEY answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeIPSECKEY {
+		t.Fatalf("IPSECKEY answer type = %d, want %d", got, protocol.TypeIPSECKEY)
+	}
+	ipseckey, ok := w.msg.Answers[0].Data.(*protocol.RDataIPSECKEY)
+	if !ok {
+		t.Fatalf("IPSECKEY answer data = %T, want *protocol.RDataIPSECKEY", w.msg.Answers[0].Data)
+	}
+	if ipseckey.Precedence != 10 || ipseckey.GatewayType != 1 || ipseckey.Algorithm != 2 {
+		t.Fatalf("IPSECKEY header = %d %d %d, want 10 1 2", ipseckey.Precedence, ipseckey.GatewayType, ipseckey.Algorithm)
+	}
+	if want := []byte{192, 0, 2, 1}; !bytes.Equal(ipseckey.Gateway, want) {
+		t.Fatalf("IPSECKEY gateway = %v, want %v", ipseckey.Gateway, want)
+	}
+	if want := []byte{1, 2, 3, 4}; !bytes.Equal(ipseckey.PublicKey, want) {
+		t.Fatalf("IPSECKEY public key = %v, want %v", ipseckey.PublicKey, want)
+	}
+}
+
+func TestServeDNS_HIPQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "hip.example.com.", []zone.Record{
+		{Name: "hip.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.hip.example.com. admin.hip.example.com. 1 3600 600 86400 300"},
+		{Name: "hip.example.com.", TTL: 300, Class: "IN", Type: "HIP", RData: "2 00112233445566778899aabbccddeeff AQIDBA== rvs.hip.example.com."},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "hip.example.com.", protocol.TypeHIP))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("HIP answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeHIP {
+		t.Fatalf("HIP answer type = %d, want %d", got, protocol.TypeHIP)
+	}
+	hip, ok := w.msg.Answers[0].Data.(*protocol.RDataHIP)
+	if !ok {
+		t.Fatalf("HIP answer data = %T, want *protocol.RDataHIP", w.msg.Answers[0].Data)
+	}
+	if hip.PublicKeyAlgorithm != 2 {
+		t.Fatalf("HIP public key algorithm = %d, want 2", hip.PublicKeyAlgorithm)
+	}
+	if want := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}; !bytes.Equal(hip.HIT, want) {
+		t.Fatalf("HIP HIT = %v, want %v", hip.HIT, want)
+	}
+	if want := []byte{1, 2, 3, 4}; !bytes.Equal(hip.PublicKey, want) {
+		t.Fatalf("HIP public key = %v, want %v", hip.PublicKey, want)
+	}
+	if got, want := len(hip.RendezvousServers), 1; got != want {
+		t.Fatalf("HIP rendezvous server count = %d, want %d", got, want)
+	}
+	if got, want := hip.RendezvousServers[0].String(), "rvs.hip.example.com."; got != want {
+		t.Fatalf("HIP rendezvous server = %q, want %q", got, want)
+	}
+}
+
+func TestServeDNS_LOCQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "loc.example.com.", []zone.Record{
+		{Name: "loc.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.loc.example.com. admin.loc.example.com. 1 3600 600 86400 300"},
+		{Name: "loc.example.com.", TTL: 300, Class: "IN", Type: "LOC", RData: "37 47 36 N 122 24 37 W 10m 1m 100m 10m"},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "loc.example.com.", protocol.TypeLOC))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("LOC answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeLOC {
+		t.Fatalf("LOC answer type = %d, want %d", got, protocol.TypeLOC)
+	}
+	loc, ok := w.msg.Answers[0].Data.(*protocol.RDataLOC)
+	if !ok {
+		t.Fatalf("LOC answer data = %T, want *protocol.RDataLOC", w.msg.Answers[0].Data)
+	}
+	if loc.Version != 0 || loc.Size != 0x12 || loc.HorizPrecision != 0x14 || loc.VertPrecision != 0x13 {
+		t.Fatalf("LOC header = %02x %02x %02x %02x, want 00 12 14 13", loc.Version, loc.Size, loc.HorizPrecision, loc.VertPrecision)
+	}
+	if got, want := loc.Latitude, uint32(2283539648); got != want {
+		t.Fatalf("LOC latitude = %d, want %d", got, want)
+	}
+	if got, want := loc.Longitude, uint32(1706806648); got != want {
+		t.Fatalf("LOC longitude = %d, want %d", got, want)
+	}
+	if got, want := loc.Altitude, uint32(10001000); got != want {
+		t.Fatalf("LOC altitude = %d, want %d", got, want)
+	}
+}
+
+func TestServeDNS_DKIMAliasTXTQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "dkim.example.com.", []zone.Record{
+		{Name: "dkim.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.dkim.example.com. admin.dkim.example.com. 1 3600 600 86400 300"},
+		{Name: "selector._domainkey.dkim.example.com.", TTL: 300, Class: "IN", Type: "DKIM", RData: "v=DKIM1; k=rsa; p=abc123"},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "selector._domainkey.dkim.example.com.", protocol.TypeTXT))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("DKIM/TXT answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeTXT {
+		t.Fatalf("DKIM/TXT answer type = %d, want %d", got, protocol.TypeTXT)
+	}
+	txt, ok := w.msg.Answers[0].Data.(*protocol.RDataTXT)
+	if !ok {
+		t.Fatalf("DKIM/TXT answer data = %T, want *protocol.RDataTXT", w.msg.Answers[0].Data)
+	}
+	if got, want := strings.Join(txt.Strings, ""), "v=DKIM1; k=rsa; p=abc123"; got != want {
+		t.Fatalf("DKIM/TXT RDATA = %q, want %q", got, want)
+	}
+}
+
+func TestServeDNS_ZONEMDQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "zonemd.example.com.", []zone.Record{
+		{Name: "zonemd.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.zonemd.example.com. admin.zonemd.example.com. 1 3600 600 86400 300"},
+		{Name: "zonemd.example.com.", TTL: 300, Class: "IN", Type: "ZONEMD", RData: "1 1 1 00112233445566778899aabbccddeeff"},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "zonemd.example.com.", protocol.TypeZONEMD))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("ZONEMD answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeZONEMD {
+		t.Fatalf("ZONEMD answer type = %d, want %d", got, protocol.TypeZONEMD)
+	}
+	zonemd, ok := w.msg.Answers[0].Data.(*protocol.RDataZONEMD)
+	if !ok {
+		t.Fatalf("ZONEMD answer data = %T, want *protocol.RDataZONEMD", w.msg.Answers[0].Data)
+	}
+	if zonemd.Serial != 1 || zonemd.Scheme != 1 || zonemd.Algorithm != 1 {
+		t.Fatalf("ZONEMD header = %d %d %d, want 1 1 1", zonemd.Serial, zonemd.Scheme, zonemd.Algorithm)
+	}
+	if want := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}; !bytes.Equal(zonemd.Digest, want) {
+		t.Fatalf("ZONEMD digest = %v, want %v", zonemd.Digest, want)
+	}
+}
+
+func TestServeDNS_APLQuery(t *testing.T) {
+	h := newTestHandler()
+	addZoneRecords(t, h, "apl.example.com.", []zone.Record{
+		{Name: "apl.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.apl.example.com. admin.apl.example.com. 1 3600 600 86400 300"},
+		{Name: "apl.example.com.", TTL: 300, Class: "IN", Type: "APL", RData: "1:192.0.2.0/24 !2:2001:db8::/32"},
+	})
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "apl.example.com.", protocol.TypeAPL))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if got, want := len(w.msg.Answers), 1; got != want {
+		t.Fatalf("APL answers = %d, want %d", got, want)
+	}
+	if got := w.msg.Answers[0].Type; got != protocol.TypeAPL {
+		t.Fatalf("APL answer type = %d, want %d", got, protocol.TypeAPL)
+	}
+	apl, ok := w.msg.Answers[0].Data.(*protocol.RDataAPL)
+	if !ok {
+		t.Fatalf("APL answer data = %T, want *protocol.RDataAPL", w.msg.Answers[0].Data)
+	}
+	if got, want := len(apl.Items), 2; got != want {
+		t.Fatalf("APL item count = %d, want %d", got, want)
+	}
+	if apl.Items[0].Negation || apl.Items[0].AddressFamily != 1 || apl.Items[0].Prefix != 24 {
+		t.Fatalf("first APL item = %+v, want afi=1 prefix=24 positive", apl.Items[0])
+	}
+	if !apl.Items[1].Negation || apl.Items[1].AddressFamily != 2 || apl.Items[1].Prefix != 32 {
+		t.Fatalf("second APL item = %+v, want afi=2 prefix=32 negated", apl.Items[1])
 	}
 }
 
@@ -8217,7 +9436,9 @@ func TestCacheManager_SaveCacheToKVSuccess(t *testing.T) {
 		Cache:  cache.New(cache.Config{Capacity: 10}),
 		logger: logger,
 	}
-	cm2.LoadCacheFromKV(kv)
+	if err := cm2.LoadCacheFromKV(kv); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 	if cm2.Cache == nil {
 		t.Error("expected cache to be loaded")
 	}
@@ -8229,8 +9450,7 @@ func TestClusterManager_StopMultiple(t *testing.T) {
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, _ := NewClusterManager(cfg, logger, nil, nil, nil)
 	mgr.Stop() // should not panic
-	// Note: calling Stop() twice would panic on close(stopCh)
-	_ = mgr
+	mgr.Stop() // should remain idempotent
 }
 
 func TestServeDNS_EmptyQuery(t *testing.T) {
@@ -8255,7 +9475,7 @@ func TestServeDNS_RPZ_NSDNAME(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	os.WriteFile(rpzFile, []byte("ns.bad.example.com.rpz-nsdname 300 IN CNAME .\n"), 0644)
+	os.WriteFile(rpzFile, []byte("ns.bad.example.com.rpz-nsdname 300 IN CNAME *.\n"), 0644)
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
@@ -8330,7 +9550,7 @@ func TestServeDNS_RPZ_NSDNAME_UPstream(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
 	rpzFile := filepath.Join(tmpDir, "rpz.txt")
-	os.WriteFile(rpzFile, []byte("ns.blocked.example.com.rpz-nsdname 300 IN CNAME .\n"), 0644)
+	os.WriteFile(rpzFile, []byte("ns.blocked.example.com.rpz-nsdname 300 IN CNAME *.\n"), 0644)
 	engine := rpz.NewEngine(rpz.Config{Enabled: true, Files: []string{rpzFile}})
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
@@ -8657,7 +9877,9 @@ func TestLoadCacheFromKV_Nil(t *testing.T) {
 		logger: logger,
 	}
 	// Should not panic with nil KV
-	cm.LoadCacheFromKV(nil)
+	if err := cm.LoadCacheFromKV(nil); err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
 }
 
 func TestBindEntryToAddr(t *testing.T) {

@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -31,6 +32,24 @@ func TestIsWebSocketRequest_CaseInsensitive(t *testing.T) {
 	r.Header.Set("Connection", "keep-alive, upgrade")
 	if !IsWebSocketRequest(r) {
 		t.Error("expected case-insensitive match")
+	}
+}
+
+func TestIsWebSocketRequest_ConnectionTokenExactMatch(t *testing.T) {
+	r := httptest.NewRequest("GET", "/ws", nil)
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Connection", "keep-alive, notupgrade")
+	if IsWebSocketRequest(r) {
+		t.Error("expected false when Connection lacks exact upgrade token")
+	}
+}
+
+func TestIsWebSocketRequest_RequiresGET(t *testing.T) {
+	r := httptest.NewRequest("POST", "/ws", nil)
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Connection", "Upgrade")
+	if IsWebSocketRequest(r) {
+		t.Error("expected false for non-GET WebSocket request")
 	}
 }
 
@@ -101,14 +120,30 @@ func buildFrame(opcode byte, fin bool, mask bool, maskKey []byte, payload []byte
 	return buf
 }
 
-type bufferConn struct {
-	reader io.Reader
-	writer *bytes.Buffer
+func buildClientFrame(opcode byte, fin bool, payload []byte) []byte {
+	return buildFrame(opcode, fin, true, []byte{0x01, 0x02, 0x03, 0x04}, payload)
 }
 
-func (bc *bufferConn) Read(p []byte) (int, error)  { return bc.reader.Read(p) }
-func (bc *bufferConn) Write(p []byte) (int, error) { return bc.writer.Write(p) }
-func (bc *bufferConn) Close() error                { return nil }
+type bufferConn struct {
+	reader    io.Reader
+	writer    *bytes.Buffer
+	writeMax  int
+	writeCall int
+	writeErr  error
+}
+
+func (bc *bufferConn) Read(p []byte) (int, error) { return bc.reader.Read(p) }
+func (bc *bufferConn) Write(p []byte) (int, error) {
+	bc.writeCall++
+	if bc.writeErr != nil {
+		return 0, bc.writeErr
+	}
+	if bc.writeMax > 0 && bc.writeMax < len(p) {
+		p = p[:bc.writeMax]
+	}
+	return bc.writer.Write(p)
+}
+func (bc *bufferConn) Close() error { return nil }
 
 func newConn(data []byte) *Conn {
 	return &Conn{conn: &bufferConn{
@@ -136,7 +171,7 @@ func TestReadFrame_SmallPayload(t *testing.T) {
 }
 
 func TestReadFrame_EmptyPayload(t *testing.T) {
-	frame := buildFrame(0x1, true, false, nil, []byte{})
+	frame := buildClientFrame(0x1, true, []byte{})
 	c := newConn(frame)
 
 	_, opcode, data, err := c.readFrame()
@@ -148,6 +183,29 @@ func TestReadFrame_EmptyPayload(t *testing.T) {
 	}
 	if len(data) != 0 {
 		t.Errorf("expected empty payload, got %d bytes", len(data))
+	}
+}
+
+func TestReadFrame_ReservedBitsRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		firstByte byte
+	}{
+		{name: "rsv1", firstByte: 0x80 | 0x40 | 0x1},
+		{name: "rsv2", firstByte: 0x80 | 0x20 | 0x1},
+		{name: "rsv3", firstByte: 0x80 | 0x10 | 0x1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frame := []byte{tt.firstByte, 0x80, 0x01, 0x02, 0x03, 0x04}
+			c := newConn(frame)
+
+			_, _, _, err := c.readFrame()
+			if err == nil || err.Error() != "websocket: reserved bits set" {
+				t.Fatalf("expected reserved bits set error, got %v", err)
+			}
+		})
 	}
 }
 
@@ -171,13 +229,45 @@ func TestReadFrame_MediumPayload(t *testing.T) {
 	}
 }
 
+func TestReadFrame_NonMinimal16BitLengthRejected(t *testing.T) {
+	mask := []byte{0x37, 0xfa, 0x21, 0x3d}
+	payload := []byte("hello")
+	frame := []byte{0x81, 0x80 | 126, 0x00, byte(len(payload))}
+	frame = append(frame, mask...)
+	for i, b := range payload {
+		frame = append(frame, b^mask[i%4])
+	}
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: non-minimal payload length" {
+		t.Fatalf("expected non-minimal payload length error, got %v", err)
+	}
+}
+
+func TestReadFrame_NonMinimal64BitLengthRejected(t *testing.T) {
+	mask := []byte{0x37, 0xfa, 0x21, 0x3d}
+	payload := make([]byte, 126)
+	frame := []byte{0x82, 0x80 | 127, 0, 0, 0, 0, 0, 0, 0, byte(len(payload))}
+	frame = append(frame, mask...)
+	for i, b := range payload {
+		frame = append(frame, b^mask[i%4])
+	}
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: non-minimal payload length" {
+		t.Fatalf("expected non-minimal payload length error, got %v", err)
+	}
+}
+
 func TestReadFrame_LargePayload(t *testing.T) {
 	// Test that a payload within the 16KB limit can be read
 	payload := make([]byte, 15*1024) // 15KB — under the 16KB limit
 	for i := range payload {
 		payload[i] = byte(i % 256)
 	}
-	frame := buildFrame(0x1, true, false, nil, payload)
+	frame := buildClientFrame(0x1, true, payload)
 	c := newConn(frame)
 
 	_, opcode, data, err := c.readFrame()
@@ -194,9 +284,9 @@ func TestReadFrame_LargePayload(t *testing.T) {
 
 func TestReadFrame_TooLarge(t *testing.T) {
 	// Build a frame claiming > 16KB payload
-	buf := []byte{0x81, 0x7F} // FIN + text, 127 = 64-bit length
-	lenBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(lenBytes, 16*1024+1) // 16KB + 1
+	buf := []byte{0x81, 0x80 | 0x7E} // FIN + text, masked, 126 = 16-bit length
+	lenBytes := make([]byte, 2)
+	binary.BigEndian.PutUint16(lenBytes, 16*1024+1) // 16KB + 1
 	buf = append(buf, lenBytes...)
 
 	c := newConn(buf)
@@ -219,12 +309,79 @@ func TestReadFrame_UnmaskedPayload(t *testing.T) {
 	frame := buildFrame(0x1, true, false, nil, payload)
 	c := newConn(frame)
 
-	_, _, data, err := c.readFrame()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: client frame not masked" {
+		t.Fatalf("expected client frame not masked error, got %v", err)
 	}
-	if string(data) != "test data" {
-		t.Errorf("expected 'test data', got %q", string(data))
+}
+
+func TestReadFrame_FragmentedControlFrameRejected(t *testing.T) {
+	frame := buildClientFrame(0x9, false, []byte("ping"))
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: fragmented control frame" {
+		t.Fatalf("expected fragmented control frame error, got %v", err)
+	}
+}
+
+func TestReadFrame_OversizedControlFrameRejected(t *testing.T) {
+	frame := buildClientFrame(0x8, true, bytes.Repeat([]byte("x"), 126))
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: control frame too large" {
+		t.Fatalf("expected control frame too large error, got %v", err)
+	}
+}
+
+func TestReadFrame_InvalidCloseFramePayloadRejected(t *testing.T) {
+	frame := buildClientFrame(0x8, true, []byte{0x03})
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: invalid close frame payload" {
+		t.Fatalf("expected invalid close frame payload error, got %v", err)
+	}
+}
+
+func TestReadFrame_InvalidCloseCodeRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		code uint16
+	}{
+		{name: "below-range", code: 999},
+		{name: "reserved-1004", code: 1004},
+		{name: "no-status", code: 1005},
+		{name: "abnormal-closure", code: 1006},
+		{name: "tls-failure", code: 1015},
+		{name: "reserved-extension-range", code: 2000},
+		{name: "above-range", code: 5000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := make([]byte, 2)
+			binary.BigEndian.PutUint16(payload, tt.code)
+			frame := buildClientFrame(0x8, true, payload)
+			c := newConn(frame)
+
+			_, _, _, err := c.readFrame()
+			if err == nil || err.Error() != "websocket: invalid close code" {
+				t.Fatalf("expected invalid close code error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestReadFrame_InvalidCloseReasonRejected(t *testing.T) {
+	payload := []byte{0x03, 0xE8, 0xFF}
+	frame := buildClientFrame(0x8, true, payload)
+	c := newConn(frame)
+
+	_, _, _, err := c.readFrame()
+	if err == nil || err.Error() != "websocket: invalid close reason" {
+		t.Fatalf("expected invalid close reason error, got %v", err)
 	}
 }
 
@@ -281,6 +438,59 @@ func TestWriteMessage_MediumPayload(t *testing.T) {
 	}
 }
 
+func TestWriteMessage_CompletesPartialWrites(t *testing.T) {
+	buf := &bytes.Buffer{}
+	conn := &bufferConn{reader: strings.NewReader(""), writer: buf, writeMax: 2}
+	c := &Conn{conn: conn}
+
+	if err := c.WriteMessage(1, []byte("hello")); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	if conn.writeCall < 2 {
+		t.Fatalf("partial writer should require multiple writes, got %d", conn.writeCall)
+	}
+
+	data := buf.Bytes()
+	if len(data) != 7 {
+		t.Fatalf("wire length = %d, want 7", len(data))
+	}
+	if data[0] != 0x81 || data[1] != 5 || string(data[2:]) != "hello" {
+		t.Fatalf("wire frame = %x, want text frame with hello", data)
+	}
+}
+
+func TestWriteMessage_RejectsInvalidMessageTypes(t *testing.T) {
+	tests := []struct {
+		name        string
+		messageType int
+		payload     []byte
+		want        string
+	}{
+		{name: "continuation", messageType: 0x0, want: "invalid message type"},
+		{name: "reserved", messageType: 0x3, want: "invalid message type"},
+		{name: "oversized control", messageType: 0x9, payload: make([]byte, 126), want: "control frame too large"},
+		{name: "invalid close payload", messageType: 0x8, payload: []byte{0x03}, want: "invalid close frame payload"},
+		{name: "invalid close code", messageType: 0x8, payload: []byte{0x03, 0xEE}, want: "invalid close code"},
+		{name: "invalid close reason", messageType: 0x8, payload: []byte{0x03, 0xE8, 0xFF}, want: "invalid close reason"},
+		{name: "invalid text payload", messageType: 0x1, payload: []byte{0xFF}, want: "invalid text payload"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := &bytes.Buffer{}
+			c := &Conn{conn: &bufferConn{reader: strings.NewReader(""), writer: buf}}
+
+			err := c.WriteMessage(tt.messageType, tt.payload)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("WriteMessage error = %v, want %q", err, tt.want)
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("WriteMessage wrote %d bytes for invalid frame", buf.Len())
+			}
+		})
+	}
+}
+
 func TestWriteMessage_LargePayload(t *testing.T) {
 	buf := &bytes.Buffer{}
 	c := &Conn{conn: &bufferConn{reader: strings.NewReader(""), writer: buf}}
@@ -330,7 +540,7 @@ func TestWriteMessage_Empty(t *testing.T) {
 // ============================================================================
 
 func TestReadMessage_PingAutoPong(t *testing.T) {
-	pingFrame := buildFrame(0x9, true, false, nil, []byte("ping"))
+	pingFrame := buildClientFrame(0x9, true, []byte("ping"))
 	// Follow with a text frame so ReadMessage returns
 	textFrame := buildFrame(0x1, true, true, []byte{1, 2, 3, 4}, []byte("data"))
 	c := newConn(append(pingFrame, textFrame...))
@@ -357,9 +567,93 @@ func TestReadMessage_PingAutoPong(t *testing.T) {
 	}
 }
 
+func TestReadMessage_PingPongWriteError(t *testing.T) {
+	pingFrame := buildClientFrame(0x9, true, []byte("ping"))
+	writeErr := errors.New("pong write failed")
+	c := &Conn{conn: &bufferConn{
+		reader:   bytes.NewReader(pingFrame),
+		writer:   &bytes.Buffer{},
+		writeErr: writeErr,
+	}}
+
+	_, _, err := c.ReadMessage()
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("ReadMessage error = %v, want %v", err, writeErr)
+	}
+}
+
+func TestReadMessage_InvalidOpcodeRejected(t *testing.T) {
+	frame := buildClientFrame(0x3, true, nil)
+	c := newConn(frame)
+
+	_, _, err := c.ReadMessage()
+	if err == nil || !strings.Contains(err.Error(), "invalid opcode") {
+		t.Fatalf("ReadMessage error = %v, want invalid opcode", err)
+	}
+
+	bc := c.conn.(*bufferConn)
+	written := bc.writer.Bytes()
+	if len(written) < 4 {
+		t.Fatalf("expected protocol-error close frame, got %d bytes: %x", len(written), written)
+	}
+	if written[0] != 0x88 {
+		t.Fatalf("expected close opcode, got 0x%02x", written[0])
+	}
+	if code := binary.BigEndian.Uint16(written[2:4]); code != 1002 {
+		t.Fatalf("close code = %d, want 1002", code)
+	}
+}
+
+func TestReadMessage_InvalidTextPayloadRejected(t *testing.T) {
+	frame := buildClientFrame(0x1, true, []byte{0xFF})
+	c := newConn(frame)
+
+	_, _, err := c.ReadMessage()
+	if err == nil || !strings.Contains(err.Error(), "invalid text payload") {
+		t.Fatalf("ReadMessage error = %v, want invalid text payload", err)
+	}
+
+	bc := c.conn.(*bufferConn)
+	written := bc.writer.Bytes()
+	if len(written) < 4 {
+		t.Fatalf("expected invalid-payload close frame, got %d bytes: %x", len(written), written)
+	}
+	if written[0] != 0x88 {
+		t.Fatalf("expected close opcode, got 0x%02x", written[0])
+	}
+	if code := binary.BigEndian.Uint16(written[2:4]); code != 1007 {
+		t.Fatalf("close code = %d, want 1007", code)
+	}
+}
+
+func TestReadMessage_CloseWriteErrorIsReturned(t *testing.T) {
+	frames := append(buildClientFrame(0x1, true, []byte("first")), buildClientFrame(0x1, true, []byte("second"))...)
+	writeErr := errors.New("close write failed")
+	c := &Conn{conn: &bufferConn{
+		reader:   bytes.NewReader(frames),
+		writer:   &bytes.Buffer{},
+		writeErr: writeErr,
+	}}
+	c.SetRateLimit(1, time.Minute)
+
+	if msgType, payload, err := c.ReadMessage(); err != nil || msgType != 1 || string(payload) != "first" {
+		t.Fatalf("first ReadMessage = (%d, %q, %v), want text first", msgType, payload, err)
+	}
+	_, _, err := c.ReadMessage()
+	if err == nil {
+		t.Fatal("expected rate limit error")
+	}
+	if !strings.Contains(err.Error(), "rate limit exceeded") {
+		t.Fatalf("ReadMessage error = %v, want rate limit context", err)
+	}
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("ReadMessage error = %v, want wrapped %v", err, writeErr)
+	}
+}
+
 func TestReadMessage_PongDiscarded(t *testing.T) {
-	pongFrame := buildFrame(0xA, true, false, nil, []byte("pong"))
-	textFrame := buildFrame(0x1, true, false, nil, []byte("after"))
+	pongFrame := buildClientFrame(0xA, true, []byte("pong"))
+	textFrame := buildClientFrame(0x1, true, []byte("after"))
 	c := newConn(append(pongFrame, textFrame...))
 
 	msgType, data, err := c.ReadMessage()
@@ -375,7 +669,7 @@ func TestReadMessage_PongDiscarded(t *testing.T) {
 }
 
 func TestReadMessage_CloseFrame(t *testing.T) {
-	closeFrame := buildFrame(0x8, true, false, nil, []byte{0x03, 0xE8}) // 1000
+	closeFrame := buildClientFrame(0x8, true, []byte{0x03, 0xE8}) // 1000
 	c := newConn(closeFrame)
 
 	msgType, data, err := c.ReadMessage()
@@ -392,7 +686,7 @@ func TestReadMessage_CloseFrame(t *testing.T) {
 
 func TestReadMessage_BinaryMessage(t *testing.T) {
 	payload := []byte{0x00, 0x01, 0x02, 0xFF}
-	frame := buildFrame(0x2, true, false, nil, payload)
+	frame := buildClientFrame(0x2, true, payload)
 	c := newConn(frame)
 
 	msgType, data, err := c.ReadMessage()
@@ -420,20 +714,21 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("write error: %v", err)
 	}
 
-	// Client would mask the frame, simulate that
 	wireData := buf.Bytes()
-	// Re-parse: skip FIN+opcode byte, check it's unmasked (server->client)
-	reader := &Conn{conn: &bufferConn{reader: bytes.NewReader(wireData), writer: &bytes.Buffer{}}}
-
-	_, opcode, data, err := reader.readFrame()
-	if err != nil {
-		t.Fatalf("read error: %v", err)
+	if len(wireData) < 2 {
+		t.Fatalf("expected websocket frame, got %d bytes", len(wireData))
 	}
-	if opcode != 0x1 {
-		t.Errorf("expected opcode 0x1, got 0x%x", opcode)
+	if wireData[0] != 0x81 {
+		t.Errorf("expected FIN text frame 0x81, got 0x%x", wireData[0])
 	}
-	if !bytes.Equal(data, original) {
-		t.Errorf("expected %q, got %q", original, data)
+	if wireData[1]&0x80 != 0 {
+		t.Fatal("server-to-client frame must not be masked")
+	}
+	if int(wireData[1]&0x7F) != len(original) {
+		t.Fatalf("expected payload length %d, got %d", len(original), wireData[1]&0x7F)
+	}
+	if !bytes.Equal(wireData[2:], original) {
+		t.Errorf("expected %q, got %q", original, wireData[2:])
 	}
 }
 
@@ -494,6 +789,71 @@ func TestHandshake_MissingKey(t *testing.T) {
 	}
 }
 
+func TestHandshake_InvalidKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "not-base64", key: "not-base64"},
+		{name: "wrong-length", key: base64.StdEncoding.EncodeToString([]byte("short"))},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/ws", nil)
+			r.Header.Set("Upgrade", "websocket")
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Sec-WebSocket-Key", tt.key)
+
+			conn, err := Handshake(w, r)
+			if conn != nil {
+				t.Error("expected nil conn")
+			}
+			if !errors.Is(err, ErrNotWebSocket) {
+				t.Errorf("expected ErrNotWebSocket, got %v", err)
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
+func TestHandshake_InvalidVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+	}{
+		{name: "missing", version: ""},
+		{name: "unsupported", version: "12"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/ws", nil)
+			r.Header.Set("Upgrade", "websocket")
+			r.Header.Set("Connection", "Upgrade")
+			r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			if tt.version != "" {
+				r.Header.Set("Sec-WebSocket-Version", tt.version)
+			}
+
+			conn, err := Handshake(w, r)
+			if conn != nil {
+				t.Error("expected nil conn")
+			}
+			if !errors.Is(err, ErrNotWebSocket) {
+				t.Errorf("expected ErrNotWebSocket, got %v", err)
+			}
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d", w.Code)
+			}
+		})
+	}
+}
+
 // ============================================================================
 // Conn.Close
 // ============================================================================
@@ -534,12 +894,12 @@ func TestSetReadDeadline_NoNetConn(t *testing.T) {
 // int() narrowing, so any high-bit value (which RFC 6455 also
 // requires be zero) is rejected cleanly with an error.
 func TestReadFrame_ExtendedLength_RejectsHighBit(t *testing.T) {
-	// Frame: FIN=1, opcode=binary, NOT masked, length-marker=127,
+	// Frame: FIN=1, opcode=binary, masked, length-marker=127,
 	// extended length = 0x8000000000000001 (MSB set + small low byte
 	// so that int(uint64) sign-flips to a small negative on 64-bit).
 	frame := []byte{
 		0x82,                                           // FIN + binary opcode
-		127,                                            // length marker, no mask bit
+		0x80 | 127,                                     // length marker with mask bit
 		0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // length = 2^63 + 1
 	}
 	c := newConn(frame)

@@ -8,6 +8,8 @@ package geodns
 import (
 	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -330,5 +332,35 @@ func TestReadRecord_UnsupportedSize(t *testing.T) {
 	_, err := mmdbReadRecord([]byte{0, 0, 0, 0}, 0, 99, false)
 	if err == nil {
 		t.Error("expected error for unsupported record_size 99")
+	}
+}
+
+func TestReadRecord_RejectsNodeOffsetOverflow(t *testing.T) {
+	node := []byte{0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44}
+	_, err := mmdbReadRecord(node, 1<<29, 32, false)
+	if err == nil {
+		t.Fatal("expected error for overflowing node offset")
+	}
+}
+
+func TestLoadMMDB_RejectsMetadataBeforeTree(t *testing.T) {
+	meta, err := mmdbEncode(map[string]interface{}{
+		"node_count":  uint64(1),
+		"record_size": uint64(32),
+		"ip_version":  uint64(4),
+	})
+	if err != nil {
+		t.Fatalf("mmdbEncode metadata: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "truncated-tree.mmdb")
+	data := append([]byte(mmdbMetadataMarker), meta...)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	e := NewEngine(Config{})
+	if err := e.LoadMMDB(path); err == nil {
+		t.Fatal("expected LoadMMDB to reject metadata before complete tree")
 	}
 }

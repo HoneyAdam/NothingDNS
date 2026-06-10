@@ -221,6 +221,110 @@ short
 	}
 }
 
+// TestParseRRSIGTimeBounds verifies RRSIG inception/expiration handling
+// through parseRDataFromZone, which delegates to the shared
+// protocol.ParseRDataText. Both RFC 4034 §3.2 presentation times
+// (YYYYMMDDHHMMSS) and bare uint32 Unix seconds must be accepted;
+// out-of-range or malformed times must reject the whole record (the old
+// dnsctl-local parser silently loaded them with time 0 instead).
+func TestParseRRSIGTimeBounds(t *testing.T) {
+	sig := base64.StdEncoding.EncodeToString([]byte("fakesignature"))
+	tests := []struct {
+		name    string
+		expTime string
+		want    uint32 // expected Expiration when wantErr is false
+		wantErr bool
+	}{
+		{
+			name:    "bind presentation before epoch rejected",
+			expTime: "19691231235959",
+			wantErr: true,
+		},
+		{
+			name:    "bind presentation at epoch accepted",
+			expTime: "19700101000000",
+			want:    0,
+		},
+		{
+			name:    "bind presentation normal time accepted",
+			expTime: "20250101000000",
+			want:    1735689600,
+		},
+		{
+			name:    "bind presentation max uint32 accepted",
+			expTime: "21060207062815",
+			want:    ^uint32(0),
+		},
+		{
+			name:    "bind presentation above max uint32 rejected",
+			expTime: "21060207062816",
+			wantErr: true,
+		},
+		{
+			name:    "bare max uint32 accepted",
+			expTime: "4294967295",
+			want:    ^uint32(0),
+		},
+		{
+			name:    "bare above max uint32 rejected",
+			expTime: "4294967296",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rdata := fmt.Sprintf("A 13 2 300 %s 1733088000 12345 example.com. %s", tt.expTime, sig)
+			data, err := parseRDataFromZone(protocol.TypeRRSIG, rdata)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for expiration %q, got nil", tt.expTime)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			rrsig, ok := data.(*protocol.RDataRRSIG)
+			if !ok {
+				t.Fatalf("expected *RDataRRSIG, got %T", data)
+			}
+			if rrsig.Expiration != tt.want {
+				t.Fatalf("Expiration = %d, want %d", rrsig.Expiration, tt.want)
+			}
+		})
+	}
+}
+
+func TestRRSIGTimeState(t *testing.T) {
+	tests := []struct {
+		name        string
+		inception   uint32
+		expiration  uint32
+		now         uint32
+		wantNotYet  bool
+		wantExpired bool
+	}{
+		{name: "currently valid", inception: 90, expiration: 110, now: 100},
+		{name: "not yet valid", inception: 101, expiration: 110, now: 100, wantNotYet: true},
+		{name: "expired", inception: 90, expiration: 99, now: 100, wantExpired: true},
+		{name: "valid across uint32 wrap", inception: ^uint32(0) - 1, expiration: 5, now: 1},
+		{name: "expired across uint32 wrap", inception: ^uint32(0) - 10, expiration: ^uint32(0), now: 1, wantExpired: true},
+		{name: "not yet valid across uint32 wrap", inception: 1, expiration: 10, now: ^uint32(0), wantNotYet: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rrsig := &protocol.RDataRRSIG{Inception: tt.inception, Expiration: tt.expiration}
+			gotNotYet, gotExpired := rrsigTimeState(rrsig, tt.now)
+			if gotNotYet != tt.wantNotYet || gotExpired != tt.wantExpired {
+				t.Fatalf("rrsigTimeState(inception=%d, expiration=%d, now=%d) = (%v, %v), want (%v, %v)",
+					tt.inception, tt.expiration, tt.now, gotNotYet, gotExpired, tt.wantNotYet, tt.wantExpired)
+			}
+		})
+	}
+}
+
 func TestParseZoneRecordsFromFile(t *testing.T) {
 	// Create a temp zone file and parse it to verify end-to-end behavior.
 	tmpDir := t.TempDir()
@@ -401,6 +505,18 @@ func TestParseRDataFromZone(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "MX record invalid preference",
+			rrtype:  protocol.TypeMX,
+			rdata:   "bad mail.example.com.",
+			wantErr: true,
+		},
+		{
+			name:    "MX record preference overflow",
+			rrtype:  protocol.TypeMX,
+			rdata:   "65536 mail.example.com.",
+			wantErr: true,
+		},
+		{
 			name:   "TXT record with quotes",
 			rrtype: protocol.TypeTXT,
 			rdata:  `"v=spf1 +all"`,
@@ -461,6 +577,24 @@ func TestParseRDataFromZone(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "DNSKEY record invalid flags",
+			rrtype:  protocol.TypeDNSKEY,
+			rdata:   fmt.Sprintf("bad 3 13 %s", base64.StdEncoding.EncodeToString([]byte("fakekey"))),
+			wantErr: true,
+		},
+		{
+			name:    "DNSKEY record invalid protocol",
+			rrtype:  protocol.TypeDNSKEY,
+			rdata:   fmt.Sprintf("257 2 13 %s", base64.StdEncoding.EncodeToString([]byte("fakekey"))),
+			wantErr: true,
+		},
+		{
+			name:    "DNSKEY record invalid algorithm",
+			rrtype:  protocol.TypeDNSKEY,
+			rdata:   fmt.Sprintf("257 3 bad %s", base64.StdEncoding.EncodeToString([]byte("fakekey"))),
+			wantErr: true,
+		},
+		{
 			name:    "RRSIG record too few fields",
 			rrtype:  protocol.TypeRRSIG,
 			rdata:   "A 13 2 300",
@@ -502,6 +636,54 @@ func TestParseRDataFromZone(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "RRSIG record unknown covered type",
+			rrtype:  protocol.TypeRRSIG,
+			rdata:   fmt.Sprintf("NOPE 13 2 300 1735689600 1733088000 12345 example.com. %s", base64.StdEncoding.EncodeToString([]byte("fakesignature"))),
+			wantErr: true,
+		},
+		{
+			name:    "RRSIG record invalid algorithm",
+			rrtype:  protocol.TypeRRSIG,
+			rdata:   fmt.Sprintf("A bad 2 300 1735689600 1733088000 12345 example.com. %s", base64.StdEncoding.EncodeToString([]byte("fakesignature"))),
+			wantErr: true,
+		},
+		{
+			name:    "RRSIG record original TTL overflow",
+			rrtype:  protocol.TypeRRSIG,
+			rdata:   fmt.Sprintf("A 13 2 4294967296 1735689600 1733088000 12345 example.com. %s", base64.StdEncoding.EncodeToString([]byte("fakesignature"))),
+			wantErr: true,
+		},
+		{
+			name:    "RRSIG record key tag overflow",
+			rrtype:  protocol.TypeRRSIG,
+			rdata:   fmt.Sprintf("A 13 2 300 1735689600 1733088000 65536 example.com. %s", base64.StdEncoding.EncodeToString([]byte("fakesignature"))),
+			wantErr: true,
+		},
+		{
+			name:    "SOA record invalid serial",
+			rrtype:  protocol.TypeSOA,
+			rdata:   "ns1.example.com. admin.example.com. bad 3600 900 604800 86400",
+			wantErr: true,
+		},
+		{
+			name:    "SOA record refresh overflow",
+			rrtype:  protocol.TypeSOA,
+			rdata:   "ns1.example.com. admin.example.com. 1 4294967296 900 604800 86400",
+			wantErr: true,
+		},
+		{
+			name:    "NSEC3 record invalid hash algorithm",
+			rrtype:  protocol.TypeNSEC3,
+			rdata:   "bad 0 0 - ABCD",
+			wantErr: true,
+		},
+		{
+			name:    "NSEC3 record iterations overflow",
+			rrtype:  protocol.TypeNSEC3,
+			rdata:   "1 0 65536 - ABCD",
+			wantErr: true,
+		},
+		{
 			name:   "Unknown record type returns RDataRaw",
 			rrtype: 999, // unsupported type
 			rdata:  "some arbitrary data",
@@ -519,7 +701,7 @@ func TestParseRDataFromZone(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data, err := parseRDataFromZone(tt.rrtype, tt.rdata, "example.com.")
+			data, err := parseRDataFromZone(tt.rrtype, tt.rdata)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil (data type: %T)", data)
@@ -604,7 +786,7 @@ func TestHexEncode(t *testing.T) {
 }
 
 // ============================================================================
-// canonicalWireName tests
+// DNSSEC canonical wire name tests
 // ============================================================================
 
 func TestCanonicalWireName(t *testing.T) {
@@ -642,9 +824,9 @@ func TestCanonicalWireName(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := canonicalWireName(tt.in)
+			got := protocol.CanonicalWireName(tt.in)
 			if string(got) != string(tt.want) {
-				t.Errorf("canonicalWireName(%q) = %v, want %v", tt.in, got, tt.want)
+				t.Errorf("protocol.CanonicalWireName(%q) = %v, want %v", tt.in, got, tt.want)
 			}
 		})
 	}
@@ -879,6 +1061,18 @@ func TestCmdDNSSECGenerateKey_FlagParsing(t *testing.T) {
 			args:    []string{"--zone", "example.com"},
 			wantErr: false,
 		},
+		{
+			name:      "reject negative algorithm",
+			args:      []string{"--algorithm", "-1", "--type", "ZSK", "--zone", "example.com"},
+			wantErr:   true,
+			errSubstr: "invalid algorithm -1",
+		},
+		{
+			name:      "reject algorithm that would wrap to 13",
+			args:      []string{"--algorithm", "269", "--type", "ZSK", "--zone", "example.com"},
+			wantErr:   true,
+			errSubstr: "invalid algorithm 269",
+		},
 	}
 
 	for _, tt := range tests {
@@ -973,6 +1167,12 @@ func TestCmdDNSSECDSFromDNSKEY_FlagValidation(t *testing.T) {
 			args:      []string{"--keyfile", "some.key"},
 			wantErr:   true,
 			errSubstr: "zone and keyfile are required",
+		},
+		{
+			name:      "reject digest that would wrap to SHA-256",
+			args:      []string{"--zone", "example.com", "--keyfile", "missing.key", "--digest", "258"},
+			wantErr:   true,
+			errSubstr: "invalid digest type 258",
 		},
 	}
 
@@ -1346,7 +1546,10 @@ func TestBuildSignedDataForValidation(t *testing.T) {
 		Signature:   []byte("fakesignature"),
 	}
 
-	data := buildSignedDataForValidation(rrSet, rrsig)
+	data, err := buildSignedDataForValidation(rrSet, rrsig)
+	if err != nil {
+		t.Fatalf("buildSignedDataForValidation: %v", err)
+	}
 	if len(data) == 0 {
 		t.Error("expected non-empty signed data")
 	}
@@ -1355,6 +1558,39 @@ func TestBuildSignedDataForValidation(t *testing.T) {
 	typeCovered := uint16(data[0])<<8 | uint16(data[1])
 	if typeCovered != protocol.TypeA {
 		t.Errorf("first two bytes = %d (type covered), want %d", typeCovered, protocol.TypeA)
+	}
+}
+
+func TestBuildSignedDataForValidationRejectsOversizedRDATA(t *testing.T) {
+	owner, _ := protocol.ParseName("example.com.")
+	signer, _ := protocol.ParseName("example.com.")
+
+	rrSet := []*protocol.ResourceRecord{
+		{
+			Name:  owner,
+			Type:  65000,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data: &protocol.RDataRaw{
+				TypeVal: 65000,
+				Data:    make([]byte, 65536),
+			},
+		},
+	}
+	rrsig := &protocol.RDataRRSIG{
+		TypeCovered: 65000,
+		Algorithm:   13,
+		Labels:      1,
+		OriginalTTL: 300,
+		Expiration:  1735689600,
+		Inception:   1733088000,
+		KeyTag:      12345,
+		SignerName:  signer,
+		Signature:   []byte("fakesignature"),
+	}
+
+	if _, err := buildSignedDataForValidation(rrSet, rrsig); err == nil {
+		t.Fatal("expected oversized RDATA to fail")
 	}
 }
 
@@ -1423,6 +1659,31 @@ func TestCmdDNSSEC_SubcommandDispatch(t *testing.T) {
 				if !strings.Contains(err.Error(), tt.errSubstr) {
 					t.Errorf("error = %q, want substring %q", err.Error(), tt.errSubstr)
 				}
+			}
+		})
+	}
+}
+
+func TestCmdDNSSECFlagParseErrorsReturn(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "generate-key", args: []string{"generate-key", "--unknown"}},
+		{name: "ds-from-dnskey", args: []string{"ds-from-dnskey", "--unknown"}},
+		{name: "sign-zone", args: []string{"sign-zone", "--unknown"}},
+		{name: "verify-anchor", args: []string{"verify-anchor", "--unknown"}},
+		{name: "validate-zone", args: []string{"validate-zone", "--unknown"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := cmdDNSSEC(tt.args)
+			if err == nil {
+				t.Fatal("expected flag parse error, got nil")
+			}
+			if !strings.Contains(err.Error(), "flag provided but not defined") {
+				t.Fatalf("error = %q, want unknown flag parse error", err.Error())
 			}
 		})
 	}

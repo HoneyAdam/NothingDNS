@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,34 @@ func TestWALCreate(t *testing.T) {
 	stats := wal.Stats()
 	if stats.SegmentCount != 1 {
 		t.Errorf("Expected 1 segment, got %d", stats.SegmentCount)
+	}
+}
+
+func TestOpenWALNormalizesInvalidOptions(t *testing.T) {
+	dir := t.TempDir()
+
+	wal, err := OpenWAL(dir, WALOptions{
+		MaxSegmentSize:  -1,
+		SyncInterval:    0,
+		PreallocateSize: -1,
+	})
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	if wal.opts.MaxSegmentSize != MaxSegmentSize {
+		t.Fatalf("MaxSegmentSize = %d, want %d", wal.opts.MaxSegmentSize, MaxSegmentSize)
+	}
+	if wal.opts.SyncInterval != SyncInterval {
+		t.Fatalf("SyncInterval = %v, want %v", wal.opts.SyncInterval, SyncInterval)
+	}
+	if wal.opts.PreallocateSize != 0 {
+		t.Fatalf("PreallocateSize = %d, want 0", wal.opts.PreallocateSize)
+	}
+
+	if _, err := wal.Append(EntryTypePut, []byte("normalized")); err != nil {
+		t.Fatalf("Append failed: %v", err)
 	}
 }
 
@@ -296,6 +325,46 @@ func TestWALReader_MultiEntry(t *testing.T) {
 	}
 }
 
+func TestWALReader_LargeEntrySpanningReads(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultWALOptions()
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	largePayload := strings.Repeat("x", 5000)
+	if _, err := wal.Append(EntryTypePut, []byte(largePayload)); err != nil {
+		t.Fatalf("Append large payload failed: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("after-large")); err != nil {
+		t.Fatalf("Append second payload failed: %v", err)
+	}
+	if err := wal.Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	reader := wal.NewReader()
+	defer reader.Close()
+	defer wal.Close()
+
+	entry, err := reader.Next()
+	if err != nil {
+		t.Fatalf("Next large payload returned error: %v", err)
+	}
+	if string(entry.Data) != largePayload {
+		t.Fatalf("large payload mismatch: got %d bytes, want %d", len(entry.Data), len(largePayload))
+	}
+
+	entry, err = reader.Next()
+	if err != nil {
+		t.Fatalf("Next second payload returned error: %v", err)
+	}
+	if string(entry.Data) != "after-large" {
+		t.Fatalf("second payload = %q, want %q", entry.Data, "after-large")
+	}
+}
+
 func TestWALEntryEncoding(t *testing.T) {
 	wal := &WAL{}
 
@@ -507,6 +576,33 @@ func TestWALAppendReportsRollbackFailure(t *testing.T) {
 	}
 }
 
+func TestWALCloseReportsFinalSyncError(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	wal.mu.Lock()
+	wal.syncPending = true
+	if err := wal.active.file.Close(); err != nil {
+		wal.mu.Unlock()
+		t.Fatalf("close active file: %v", err)
+	}
+	wal.mu.Unlock()
+
+	err = wal.Close()
+	if err == nil {
+		t.Fatal("Close with pending sync on closed active file should fail")
+	}
+	if !strings.Contains(err.Error(), "final sync") {
+		t.Fatalf("Close error should include final sync context, got: %v", err)
+	}
+}
+
 func TestWALMultipleSegments(t *testing.T) {
 	dir := t.TempDir()
 
@@ -565,4 +661,39 @@ func TestWALFileExists(t *testing.T) {
 	if !found {
 		t.Error("Expected to find .log files in WAL directory")
 	}
+}
+
+func TestWriteWALBufferCompletesPartialWrites(t *testing.T) {
+	writer := &chunkedWriter{maxWrite: 2}
+	data := []byte("wal-entry")
+
+	written, err := writeWALBuffer(writer, data)
+	if err != nil {
+		t.Fatalf("writeWALBuffer error: %v", err)
+	}
+	if written != len(data) {
+		t.Fatalf("writeWALBuffer wrote %d bytes, want %d", written, len(data))
+	}
+	if got := writer.buf.String(); got != string(data) {
+		t.Fatalf("writeWALBuffer wrote %q, want %q", got, string(data))
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+}
+
+func TestWriteWALBufferRejectsZeroProgress(t *testing.T) {
+	written, err := writeWALBuffer(zeroProgressWriter{}, []byte("wal-entry"))
+	if err != io.ErrShortWrite {
+		t.Fatalf("writeWALBuffer error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if written != 0 {
+		t.Fatalf("writeWALBuffer wrote %d bytes, want 0", written)
+	}
+}
+
+type zeroProgressWriter struct{}
+
+func (zeroProgressWriter) Write([]byte) (int, error) {
+	return 0, nil
 }

@@ -309,6 +309,21 @@ func TestRateLimiter_PruneEmpty(t *testing.T) {
 	rl.Prune()
 }
 
+func TestRateLimiter_WindowExpiredBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	window := time.Second
+
+	if rateWindowExpiredAt(now.Add(-window+time.Nanosecond), now, window) {
+		t.Error("rate window should not be expired before the boundary")
+	}
+	if !rateWindowExpiredAt(now.Add(-window), now, window) {
+		t.Error("rate window should expire exactly at the boundary")
+	}
+	if !rateWindowExpiredAt(now.Add(-window-time.Nanosecond), now, window) {
+		t.Error("rate window should expire after the boundary")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // UDPServer.SetRateLimit
 // ---------------------------------------------------------------------------

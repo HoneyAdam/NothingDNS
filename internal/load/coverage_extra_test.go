@@ -124,7 +124,7 @@ func TestComputeResult_WithLatencies(t *testing.T) {
 func TestComputeResult_Percentiles(t *testing.T) {
 	latencies := make([]time.Duration, 100)
 	for i := 0; i < 100; i++ {
-		latencies[i] = time.Duration(i+1) * time.Millisecond
+		latencies[i] = time.Duration(100-i) * time.Millisecond
 	}
 
 	r := &Runner{

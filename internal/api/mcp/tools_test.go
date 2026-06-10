@@ -14,16 +14,18 @@ import (
 // Mock implementations for testing
 
 type MockZoneManager struct {
-	zones     []ZoneInfo
-	records   []RecordInfo
-	createErr error
-	deleteErr error
-	getErr    error
-	listErr   error
-	addRecErr error
-	delRecErr error
-	importErr error
-	exportErr error
+	zones          []ZoneInfo
+	records        []RecordInfo
+	createErr      error
+	deleteErr      error
+	getErr         error
+	listErr        error
+	addRecErr      error
+	delRecErr      error
+	importErr      error
+	exportErr      error
+	lastCreateName string
+	lastCreateOpts ZoneOptions
 }
 
 func (m *MockZoneManager) ListZones() ([]ZoneInfo, error) {
@@ -49,6 +51,8 @@ func (m *MockZoneManager) CreateZone(name string, opts ZoneOptions) error {
 	if m.createErr != nil {
 		return m.createErr
 	}
+	m.lastCreateName = name
+	m.lastCreateOpts = opts
 	m.zones = append(m.zones, ZoneInfo{Name: name})
 	return nil
 }
@@ -362,7 +366,7 @@ func TestCallZoneCreate(t *testing.T) {
 
 	result, err := handler.CallTool("zone_create", map[string]interface{}{
 		"name":        "newzone.com",
-		"ttl":         3600,
+		"ttl":         7200,
 		"admin_email": "admin@newzone.com",
 		"auth_token":  "test-token",
 	})
@@ -372,6 +376,12 @@ func TestCallZoneCreate(t *testing.T) {
 
 	if result.IsError {
 		t.Error("Expected successful result")
+	}
+	if zm.lastCreateName != "newzone.com" {
+		t.Fatalf("created zone name = %q, want newzone.com", zm.lastCreateName)
+	}
+	if zm.lastCreateOpts.TTL != 7200 {
+		t.Fatalf("created zone ttl = %d, want 7200", zm.lastCreateOpts.TTL)
 	}
 }
 
@@ -400,6 +410,37 @@ func TestCallZoneCreateError(t *testing.T) {
 
 	if !result.IsError {
 		t.Error("Expected error result when create fails")
+	}
+}
+
+func TestCallZoneCreateRejectsInvalidTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		ttl  interface{}
+	}{
+		{name: "negative", ttl: -1},
+		{name: "fractional", ttl: float64(1.5)},
+		{name: "too large", ttl: float64(4294967296)},
+		{name: "wrong type", ttl: "3600"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			zm := &MockZoneManager{}
+			handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+
+			_, err := handler.CallTool("zone_create", map[string]interface{}{
+				"name":       "newzone.com",
+				"ttl":        tc.ttl,
+				"auth_token": "test-token",
+			})
+			if err == nil {
+				t.Fatal("expected error for invalid ttl")
+			}
+			if len(zm.zones) != 0 {
+				t.Fatalf("zone was created after rejected ttl: %+v", zm.zones)
+			}
+		})
 	}
 }
 
@@ -457,7 +498,7 @@ func TestCallRecordAdd(t *testing.T) {
 		"name":       "www",
 		"type":       "A",
 		"value":      "192.0.2.1",
-		"ttl":        3600,
+		"ttl":        7200,
 		"auth_token": "test-token",
 	})
 	if err != nil {
@@ -466,6 +507,12 @@ func TestCallRecordAdd(t *testing.T) {
 
 	if result.IsError {
 		t.Error("Expected successful result")
+	}
+	if len(zm.records) != 1 {
+		t.Fatalf("records added = %d, want 1", len(zm.records))
+	}
+	if zm.records[0].TTL != 7200 {
+		t.Fatalf("record ttl = %d, want 7200", zm.records[0].TTL)
 	}
 }
 
@@ -509,6 +556,40 @@ func TestCallRecordAddError(t *testing.T) {
 
 	if !result.IsError {
 		t.Error("Expected error result when add fails")
+	}
+}
+
+func TestCallRecordAddRejectsInvalidTTL(t *testing.T) {
+	tests := []struct {
+		name string
+		ttl  interface{}
+	}{
+		{name: "negative", ttl: -1},
+		{name: "fractional", ttl: float64(1.5)},
+		{name: "too large", ttl: float64(4294967296)},
+		{name: "wrong type", ttl: "3600"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			zm := &MockZoneManager{}
+			handler := NewDNSToolsHandler(nil, zm, nil, nil, nil, nil).WithAuth(&MockAuthProvider{})
+
+			_, err := handler.CallTool("record_add", map[string]interface{}{
+				"zone":       "example.com",
+				"name":       "www",
+				"type":       "A",
+				"value":      "192.0.2.1",
+				"ttl":        tc.ttl,
+				"auth_token": "test-token",
+			})
+			if err == nil {
+				t.Fatal("expected error for invalid ttl")
+			}
+			if len(zm.records) != 0 {
+				t.Fatalf("record was added after rejected ttl: %+v", zm.records)
+			}
+		})
 	}
 }
 
@@ -998,11 +1079,21 @@ func TestGetStringDefault(t *testing.T) {
 
 func TestGetIntDefault(t *testing.T) {
 	args := map[string]interface{}{
-		"number": float64(42),
+		"number":     float64(42),
+		"int_number": 7,
+		"fractional": float64(1.5),
 	}
 
 	if getIntDefault(args, "number", 0) != 42 {
 		t.Error("Expected 42")
+	}
+
+	if getIntDefault(args, "int_number", 0) != 7 {
+		t.Error("Expected 7")
+	}
+
+	if getIntDefault(args, "fractional", 100) != 100 {
+		t.Error("Expected default for fractional value")
 	}
 
 	if getIntDefault(args, "missing", 100) != 100 {

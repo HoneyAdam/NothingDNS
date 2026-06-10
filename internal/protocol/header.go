@@ -105,6 +105,9 @@ func (h *Header) Pack(buf []byte) error {
 	if len(buf) < HeaderLen {
 		return ErrBufferTooSmall
 	}
+	if h == nil {
+		return fmt.Errorf("nil header")
+	}
 
 	// Pack ID
 	binary.BigEndian.PutUint16(buf[0:2], h.ID)
@@ -125,6 +128,9 @@ func (h *Header) Pack(buf []byte) error {
 func (h *Header) Unpack(buf []byte) error {
 	if len(buf) < HeaderLen {
 		return ErrBufferTooSmall
+	}
+	if h == nil {
+		return fmt.Errorf("nil header")
 	}
 
 	// Unpack ID
@@ -295,6 +301,9 @@ func (f Flags) String() string {
 
 // String returns a human-readable representation of the header.
 func (h *Header) String() string {
+	if h == nil {
+		return "<nil header>"
+	}
 	return fmt.Sprintf(
 		";; ->>HEADER<<- opcode: %s, status: %s, id: %d\n"+
 			";; flags: %s; QUERY: %d, ANSWER: %d, AUTHORITY: %d, ADDITIONAL: %d",
@@ -329,22 +338,34 @@ func opcodeString(opcode uint8) string {
 
 // SetResponse sets the header for a response with the given RCODE.
 func (h *Header) SetResponse(rcode uint8) {
+	if h == nil {
+		return
+	}
 	h.Flags.QR = true
 	h.Flags.RCODE = rcode
 }
 
 // SetTruncated sets the TC bit.
 func (h *Header) SetTruncated(truncated bool) {
+	if h == nil {
+		return
+	}
 	h.Flags.TC = truncated
 }
 
 // SetAuthoritative sets the AA bit.
 func (h *Header) SetAuthoritative(auth bool) {
+	if h == nil {
+		return
+	}
 	h.Flags.AA = auth
 }
 
 // ClearCounts sets all section counts to zero.
 func (h *Header) ClearCounts() {
+	if h == nil {
+		return
+	}
 	h.QDCount = 0
 	h.ANCount = 0
 	h.NSCount = 0
@@ -353,11 +374,17 @@ func (h *Header) ClearCounts() {
 
 // IsSuccess returns true if the response code indicates success.
 func (h *Header) IsSuccess() bool {
+	if h == nil {
+		return false
+	}
 	return h.Flags.RCODE == RcodeSuccess
 }
 
 // Copy creates a copy of the header.
 func (h *Header) Copy() *Header {
+	if h == nil {
+		return nil
+	}
 	return &Header{
 		ID:      h.ID,
 		Flags:   h.Flags,

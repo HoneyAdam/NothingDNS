@@ -44,6 +44,10 @@ func (r *RDataOPT) Type() uint16 { return TypeOPT }
 // Note: The OPT record header fields (UDPSize, ExtendedRCODE, Version, DO, Z)
 // are stored in the ResourceRecord Class and TTL fields, not in RData.
 func (r *RDataOPT) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil OPT record")
+	}
+
 	startOffset := offset
 
 	for _, opt := range r.Options {
@@ -83,6 +87,10 @@ func (r *RDataOPT) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the OPT record options.
 func (r *RDataOPT) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil OPT record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -122,6 +130,10 @@ func (r *RDataOPT) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 
 // String returns a human-readable representation.
 func (r *RDataOPT) String() string {
+	if r == nil {
+		return ""
+	}
+
 	var result string
 	for i, opt := range r.Options {
 		if i > 0 {
@@ -134,6 +146,10 @@ func (r *RDataOPT) String() string {
 
 // Len returns the wire length.
 func (r *RDataOPT) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	length := 0
 	for _, opt := range r.Options {
 		length += 4 + len(opt.Data)
@@ -143,6 +159,10 @@ func (r *RDataOPT) Len() int {
 
 // Copy creates a copy.
 func (r *RDataOPT) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	options := make([]EDNS0Option, len(r.Options))
 	for i, opt := range r.Options {
 		options[i] = EDNS0Option{
@@ -155,6 +175,9 @@ func (r *RDataOPT) Copy() RData {
 
 // AddOption adds an option to the OPT record.
 func (r *RDataOPT) AddOption(code uint16, data []byte) {
+	if r == nil {
+		return
+	}
 	r.Options = append(r.Options, EDNS0Option{
 		Code: code,
 		Data: append([]byte(nil), data...),
@@ -163,6 +186,9 @@ func (r *RDataOPT) AddOption(code uint16, data []byte) {
 
 // GetOption returns the first option with the given code, or nil if not found.
 func (r *RDataOPT) GetOption(code uint16) *EDNS0Option {
+	if r == nil {
+		return nil
+	}
 	for i := range r.Options {
 		if r.Options[i].Code == code {
 			return &r.Options[i]
@@ -173,6 +199,9 @@ func (r *RDataOPT) GetOption(code uint16) *EDNS0Option {
 
 // RemoveOption removes all options with the given code.
 func (r *RDataOPT) RemoveOption(code uint16) {
+	if r == nil {
+		return
+	}
 	filtered := r.Options[:0]
 	for _, opt := range r.Options {
 		if opt.Code != code {
@@ -202,14 +231,17 @@ type EDNS0ClientSubnet struct {
 func NewEDNS0ClientSubnet(ip net.IP, sourceBits uint8) *EDNS0ClientSubnet {
 	// Determine family
 	family := uint16(1) // IPv4
-	if ip.To4() == nil {
-		family = 2 // IPv6
-	}
-
-	// Get the address bytes
 	addr := ip.To4()
 	if addr == nil {
+		family = 2 // IPv6
 		addr = ip.To16()
+	}
+
+	if addr == nil {
+		family = 1
+		sourceBits = 0
+	} else if maxPrefix, ok := ecsFamilyMaxPrefix(family); ok && int(sourceBits) > maxPrefix {
+		sourceBits = uint8(maxPrefix)
 	}
 
 	// Calculate how many bytes we need for the prefix
@@ -238,6 +270,9 @@ func NewEDNS0ClientSubnet(ip net.IP, sourceBits uint8) *EDNS0ClientSubnet {
 
 // Pack serializes the Client Subnet option data.
 func (e *EDNS0ClientSubnet) Pack() []byte {
+	if e == nil {
+		return nil
+	}
 	data := make([]byte, 4+len(e.Address))
 	PutUint16(data[0:], e.Family)
 	data[2] = e.SourcePrefixLength
@@ -257,16 +292,62 @@ func UnpackEDNS0ClientSubnet(data []byte) (*EDNS0ClientSubnet, error) {
 	e.SourcePrefixLength = data[2]
 	e.ScopePrefixLength = data[3]
 
-	if len(data) > 4 {
-		e.Address = make([]byte, len(data)-4)
-		copy(e.Address, data[4:])
+	maxPrefix, ok := ecsFamilyMaxPrefix(e.Family)
+	if !ok {
+		return nil, fmt.Errorf("unsupported ECS address family: %d", e.Family)
+	}
+	if int(e.SourcePrefixLength) > maxPrefix {
+		return nil, fmt.Errorf("invalid ECS source prefix length %d for family %d", e.SourcePrefixLength, e.Family)
+	}
+	if int(e.ScopePrefixLength) > maxPrefix {
+		return nil, fmt.Errorf("invalid ECS scope prefix length %d for family %d", e.ScopePrefixLength, e.Family)
+	}
+
+	addressLen := len(data) - 4
+	expectedLen := int(e.SourcePrefixLength+7) / 8
+	if addressLen < expectedLen {
+		return nil, fmt.Errorf("invalid ECS address length %d for source prefix %d", addressLen, e.SourcePrefixLength)
+	}
+	if addressLen > maxPrefix/8 {
+		return nil, fmt.Errorf("invalid ECS address length %d for family %d", addressLen, e.Family)
+	}
+
+	if expectedLen > 0 {
+		e.Address = make([]byte, expectedLen)
+		copy(e.Address, data[4:4+expectedLen])
+	}
+
+	if unusedBits := e.SourcePrefixLength % 8; unusedBits != 0 && len(e.Address) > 0 {
+		hostMask := byte(1<<(8-unusedBits) - 1)
+		if e.Address[len(e.Address)-1]&hostMask != 0 {
+			return nil, fmt.Errorf("invalid ECS address: host bits set beyond source prefix")
+		}
+	}
+	for _, b := range data[4+expectedLen:] {
+		if b != 0 {
+			return nil, fmt.Errorf("invalid ECS address: trailing host octets set beyond source prefix")
+		}
 	}
 
 	return e, nil
 }
 
+func ecsFamilyMaxPrefix(family uint16) (int, bool) {
+	switch family {
+	case 1:
+		return 32, true
+	case 2:
+		return 128, true
+	default:
+		return 0, false
+	}
+}
+
 // IP returns the address as a net.IP (with zero padding).
 func (e *EDNS0ClientSubnet) IP() net.IP {
+	if e == nil {
+		return nil
+	}
 	var fullAddr []byte
 	switch e.Family {
 	case 1: // IPv4
@@ -282,7 +363,14 @@ func (e *EDNS0ClientSubnet) IP() net.IP {
 
 // String returns a human-readable representation.
 func (e *EDNS0ClientSubnet) String() string {
-	return fmt.Sprintf("%s/%d scope/%d", e.IP().String(), e.SourcePrefixLength, e.ScopePrefixLength)
+	if e == nil {
+		return ""
+	}
+	ip := e.IP()
+	if ip == nil {
+		return fmt.Sprintf("<invalid>/%d scope/%d", e.SourcePrefixLength, e.ScopePrefixLength)
+	}
+	return fmt.Sprintf("%s/%d scope/%d", ip.String(), e.SourcePrefixLength, e.ScopePrefixLength)
 }
 
 // ToEDNS0Option converts the Client Subnet to an EDNS0Option.
@@ -321,6 +409,9 @@ func NewEDNS0NSIDFromBytes(nsid []byte) *EDNS0NSID {
 
 // Pack serializes the NSID option to wire format.
 func (e *EDNS0NSID) Pack() []byte {
+	if e == nil {
+		return nil
+	}
 	return e.NSID
 }
 
@@ -341,6 +432,9 @@ func (e *EDNS0NSID) ToEDNS0Option() EDNS0Option {
 
 // String returns a human-readable representation of the NSID.
 func (e *EDNS0NSID) String() string {
+	if e == nil {
+		return ""
+	}
 	return string(e.NSID)
 }
 
@@ -368,6 +462,9 @@ func NewEDNS0ExtendedError(infoCode uint16, extraText string) *EDNS0ExtendedErro
 // Pack serializes the Extended DNS Error to wire format.
 // Wire format: 2-byte info code (big-endian) followed by optional UTF-8 extra text.
 func (e *EDNS0ExtendedError) Pack() []byte {
+	if e == nil {
+		return nil
+	}
 	data := make([]byte, 2+len(e.ExtraText))
 	PutUint16(data[0:], e.InfoCode)
 	if len(e.ExtraText) > 0 {
@@ -402,6 +499,9 @@ func (e *EDNS0ExtendedError) ToEDNS0Option() EDNS0Option {
 
 // String returns a human-readable representation of the Extended DNS Error.
 func (e *EDNS0ExtendedError) String() string {
+	if e == nil {
+		return ""
+	}
 	name := EDEInfoCodeString(e.InfoCode)
 	if e.ExtraText != "" {
 		return fmt.Sprintf("%s (%d): %s", name, e.InfoCode, e.ExtraText)
@@ -475,6 +575,10 @@ func EDEInfoCodeString(code uint16) string {
 // If the message already has an OPT record, the EDE option is appended to it.
 // If no OPT record exists, one is created with a default UDP payload size of 4096.
 func AddExtendedError(msg *Message, infoCode uint16, extraText string) {
+	if msg == nil {
+		return
+	}
+
 	ede := NewEDNS0ExtendedError(infoCode, extraText)
 	opt := msg.GetOPT()
 
@@ -484,10 +588,16 @@ func AddExtendedError(msg *Message, infoCode uint16, extraText string) {
 		opt = msg.GetOPT()
 	}
 
-	if optData, ok := opt.Data.(*RDataOPT); ok {
-		edeOption := ede.ToEDNS0Option()
-		optData.AddOption(edeOption.Code, edeOption.Data)
+	if opt == nil {
+		return
 	}
+	optData, ok := opt.Data.(*RDataOPT)
+	if !ok {
+		optData = &RDataOPT{}
+		opt.Data = optData
+	}
+	edeOption := ede.ToEDNS0Option()
+	optData.AddOption(edeOption.Code, edeOption.Data)
 }
 
 // ============================================================================
@@ -511,6 +621,9 @@ func NewEDNS0Chain(chainNS []string) *EDNS0Chain {
 
 // Pack serializes the CHAIN option to wire format.
 func (e *EDNS0Chain) Pack() []byte {
+	if e == nil {
+		return nil
+	}
 	// Each name in the chain is stored as a sequence of labels
 	// Format: [len1][labels1][len2][labels2]...[0] (null terminator)
 	// Each name is in wire format (lowercase, no compression)
@@ -617,6 +730,9 @@ func (e *EDNS0Chain) ToEDNS0Option() EDNS0Option {
 
 // String returns a human-readable representation of the CHAIN option.
 func (e *EDNS0Chain) String() string {
+	if e == nil {
+		return ""
+	}
 	return fmt.Sprintf("CHAIN{%v}", e.ChainNS)
 }
 
@@ -651,6 +767,10 @@ func OptionCodeString(code uint16) string {
 // ParseEDNS0Header extracts EDNS0 information from a ResourceRecord.
 // The OPT record uses the CLASS field for UDP payload size and TTL for extended info.
 func ParseEDNS0Header(rr *ResourceRecord) *EDNS0Header {
+	if rr == nil || rr.Type != TypeOPT {
+		return nil
+	}
+
 	h := &EDNS0Header{}
 
 	// UDP payload size is stored in the Class field

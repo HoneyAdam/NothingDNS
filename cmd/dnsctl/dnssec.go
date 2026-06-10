@@ -9,14 +9,12 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
 	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -54,6 +52,12 @@ func cmdDNSSEC(args []string) error {
 	default:
 		return fmt.Errorf("unknown dnssec subcommand: %s (supported: status, keys, generate-key, ds-from-dnskey, sign-zone, verify-anchor, validate-zone)", subcmd)
 	}
+}
+
+func newDNSSECFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
 }
 
 // cmdDNSSECStatus queries the live daemon's validator state via
@@ -102,14 +106,16 @@ func cmdDNSSECKeys(_ []string) error {
 }
 
 func cmdDNSSECGenerateKey(args []string) error {
-	fs := flag.NewFlagSet("generate-key", flag.ExitOnError)
+	fs := newDNSSECFlagSet("generate-key")
 	algorithm := fs.Int("algorithm", 13, "DNSSEC algorithm (8=RSASHA256, 10=RSASHA512, 13=ECDSAP256SHA256, 14=ECDSAP384SHA384, 15=ED25519)")
 	keyType := fs.String("type", "ZSK", "Key type (KSK or ZSK)")
 	zone := fs.String("zone", "", "Zone name (required)")
 	outputDir := fs.String("output", ".", "Output directory for key files")
 	keySize := fs.Int("keysize", 0, "Key size in bits (for RSA: 2048, 3072, 4096)")
 
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *zone == "" {
 		return fmt.Errorf("zone name is required")
@@ -125,8 +131,13 @@ func cmdDNSSECGenerateKey(args []string) error {
 	*keyType = strings.ToUpper(*keyType)
 	isKSK := *keyType == "KSK"
 
+	alg, err := validateGeneratedKeyAlgorithm(*algorithm)
+	if err != nil {
+		return err
+	}
+
 	// Generate key pair
-	signingKey, err := generateKeyPair(uint8(*algorithm), isKSK, *keySize)
+	signingKey, err := generateKeyPair(alg, isKSK, *keySize)
 	if err != nil {
 		return fmt.Errorf("failed to generate key: %w", err)
 	}
@@ -138,7 +149,7 @@ func cmdDNSSECGenerateKey(args []string) error {
 
 	// Generate key file names
 	keyTag := signingKey.KeyTag
-	algStr := fmt.Sprintf("%03d", *algorithm)
+	algStr := fmt.Sprintf("%03d", alg)
 	baseName := fmt.Sprintf("K%s+%s+%05d", *zone, algStr, keyTag)
 
 	// Write private key file
@@ -154,7 +165,7 @@ func cmdDNSSECGenerateKey(args []string) error {
 	}
 
 	fmt.Printf("Generated %s key for %s:\n", *keyType, *zone)
-	fmt.Printf("  Algorithm: %d (%s)\n", *algorithm, algorithmName(uint8(*algorithm)))
+	fmt.Printf("  Algorithm: %d (%s)\n", alg, algorithmName(alg))
 	fmt.Printf("  Key Tag: %d\n", keyTag)
 	fmt.Printf("  Private key: %s\n", privateKeyPath)
 	fmt.Printf("  Public key: %s\n", publicKeyPath)
@@ -173,15 +184,22 @@ func cmdDNSSECGenerateKey(args []string) error {
 }
 
 func cmdDNSSECDSFromDNSKEY(args []string) error {
-	fs := flag.NewFlagSet("ds-from-dnskey", flag.ExitOnError)
+	fs := newDNSSECFlagSet("ds-from-dnskey")
 	zone := fs.String("zone", "", "Zone name (required)")
 	keyFile := fs.String("keyfile", "", "Public key file path (required)")
 	digestType := fs.Int("digest", 2, "Digest type (1=SHA-1, 2=SHA-256, 4=SHA-384)")
 
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *zone == "" || *keyFile == "" {
 		return fmt.Errorf("zone and keyfile are required")
+	}
+
+	digest, err := validateDSDigestType(*digestType)
+	if err != nil {
+		return err
 	}
 
 	// Normalize zone name
@@ -197,7 +215,7 @@ func cmdDNSSECDSFromDNSKEY(args []string) error {
 	}
 
 	// Create DS record
-	ds, err := dnssec.CreateDS(*zone, dnskey, uint8(*digestType))
+	ds, err := dnssec.CreateDS(*zone, dnskey, digest)
 	if err != nil {
 		return fmt.Errorf("failed to create DS: %w", err)
 	}
@@ -209,7 +227,7 @@ func cmdDNSSECDSFromDNSKEY(args []string) error {
 }
 
 func cmdDNSSECSignZone(args []string) error {
-	fs := flag.NewFlagSet("sign-zone", flag.ExitOnError)
+	fs := newDNSSECFlagSet("sign-zone")
 	zone := fs.String("zone", "", "Zone name (required)")
 	inputFile := fs.String("input", "", "Input zone file (required)")
 	outputFile := fs.String("output", "", "Output signed zone file (default: <input>.signed)")
@@ -221,7 +239,9 @@ func cmdDNSSECSignZone(args []string) error {
 	nsec3Salt := fs.String("salt", "", "NSEC3 salt (hex string)")
 	validity := fs.String("validity", "720h", "Signature validity (Go duration)")
 
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *zone == "" || *inputFile == "" {
 		return fmt.Errorf("zone and input are required")
@@ -240,6 +260,14 @@ func cmdDNSSECSignZone(args []string) error {
 		*algorithm == int(protocol.AlgorithmRSAMD5)
 	if isRSA && *keySize <= 0 {
 		return fmt.Errorf("keysize must be > 0 for RSA algorithms (recommended: 2048, 3072, or 4096)")
+	}
+	nsec3Iter := uint16(0)
+	if *nsec3 {
+		iter, err := validateNSEC3Iterations(*nsec3Iterations)
+		if err != nil {
+			return err
+		}
+		nsec3Iter = iter
 	}
 
 	if *outputFile == "" {
@@ -270,7 +298,7 @@ func cmdDNSSECSignZone(args []string) error {
 	signerCfg.SignatureValidity = sigValidity
 	if *nsec3 {
 		signerCfg.NSEC3Enabled = true
-		signerCfg.NSEC3Iterations = uint16(*nsec3Iterations)
+		signerCfg.NSEC3Iterations = nsec3Iter
 		if *nsec3Salt != "" {
 			salt, err := hex.DecodeString(*nsec3Salt)
 			if err != nil {
@@ -442,7 +470,7 @@ func parseZoneRecords(data, origin string) ([]*protocol.ResourceRecord, error) {
 			continue
 		}
 
-		rdataObj, err := parseRDataFromZone(rrtype, rdata, owner.String())
+		rdataObj, err := parseRDataFromZone(rrtype, rdata)
 		if err != nil {
 			continue
 		}
@@ -460,8 +488,10 @@ func parseZoneRecords(data, origin string) ([]*protocol.ResourceRecord, error) {
 }
 
 func cmdDNSSECVerifyAnchor(args []string) error {
-	fs := flag.NewFlagSet("verify-anchor", flag.ExitOnError)
-	fs.Parse(args)
+	fs := newDNSSECFlagSet("verify-anchor")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if fs.NArg() < 1 {
 		return fmt.Errorf("trust anchor file path is required")
@@ -496,28 +526,65 @@ func cmdDNSSECVerifyAnchor(args []string) error {
 
 // Helper functions
 
-// parseRRSIGTime parses an RRSIG inception/expiration time from a BIND
-// zone-file RRSIG record. Per RFC 4034 §3.2 the presentation format
-// is `YYYYMMDDHHMMSS` (14 ASCII digits, UTC). For interoperability the
-// pure-uint32 Unix-seconds form is also accepted. Returns 0 on parse
-// failure (caller should treat as "invalid sig" — any RRSIG with
-// inception 0 will validate as not-yet-valid against any later real
-// time, which is the safe default).
-func parseRRSIGTime(s string) uint32 {
-	if len(s) == 14 {
-		// Try YYYYMMDDHHMMSS.
-		if t, err := time.Parse("20060102150405", s); err == nil {
-			return uint32(t.Unix())
-		}
+// rrsigTimeState classifies an RRSIG's validity window at time now using the
+// shared RFC 1982 serial arithmetic in internal/protocol. A signature that is
+// not yet valid is reported as such even if its window is also in the past.
+func rrsigTimeState(rrsig *protocol.RDataRRSIG, now uint32) (notYetValid, expired bool) {
+	if !rrsig.IsInceptionValidAt(now) {
+		return true, false
 	}
-	// Fall back to bare Unix seconds (legacy / wire-derived dumps).
-	if v, err := strconv.ParseUint(s, 10, 32); err == nil {
-		return uint32(v)
+	if rrsig.IsExpiredAt(now) {
+		return false, true
 	}
-	return 0
+	return false, false
+}
+
+func validateGeneratedKeyAlgorithm(algorithm int) (uint8, error) {
+	switch algorithm {
+	case int(protocol.AlgorithmRSASHA256),
+		int(protocol.AlgorithmRSASHA512),
+		int(protocol.AlgorithmECDSAP256SHA256),
+		int(protocol.AlgorithmECDSAP384SHA384),
+		int(protocol.AlgorithmED25519):
+		return uint8(algorithm), nil
+	default:
+		return 0, fmt.Errorf("invalid algorithm %d: supported key generation algorithms are 8, 10, 13, 14, and 15", algorithm)
+	}
+}
+
+func validateDSDigestType(digestType int) (uint8, error) {
+	switch digestType {
+	case 1, 2, 4:
+		return uint8(digestType), nil
+	default:
+		return 0, fmt.Errorf("invalid digest type %d: must be one of 1, 2, or 4", digestType)
+	}
+}
+
+func validateNSEC3Iterations(iterations int) (uint16, error) {
+	if iterations < 0 || iterations > 65535 {
+		return 0, fmt.Errorf("invalid NSEC3 iterations %d: must be in range 0-65535", iterations)
+	}
+	return uint16(iterations), nil
 }
 
 func generateKeyPair(algorithm uint8, isKSK bool, keySize int) (*dnssec.SigningKey, error) {
+	const maxKeyTagAttempts = 16
+
+	for attempt := 0; attempt < maxKeyTagAttempts; attempt++ {
+		key, err := generateKeyPairOnce(algorithm, isKSK, keySize)
+		if err != nil {
+			return nil, err
+		}
+		if key.KeyTag != 0 {
+			return key, nil
+		}
+	}
+
+	return nil, fmt.Errorf("generated DNSSEC key tag was zero after %d attempts", maxKeyTagAttempts)
+}
+
+func generateKeyPairOnce(algorithm uint8, isKSK bool, keySize int) (*dnssec.SigningKey, error) {
 	var privKey crypto.PrivateKey
 	var pubKey crypto.PublicKey
 	var err error
@@ -864,11 +931,13 @@ func keyType(key *dnssec.SigningKey) string {
 }
 
 func cmdDNSSECValidateZone(args []string) error {
-	fs := flag.NewFlagSet("validate-zone", flag.ExitOnError)
+	fs := newDNSSECFlagSet("validate-zone")
 	zoneFile := fs.String("zone", "", "Zone file to validate (required)")
 	ignoreTime := fs.Bool("ignore-time", false, "Ignore signature timestamps (for testing)")
 
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if *zoneFile == "" {
 		return fmt.Errorf("zone file is required (-zone)")
@@ -886,7 +955,7 @@ func cmdDNSSECValidateZone(args []string) error {
 	var dnskeyRRs []*protocol.ResourceRecord
 	var rrsigRRs []*protocol.ResourceRecord
 
-	for _, line := range lines {
+	for lineNo, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "$") {
 			continue
@@ -922,8 +991,11 @@ func cmdDNSSECValidateZone(args []string) error {
 			continue
 		}
 
-		rdataObj, err := parseRDataFromZone(rrtype, rdata, owner.String())
+		rdataObj, err := parseRDataFromZone(rrtype, rdata)
 		if err != nil {
+			if rrtype == protocol.TypeDNSKEY || rrtype == protocol.TypeRRSIG || rrtype == protocol.TypeNSEC || rrtype == protocol.TypeNSEC3 {
+				return fmt.Errorf("line %d: invalid %s RDATA: %w", lineNo+1, typeStr, err)
+			}
 			continue
 		}
 
@@ -995,13 +1067,14 @@ func cmdDNSSECValidateZone(args []string) error {
 		// Check timestamps
 		if !*ignoreTime {
 			now := uint32(time.Now().Unix())
-			if now < rrsig.Inception {
+			notYetValid, expired := rrsigTimeState(rrsig, now)
+			if notYetValid {
 				fmt.Printf("  WARNING: Signature not yet valid for %s type %d (inception: %d)\n",
 					rr.Name.String(), rrsig.TypeCovered, rrsig.Inception)
 				expiredSigs++
 				continue
 			}
-			if now > rrsig.Expiration {
+			if expired {
 				fmt.Printf("  ERROR: Signature expired for %s type %d (expired: %d)\n",
 					rr.Name.String(), rrsig.TypeCovered, rrsig.Expiration)
 				expiredSigs++
@@ -1034,7 +1107,13 @@ func cmdDNSSECValidateZone(args []string) error {
 		}
 
 		// Build signed data for verification
-		signedData := buildSignedDataForValidation(coveredRecords, rrsig)
+		signedData, err := buildSignedDataForValidation(coveredRecords, rrsig)
+		if err != nil {
+			fmt.Printf("  ERROR: Failed to build signed data for %s type %d: %v\n",
+				rr.Name.String(), rrsig.TypeCovered, err)
+			invalidSigs++
+			continue
+		}
 
 		err = dnssec.VerifySignature(rrsig, signedData, pubKey)
 		if err != nil {
@@ -1071,7 +1150,14 @@ func cmdDNSSECValidateZone(args []string) error {
 // matters because the signer sorted them too. Skipping the sort
 // here caused every KSK-over-DNSKEY-RRSet signature to fail
 // verification (zone-file order ≠ canonical order in general).
-func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) []byte {
+func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) ([]byte, error) {
+	if rrsig == nil {
+		return nil, fmt.Errorf("nil RRSIG")
+	}
+	if rrsig.SignerName == nil {
+		return nil, fmt.Errorf("nil RRSIG signer name")
+	}
+
 	var data []byte
 
 	// RRSIG RDATA prefix (without signature)
@@ -1087,7 +1173,7 @@ func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *proto
 	data = append(data, byte(rrsig.KeyTag>>8), byte(rrsig.KeyTag))
 
 	// Signer name in wire format
-	signerWire := canonicalWireName(rrsig.SignerName.String())
+	signerWire := protocol.CanonicalWireName(rrsig.SignerName.String())
 	data = append(data, signerWire...)
 
 	// Pre-pack each record's RDATA and sort by RDATA wire form
@@ -1098,16 +1184,32 @@ func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *proto
 	}
 	packedSet := make([]packed, 0, len(rrSet))
 	for _, rr := range rrSet {
-		buf := make([]byte, 65535)
-		n, _ := rr.Data.Pack(buf, 0)
-		packedSet = append(packedSet, packed{rr: rr, rdata: append([]byte(nil), buf[:n]...)})
+		if rr == nil {
+			return nil, fmt.Errorf("nil RR in RRSet")
+		}
+		if rr.Name == nil {
+			return nil, fmt.Errorf("nil RR owner name")
+		}
+		var rdata []byte
+		if rr.Data != nil {
+			buf := make([]byte, 65535)
+			n, err := rr.Data.Pack(buf, 0)
+			if err != nil {
+				return nil, fmt.Errorf("pack RR RDATA: %w", err)
+			}
+			if n > 65535 {
+				return nil, fmt.Errorf("RR RDATA too large: %d bytes", n)
+			}
+			rdata = append([]byte(nil), buf[:n]...)
+		}
+		packedSet = append(packedSet, packed{rr: rr, rdata: rdata})
 	}
 	sort.Slice(packedSet, func(i, j int) bool {
 		return bytes.Compare(packedSet[i].rdata, packedSet[j].rdata) < 0
 	})
 
 	for _, p := range packedSet {
-		ownerWire := canonicalWireName(p.rr.Name.String())
+		ownerWire := protocol.CanonicalWireName(p.rr.Name.String())
 		data = append(data, ownerWire...)
 		data = append(data, byte(p.rr.Type>>8), byte(p.rr.Type))
 		data = append(data, byte(p.rr.Class>>8), byte(p.rr.Class))
@@ -1117,238 +1219,43 @@ func buildSignedDataForValidation(rrSet []*protocol.ResourceRecord, rrsig *proto
 		data = append(data, p.rdata...)
 	}
 
-	return data
+	return data, nil
 }
 
-// canonicalWireName converts a domain name to lowercase wire format
-func canonicalWireName(name string) []byte {
-	name = strings.ToLower(name)
-	var result []byte
-	if name == "." || name == "" {
-		return []byte{0}
-	}
-	parts := strings.Split(strings.TrimSuffix(name, "."), ".")
-	for _, part := range parts {
-		result = append(result, byte(len(part)))
-		result = append(result, []byte(part)...)
-	}
-	result = append(result, 0)
-	return result
-}
-
-// parseRDataFromZone parses RDATA from a zone file line
-func parseRDataFromZone(rrtype uint16, rdata, origin string) (protocol.RData, error) {
-	switch rrtype {
-	case protocol.TypeA:
-		ip := net.ParseIP(rdata)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid A record: %s", rdata)
-		}
-		ipv4 := ip.To4()
-		if ipv4 == nil {
-			return nil, fmt.Errorf("a record requires IPv4 address")
-		}
-		var addr [4]byte
-		copy(addr[:], ipv4)
-		return &protocol.RDataA{Address: addr}, nil
-
-	case protocol.TypeAAAA:
-		ip := net.ParseIP(rdata)
-		if ip == nil {
-			return nil, fmt.Errorf("invalid AAAA record: %s", rdata)
-		}
-		var addr [16]byte
-		copy(addr[:], ip.To16())
-		return &protocol.RDataAAAA{Address: addr}, nil
-
-	case protocol.TypeCNAME:
-		name, err := protocol.ParseName(rdata)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataCNAME{CName: name}, nil
-
-	case protocol.TypeNS:
-		name, err := protocol.ParseName(rdata)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataNS{NSDName: name}, nil
-
-	case protocol.TypeMX:
-		var pref uint16
-		var exchange string
-		_, err := fmt.Sscanf(rdata, "%d %s", &pref, &exchange)
-		if err != nil {
-			return nil, fmt.Errorf("invalid MX record: %s", rdata)
-		}
-		name, err := protocol.ParseName(exchange)
-		if err != nil {
-			return nil, err
-		}
-		return &protocol.RDataMX{Preference: pref, Exchange: name}, nil
-
-	case protocol.TypeTXT:
-		text := strings.Trim(rdata, "\"")
-		return &protocol.RDataTXT{Strings: []string{text}}, nil
-
-	case protocol.TypeDNSKEY:
-		fields := strings.Fields(rdata)
-		if len(fields) < 4 {
-			return nil, fmt.Errorf("invalid DNSKEY record")
-		}
-		flags, _ := strconv.ParseUint(fields[0], 10, 16)
-		alg, _ := strconv.ParseUint(fields[2], 10, 8)
-		pubKeyB64 := strings.Join(fields[3:], "")
-		pubKey, err := base64.StdEncoding.DecodeString(pubKeyB64)
-		if err != nil {
-			return nil, fmt.Errorf("decoding DNSKEY public key: %w", err)
-		}
-		return &protocol.RDataDNSKEY{
-			Flags:     uint16(flags),
-			Protocol:  3,
-			Algorithm: uint8(alg),
-			PublicKey: pubKey,
-		}, nil
-
-	case protocol.TypeRRSIG:
-		fields := strings.Fields(rdata)
-		if len(fields) < 9 {
-			return nil, fmt.Errorf("invalid RRSIG record")
-		}
-		typeStr := strings.ToUpper(fields[0])
-		covered := protocol.StringToType[typeStr]
-		alg, _ := strconv.ParseUint(fields[1], 10, 8)
-		labels, _ := strconv.ParseUint(fields[2], 10, 8)
-		origTTL, _ := strconv.ParseUint(fields[3], 10, 32)
-		// RFC 4034 §3.2: RRSIG inception/expiration in presentation
-		// format are YYYYMMDDHHMMSS (14 digits, UTC). The wire format
-		// is Unix seconds. If the field is 14 chars, parse as a time
-		// and convert. Treating it as a Unix uint32 silently overflows
-		// to 4294967295 — caught by smoke-testing `validate-zone`.
-		expiration := parseRRSIGTime(fields[4])
-		inception := parseRRSIGTime(fields[5])
-		keyTag, _ := strconv.ParseUint(fields[6], 10, 16)
-		signerName := fields[7]
-		sigB64 := strings.Join(fields[8:], "")
-		signature, err := base64.StdEncoding.DecodeString(sigB64)
-		if err != nil {
-			return nil, fmt.Errorf("decoding RRSIG signature: %w", err)
-		}
-		signer, err := protocol.ParseName(signerName)
-		if err != nil {
-			return nil, fmt.Errorf("parsing signer name: %w", err)
-		}
-		return &protocol.RDataRRSIG{
-			TypeCovered: covered,
-			Algorithm:   uint8(alg),
-			Labels:      uint8(labels),
-			OriginalTTL: uint32(origTTL),
-			Expiration:  expiration,
-			Inception:   inception,
-			KeyTag:      uint16(keyTag),
-			SignerName:  signer,
-			Signature:   signature,
-		}, nil
-
-	case protocol.TypeSOA:
-		// Presentation format (RFC 1035 §3.3.13):
-		//   MNAME RNAME ( SERIAL REFRESH RETRY EXPIRE MINIMUM )
-		// Parens are stripped by the line-by-line reader upstream;
-		// fields here are space-separated.
-		fields := strings.Fields(rdata)
-		if len(fields) < 7 {
-			return nil, fmt.Errorf("invalid SOA record: need 7 fields, got %d", len(fields))
-		}
-		mname, err := protocol.ParseName(fields[0])
-		if err != nil {
-			return nil, fmt.Errorf("SOA MNAME: %w", err)
-		}
-		rname, err := protocol.ParseName(fields[1])
-		if err != nil {
-			return nil, fmt.Errorf("SOA RNAME: %w", err)
-		}
-		serial, _ := strconv.ParseUint(fields[2], 10, 32)
-		refresh, _ := strconv.ParseUint(fields[3], 10, 32)
-		retry, _ := strconv.ParseUint(fields[4], 10, 32)
-		expire, _ := strconv.ParseUint(fields[5], 10, 32)
-		minimum, _ := strconv.ParseUint(fields[6], 10, 32)
-		return &protocol.RDataSOA{
-			MName:   mname,
-			RName:   rname,
-			Serial:  uint32(serial),
-			Refresh: uint32(refresh),
-			Retry:   uint32(retry),
-			Expire:  uint32(expire),
-			Minimum: uint32(minimum),
-		}, nil
-
-	case protocol.TypeNSEC:
-		// Presentation format (RFC 4034 §4.1.2):
-		//   NEXT-NAME TYPE1 TYPE2 ...
-		fields := strings.Fields(rdata)
-		if len(fields) < 1 {
-			return nil, fmt.Errorf("invalid NSEC record: missing next-name")
-		}
-		next, err := protocol.ParseName(fields[0])
-		if err != nil {
-			return nil, fmt.Errorf("NSEC next-name: %w", err)
-		}
-		types := make([]uint16, 0, len(fields)-1)
-		for _, t := range fields[1:] {
-			if code, ok := protocol.StringToType[strings.ToUpper(t)]; ok {
-				types = append(types, code)
-			}
-		}
-		return &protocol.RDataNSEC{
-			NextDomain: next,
-			TypeBitMap: types,
-		}, nil
-
-	case protocol.TypeNSEC3:
-		// Presentation format (RFC 5155 §3.3):
-		//   HASH-ALG FLAGS ITERATIONS SALT NEXT-HASHED-OWNER TYPE1 TYPE2 ...
-		// Salt is hex or "-" (empty). Next-hashed is base32hex without
-		// padding, unpadded; we decode it the same way protocol's
-		// Base32Encode produces it.
-		fields := strings.Fields(rdata)
-		if len(fields) < 5 {
-			return nil, fmt.Errorf("invalid NSEC3 record: need ≥5 fields, got %d", len(fields))
-		}
-		alg, _ := strconv.ParseUint(fields[0], 10, 8)
-		flags, _ := strconv.ParseUint(fields[1], 10, 8)
-		iter, _ := strconv.ParseUint(fields[2], 10, 16)
-		var salt []byte
-		if fields[3] != "-" {
-			s, err := hex.DecodeString(fields[3])
-			if err != nil {
-				return nil, fmt.Errorf("NSEC3 salt: %w", err)
-			}
-			salt = s
-		}
-		// RFC 5155 base32hex without padding.
-		enc := base32.HexEncoding.WithPadding(base32.NoPadding)
-		nextHashed, err := enc.DecodeString(strings.ToUpper(fields[4]))
-		if err != nil {
-			return nil, fmt.Errorf("NSEC3 next-hashed-owner: %w", err)
-		}
-		types := make([]uint16, 0, len(fields)-5)
-		for _, t := range fields[5:] {
-			if code, ok := protocol.StringToType[strings.ToUpper(t)]; ok {
-				types = append(types, code)
-			}
-		}
-		return &protocol.RDataNSEC3{
-			HashAlgorithm: uint8(alg),
-			Flags:         uint8(flags),
-			Iterations:    uint16(iter),
-			Salt:          salt,
-			HashLength:    uint8(len(nextHashed)),
-			NextHashed:    nextHashed,
-			TypeBitMap:    types,
-		}, nil
-
-	default:
+// parseRDataFromZone converts one record's RDATA text from a zone file into
+// its wire-format RData by delegating to the shared presentation-format
+// parser (protocol.ParseRDataText). Zone-file normalization (comments,
+// @-origin substitution, relative owner names, column splitting) happens in
+// the line readers above (parseZoneRecords / cmdDNSSECValidateZone); only the
+// rdata→RData conversion lives here.
+//
+// RRSIG inception/expiration accept both RFC 4034 §3.2 presentation times
+// (YYYYMMDDHHMMSS, 14 digits, UTC) and bare uint32 Unix seconds — the shared
+// parser handles both and rejects out-of-range values, so a malformed time
+// now fails the whole record instead of silently loading as time 0.
+func parseRDataFromZone(rrtype uint16, rdata string) (protocol.RData, error) {
+	typeName, ok := protocol.TypeToString[rrtype]
+	if !ok {
+		// No known mnemonic means no presentation grammar to parse with;
+		// carry the text verbatim so the record is still visible to the
+		// caller (matches the pre-delegation behavior for unknown types).
 		return &protocol.RDataRaw{TypeVal: rrtype, Data: []byte(rdata)}, nil
 	}
+	rd := protocol.ParseRDataText(typeName, rdata)
+	if rd == nil {
+		return nil, fmt.Errorf("invalid %s RDATA: %q", typeName, rdata)
+	}
+	// RFC 4034 §2.1.2: a DNSKEY's protocol field MUST be 3 and the key MUST
+	// be treated as invalid otherwise. The shared parser deliberately accepts
+	// any protocol value (the wire form is well-defined and the server may
+	// need to serve such records verbatim); this offline DNSSEC tool is
+	// stricter and rejects non-3 keys up front so they can never be used for
+	// signature verification. Scoped to DNSKEY only — KEY (RFC 2535) records
+	// legitimately use other protocol values.
+	if rrtype == protocol.TypeDNSKEY {
+		if dnskey, ok := rd.(*protocol.RDataDNSKEY); ok && dnskey.Protocol != 3 {
+			return nil, fmt.Errorf("DNSKEY protocol must be 3, got %d", dnskey.Protocol)
+		}
+	}
+	return rd, nil
 }

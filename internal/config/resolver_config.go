@@ -107,14 +107,20 @@ func unmarshalResolution(node *Node, cfg *ResolutionConfig) error {
 	}
 
 	cfg.Recursive = getBool(node, "recursive", cfg.Recursive)
+	cfg.AuthoritativeOnly = getBool(node, "authoritative_only", cfg.AuthoritativeOnly)
 	cfg.RootHints = node.GetString("root_hints")
-	cfg.MaxDepth = getInt(node, "max_depth", cfg.MaxDepth)
+	var err error
+	if cfg.MaxDepth, err = getRequiredInt(node, "max_depth", cfg.MaxDepth); err != nil {
+		return err
+	}
 	cfg.Timeout = node.GetString("timeout")
 	if cfg.Timeout == "" {
 		cfg.Timeout = "5s"
 	}
-	cfg.EDNS0BufferSize = getInt(node, "edns0_buffer_size", cfg.EDNS0BufferSize)
-	cfg.QnameMinimization = node.GetBool("qname_minimization")
+	if cfg.EDNS0BufferSize, err = getRequiredInt(node, "edns0_buffer_size", cfg.EDNS0BufferSize); err != nil {
+		return err
+	}
+	cfg.QnameMinimization = getBool(node, "qname_minimization", cfg.QnameMinimization)
 	cfg.Use0x20 = getBool(node, "use_0x20", cfg.Use0x20)
 
 	return nil
@@ -143,7 +149,10 @@ func unmarshalUpstream(node *Node, cfg *UpstreamConfig) error {
 	if topologyNode := node.Get("topology"); topologyNode != nil {
 		cfg.Topology.Region = topologyNode.GetString("region")
 		cfg.Topology.Zone = topologyNode.GetString("zone")
-		cfg.Topology.Weight = getInt(topologyNode, "weight", 100)
+		var err error
+		if cfg.Topology.Weight, err = getRequiredInt(topologyNode, "weight", 100); err != nil {
+			return fmt.Errorf("topology: %w", err)
+		}
 	}
 
 	// Parse anycast groups
@@ -160,10 +169,15 @@ func unmarshalUpstream(node *Node, cfg *UpstreamConfig) error {
 						if backendNode.Type == NodeMapping {
 							var backend AnycastBackendConfig
 							backend.PhysicalIP = backendNode.GetString("physical_ip")
-							backend.Port = getInt(backendNode, "port", 53)
+							var err error
+							if backend.Port, err = getRequiredInt(backendNode, "port", 53); err != nil {
+								return fmt.Errorf("anycast_groups backend: %w", err)
+							}
 							backend.Region = backendNode.GetString("region")
 							backend.Zone = backendNode.GetString("zone")
-							backend.Weight = getInt(backendNode, "weight", 100)
+							if backend.Weight, err = getRequiredInt(backendNode, "weight", 100); err != nil {
+								return fmt.Errorf("anycast_groups backend: %w", err)
+							}
 							group.Backends = append(group.Backends, backend)
 						}
 					}

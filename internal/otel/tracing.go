@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -45,7 +46,9 @@ type Attr struct {
 
 // Tracer provides distributed tracing.
 type Tracer struct {
-	cfg   Config
+	cfg Config
+	mu  sync.Mutex
+
 	spans []*Span
 }
 
@@ -83,8 +86,15 @@ func (t *Tracer) EndSpan(span *Span, err error) {
 	if span == nil {
 		return
 	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if !span.EndTime.IsZero() {
+		return
+	}
 	span.EndTime = time.Now()
 	span.Err = err
+	t.spans = append(t.spans, span)
 }
 
 // SpanOption configures a span.
@@ -113,7 +123,12 @@ func WithLevel(level TraceLevel) SpanOption {
 
 // Export exports spans (implements OTLP-compatible export).
 func (t *Tracer) Export() []*Span {
-	return t.spans
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	spans := make([]*Span, len(t.spans))
+	copy(spans, t.spans)
+	return spans
 }
 
 var (

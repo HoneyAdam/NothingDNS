@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
@@ -17,9 +18,10 @@ import (
 
 // ClusterManager manages gossip-based clustering with cache sync.
 type ClusterManager struct {
-	Cluster *cluster.Cluster
-	logger  *util.Logger
-	stopCh  chan struct{}
+	Cluster  *cluster.Cluster
+	logger   *util.Logger
+	stopCh   chan struct{}
+	stopOnce sync.Once
 }
 
 // NewClusterManager creates a new cluster manager with the given configuration.
@@ -120,8 +122,10 @@ func (m *ClusterManager) metricsUpdater(metricsCollector *metrics.MetricsCollect
 
 // Stop stops the cluster manager.
 func (m *ClusterManager) Stop() {
-	close(m.stopCh)
-	if m.Cluster != nil {
-		_ = m.Cluster.Stop()
-	}
+	m.stopOnce.Do(func() {
+		close(m.stopCh)
+		if m.Cluster != nil {
+			_ = m.Cluster.Stop()
+		}
+	})
 }

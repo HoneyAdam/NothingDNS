@@ -48,14 +48,16 @@ func freshSession() *Session {
 }
 
 func TestHandleDSORequest_Keepalive(t *testing.T) {
-	m := NewManager(DefaultConfig(), nil)
+	cfg := DefaultConfig()
+	cfg.InactivityTimeout = 22 * time.Second
+	m := NewManager(cfg, nil)
 	sess := freshSession()
 
 	// RFC 8490 §4.1: Keepalive TLV body = primary(4) || secondary(4),
-	// both in 100-ms units. 15s = 150 units, 60s = 600 units.
+	// both in milliseconds. The server chooses its response values.
 	body := make([]byte, 8)
-	binary.BigEndian.PutUint32(body[0:4], 150)
-	binary.BigEndian.PutUint32(body[4:8], 600)
+	binary.BigEndian.PutUint32(body[0:4], 15000)
+	binary.BigEndian.PutUint32(body[4:8], 500)
 
 	resp, err := m.HandleDSORequest(sess, dsoMessage(packTLV(DSOTLVKeepalive, body)))
 	if err != nil {
@@ -67,8 +69,22 @@ func TestHandleDSORequest_Keepalive(t *testing.T) {
 	if !sess.keepalivesEnabled {
 		t.Error("keepalivesEnabled should be true after Keepalive TLV")
 	}
-	if sess.KeepaliveTime != 15*time.Second {
-		t.Errorf("KeepaliveTime = %v, want 15s", sess.KeepaliveTime)
+	if sess.KeepaliveTime != MinKeepaliveInterval {
+		t.Errorf("KeepaliveTime = %v, want %v", sess.KeepaliveTime, MinKeepaliveInterval)
+	}
+	tlv, _, err := UnpackTLV(resp.RawBody, 0)
+	if err != nil {
+		t.Fatalf("response keepalive TLV unpack: %v", err)
+	}
+	primary, secondary, err := ParseKeepaliveTLV(tlv)
+	if err != nil {
+		t.Fatalf("response keepalive TLV parse: %v", err)
+	}
+	if primary != 22*time.Second {
+		t.Errorf("response inactivity timeout = %v, want 22s", primary)
+	}
+	if secondary != MinKeepaliveInterval {
+		t.Errorf("response keepalive interval = %v, want %v", secondary, MinKeepaliveInterval)
 	}
 }
 
@@ -104,12 +120,28 @@ func TestHandleDSORequest_MaximumPayload_NoGrowOverSessionCap(t *testing.T) {
 	}
 }
 
-func TestHandleDSORequest_Padding_Ignored(t *testing.T) {
-	// Padding TLVs in requests are explicitly ignored — no error, no
-	// response TLV added.
+func TestHandleDSORequest_PrimaryPaddingRejected(t *testing.T) {
 	m := NewManager(DefaultConfig(), nil)
 	sess := freshSession()
-	resp, err := m.HandleDSORequest(sess, dsoMessage(packTLV(DSOTLVPadding, []byte{0, 0, 0, 0})))
+	_, err := m.HandleDSORequest(sess, dsoMessage(packTLV(DSOTLVPadding, []byte{0, 0, 0, 0})))
+	if err == nil {
+		t.Fatal("expected error for primary padding TLV")
+	}
+}
+
+func TestHandleDSORequest_AdditionalPaddingIgnored(t *testing.T) {
+	// Padding TLVs are only valid as Additional TLVs and are ignored.
+	m := NewManager(DefaultConfig(), nil)
+	sess := freshSession()
+
+	keepalive := make([]byte, 8)
+	binary.BigEndian.PutUint32(keepalive[0:4], 5000)
+	binary.BigEndian.PutUint32(keepalive[4:8], 30000)
+
+	resp, err := m.HandleDSORequest(sess, dsoMessage(
+		packTLV(DSOTLVKeepalive, keepalive),
+		packTLV(DSOTLVPadding, []byte{0, 0, 0, 0}),
+	))
 	if err != nil {
 		t.Fatalf("HandleDSORequest: %v", err)
 	}
@@ -142,16 +174,39 @@ func TestHandleDSORequest_UnknownTLV_Rejected(t *testing.T) {
 	}
 }
 
+func TestHandleDSORequest_UnknownAdditionalTLV_Ignored(t *testing.T) {
+	m := NewManager(DefaultConfig(), nil)
+	sess := freshSession()
+
+	keepalive := make([]byte, 8)
+	binary.BigEndian.PutUint32(keepalive[0:4], 5000)
+	binary.BigEndian.PutUint32(keepalive[4:8], 30000)
+
+	resp, err := m.HandleDSORequest(sess, dsoMessage(
+		packTLV(DSOTLVKeepalive, keepalive),
+		packTLV(0x7FFF, []byte{1, 2, 3}),
+	))
+	if err != nil {
+		t.Fatalf("HandleDSORequest: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if !sess.keepalivesEnabled {
+		t.Fatal("known primary TLV should still be applied")
+	}
+}
+
 func TestHandleDSORequest_MultipleTLVsInOneRequest(t *testing.T) {
 	// A DSO message can carry multiple TLVs back-to-back. Confirm
 	// both branches fire and the session state reflects both.
 	m := NewManager(DefaultConfig(), nil)
 	sess := freshSession()
 
-	// 5s = 50 units, 30s = 300 units (100ms each per RFC 8490).
+	// 5s = 5000ms, 30s = 30000ms.
 	keepalive := make([]byte, 8)
-	binary.BigEndian.PutUint32(keepalive[0:4], 50)
-	binary.BigEndian.PutUint32(keepalive[4:8], 300)
+	binary.BigEndian.PutUint32(keepalive[0:4], 5000)
+	binary.BigEndian.PutUint32(keepalive[4:8], 30000)
 	mp := make([]byte, 2)
 	binary.BigEndian.PutUint16(mp, 16000)
 

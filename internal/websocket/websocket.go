@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // WebSocket GUID per RFC 6455 Section 4.2.1.5
@@ -34,8 +37,18 @@ const (
 
 // IsWebSocketRequest checks if the request is a WebSocket upgrade.
 func IsWebSocketRequest(r *http.Request) bool {
-	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
-		strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade")
+	return r.Method == http.MethodGet &&
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket") &&
+		headerHasToken(r.Header.Get("Connection"), "upgrade")
+}
+
+func headerHasToken(header string, token string) bool {
+	for _, part := range strings.Split(header, ",") {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
 }
 
 // Handshake performs the WebSocket upgrade handshake. On success the response
@@ -68,6 +81,14 @@ func Handshake(w http.ResponseWriter, r *http.Request, allowedOrigins ...string)
 		http.Error(w, "missing Sec-WebSocket-Key", http.StatusBadRequest)
 		return nil, ErrNotWebSocket
 	}
+	if decoded, err := base64.StdEncoding.DecodeString(key); err != nil || len(decoded) != 16 {
+		http.Error(w, "invalid Sec-WebSocket-Key", http.StatusBadRequest)
+		return nil, ErrNotWebSocket
+	}
+	if r.Header.Get("Sec-WebSocket-Version") != "13" {
+		http.Error(w, "unsupported Sec-WebSocket-Version", http.StatusBadRequest)
+		return nil, ErrNotWebSocket
+	}
 
 	// Compute accept value
 	h := sha1.New()
@@ -91,7 +112,7 @@ func Handshake(w http.ResponseWriter, r *http.Request, allowedOrigins ...string)
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
-	if _, err := conn.Write([]byte(response)); err != nil {
+	if err := util.WriteFull(conn, []byte(response)); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -200,13 +221,17 @@ func (c *Conn) checkRateLimit() bool {
 		return true
 	}
 	now := time.Now()
-	if now.Sub(c.rateWindow) > c.rateDur {
+	if wsRateWindowExpiredAt(c.rateWindow, now, c.rateDur) {
 		c.rateWindow = now
 		c.rateCount = 1
 		return true
 	}
 	c.rateCount++
 	return c.rateCount <= c.rateMax
+}
+
+func wsRateWindowExpiredAt(windowStart, now time.Time, window time.Duration) bool {
+	return !now.Before(windowStart.Add(window))
 }
 
 // ReadMessage reads a single text or binary message.
@@ -226,14 +251,15 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 		case 0x0: // continuation
 			if !c.fragmented {
 				c.mu.Unlock()
-				continue
+				err := errors.New("websocket: unexpected continuation frame")
+				return 0, nil, errors.Join(err, c.writeClose(1002, "protocol error"))
 			}
 			if len(c.fragAccum)+len(payload) > MaxFragmentationSize {
 				c.fragmented = false
 				c.fragAccum = nil
 				c.mu.Unlock()
-				c.writeClose(1009, "message too large")
-				return 0, nil, errors.New("websocket: fragmented message exceeds size limit")
+				err := errors.New("websocket: fragmented message exceeds size limit")
+				return 0, nil, errors.Join(err, c.writeClose(1009, "message too large"))
 			}
 			c.fragAccum = append(c.fragAccum, payload...)
 			if fin {
@@ -243,28 +269,40 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 				c.fragType = 0
 				c.fragAccum = nil
 				c.mu.Unlock()
+				if msgType == 1 && !utf8.Valid(msg) {
+					err := errors.New("websocket: invalid text payload")
+					return 0, nil, errors.Join(err, c.writeClose(1007, "invalid text payload"))
+				}
 				// Check rate limit before returning
 				if !c.checkRateLimit() {
-					c.writeClose(1008, "rate limit exceeded")
-					return 0, nil, errors.New("websocket: rate limit exceeded")
+					err := errors.New("websocket: rate limit exceeded")
+					return 0, nil, errors.Join(err, c.writeClose(1008, "rate limit exceeded"))
 				}
 				return msgType, msg, nil
 			}
 			c.mu.Unlock()
 
 		case 0x1: // text
+			if c.fragmented {
+				c.fragmented = false
+				c.fragType = 0
+				c.fragAccum = nil
+				c.mu.Unlock()
+				err := errors.New("websocket: data frame received before fragmented message complete")
+				return 0, nil, errors.Join(err, c.writeClose(1002, "protocol error"))
+			}
 			if fin {
 				c.mu.Unlock()
+				if !utf8.Valid(payload) {
+					err := errors.New("websocket: invalid text payload")
+					return 0, nil, errors.Join(err, c.writeClose(1007, "invalid text payload"))
+				}
 				// Check rate limit before returning
 				if !c.checkRateLimit() {
-					c.writeClose(1008, "rate limit exceeded")
-					return 0, nil, errors.New("websocket: rate limit exceeded")
+					err := errors.New("websocket: rate limit exceeded")
+					return 0, nil, errors.Join(err, c.writeClose(1008, "rate limit exceeded"))
 				}
 				return 1, payload, nil
-			}
-			if c.fragmented {
-				c.mu.Unlock()
-				continue
 			}
 			c.fragmented = true
 			c.fragType = 1
@@ -272,25 +310,29 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 				c.fragmented = false
 				c.fragAccum = nil
 				c.mu.Unlock()
-				c.writeClose(1009, "message too large")
-				return 0, nil, errors.New("websocket: fragmented message exceeds size limit")
+				err := errors.New("websocket: fragmented message exceeds size limit")
+				return 0, nil, errors.Join(err, c.writeClose(1009, "message too large"))
 			}
 			c.fragAccum = append(c.fragAccum, payload...)
 			c.mu.Unlock()
 
 		case 0x2: // binary
+			if c.fragmented {
+				c.fragmented = false
+				c.fragType = 0
+				c.fragAccum = nil
+				c.mu.Unlock()
+				err := errors.New("websocket: data frame received before fragmented message complete")
+				return 0, nil, errors.Join(err, c.writeClose(1002, "protocol error"))
+			}
 			if fin {
 				c.mu.Unlock()
 				// Check rate limit before returning
 				if !c.checkRateLimit() {
-					c.writeClose(1008, "rate limit exceeded")
-					return 0, nil, errors.New("websocket: rate limit exceeded")
+					err := errors.New("websocket: rate limit exceeded")
+					return 0, nil, errors.Join(err, c.writeClose(1008, "rate limit exceeded"))
 				}
 				return 2, payload, nil
-			}
-			if c.fragmented {
-				c.mu.Unlock()
-				continue
 			}
 			c.fragmented = true
 			c.fragType = 2
@@ -298,8 +340,8 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 				c.fragmented = false
 				c.fragAccum = nil
 				c.mu.Unlock()
-				c.writeClose(1009, "message too large")
-				return 0, nil, errors.New("websocket: fragmented message exceeds size limit")
+				err := errors.New("websocket: fragmented message exceeds size limit")
+				return 0, nil, errors.Join(err, c.writeClose(1009, "message too large"))
 			}
 			c.fragAccum = append(c.fragAccum, payload...)
 			c.mu.Unlock()
@@ -312,36 +354,66 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 			// Note: WriteMessage will block, holding the lock
 			// This is intentional - we don't want concurrent writes
 			c.mu.Unlock() // Release before blocking write
-			_ = c.WriteMessage(0xA, payload)
+			if err := c.WriteMessage(0xA, payload); err != nil {
+				return 0, nil, err
+			}
 
 		case 0xA: // pong - ignore
 			c.mu.Unlock()
+
+		default:
+			c.mu.Unlock()
+			err := errors.New("websocket: invalid opcode")
+			return 0, nil, errors.Join(err, c.writeClose(1002, "protocol error"))
 		}
 	}
 }
 
 // writeClose sends a close frame with the given code and reason.
-func (c *Conn) writeClose(code int, reason string) {
+func (c *Conn) writeClose(code int, reason string) error {
+	if code < 0 || code > 65535 || !isValidCloseCode(uint16(code)) {
+		return errors.New("websocket: invalid close code")
+	}
+	if !utf8.ValidString(reason) {
+		return errors.New("websocket: invalid close reason")
+	}
+	reason = truncateCloseReason(reason)
 	buf := make([]byte, 2+len(reason))
 	binary.BigEndian.PutUint16(buf[:2], uint16(code))
 	copy(buf[2:], reason)
 
 	var frame []byte
 	frame = append(frame, byte(0x80|0x8)) // FIN + close opcode
-	length := len(buf)
-	switch {
-	case length <= 125:
-		frame = append(frame, byte(length))
-	default:
-		frame = append(frame, 126)
-		frame = append(frame, byte(length>>8), byte(length))
-	}
+	frame = append(frame, byte(len(buf)))
 	frame = append(frame, buf...)
-	_, _ = c.conn.Write(frame)
+	return util.WriteFull(c.conn, frame)
+}
+
+func truncateCloseReason(reason string) string {
+	const maxCloseReasonBytes = 123 // close code takes 2 bytes; control payload max is 125.
+	if len(reason) <= maxCloseReasonBytes {
+		return reason
+	}
+
+	end := 0
+	for i := range reason {
+		if i > maxCloseReasonBytes {
+			break
+		}
+		end = i
+	}
+	if end == 0 {
+		return ""
+	}
+	return reason[:end]
 }
 
 // WriteMessage writes a message to the connection.
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
+	if err := validateServerMessageType(messageType, data); err != nil {
+		return err
+	}
+
 	var buf []byte
 
 	// FIN bit + opcode
@@ -363,8 +435,31 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 	}
 
 	buf = append(buf, data...)
-	_, err := c.conn.Write(buf)
-	return err
+	return util.WriteFull(c.conn, buf)
+}
+
+func validateServerMessageType(messageType int, payload []byte) error {
+	switch messageType {
+	case 0x1:
+		if !utf8.Valid(payload) {
+			return errors.New("websocket: invalid text payload")
+		}
+		return nil
+	case 0x2:
+		return nil
+	case 0x8, 0x9, 0xA:
+		if len(payload) > 125 {
+			return errors.New("websocket: control frame too large")
+		}
+		if messageType == 0x8 {
+			if err := validateClosePayload(payload); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return errors.New("websocket: invalid message type")
+	}
 }
 
 // readFrame reads a single WebSocket frame.
@@ -375,10 +470,17 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 		return false, 0, nil, err
 	}
 
+	if header[0]&0x70 != 0 {
+		return false, 0, nil, errors.New("websocket: reserved bits set")
+	}
 	fin = (header[0] & 0x80) != 0
 	opcode = header[0] & 0x0F
 	masked := (header[1] & 0x80) != 0
 	payloadLen := int(header[1] & 0x7F)
+
+	if !masked {
+		return false, 0, nil, errors.New("websocket: client frame not masked")
+	}
 
 	switch payloadLen {
 	case 126:
@@ -387,12 +489,18 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 			return false, 0, nil, err
 		}
 		payloadLen = int(binary.BigEndian.Uint16(ext))
+		if payloadLen < 126 {
+			return false, 0, nil, errors.New("websocket: non-minimal payload length")
+		}
 	case 127:
 		ext := make([]byte, 8)
 		if _, err = io.ReadFull(c.conn, ext); err != nil {
 			return false, 0, nil, err
 		}
 		raw := binary.BigEndian.Uint64(ext)
+		if raw < 65536 {
+			return false, 0, nil, errors.New("websocket: non-minimal payload length")
+		}
 		// L-1: bound the uint64 BEFORE narrowing to int. On 64-bit
 		// platforms `int(uint64)` for values ≥ 2^63 sign-flips to a
 		// negative number; the `> 16*1024` check below then sees a
@@ -410,28 +518,66 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 	if payloadLen > 16*1024 { // 16KB max frame (DNS messages are typically < 4KB)
 		return false, 0, nil, errors.New("websocket: frame too large")
 	}
+	if opcode >= 0x8 {
+		if !fin {
+			return false, 0, nil, errors.New("websocket: fragmented control frame")
+		}
+		if payloadLen > 125 {
+			return false, 0, nil, errors.New("websocket: control frame too large")
+		}
+		if opcode == 0x8 && payloadLen == 1 {
+			return false, 0, nil, errors.New("websocket: invalid close frame payload")
+		}
+	}
 
 	payload = make([]byte, payloadLen)
 
-	// Unmask if needed (client -> server frames must be masked)
-	if masked {
-		mask := make([]byte, 4)
-		if _, err = io.ReadFull(c.conn, mask); err != nil {
+	mask := make([]byte, 4)
+	if _, err = io.ReadFull(c.conn, mask); err != nil {
+		return false, 0, nil, err
+	}
+	if payloadLen > 0 {
+		if _, err = io.ReadFull(c.conn, payload); err != nil {
 			return false, 0, nil, err
 		}
-		if payloadLen > 0 {
-			if _, err = io.ReadFull(c.conn, payload); err != nil {
-				return false, 0, nil, err
-			}
-			for i := range payload {
-				payload[i] ^= mask[i%4]
-			}
+		for i := range payload {
+			payload[i] ^= mask[i%4]
 		}
-	} else if payloadLen > 0 {
-		if _, err = io.ReadFull(c.conn, payload); err != nil {
+	}
+	if opcode == 0x8 {
+		if err := validateClosePayload(payload); err != nil {
 			return false, 0, nil, err
 		}
 	}
 
 	return fin, opcode, payload, nil
+}
+
+func validateClosePayload(payload []byte) error {
+	if len(payload) == 1 {
+		return errors.New("websocket: invalid close frame payload")
+	}
+	if len(payload) >= 2 {
+		if !isValidCloseCode(binary.BigEndian.Uint16(payload[:2])) {
+			return errors.New("websocket: invalid close code")
+		}
+		if !utf8.Valid(payload[2:]) {
+			return errors.New("websocket: invalid close reason")
+		}
+	}
+	return nil
+}
+
+func isValidCloseCode(code uint16) bool {
+	if code < 1000 || code > 4999 {
+		return false
+	}
+	switch code {
+	case 1004, 1005, 1006, 1015:
+		return false
+	}
+	if code >= 1016 && code <= 2999 {
+		return false
+	}
+	return true
 }

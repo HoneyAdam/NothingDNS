@@ -6,14 +6,14 @@ import (
 	"time"
 )
 
-// pickFreePort returns a random available TCP port.
+// pickFreePort returns a random available UDP port.
 func pickFreePort() int {
-	l, err := net.Listen("tcp", ":0")
+	l, err := net.ListenPacket("udp", "0.0.0.0:0")
 	if err != nil {
 		return 0
 	}
 	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	return l.LocalAddr().(*net.UDPAddr).Port
 }
 
 // ---------------------------------------------------------------------------

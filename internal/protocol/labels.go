@@ -68,6 +68,10 @@ func ParseName(s string) (*Name, error) {
 	// Split into labels
 	labels := strings.Split(s, ".")
 
+	if err := validateNameLabels(labels); err != nil {
+		return nil, err
+	}
+
 	// Validate each label
 	for i, label := range labels {
 		if err := ValidateLabel(label); err != nil {
@@ -80,6 +84,9 @@ func ParseName(s string) (*Name, error) {
 
 // String returns the domain name as a string.
 func (n *Name) String() string {
+	if n == nil {
+		return "."
+	}
 	result := strings.Join(n.Labels, ".")
 	if n.FQDN {
 		result += "."
@@ -89,16 +96,25 @@ func (n *Name) String() string {
 
 // IsRoot returns true if this is the root domain.
 func (n *Name) IsRoot() bool {
+	if n == nil {
+		return true
+	}
 	return len(n.Labels) == 0
 }
 
 // IsWildcard returns true if this is a wildcard name (starts with *).
 func (n *Name) IsWildcard() bool {
+	if n == nil {
+		return false
+	}
 	return len(n.Labels) > 0 && n.Labels[0] == "*"
 }
 
 // HasPrefix returns true if the name has the given prefix labels.
 func (n *Name) HasPrefix(prefix []string) bool {
+	if n == nil {
+		return len(prefix) == 0
+	}
 	if len(prefix) > len(n.Labels) {
 		return false
 	}
@@ -112,6 +128,9 @@ func (n *Name) HasPrefix(prefix []string) bool {
 
 // HasSuffix returns true if the name has the given suffix labels.
 func (n *Name) HasSuffix(suffix []string) bool {
+	if n == nil {
+		return len(suffix) == 0
+	}
 	if len(suffix) > len(n.Labels) {
 		return false
 	}
@@ -126,6 +145,9 @@ func (n *Name) HasSuffix(suffix []string) bool {
 
 // Equal returns true if the names are equal (case-insensitive).
 func (n *Name) Equal(other *Name) bool {
+	if n == nil || other == nil {
+		return false
+	}
 	if len(n.Labels) != len(other.Labels) {
 		return false
 	}
@@ -139,12 +161,29 @@ func (n *Name) Equal(other *Name) bool {
 
 // WireLength returns the length of the name in wire format.
 func (n *Name) WireLength() int {
+	if n == nil {
+		return 1
+	}
 	length := 0
 	for _, label := range n.Labels {
 		length += 1 + len(label) // length byte + label data
 	}
 	length++ // terminating zero
 	return length
+}
+
+func validateNameLabels(labels []string) error {
+	if len(labels) > maxLabels {
+		return ErrNameTooLong
+	}
+	length := 1 // terminating root label
+	for _, label := range labels {
+		length += 1 + len(label)
+		if length > MaxNameLength {
+			return ErrNameTooLong
+		}
+	}
+	return nil
 }
 
 // ValidateLabel validates a single label.
@@ -189,6 +228,13 @@ func isValidLabelChar(c rune) bool {
 func PackName(name *Name, buf []byte, offset int, compression map[string]int) (int, error) {
 	if offset < 0 || offset >= len(buf) {
 		return 0, ErrInvalidOffset
+	}
+	if name == nil {
+		buf[offset] = 0
+		return 1, nil
+	}
+	if err := validateNameLabels(name.Labels); err != nil {
+		return 0, err
 	}
 
 	startOffset := offset
@@ -431,7 +477,8 @@ func WireNameLength(buf []byte, offset int) (int, error) {
 	}
 
 	startOffset := offset
-	ptrDepth := 0
+	labelCount := 0
+	nameLen := 1
 
 	for {
 		if offset >= len(buf) {
@@ -456,14 +503,20 @@ func WireNameLength(buf []byte, offset int) (int, error) {
 		if labelLen > MaxLabelLength {
 			return 0, ErrLabelTooLong
 		}
+		if offset+1+labelLen > len(buf) {
+			return 0, ErrBufferTooSmall
+		}
+
+		labelCount++
+		if labelCount > maxLabels {
+			return 0, ErrNameTooLong
+		}
+		nameLen += 1 + labelLen
+		if nameLen > MaxNameLength {
+			return 0, ErrNameTooLong
+		}
 
 		offset += 1 + labelLen
-
-		// Safety check
-		ptrDepth++
-		if ptrDepth > MaxPointerDepth {
-			return 0, ErrPointerLoop
-		}
 	}
 }
 
@@ -471,13 +524,21 @@ func WireNameLength(buf []byte, offset int) (int, error) {
 // Returns -1 if a < b, 0 if a == b, 1 if a > b.
 // Comparison is done label by label from the TLD (right to left).
 func CompareNames(a, b *Name) int {
+	var aLabels, bLabels []string
+	if a != nil {
+		aLabels = a.Labels
+	}
+	if b != nil {
+		bLabels = b.Labels
+	}
+
 	// Compare from the rightmost label (TLD) to the leftmost
-	i, j := len(a.Labels)-1, len(b.Labels)-1
+	i, j := len(aLabels)-1, len(bLabels)-1
 
 	for i >= 0 && j >= 0 {
 		cmp := strings.Compare(
-			strings.ToLower(a.Labels[i]),
-			strings.ToLower(b.Labels[j]),
+			strings.ToLower(aLabels[i]),
+			strings.ToLower(bLabels[j]),
 		)
 		if cmp != 0 {
 			return cmp
@@ -498,5 +559,8 @@ func CompareNames(a, b *Name) int {
 
 // IsSubdomain returns true if child is a subdomain of parent.
 func IsSubdomain(child, parent *Name) bool {
+	if parent == nil {
+		return true
+	}
 	return child.HasSuffix(parent.Labels)
 }

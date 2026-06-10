@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // TLV (Type-Length-Value) encoding for binary serialization.
@@ -72,20 +74,20 @@ func (e *TLVEncoder) Encode(tlv *TLV) error {
 	}
 
 	// Write type (1 byte)
-	if _, err := e.w.Write([]byte{tlv.Type}); err != nil {
+	if err := util.WriteFull(e.w, []byte{tlv.Type}); err != nil {
 		return fmt.Errorf("write type: %w", err)
 	}
 
 	// Write length (4 bytes, big-endian)
 	lenBuf := make([]byte, 4)
 	binary.BigEndian.PutUint32(lenBuf, uint32(len(tlv.Value)))
-	if _, err := e.w.Write(lenBuf); err != nil {
+	if err := util.WriteFull(e.w, lenBuf); err != nil {
 		return fmt.Errorf("write length: %w", err)
 	}
 
 	// Write value
 	if len(tlv.Value) > 0 {
-		if _, err := e.w.Write(tlv.Value); err != nil {
+		if err := util.WriteFull(e.w, tlv.Value); err != nil {
 			return fmt.Errorf("write value: %w", err)
 		}
 	}
@@ -234,9 +236,9 @@ func (e *BatchEncoder) Add(typ byte, value []byte) error {
 	return nil
 }
 
-// Bytes returns the encoded bytes
+// Bytes returns a snapshot of the encoded bytes.
 func (e *BatchEncoder) Bytes() []byte {
-	return e.buf
+	return append([]byte(nil), e.buf...)
 }
 
 // Reset clears the batch

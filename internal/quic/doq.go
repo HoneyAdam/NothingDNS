@@ -293,8 +293,7 @@ func (s *DoQServer) acceptLoop() {
 		s.activeConns++
 
 		// Check per-IP connection limit
-		remoteAddr := conn.RemoteAddr().(*net.UDPAddr)
-		ip := remoteAddr.IP.String()
+		ip := doqRemoteIP(conn.RemoteAddr())
 		s.ipConnsMu.Lock()
 		if s.ipConns[ip] >= DoQMaxConnectionsPerIP {
 			s.ipConnsMu.Unlock()
@@ -312,6 +311,23 @@ func (s *DoQServer) acceptLoop() {
 		s.wg.Add(1)
 		go s.handleConnection(conn, ip)
 	}
+}
+
+func doqRemoteIP(addr net.Addr) string {
+	if addr == nil {
+		return "unknown"
+	}
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		if udpAddr.IP != nil {
+			return udpAddr.IP.String()
+		}
+		return udpAddr.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err == nil && host != "" {
+		return host
+	}
+	return addr.String()
 }
 
 // handleConnection handles a single QUIC connection.

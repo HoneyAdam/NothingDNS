@@ -84,6 +84,17 @@ func TestDomainNormalize(t *testing.T) {
 			t.Errorf("Normalize(%q) = %q, want %q", tc.input, result, tc.expected)
 		}
 	}
+
+	var nilDomain *Domain
+	if got := nilDomain.String(); got != "" {
+		t.Errorf("nil Domain.String() = %q, want empty", got)
+	}
+	if got := nilDomain.Length(); got != 0 {
+		t.Errorf("nil Domain.Length() = %d, want 0", got)
+	}
+	if got := nilDomain.Normalize(); got != "" {
+		t.Errorf("nil Domain.Normalize() = %q, want empty", got)
+	}
 }
 
 func TestDomainIsWildcard(t *testing.T) {
@@ -108,6 +119,11 @@ func TestDomainIsWildcard(t *testing.T) {
 			t.Errorf("IsWildcard(%q) = %v, want %v", tc.domain, result, tc.expected)
 		}
 	}
+
+	var nilDomain *Domain
+	if nilDomain.IsWildcard() {
+		t.Error("nil Domain.IsWildcard() should return false")
+	}
 }
 
 func TestDomainHasParent(t *testing.T) {
@@ -120,6 +136,15 @@ func TestDomainHasParent(t *testing.T) {
 
 	if parent.HasParent(child) {
 		t.Error("example.com should not have parent www.example.com")
+	}
+
+	if child.HasParent(nil) {
+		t.Error("domain should not have a nil parent")
+	}
+
+	var nilDomain *Domain
+	if nilDomain.HasParent(parent) {
+		t.Error("nil domain should not have a parent")
 	}
 }
 

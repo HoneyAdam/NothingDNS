@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -68,6 +69,20 @@ func TestTCPServerStopNilListener(t *testing.T) {
 	err := server.Stop()
 	if err != nil {
 		t.Errorf("Stop should not return error: %v", err)
+	}
+}
+
+func TestTCPServerStopIdempotentAfterListen(t *testing.T) {
+	server := NewTCPServer("127.0.0.1:0", nil)
+	if err := server.Listen(); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	if err := server.Stop(); err != nil {
+		t.Fatalf("first Stop failed: %v", err)
+	}
+	if err := server.Stop(); err != nil {
+		t.Fatalf("second Stop failed: %v", err)
 	}
 }
 
@@ -278,6 +293,36 @@ func TestUDPServerStopWithoutListen(t *testing.T) {
 	server := NewUDPServer("127.0.0.1:0", nil)
 	// Stop should not panic
 	server.Stop()
+}
+
+func TestUDPServerStopIdempotentAfterListen(t *testing.T) {
+	server := NewUDPServer("127.0.0.1:0", nil)
+	if err := server.Listen(); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	if err := server.Stop(); err != nil {
+		t.Fatalf("first Stop failed: %v", err)
+	}
+	if err := server.Stop(); err != nil {
+		t.Fatalf("second Stop failed: %v", err)
+	}
+}
+
+func TestTLSServerStopIdempotentAfterListen(t *testing.T) {
+	cert := generateTestTLSCert(t)
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	server := NewTLSServer("127.0.0.1:0", nil, tlsConfig)
+	if err := server.Listen(); err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	if err := server.Stop(); err != nil {
+		t.Fatalf("first Stop failed: %v", err)
+	}
+	if err := server.Stop(); err != nil {
+		t.Fatalf("second Stop failed: %v", err)
+	}
 }
 
 // TestUDPServerListenWithConn tests ListenWithConn.

@@ -184,6 +184,41 @@ func TestRecordFailedAttempt_ResetsAfterExpiredLockout(t *testing.T) {
 	}
 }
 
+func TestRecordFailedAttempt_ResetsAtExactLockoutBoundary(t *testing.T) {
+	l := newTestLimiter()
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	l.mu.Lock()
+	l.ipAttempts["1.2.3.4"] = &loginAttempt{
+		count:       loginMaxAttempts,
+		lastTry:     now.Add(-10 * time.Minute),
+		lockedUntil: now,
+	}
+	l.userAttempts["1.2.3.4:user"] = &loginAttempt{
+		count:       loginMaxAttempts,
+		lastTry:     now.Add(-10 * time.Minute),
+		lockedUntil: now,
+	}
+	l.mu.Unlock()
+
+	l.recordFailedAttemptAt("1.2.3.4", "user", now)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if got := l.ipAttempts["1.2.3.4"].count; got != 1 {
+		t.Errorf("IP count after exact lockout boundary = %d, want 1", got)
+	}
+	if !l.ipAttempts["1.2.3.4"].lockedUntil.IsZero() {
+		t.Error("IP lockout should be cleared at exact lockout boundary")
+	}
+	if got := l.userAttempts["1.2.3.4:user"].count; got != 1 {
+		t.Errorf("(IP, user) count after exact lockout boundary = %d, want 1", got)
+	}
+	if !l.userAttempts["1.2.3.4:user"].lockedUntil.IsZero() {
+		t.Error("(IP, user) lockout should be cleared at exact lockout boundary")
+	}
+}
+
 func TestRecordFailedAttempt_MultipleIPs(t *testing.T) {
 	l := newTestLimiter()
 	l.recordFailedAttempt("1.2.3.4", "admin")
@@ -275,6 +310,35 @@ func TestCleanup_RemovesStale(t *testing.T) {
 	}
 	if _, exists := l.userAttempts["5.6.7.8:root"]; !exists {
 		t.Error("active (IP, user) pair lockout should NOT be cleaned up")
+	}
+}
+
+func TestCleanup_RemovesEntriesAtExactDeadlines(t *testing.T) {
+	l := newTestLimiter()
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	l.mu.Lock()
+	l.ipAttempts["1.2.3.4"] = &loginAttempt{
+		count:       1,
+		lastTry:     now.Add(-loginMaxDelay),
+		lockedUntil: now,
+	}
+	l.userAttempts["1.2.3.4:admin"] = &loginAttempt{
+		count:       loginMaxAttempts,
+		lastTry:     now.Add(-10 * time.Minute),
+		lockedUntil: now,
+	}
+	l.mu.Unlock()
+
+	l.cleanupAt(now)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, exists := l.ipAttempts["1.2.3.4"]; exists {
+		t.Error("IP entry should be cleaned up exactly at lockout and delay deadlines")
+	}
+	if _, exists := l.userAttempts["1.2.3.4:admin"]; exists {
+		t.Error("(IP, user) entry should be cleaned up exactly at lockout deadline")
 	}
 }
 

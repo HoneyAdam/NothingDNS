@@ -26,6 +26,26 @@ func TestNewServer(t *testing.T) {
 	}
 }
 
+func TestSetAllowedOriginsCopiesInput(t *testing.T) {
+	server := NewServer()
+	defer server.Stop()
+
+	origins := []string{"https://dashboard.example.com"}
+	server.SetAllowedOrigins(origins)
+	origins[0] = "https://mutated.example.com"
+
+	server.mu.RLock()
+	got := append([]string(nil), server.allowedOrigins...)
+	server.mu.RUnlock()
+
+	if len(got) != 1 {
+		t.Fatalf("allowed origins length = %d, want 1", len(got))
+	}
+	if got[0] != "https://dashboard.example.com" {
+		t.Fatalf("allowed origin = %q, want original value", got[0])
+	}
+}
+
 func TestHandleStats(t *testing.T) {
 	server := NewServer()
 	server.SetAuthToken("test-token")
@@ -101,6 +121,7 @@ func TestHandleQueryStream(t *testing.T) {
 
 func TestRecordQuery(t *testing.T) {
 	server := NewServer()
+	defer server.Stop()
 
 	// Record a query
 	event := &QueryEvent{
@@ -127,6 +148,41 @@ func TestRecordQuery(t *testing.T) {
 		t.Errorf("Expected 1 recent query, got %d", len(server.stats.RecentQueries))
 	}
 	server.stats.mu.RUnlock()
+}
+
+func TestRecordQueryNilIsNoOp(t *testing.T) {
+	server := NewServer()
+	defer server.Stop()
+
+	server.RecordQuery(nil)
+
+	stats := server.GetStats()
+	if stats.QueriesTotal != 0 {
+		t.Fatalf("nil query incremented total: got %d", stats.QueriesTotal)
+	}
+	if len(stats.RecentQueries) != 0 {
+		t.Fatalf("nil query was stored: got %d recent queries", len(stats.RecentQueries))
+	}
+}
+
+func TestRecordQueryCopiesEvent(t *testing.T) {
+	server := NewServer()
+	defer server.Stop()
+
+	event := &QueryEvent{
+		Domain:    "original.example.com",
+		QueryType: "A",
+	}
+	server.RecordQuery(event)
+	event.Domain = "mutated.example.com"
+
+	stats := server.GetStats()
+	if len(stats.RecentQueries) != 1 {
+		t.Fatalf("expected one recent query, got %d", len(stats.RecentQueries))
+	}
+	if stats.RecentQueries[0].Domain != "original.example.com" {
+		t.Fatalf("RecordQuery stored caller-owned event pointer, got domain %q", stats.RecentQueries[0].Domain)
+	}
 }
 
 func TestRecentQueriesLimit(t *testing.T) {
@@ -319,6 +375,7 @@ func TestUpdateStats(t *testing.T) {
 
 func TestGetStats(t *testing.T) {
 	server := NewServer()
+	defer server.Stop()
 
 	stats := server.GetStats()
 	if stats == nil {
@@ -328,6 +385,74 @@ func TestGetStats(t *testing.T) {
 	if stats.Uptime.IsZero() {
 		t.Error("Expected non-zero uptime")
 	}
+}
+
+func TestGetStatsReturnsIsolatedSnapshot(t *testing.T) {
+	server := NewServer()
+	defer server.Stop()
+
+	server.RecordQuery(&QueryEvent{
+		Domain:    "original.example.com",
+		QueryType: "A",
+	})
+	server.UpdateStats(UpdateStatsRequest{
+		QueriesPerSec:   10,
+		CacheHitRate:    50,
+		ZoneCount:       2,
+		UpstreamLatency: time.Millisecond,
+	})
+
+	stats := server.GetStats()
+	stats.QueriesPerSec = 99
+	stats.RecentQueries[0].Domain = "mutated.example.com"
+	stats.RecentQueries = append(stats.RecentQueries, &QueryEvent{Domain: "extra.example.com"})
+
+	next := server.GetStats()
+	if next.QueriesPerSec != 10 {
+		t.Fatalf("snapshot mutation changed server QueriesPerSec: got %v", next.QueriesPerSec)
+	}
+	if len(next.RecentQueries) != 1 {
+		t.Fatalf("snapshot slice mutation changed server recent queries length: got %d", len(next.RecentQueries))
+	}
+	if next.RecentQueries[0].Domain != "original.example.com" {
+		t.Fatalf("snapshot event mutation changed server event: got %q", next.RecentQueries[0].Domain)
+	}
+}
+
+func TestGetStatsConcurrentWithUpdates(t *testing.T) {
+	server := NewServer()
+	defer server.Stop()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				server.UpdateStats(UpdateStatsRequest{
+					QueriesPerSec:   float64(j + 1),
+					CacheHitRate:    float64(j + 1),
+					ZoneCount:       j + 1,
+					UpstreamLatency: time.Duration(j+1) * time.Millisecond,
+				})
+				server.RecordQuery(&QueryEvent{Domain: "race.example.com", QueryType: "A"})
+			}
+		}()
+	}
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				stats := server.GetStats()
+				_ = stats.QueriesPerSec
+				if len(stats.RecentQueries) > 0 && stats.RecentQueries[0] != nil {
+					_ = stats.RecentQueries[0].Domain
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // Mock implementations
@@ -796,6 +921,33 @@ func TestHandleStats_ContentType(t *testing.T) {
 	}
 }
 
+func TestHandleStatsClampsFutureUptime(t *testing.T) {
+	server := NewServer()
+	server.SetAuthToken("test-token")
+	defer server.Stop()
+
+	server.stats.mu.Lock()
+	server.stats.Uptime = time.Now().Add(time.Hour)
+	server.stats.mu.Unlock()
+
+	req := httptest.NewRequest("GET", "/api/dashboard/stats", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+
+	var resp StatsAPIResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode stats response: %v", err)
+	}
+	if resp.Uptime != 0 {
+		t.Fatalf("future uptime = %v, want 0", resp.Uptime)
+	}
+}
+
 // Test handleQueryStream response content type
 func TestHandleQueryStream_ContentType(t *testing.T) {
 	server := NewServer()
@@ -1096,6 +1248,25 @@ func TestGetRecentQueries_WithData(t *testing.T) {
 	}
 }
 
+func TestGetRecentQueriesReturnsIsolatedEvents(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			{Domain: "a.com", QueryType: "A"},
+		},
+	}
+
+	queries, total := ds.GetRecentQueries(0, 1)
+	if total != 1 || len(queries) != 1 {
+		t.Fatalf("got total=%d len=%d, want 1/1", total, len(queries))
+	}
+
+	queries[0].Domain = "mutated.example.com"
+	next, _ := ds.GetRecentQueries(0, 1)
+	if next[0].Domain != "a.com" {
+		t.Fatalf("query mutation changed DashboardStats event: got %q", next[0].Domain)
+	}
+}
+
 func TestGetRecentQueries_OffsetBeyond(t *testing.T) {
 	ds := &DashboardStats{
 		RecentQueries: []*QueryEvent{
@@ -1109,6 +1280,31 @@ func TestGetRecentQueries_OffsetBeyond(t *testing.T) {
 	if total != 0 {
 		// When offset >= total, returns 0 per implementation
 		t.Errorf("Total = %d, want 0", total)
+	}
+}
+
+func TestGetRecentQueries_InvalidBounds(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			{Domain: "a.com", QueryType: "A"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		offset int
+		limit  int
+	}{
+		{name: "negative offset", offset: -1, limit: 1},
+		{name: "zero limit", offset: 0, limit: 0},
+		{name: "negative limit", offset: 0, limit: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries, total := ds.GetRecentQueries(tc.offset, tc.limit)
+			if queries != nil || total != 0 {
+				t.Fatalf("got queries=%v total=%d, want nil/0", queries, total)
+			}
+		})
 	}
 }
 
@@ -1155,10 +1351,45 @@ func TestGetRecentQueriesFiltered(t *testing.T) {
 		t.Errorf("offset beyond: total = %d, want 2", total)
 	}
 
+	q, total = ds.GetRecentQueriesFiltered(0, 1, "ads")
+	if total != 2 || len(q) != 1 {
+		t.Fatalf("filtered isolation setup: got total=%d len=%d, want 2/1", total, len(q))
+	}
+	q[0].Domain = "mutated.example.com"
+	q, _ = ds.GetRecentQueriesFiltered(0, 1, "ads")
+	if q[0].Domain != "ads.example.com" {
+		t.Fatalf("filtered query mutation changed DashboardStats event: got %q", q[0].Domain)
+	}
+
 	// No matches.
 	q, total = ds.GetRecentQueriesFiltered(0, 10, "nomatch")
 	if total != 0 || q != nil {
 		t.Errorf("no match: got total=%d rows=%v, want 0/nil", total, q)
+	}
+}
+
+func TestGetRecentQueriesFiltered_InvalidBounds(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			{Domain: "ads.example.com", QueryType: "A"},
+		},
+	}
+
+	for _, tc := range []struct {
+		name   string
+		offset int
+		limit  int
+	}{
+		{name: "negative offset", offset: -1, limit: 1},
+		{name: "zero limit", offset: 0, limit: 0},
+		{name: "negative limit", offset: 0, limit: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries, total := ds.GetRecentQueriesFiltered(tc.offset, tc.limit, "ads")
+			if queries != nil || total != 0 {
+				t.Fatalf("got queries=%v total=%d, want nil/0", queries, total)
+			}
+		})
 	}
 }
 
@@ -1198,6 +1429,34 @@ func TestGetTopDomains_WithData(t *testing.T) {
 	}
 }
 
+func TestGetTopDomains_SkipsNilQueries(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			nil,
+			{Domain: "a.com", QueryType: "A"},
+			nil,
+			{Domain: "a.com", QueryType: "AAAA"},
+		},
+	}
+	result := ds.GetTopDomains(3)
+
+	if len(result) != 1 {
+		t.Fatalf("Result len = %d, want 1", len(result))
+	}
+	if result[0].Domain != "a.com" || result[0].Count != 2 {
+		t.Fatalf("Top domain = %+v, want a.com count 2", result[0])
+	}
+}
+
+func TestGetTopDomains_AllNilQueries(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{nil, nil},
+	}
+	if result := ds.GetTopDomains(3); result != nil {
+		t.Fatalf("all-nil queries result = %+v, want nil", result)
+	}
+}
+
 func TestGetTopDomains_LimitLessThanData(t *testing.T) {
 	ds := &DashboardStats{
 		RecentQueries: []*QueryEvent{
@@ -1210,5 +1469,18 @@ func TestGetTopDomains_LimitLessThanData(t *testing.T) {
 
 	if len(result) != 1 {
 		t.Errorf("Result len = %d, want 1", len(result))
+	}
+}
+
+func TestGetTopDomains_InvalidLimit(t *testing.T) {
+	ds := &DashboardStats{
+		RecentQueries: []*QueryEvent{
+			{Domain: "a.com", QueryType: "A"},
+		},
+	}
+	for _, limit := range []int{0, -1} {
+		if result := ds.GetTopDomains(limit); result != nil {
+			t.Fatalf("limit %d result = %+v, want nil", limit, result)
+		}
 	}
 }

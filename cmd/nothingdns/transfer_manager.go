@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -55,7 +56,11 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 	if journalDataDir == "" {
 		journalDataDir = "."
 	}
-	mgr.result.JournalStore = transfer.NewKVJournalStore(journalDataDir)
+	journalStore, err := transfer.OpenKVJournalStore(journalDataDir)
+	if err != nil {
+		return nil, fmt.Errorf("initializing IXFR journal store: %w", err)
+	}
+	mgr.result.JournalStore = journalStore
 	mgr.result.IXFRServer.SetJournalStore(mgr.result.JournalStore)
 	logger.Infof("IXFR journal store initialized at %s", journalDataDir)
 
@@ -103,6 +108,9 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 func (m *TransferManager) SetZonesMu(zonesMu *sync.RWMutex) {
 	if m.result.AXFRServer != nil {
 		m.result.AXFRServer.SetZonesMu(zonesMu)
+	}
+	if m.result.NotifyHandler != nil {
+		m.result.NotifyHandler.SetZonesMu(zonesMu)
 	}
 	if m.result.DDNSHandler != nil {
 		m.result.DDNSHandler.SetZonesMu(zonesMu)

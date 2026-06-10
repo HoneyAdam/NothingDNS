@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 func TestHashPassword(t *testing.T) {
@@ -161,6 +163,36 @@ func TestValidateToken(t *testing.T) {
 	}
 }
 
+func TestValidateTokenReturnsPublicUserCopy(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret-key-32-bytes-long!!!",
+		Users:       []User{{Username: "operator", Password: "operatorpassword", Role: RoleOperator}},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+
+	token, err := store.GenerateToken("operator", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken() returned error: %v", err)
+	}
+
+	user, err := store.ValidateToken(token.Token)
+	if err != nil {
+		t.Fatalf("ValidateToken() returned error: %v", err)
+	}
+	if user.Hash != nil || user.Password != "" {
+		t.Fatalf("ValidateToken() exposed credential fields: hash=%v password=%q", user.Hash, user.Password)
+	}
+
+	user.Role = RoleAdmin
+	stored, err := store.GetUser("operator")
+	if err != nil {
+		t.Fatalf("GetUser() returned error: %v", err)
+	}
+	if stored.Role != RoleOperator {
+		t.Fatalf("mutating ValidateToken result changed stored role to %q", stored.Role)
+	}
+}
+
 func TestRevokeToken(t *testing.T) {
 	store, _ := NewStore(&Config{
 		Secret:      "test-secret",
@@ -284,6 +316,9 @@ func TestCreateUser(t *testing.T) {
 				if user != nil && user.Role != tc.role {
 					t.Errorf("CreateUser().Role = %v, want %v", user.Role, tc.role)
 				}
+				if user != nil && (user.Hash != nil || user.Password != "") {
+					t.Errorf("CreateUser() should not expose credential fields")
+				}
 			}
 		})
 	}
@@ -306,12 +341,15 @@ func TestUpdateUser(t *testing.T) {
 	}
 
 	// Verify new password works
-	if !VerifyPassword("newpassword", user.Hash) {
+	if !store.VerifyUserPassword("admin", "newpassword") {
 		t.Errorf("Password was not updated correctly")
 	}
 	// Old password should not work
-	if VerifyPassword("adminpassword", user.Hash) {
+	if store.VerifyUserPassword("admin", "adminpassword") {
 		t.Errorf("Old password should not work after update")
+	}
+	if user.Hash != nil || user.Password != "" {
+		t.Errorf("UpdateUser() should not expose credential fields")
 	}
 
 	// Update role only
@@ -552,6 +590,35 @@ func TestSave_AtomicReplaceLeavesNoPartialFile(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFileCompletesPartialWrites(t *testing.T) {
+	writer := &chunkedAuthWriter{maxWrite: 3}
+	data := []byte("complete auth file payload")
+
+	if err := util.WriteFull(writer, data); err != nil {
+		t.Fatalf("WriteFull: %v", err)
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+	if !bytes.Equal(writer.buf.Bytes(), data) {
+		t.Fatalf("written data = %q, want %q", writer.buf.Bytes(), data)
+	}
+}
+
+type chunkedAuthWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (w *chunkedAuthWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.maxWrite > 0 && w.maxWrite < len(p) {
+		p = p[:w.maxWrite]
+	}
+	return w.buf.Write(p)
+}
+
 func TestSave_ReturnsParentDirFsyncError(t *testing.T) {
 	store, _ := NewStore(&Config{Secret: "test-secret-12345"})
 
@@ -698,6 +765,17 @@ func TestTokenExpiry(t *testing.T) {
 	_, err = store.ValidateToken(token.Token)
 	if err == nil {
 		t.Errorf("Token should be expired after waiting")
+	}
+
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	if !tokenExpiredAt(&Token{ExpiresAt: now}, now) {
+		t.Error("token should be expired exactly at ExpiresAt")
+	}
+	if tokenExpiredAt(&Token{ExpiresAt: now.Add(time.Nanosecond)}, now) {
+		t.Error("token should remain valid before ExpiresAt")
+	}
+	if !tokenExpiredAt(nil, now) {
+		t.Error("nil token should be treated as expired")
 	}
 }
 
@@ -1220,14 +1298,17 @@ func TestPasswordEdgeCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UpdateUser failed: %v", err)
 			}
+			if user.Hash != nil || user.Password != "" {
+				t.Fatalf("UpdateUser exposed credential fields")
+			}
 
 			// Verify the new password works
-			if !VerifyPassword(tc.password, user.Hash) {
+			if !store.VerifyUserPassword("testuser", tc.password) {
 				t.Errorf("Password %q should verify after update", tc.password)
 			}
 
 			// Verify wrong password doesn't work
-			if VerifyPassword("wrong-password", user.Hash) {
+			if store.VerifyUserPassword("testuser", "wrong-password") {
 				t.Errorf("Wrong password should not verify")
 			}
 		})
@@ -1631,10 +1712,10 @@ func TestNewStoreVariations(t *testing.T) {
 			t.Fatalf("GenerateToken with 0 expiry should work: %v", err)
 		}
 
-		// Should be immediately expired or valid depending on implementation
 		_, err = store.ValidateToken(token.Token)
-		// Just ensure no panic
-		_ = err
+		if err == nil {
+			t.Fatal("zero-expiry token should be immediately expired")
+		}
 	})
 }
 

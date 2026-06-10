@@ -36,6 +36,9 @@ func TestMakeAbsolute(t *testing.T) {
 		{"www.example.com.", "example.com.", "www.example.com."},
 		{"", "example.com.", "example.com."},
 		{"@", "example.com.", "example.com."},
+		{"www", ".", "www."},
+		{"@", ".", "."},
+		{"www", "", "www."},
 	}
 
 	for _, tt := range tests {
@@ -133,6 +136,10 @@ func TestParseFields(t *testing.T) {
 			`@ IN TXT "v=spf1 include:(_spf.example.com) ~all"`,
 			[]string{"@", "IN", "TXT", "v=spf1 include:(_spf.example.com) ~all"},
 		},
+		{
+			`_svc._tcp IN SVCB 1 svc.example.com. alpn="h3" port=8443`,
+			[]string{"_svc._tcp", "IN", "SVCB", "1", "svc.example.com.", "alpn=h3", "port=8443"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -224,6 +231,39 @@ mail 3600 IN MX 20 mail2
 	mailMX := z.Lookup("mail.example.com.", "MX")
 	if len(mailMX) != 2 {
 		t.Errorf("expected 2 mail MX records, got %d", len(mailMX))
+	}
+}
+
+func TestParseFileSVCBHTTPS(t *testing.T) {
+	zoneContent := `
+$ORIGIN example.com.
+$TTL 3600
+
+@ IN SOA ns1 hostmaster 2024010101 3600 900 604800 86400
+@ IN NS ns1
+ns1 IN A 192.0.2.1
+
+_svc._tcp IN SVCB 1 svc.example.com. alpn="h3" port=8443
+_443._tcp IN HTTPS 1 . alpn="h2,h3" port=443
+`
+
+	z, err := ParseFile("test.zone", strings.NewReader(zoneContent))
+	if err != nil {
+		t.Fatalf("ParseFile failed: %v", err)
+	}
+	svcb := z.Lookup("_svc._tcp.example.com.", "SVCB")
+	if got, want := len(svcb), 1; got != want {
+		t.Fatalf("SVCB records = %d, want %d", got, want)
+	}
+	if got, want := svcb[0].RData, "1 svc.example.com. alpn=h3 port=8443"; got != want {
+		t.Fatalf("SVCB RDATA = %q, want %q", got, want)
+	}
+	https := z.Lookup("_443._tcp.example.com.", "HTTPS")
+	if got, want := len(https), 1; got != want {
+		t.Fatalf("HTTPS records = %d, want %d", got, want)
+	}
+	if got, want := https[0].RData, "1 . alpn=h2,h3 port=443"; got != want {
+		t.Fatalf("HTTPS RDATA = %q, want %q", got, want)
 	}
 }
 
@@ -392,6 +432,16 @@ func TestParseFileErrors(t *testing.T) {
 			content: "$ORIGIN example.com.\n$INCLUDE other.zone",
 			wantErr: true,
 		},
+		{
+			name:    "TKEY is not a master zone record",
+			content: "$ORIGIN example.com.\n@ IN TKEY hmac-sha256. 0 0 0 0 0 0",
+			wantErr: true,
+		},
+		{
+			name:    "TSIG is not a master zone record",
+			content: "$ORIGIN example.com.\n@ IN TSIG hmac-sha256. 0 300 0 0 0 0",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -529,6 +579,25 @@ func TestZone_LookupAll(t *testing.T) {
 	recordsEmpty := z.LookupAll("nonexistent.example.com.")
 	if len(recordsEmpty) != 0 {
 		t.Errorf("expected 0 records for non-existent name, got %d", len(recordsEmpty))
+	}
+}
+
+func TestZone_LookupAllReturnsCopy(t *testing.T) {
+	z := NewZone("example.com.")
+	z.Records["www.example.com."] = []Record{
+		{Type: "A", RData: "192.0.2.1"},
+	}
+
+	records := z.LookupAll("www.example.com.")
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+
+	records[0].RData = "198.51.100.1"
+
+	records = z.LookupAll("www.example.com.")
+	if records[0].RData != "192.0.2.1" {
+		t.Fatalf("LookupAll returned mutable zone state: got %q", records[0].RData)
 	}
 }
 
@@ -761,6 +830,36 @@ func TestManager_GetRecords(t *testing.T) {
 	}
 	if len(all) < 2 { // SOA + NS + www
 		t.Errorf("all records = %d, want >= 2", len(all))
+	}
+}
+
+func TestManager_GetRecordsSpecificReturnsCopy(t *testing.T) {
+	m := NewManager()
+	m.SetZoneDir("")
+
+	soa := &SOARecord{MName: "ns1.example.com.", RName: "hostmaster.example.com.", Serial: 1}
+	if err := m.CreateZone("example.com.", 3600, soa, []NSRecord{{NSDName: "ns1.example.com."}}); err != nil {
+		t.Fatalf("CreateZone: %v", err)
+	}
+	if err := m.AddRecord("example.com.", Record{Name: "www.example.com.", Type: "A", RData: "192.0.2.1"}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	records, err := m.GetRecords("example.com.", "www.example.com.")
+	if err != nil {
+		t.Fatalf("GetRecords: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("records len = %d, want 1", len(records))
+	}
+	records[0].RData = "198.51.100.1"
+
+	next, err := m.GetRecords("example.com.", "www.example.com.")
+	if err != nil {
+		t.Fatalf("GetRecords after mutation: %v", err)
+	}
+	if next[0].RData != "192.0.2.1" {
+		t.Fatalf("GetRecords leaked internal slice: got RData %q", next[0].RData)
 	}
 }
 

@@ -20,6 +20,11 @@ func TestClientInfoString(t *testing.T) {
 			expected: "<nil>",
 		},
 		{
+			name:     "nil addr",
+			client:   &ClientInfo{},
+			expected: "<nil>",
+		},
+		{
 			name: "client with UDP addr",
 			client: &ClientInfo{
 				Addr: &net.UDPAddr{IP: net.ParseIP("192.168.1.1"), Port: 53},
@@ -64,6 +69,93 @@ func TestClientInfoIPMore(t *testing.T) {
 	// Zone suffix causes parse to fail, so IP() returns nil
 	// This is expected behavior
 	_ = ip2 // Just verify it doesn't panic
+}
+
+func TestPopulateEDNS0ClientInfo(t *testing.T) {
+	client := &ClientInfo{Protocol: "udp"}
+	msg := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{
+				Name:  mustParseName("."),
+				Type:  protocol.TypeOPT,
+				Class: 4096,
+				Data: &protocol.RDataOPT{Options: []protocol.EDNS0Option{
+					{
+						Code: protocol.OptionCodeClientSubnet,
+						Data: []byte{0x00, 0x01, 0x18, 0x00, 192, 168, 1},
+					},
+				}},
+			},
+		},
+	}
+
+	populateEDNS0ClientInfo(client, msg)
+
+	if !client.HasEDNS0 {
+		t.Fatal("HasEDNS0 should be true")
+	}
+	if client.EDNS0UDPSize != 4096 {
+		t.Fatalf("EDNS0UDPSize = %d, want 4096", client.EDNS0UDPSize)
+	}
+	if client.ClientSubnet == nil {
+		t.Fatal("ClientSubnet should be populated")
+	}
+	if client.ClientSubnet.Family != 1 || client.ClientSubnet.SourcePrefixLength != 24 {
+		t.Fatalf("ClientSubnet = %+v, want IPv4 /24", client.ClientSubnet)
+	}
+}
+
+func TestPopulateEDNS0ClientInfoMalformedOPT(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *protocol.Message
+	}{
+		{name: "nil message"},
+		{
+			name: "typed nil opt data",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: (*protocol.RDataOPT)(nil)},
+			}},
+		},
+		{
+			name: "raw opt data",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: &protocol.RDataRaw{Data: []byte{1, 2, 3}}},
+			}},
+		},
+		{
+			name: "malformed ecs option",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: &protocol.RDataOPT{Options: []protocol.EDNS0Option{
+					{Code: protocol.OptionCodeClientSubnet, Data: []byte{0x00, 0x01, 0x18, 0x00, 192, 168, 1, 1}},
+				}}},
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &ClientInfo{Protocol: "udp"}
+			populateEDNS0ClientInfo(client, tc.msg)
+			if tc.msg == nil {
+				if client.HasEDNS0 {
+					t.Fatal("HasEDNS0 should remain false for nil message")
+				}
+				return
+			}
+			if !client.HasEDNS0 {
+				t.Fatal("HasEDNS0 should be true for OPT record")
+			}
+			if client.EDNS0UDPSize != 1232 {
+				t.Fatalf("EDNS0UDPSize = %d, want 1232", client.EDNS0UDPSize)
+			}
+			if client.ClientSubnet != nil {
+				t.Fatal("ClientSubnet should remain nil for malformed OPT data")
+			}
+		})
+	}
 }
 
 // TestHandlerFunc tests the HandlerFunc adapter.

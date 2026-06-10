@@ -578,6 +578,10 @@ func (c *Cluster) BroadcastZoneUpdate(zoneName, action string, serial uint32, re
 
 // GetLeader returns the current cluster leader's node ID and whether a leader exists.
 func (c *Cluster) GetLeader() (leaderID string, ok bool) {
+	if c.consensus == ConsensusRaft && c.raft != nil {
+		id := string(c.raft.GetLeaderID())
+		return id, id != ""
+	}
 	if c.gossip != nil {
 		id := c.gossip.GetLeader()
 		return id, id != ""
@@ -587,6 +591,9 @@ func (c *Cluster) GetLeader() (leaderID string, ok bool) {
 
 // IsLeader returns true if this node is the cluster leader.
 func (c *Cluster) IsLeader() bool {
+	if c.consensus == ConsensusRaft && c.raft != nil {
+		return c.raft.IsLeader()
+	}
 	if c.gossip != nil {
 		return c.gossip.IsLeader()
 	}
@@ -596,6 +603,9 @@ func (c *Cluster) IsLeader() bool {
 // DetectSplitBrain checks for split-brain conditions in the cluster.
 // Returns true if this node should step down due to split-brain detected.
 func (c *Cluster) DetectSplitBrain() bool {
+	if c.consensus == ConsensusRaft && c.raft != nil {
+		return false
+	}
 	if c.gossip != nil {
 		return c.gossip.DetectSplitBrain()
 	}

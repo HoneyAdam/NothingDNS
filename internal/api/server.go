@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -158,10 +159,12 @@ func (l *loginRateLimiter) checkUserRateLimit(ip, username string) (bool, time.D
 
 // recordFailedAttempt records a failed login attempt for the given IP and username.
 func (l *loginRateLimiter) recordFailedAttempt(ip, username string) {
+	l.recordFailedAttemptAt(ip, username, time.Now())
+}
+
+func (l *loginRateLimiter) recordFailedAttemptAt(ip, username string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	now := time.Now()
 
 	// Track by IP
 	attempt, exists := l.ipAttempts[ip]
@@ -184,7 +187,7 @@ func (l *loginRateLimiter) recordFailedAttempt(ip, username string) {
 		}
 	} else {
 		// Reset lockout if expired (only check non-zero lockedUntil)
-		if !attempt.lockedUntil.IsZero() && now.After(attempt.lockedUntil) {
+		if !attempt.lockedUntil.IsZero() && deadlineReachedAt(now, attempt.lockedUntil) {
 			attempt.count = 0
 			attempt.lockedUntil = time.Time{}
 		}
@@ -219,7 +222,7 @@ func (l *loginRateLimiter) recordFailedAttempt(ip, username string) {
 		}
 	} else {
 		// Reset lockout if expired (only check non-zero lockedUntil)
-		if !userAttempt.lockedUntil.IsZero() && now.After(userAttempt.lockedUntil) {
+		if !userAttempt.lockedUntil.IsZero() && deadlineReachedAt(now, userAttempt.lockedUntil) {
 			userAttempt.count = 0
 			userAttempt.lockedUntil = time.Time{}
 		}
@@ -242,15 +245,17 @@ func (l *loginRateLimiter) recordSuccess(ip, username string) {
 // cleanup removes stale lockout entries to prevent memory growth.
 // Called periodically by the API server's cleanup goroutine.
 func (l *loginRateLimiter) cleanup() {
+	l.cleanupAt(time.Now())
+}
+
+func (l *loginRateLimiter) cleanupAt(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-
-	now := time.Now()
 
 	// Clean up expired IP attempts
 	for ip, attempt := range l.ipAttempts {
 		// Remove if lockout expired and no active delay
-		if now.After(attempt.lockedUntil) && now.After(attempt.lastTry.Add(loginMaxDelay)) {
+		if deadlineReachedAt(now, attempt.lockedUntil) && deadlineReachedAt(now, attempt.lastTry.Add(loginMaxDelay)) {
 			delete(l.ipAttempts, ip)
 		}
 	}
@@ -258,10 +263,14 @@ func (l *loginRateLimiter) cleanup() {
 	// Clean up expired user attempts
 	for username, attempt := range l.userAttempts {
 		// Remove if lockout expired
-		if now.After(attempt.lockedUntil) {
+		if deadlineReachedAt(now, attempt.lockedUntil) {
 			delete(l.userAttempts, username)
 		}
 	}
+}
+
+func deadlineReachedAt(now, deadline time.Time) bool {
+	return !now.Before(deadline)
 }
 
 // apiRateLimiter implements a sliding window rate limiter for API endpoints.
@@ -983,19 +992,12 @@ func reverseIPv4(ip string) string {
 	return fmt.Sprintf("%s.%s.%s.%s.in-addr.arpa", parts[3], parts[2], parts[1], parts[0])
 }
 
-// reverseIPv4Relative returns the relative name for a PTR record within a zone.
-// The FQDN for IP a.b.c.d is: d.c.b.a.in-addr.arpa
-// Zone origin like "1.168.192.in-addr.arpa" means last 1 octet varies (a=/24).
-// We need to return just the varying labels in correct order: "a" for /24, "b.a" for /16, "c.b.a" for /8.
+// reverseIPv4Relative returns the relative owner name for a PTR record within a zone.
+// The FQDN for IP a.b.c.d is d.c.b.a.in-addr.arpa; relative names must keep
+// that reverse label order so relative+origin reconstructs the PTR owner.
 // cidrPrefix is the CIDR being added (must be >= zone prefix).
 func reverseIPv4Relative(ip string, origin string, cidrPrefix int) string {
 	fqdn := reverseIPv4(ip)
-	// fqdn is like "4.1.168.192.in-addr.arpa" for IP 192.168.1.4
-	// labels before "in-addr.arpa" are [4, 1, 168, 192] = [d, c, b, a] for IP a.b.c.d
-	// varyingLabels = 4 - zonePrefix/8
-	// For /24 zone: varyingLabels = 4 - 3 = 1 → need [d] = "4"
-	// For /16 zone: varyingLabels = 4 - 2 = 2 → need [c, d] = "1.4"
-	// For /8 zone: varyingLabels = 4 - 1 = 3 → need [b, c, d] = "168.1.4"
 	// Parse zone prefix from origin (not from cidrPrefix)
 	originStripped := strings.TrimSuffix(origin, ".")
 	remainder := strings.TrimSuffix(originStripped, ".in-addr.arpa")
@@ -1015,41 +1017,13 @@ func reverseIPv4Relative(ip string, origin string, cidrPrefix int) string {
 	if varyingLabels > 4 {
 		varyingLabels = 4
 	}
-	// Split fqdn and extract varying labels from the end (reversed order)
-	// FQDN: d.c.b.a.in-addr.arpa -> labels [d, c, b, a, in-addr, arpa]
 	parts := strings.Split(fqdn, ".")
 	if len(parts) < 6 {
 		return fqdn
 	}
-	// We need the last varyingLabels from ipLabels, reversed back to normal order
-	// For varyingLabels=1: ipLabels[3] = d = 4
-	// For varyingLabels=2: ipLabels[2], ipLabels[3] = c, d = 1, 4 → "1.4"
-	// For varyingLabels=3: ipLabels[1], ipLabels[2], ipLabels[3] = b, c, d = 168, 1, 4 → "168.1.4"
-	start := 4 - varyingLabels
-	if start < 0 {
-		start = 0 //nolint:ineffassign // defensive clamp; downstream code uses start in slice math
-	}
-	// ipLabels is [d, c, b, a], we want [c, d] for varyingLabels=2 (which is parts[1], parts[2])
-	// Actually parts[0]=d, parts[1]=c, parts[2]=b, parts[3]=a
-	// For varyingLabels=2: want c,d = parts[1], parts[2]? No...
-	// Wait: parts[0]=4, parts[1]=1, parts[2]=168, parts[3]=192
-	// For /16: want "1.4" = c.d = parts[1].parts[2]? But 1.4 would be parts[1]+"."+parts[2]
-	// parts = [4, 1, 168, 192]
-	// parts[0] = 4 = d
-	// parts[1] = 1 = c
-	// parts[2] = 168 = b
-	// parts[3] = 192 = a
-	// For /16 varyingLabels=2: want b.a = 168.192? No, want c.d = 1.4 = parts[1].parts[3]? No...
-	// Let me re-think. IP is a.b.c.d = 192.168.1.4
-	// FQDN reversed: d.c.b.a.in-addr.arpa = 4.1.168.192.in-addr.arpa
-	// So parts[0]=4=d, parts[1]=1=c, parts[2]=168=b, parts[3]=192=a
-	// Zone /16 (168.192) means last 2 octets vary: c.b = 1.168? No...
-	// In reverse: d.c = 4.1 represents c.d = 1.4 (the varying part)
-	// So for varyingLabels=2, I need: parts[1].parts[0] = 1.4 (reversed order!)
-	// For varyingLabels=3: parts[2].parts[1].parts[0] = 168.1.4
 	result := make([]string, varyingLabels)
 	for i := 0; i < varyingLabels; i++ {
-		result[i] = parts[varyingLabels-1-i]
+		result[i] = parts[i]
 	}
 	return strings.Join(result, ".")
 }
@@ -1062,24 +1036,14 @@ func validateZoneCIDR(origin string, cidrPrefix int) (int, error) {
 	if !strings.HasSuffix(origin, ".") {
 		return 0, fmt.Errorf("zone origin %s must have trailing dot", origin)
 	}
-	// Parse origin: should end with .in-addr.arpa
-	originStripped := strings.TrimSuffix(origin, ".")
-	if !strings.HasSuffix(originStripped, "in-addr.arpa") {
-		return 0, fmt.Errorf("zone %s is not a reverse DNS zone (.in-addr.arpa)", origin)
+
+	labels, err := reverseIPv4ZoneLabels(origin)
+	if err != nil {
+		return 0, err
 	}
-	// Get labels between origin and .in-addr.arpa
-	// e.g. "1.168.192.in-addr.arpa" -> ["1", "168", "192"]
-	remainder := strings.TrimSuffix(originStripped, ".in-addr.arpa")
-	if remainder == originStripped {
-		return 0, fmt.Errorf("zone %s is not a valid reverse DNS zone", origin)
-	}
-	labels := strings.Split(remainder, ".")
-	// Number of fixed octets = number of labels in zone
+
 	// Zone prefix = 8 * numFixed
 	numFixed := len(labels)
-	if numFixed < 1 || numFixed > 4 {
-		return 0, fmt.Errorf("zone %s has invalid number of octets", origin)
-	}
 	zonePrefix := 8 * numFixed
 	// CIDR must be >= zone prefix (more specific or same)
 	if cidrPrefix < zonePrefix {
@@ -1087,6 +1051,53 @@ func validateZoneCIDR(origin string, cidrPrefix int) (int, error) {
 	}
 	return zonePrefix, nil
 }
+
+func validateZoneCIDRNetwork(origin string, ip net.IP, cidrPrefix int) (int, error) {
+	zonePrefix, err := validateZoneCIDR(origin, cidrPrefix)
+	if err != nil {
+		return 0, err
+	}
+
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return 0, fmt.Errorf("only IPv4 CIDR is supported")
+	}
+
+	labels, err := reverseIPv4ZoneLabels(origin)
+	if err != nil {
+		return 0, err
+	}
+	for i, label := range labels {
+		octet := int(ip4[len(labels)-1-i])
+		if label != strconv.Itoa(octet) {
+			return 0, fmt.Errorf("CIDR network %s does not belong to reverse zone %s", ip4.String(), origin)
+		}
+	}
+	return zonePrefix, nil
+}
+
+func reverseIPv4ZoneLabels(origin string) ([]string, error) {
+	originStripped := strings.ToLower(strings.TrimSuffix(origin, "."))
+	if !strings.HasSuffix(originStripped, ".in-addr.arpa") {
+		return nil, fmt.Errorf("zone %s is not a reverse DNS zone (.in-addr.arpa)", origin)
+	}
+
+	// Get labels between origin and .in-addr.arpa
+	// e.g. "1.168.192.in-addr.arpa" -> ["1", "168", "192"]
+	remainder := strings.TrimSuffix(originStripped, ".in-addr.arpa")
+	labels := strings.Split(remainder, ".")
+	if len(labels) < 1 || len(labels) > 4 {
+		return nil, fmt.Errorf("zone %s has invalid number of octets", origin)
+	}
+	for _, label := range labels {
+		octet, err := strconv.Atoi(label)
+		if err != nil || octet < 0 || octet > 255 {
+			return nil, fmt.Errorf("zone %s has invalid reverse octet %q", origin, label)
+		}
+	}
+	return labels, nil
+}
+
 func actionToString(a rpz.PolicyAction) string {
 	switch a {
 	case rpz.ActionNXDOMAIN:

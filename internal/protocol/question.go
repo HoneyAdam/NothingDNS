@@ -78,12 +78,22 @@ func NewSRVQuestion(name string) (*Question, error) {
 
 // WireLength returns the length of the question in wire format.
 func (q *Question) WireLength() int {
+	if q == nil || q.Name == nil {
+		return 0
+	}
 	return q.Name.WireLength() + 4 // 2 bytes for QType + 2 bytes for QClass
 }
 
 // Pack serializes the question to wire format.
 // Returns the number of bytes written.
 func (q *Question) Pack(buf []byte, offset int, compression map[string]int) (int, error) {
+	if q == nil {
+		return 0, fmt.Errorf("nil question")
+	}
+	if q.Name == nil {
+		return 0, fmt.Errorf("nil question name")
+	}
+
 	// Pack the name
 	n, err := PackName(q.Name, buf, offset, compression)
 	if err != nil {
@@ -140,11 +150,18 @@ func UnpackQuestion(buf []byte, offset int) (*Question, int, error) {
 
 // String returns a human-readable representation of the question.
 func (q *Question) String() string {
+	if q == nil {
+		return "<nil question>"
+	}
 	classStr := ClassString(q.QClass)
 	typeStr := TypeString(q.QType)
+	name := "<nil>"
+	if q.Name != nil {
+		name = q.Name.String()
+	}
 
 	return fmt.Sprintf(";%s\t\t%s\t%s",
-		q.Name.String(),
+		name,
 		classStr,
 		typeStr,
 	)
@@ -156,8 +173,13 @@ func (q *Question) Copy() *Question {
 		return nil
 	}
 
+	var name *Name
+	if q.Name != nil {
+		name = NewName(q.Name.Labels, q.Name.FQDN)
+	}
+
 	return &Question{
-		Name:   NewName(q.Name.Labels, q.Name.FQDN),
+		Name:   name,
 		QType:  q.QType,
 		QClass: q.QClass,
 	}
@@ -165,17 +187,26 @@ func (q *Question) Copy() *Question {
 
 // IsEDNS returns true if this is an EDNS (OPT) query.
 func (q *Question) IsEDNS() bool {
+	if q == nil {
+		return false
+	}
 	return q.QType == TypeOPT
 }
 
 // IsClassANY returns true if this is an ANY class query.
 func (q *Question) IsClassANY() bool {
+	if q == nil {
+		return false
+	}
 	return q.QClass == ClassANY
 }
 
 // MatchesType returns true if the question matches the given type.
 // Handles TypeANY wildcard.
 func (q *Question) MatchesType(qtype uint16) bool {
+	if q == nil {
+		return false
+	}
 	if q.QType == TypeANY {
 		return true
 	}
@@ -185,6 +216,9 @@ func (q *Question) MatchesType(qtype uint16) bool {
 // MatchesClass returns true if the question matches the given class.
 // Handles ClassANY wildcard.
 func (q *Question) MatchesClass(qclass uint16) bool {
+	if q == nil {
+		return false
+	}
 	if q.QClass == ClassANY {
 		return true
 	}

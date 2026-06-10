@@ -127,6 +127,21 @@ func TestSetRateLimit_WindowReset(t *testing.T) {
 	}
 }
 
+func TestSetRateLimit_WindowExpiredBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	window := time.Second
+
+	if wsRateWindowExpiredAt(now.Add(-window+time.Nanosecond), now, window) {
+		t.Error("websocket rate window should not expire before the boundary")
+	}
+	if !wsRateWindowExpiredAt(now.Add(-window), now, window) {
+		t.Error("websocket rate window should expire exactly at the boundary")
+	}
+	if !wsRateWindowExpiredAt(now.Add(-window-time.Nanosecond), now, window) {
+		t.Error("websocket rate window should expire after the boundary")
+	}
+}
+
 func TestSetRateLimit_Disabled(t *testing.T) {
 	c := newConn(nil)
 	// maxMessages <= 0 disables rate limiting
@@ -342,23 +357,37 @@ func TestWriteClose_DirectCall(t *testing.T) {
 	}
 }
 
-func TestWriteClose_EmptyReason(t *testing.T) {
+func TestWriteClose_InvalidCodeRejected(t *testing.T) {
 	buf := &bytes.Buffer{}
 	c := &Conn{conn: &bufferConn{
 		reader: strings.NewReader(""),
 		writer: buf,
 	}}
 
-	c.writeClose(1006, "")
-
-	written := buf.Bytes()
-	// FIN + close opcode + length 2
-	if len(written) != 4 {
-		t.Errorf("expected 4 bytes (header + code only), got %d", len(written))
+	err := c.writeClose(1006, "")
+	if err == nil || err.Error() != "websocket: invalid close code" {
+		t.Fatalf("expected invalid close code error, got %v", err)
 	}
-	code := binary.BigEndian.Uint16(written[2:4])
-	if code != 1006 {
-		t.Errorf("expected close code 1006, got %d", code)
+
+	if written := buf.Bytes(); len(written) != 0 {
+		t.Fatalf("expected no close frame for invalid code, got %x", written)
+	}
+}
+
+func TestWriteClose_InvalidReasonRejected(t *testing.T) {
+	buf := &bytes.Buffer{}
+	c := &Conn{conn: &bufferConn{
+		reader: strings.NewReader(""),
+		writer: buf,
+	}}
+
+	err := c.writeClose(1000, string([]byte{0xFF}))
+	if err == nil || err.Error() != "websocket: invalid close reason" {
+		t.Fatalf("expected invalid close reason error, got %v", err)
+	}
+
+	if written := buf.Bytes(); len(written) != 0 {
+		t.Fatalf("expected no close frame for invalid reason, got %x", written)
 	}
 }
 
@@ -369,7 +398,8 @@ func TestWriteClose_LongReason(t *testing.T) {
 		writer: buf,
 	}}
 
-	// Reason longer than 125 bytes — triggers extended length encoding in writeClose
+	// Close frames are control frames; RFC 6455 limits control payloads to
+	// 125 bytes, including the 2-byte close code.
 	longReason := strings.Repeat("x", 200)
 	c.writeClose(1011, longReason)
 
@@ -377,21 +407,16 @@ func TestWriteClose_LongReason(t *testing.T) {
 	if written[0] != 0x88 {
 		t.Errorf("expected close opcode, got 0x%02x", written[0])
 	}
-	// Extended length marker
-	if written[1] != 126 {
-		t.Errorf("expected extended length marker 126, got %d", written[1])
+	if written[1] != 125 {
+		t.Errorf("expected control payload length 125, got %d", written[1])
 	}
-	length := int(binary.BigEndian.Uint16(written[2:4]))
-	if length != 2+200 {
-		t.Errorf("expected payload length 202, got %d", length)
-	}
-	code := binary.BigEndian.Uint16(written[4:6])
+	code := binary.BigEndian.Uint16(written[2:4])
 	if code != 1011 {
 		t.Errorf("expected close code 1011, got %d", code)
 	}
-	reason := string(written[6 : 4+length])
-	if reason != longReason {
-		t.Error("reason string mismatch")
+	reason := string(written[4:])
+	if reason != strings.Repeat("x", 123) {
+		t.Errorf("reason length = %d, want 123-byte truncation", len(reason))
 	}
 }
 
@@ -401,8 +426,8 @@ func TestWriteClose_LongReason(t *testing.T) {
 
 func TestReadMessage_FragmentedText(t *testing.T) {
 	// Two-fragment text message
-	frag1 := buildFrame(0x1, false, false, nil, []byte("foo"))
-	frag2 := buildFrame(0x0, true, false, nil, []byte("bar"))
+	frag1 := buildClientFrame(0x1, false, []byte("foo"))
+	frag2 := buildClientFrame(0x0, true, []byte("bar"))
 	c := newConn(append(frag1, frag2...))
 
 	msgType, data, err := c.ReadMessage()
@@ -414,6 +439,29 @@ func TestReadMessage_FragmentedText(t *testing.T) {
 	}
 	if string(data) != "foobar" {
 		t.Errorf("expected 'foobar', got %q", string(data))
+	}
+}
+
+func TestReadMessage_FragmentedInvalidTextRejected(t *testing.T) {
+	frag1 := buildClientFrame(0x1, false, []byte("ok"))
+	frag2 := buildClientFrame(0x0, true, []byte{0xFF})
+	c := newConn(append(frag1, frag2...))
+
+	_, _, err := c.ReadMessage()
+	if err == nil || !strings.Contains(err.Error(), "invalid text payload") {
+		t.Fatalf("ReadMessage error = %v, want invalid text payload", err)
+	}
+
+	bc := c.conn.(*bufferConn)
+	written := bc.writer.Bytes()
+	if len(written) < 4 {
+		t.Fatalf("expected invalid-payload close frame, got %d bytes: %x", len(written), written)
+	}
+	if written[0] != 0x88 {
+		t.Fatalf("expected close opcode, got 0x%02x", written[0])
+	}
+	if code := binary.BigEndian.Uint16(written[2:4]); code != 1007 {
+		t.Fatalf("close code = %d, want 1007", code)
 	}
 }
 
@@ -436,9 +484,9 @@ func TestReadMessage_FragmentedBinary(t *testing.T) {
 }
 
 func TestReadMessage_ThreeFragmentMessage(t *testing.T) {
-	frag1 := buildFrame(0x1, false, false, nil, []byte("a"))
-	frag2 := buildFrame(0x0, false, false, nil, []byte("b"))
-	frag3 := buildFrame(0x0, true, false, nil, []byte("c"))
+	frag1 := buildClientFrame(0x1, false, []byte("a"))
+	frag2 := buildClientFrame(0x0, false, []byte("b"))
+	frag3 := buildClientFrame(0x0, true, []byte("c"))
 	c := newConn(append(append(frag1, frag2...), frag3...))
 
 	msgType, data, err := c.ReadMessage()
@@ -454,41 +502,68 @@ func TestReadMessage_ThreeFragmentMessage(t *testing.T) {
 }
 
 // ============================================================================
-// ReadMessage — continuation without prior fragment (ignored)
+// ReadMessage — continuation without prior fragment (protocol error)
 // ============================================================================
 
 func TestReadMessage_ContinuationWithoutPriorFragment(t *testing.T) {
-	// A continuation frame arriving without a prior start frame should be skipped
-	cont := buildFrame(0x0, true, false, nil, []byte("orphan"))
-	text := buildFrame(0x1, true, false, nil, []byte("real"))
-	c := newConn(append(cont, text...))
+	// A continuation frame arriving without a prior start frame is a protocol error.
+	cont := buildClientFrame(0x0, true, []byte("orphan"))
+	c := newConn(cont)
 
-	msgType, data, err := c.ReadMessage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	_, _, err := c.ReadMessage()
+	if err == nil || !strings.Contains(err.Error(), "unexpected continuation frame") {
+		t.Fatalf("ReadMessage error = %v, want unexpected continuation frame", err)
 	}
-	if msgType != 1 || string(data) != "real" {
-		t.Errorf("expected type=1 data='real', got type=%d data=%q", msgType, data)
+
+	bc := c.conn.(*bufferConn)
+	written := bc.writer.Bytes()
+	if len(written) < 4 {
+		t.Fatalf("expected protocol-error close frame, got %d bytes: %x", len(written), written)
+	}
+	if written[0] != 0x88 {
+		t.Fatalf("expected close opcode, got 0x%02x", written[0])
+	}
+	if code := binary.BigEndian.Uint16(written[2:4]); code != 1002 {
+		t.Fatalf("close code = %d, want 1002", code)
 	}
 }
 
 // ============================================================================
-// ReadMessage — new fragment start while already fragmenting (reset)
+// ReadMessage — new data frame while already fragmenting (protocol error)
 // ============================================================================
 
 func TestReadMessage_NewFragmentStartWhileFragmenting(t *testing.T) {
-	// Start a text fragment, then send another text start (not continuation)
-	frag1 := buildFrame(0x1, false, false, nil, []byte("dead"))
-	frag2 := buildFrame(0x1, true, false, nil, []byte("live"))
-	c := newConn(append(frag1, frag2...))
-
-	// The second text frame is a complete message (fin=true), so it should be returned
-	msgType, data, err := c.ReadMessage()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	tests := []struct {
+		name   string
+		opcode byte
+	}{
+		{name: "text", opcode: 0x1},
+		{name: "binary", opcode: 0x2},
 	}
-	if msgType != 1 || string(data) != "live" {
-		t.Errorf("expected type=1 data='live', got type=%d data=%q", msgType, data)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			frag1 := buildClientFrame(0x1, false, []byte("dead"))
+			frag2 := buildClientFrame(tt.opcode, true, []byte("live"))
+			c := newConn(append(frag1, frag2...))
+
+			_, _, err := c.ReadMessage()
+			if err == nil || !strings.Contains(err.Error(), "fragmented message complete") {
+				t.Fatalf("ReadMessage error = %v, want fragmented message complete", err)
+			}
+
+			bc := c.conn.(*bufferConn)
+			written := bc.writer.Bytes()
+			if len(written) < 4 {
+				t.Fatalf("expected protocol-error close frame, got %d bytes: %x", len(written), written)
+			}
+			if written[0] != 0x88 {
+				t.Fatalf("expected close opcode, got 0x%02x", written[0])
+			}
+			if code := binary.BigEndian.Uint16(written[2:4]); code != 1002 {
+				t.Fatalf("close code = %d, want 1002", code)
+			}
+		})
 	}
 }
 
@@ -502,7 +577,7 @@ func TestReadFrame_16BitLength(t *testing.T) {
 	for i := range payload {
 		payload[i] = byte(i % 256)
 	}
-	frame := buildFrame(0x2, true, false, nil, payload)
+	frame := buildClientFrame(0x2, true, payload)
 	c := newConn(frame)
 
 	_, opcode, data, err := c.readFrame()
@@ -524,7 +599,7 @@ func TestReadFrame_64BitLength(t *testing.T) {
 	for i := range payload {
 		payload[i] = byte(i % 256)
 	}
-	frame := buildFrame(0x1, true, false, nil, payload)
+	frame := buildClientFrame(0x1, true, payload)
 
 	// This should exceed the 16KB max frame limit
 	c := newConn(frame)
@@ -591,6 +666,7 @@ func TestHandshake_OriginAllowed(t *testing.T) {
 		r.Header.Set("Upgrade", "websocket")
 		r.Header.Set("Connection", "Upgrade")
 		r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+		r.Header.Set("Sec-WebSocket-Version", "13")
 		r.Header.Set("Origin", "https://evil.com")
 
 		conn, err := Handshake(w, r, "https://good.com")
@@ -615,6 +691,7 @@ func TestHandshake_OriginAllowedExact(t *testing.T) {
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")
 	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	r.Header.Set("Sec-WebSocket-Version", "13")
 	r.Header.Set("Origin", "https://good.com")
 
 	// Origin matches — but Handshake will fail at Hijack since
@@ -671,6 +748,7 @@ func TestHandshake_NoAllowedOriginsWithOriginHeader(t *testing.T) {
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")
 	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	r.Header.Set("Sec-WebSocket-Version", "13")
 	r.Header.Set("Origin", "https://example.com")
 
 	conn, err := Handshake(w, r) // no allowed origins
@@ -694,6 +772,7 @@ func TestHandshake_NoAllowedOriginsSameOriginHeader(t *testing.T) {
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")
 	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	r.Header.Set("Sec-WebSocket-Version", "13")
 	r.Header.Set("Origin", "http://example.com")
 
 	conn, err := Handshake(w, r) // no allowed origins
@@ -715,6 +794,7 @@ func TestHandshake_NoOriginHeader(t *testing.T) {
 	r.Header.Set("Upgrade", "websocket")
 	r.Header.Set("Connection", "Upgrade")
 	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	r.Header.Set("Sec-WebSocket-Version", "13")
 	// No Origin header — should proceed past origin check
 
 	conn, err := Handshake(w, r)

@@ -136,7 +136,10 @@ func ParseCatalogMemberRecord(rdata string) (*CatalogMemberRecord, error) {
 		} else if isValidClass(part) {
 			rec.Class = part
 		} else if isNumericTTL(part) {
-			ttl, _ := strconv.ParseUint(part, 10, 32)
+			ttl, err := strconv.ParseUint(part, 10, 32)
+			if err != nil {
+				return nil, fmt.Errorf("catalog member record: invalid TTL %q: %w", part, err)
+			}
 			rec.TTL = uint32(ttl)
 		}
 	}

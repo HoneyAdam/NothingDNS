@@ -51,18 +51,15 @@ func cmdRecord(args []string) error {
 		name := args[2]
 		rtype := args[3]
 		rdata := args[4]
-		ttl := 300
+		ttl := uint32(300)
 		if len(args) > 5 {
 			// Reject invalid TTL strings rather than silently keeping the
 			// default. The old behavior accepted `record add z n A 1.2.3.4
 			// abc` and inserted with TTL=300 with no warning — most users
 			// reading the output would have no clue their TTL was ignored.
-			t, err := strconv.Atoi(args[5])
+			t, err := parseRecordTTL(args[5])
 			if err != nil {
-				return fmt.Errorf("invalid TTL %q: must be an integer", args[5])
-			}
-			if t < 0 {
-				return fmt.Errorf("invalid TTL %d: must be non-negative", t)
+				return err
 			}
 			ttl = t
 		}
@@ -110,14 +107,11 @@ func cmdRecord(args []string) error {
 		rtype := args[3]
 		oldData := args[4]
 		newData := args[5]
-		ttl := 0
+		ttl := uint32(0)
 		if len(args) > 6 {
-			t, err := strconv.Atoi(args[6])
+			t, err := parseRecordTTL(args[6])
 			if err != nil {
-				return fmt.Errorf("invalid TTL %q: must be an integer", args[6])
-			}
-			if t < 0 {
-				return fmt.Errorf("invalid TTL %d: must be non-negative", t)
+				return err
 			}
 			ttl = t
 		}
@@ -141,4 +135,12 @@ func cmdRecord(args []string) error {
 		return fmt.Errorf("unknown record subcommand: %s", args[0])
 	}
 	return nil
+}
+
+func parseRecordTTL(value string) (uint32, error) {
+	ttl, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("invalid TTL %q: must be an integer between 0 and 4294967295", value)
+	}
+	return uint32(ttl), nil
 }

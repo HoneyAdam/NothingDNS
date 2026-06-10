@@ -1,12 +1,15 @@
 package zone
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/storage"
 )
 
@@ -330,6 +333,35 @@ func TestManager_CreateZone_WithZoneDir(t *testing.T) {
 	}
 }
 
+func TestManager_DeleteZone_RemovesZoneDirFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	m := NewManager()
+	m.SetZoneDir(tmpDir)
+
+	soa := &SOARecord{
+		MName: "ns1.example.com.", RName: "hostmaster.example.com.",
+		Serial: 1, Refresh: 3600, Retry: 900, Expire: 604800, Minimum: 86400,
+	}
+	ns := []NSRecord{{NSDName: "ns1.example.com.", TTL: 0}}
+
+	if err := m.CreateZone("example.com.", 3600, soa, ns); err != nil {
+		t.Fatalf("CreateZone: %v", err)
+	}
+
+	zonePath := filepath.Join(tmpDir, "example.com.zone")
+	if _, err := os.Stat(zonePath); err != nil {
+		t.Fatalf("expected zone file before delete: %v", err)
+	}
+
+	if err := m.DeleteZone("example.com."); err != nil {
+		t.Fatalf("DeleteZone: %v", err)
+	}
+
+	if _, err := os.Stat(zonePath); !os.IsNotExist(err) {
+		t.Fatalf("zone file still exists after delete, stat err = %v", err)
+	}
+}
+
 func TestManager_CreateZone_DotOrigin(t *testing.T) {
 	m := NewManager()
 	m.SetZoneDir("")
@@ -366,11 +398,6 @@ func TestManager_CreateZone_BadZoneDir(t *testing.T) {
 // ============================================================================
 
 func TestManager_AddRecord_WithZoneDirAndLogger(t *testing.T) {
-	// Test AddRecord with zoneDir set and a logger.
-	// Note: writeZoneFile acquires zone.RLock while AddRecord holds zone.Lock,
-	// which would deadlock. To test the zoneDir code path without deadlock,
-	// set zoneDir to empty so writeZoneFile is skipped in AddRecord,
-	// then set it back for the next operations.
 	m := NewManager()
 	m.SetZoneDir("")
 	m.SetLogger(&testLogger{})
@@ -395,6 +422,78 @@ func TestManager_AddRecord_WithZoneDirAndLogger(t *testing.T) {
 		t.Error("record should be added")
 	}
 	z.RUnlock()
+}
+
+func TestManager_RecordMutationsPersistWithZoneDir(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager()
+	m.SetZoneDir(dir)
+
+	soa := &SOARecord{
+		MName:   "ns1.example.com.",
+		RName:   "hostmaster.example.com.",
+		Serial:  1,
+		Refresh: 3600,
+		Retry:   900,
+		Expire:  604800,
+		Minimum: 86400,
+	}
+	if err := m.CreateZone("example.com.", 3600, soa, []NSRecord{{NSDName: "ns1.example.com."}}); err != nil {
+		t.Fatalf("CreateZone: %v", err)
+	}
+
+	zonePath := filepath.Join(dir, "example.com.zone")
+	mustFinish := func(name string, fn func() error) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			done <- fn()
+		}()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s: %v", name, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not return; likely zone lock self-deadlock during persistence", name)
+		}
+	}
+	mustContain := func(substr string) {
+		t.Helper()
+		content, err := os.ReadFile(zonePath)
+		if err != nil {
+			t.Fatalf("read zone file: %v", err)
+		}
+		if !strings.Contains(string(content), substr) {
+			t.Fatalf("zone file does not contain %q:\n%s", substr, content)
+		}
+	}
+	mustNotContain := func(substr string) {
+		t.Helper()
+		content, err := os.ReadFile(zonePath)
+		if err != nil {
+			t.Fatalf("read zone file: %v", err)
+		}
+		if strings.Contains(string(content), substr) {
+			t.Fatalf("zone file unexpectedly contains %q:\n%s", substr, content)
+		}
+	}
+
+	mustFinish("AddRecord", func() error {
+		return m.AddRecord("example.com.", Record{Name: "www", TTL: 300, Type: "A", RData: "192.0.2.1"})
+	})
+	mustContain("www\t300\tIN\tA\t192.0.2.1")
+
+	mustFinish("UpdateRecord", func() error {
+		return m.UpdateRecord("example.com.", "www", "A", "192.0.2.1", Record{Name: "www", TTL: 300, Type: "A", RData: "192.0.2.2"})
+	})
+	mustContain("www\t300\tIN\tA\t192.0.2.2")
+	mustNotContain("www\t300\tIN\tA\t192.0.2.1")
+
+	mustFinish("DeleteRecord", func() error {
+		return m.DeleteRecord("example.com.", "www", "A")
+	})
+	mustNotContain("www\t300\tIN\tA")
 }
 
 func TestManager_AddRecord_DefaultClass(t *testing.T) {
@@ -813,23 +912,58 @@ func TestWriteZone_WithRecords(t *testing.T) {
 	}
 }
 
+func TestWriteZone_QuotesCharacterStringRDataRoundTrip(t *testing.T) {
+	dkim := `v=DKIM1; k=rsa; p=abc\"def\\ghi`
+	spf := "v=spf1 include:_spf.example.com ~all"
+	z := &Zone{
+		Origin:     "example.com.",
+		DefaultTTL: 300,
+		Records: map[string][]Record{
+			"_dmarc.example.com.": {
+				{Name: "_dmarc.example.com.", TTL: 300, Class: "IN", Type: "TXT", RData: "v=DMARC1; p=reject; rua=mailto:dmarc@example.com"},
+			},
+			"selector._domainkey.example.com.": {
+				{Name: "selector._domainkey.example.com.", TTL: 300, Class: "IN", Type: "TXT", RData: dkim},
+			},
+			"example.com.": {
+				{Name: "example.com.", TTL: 300, Class: "IN", Type: "SPF", RData: spf},
+			},
+		},
+	}
+
+	out, err := WriteZone(z)
+	if err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	if !strings.Contains(out, `TXT	"v=DMARC1; p=reject; rua=mailto:dmarc@example.com"`) {
+		t.Fatalf("TXT RDATA with semicolons was not quoted:\n%s", out)
+	}
+
+	parsed, err := ParseFile("roundtrip.zone", strings.NewReader(out))
+	if err != nil {
+		t.Fatalf("ParseFile round-trip: %v\n%s", err, out)
+	}
+
+	gotDMARC := parsed.Records["_dmarc.example.com."][0].RData
+	wantDMARC := "v=DMARC1; p=reject; rua=mailto:dmarc@example.com"
+	if gotDMARC != wantDMARC {
+		t.Fatalf("DMARC RDATA round-trip = %q, want %q", gotDMARC, wantDMARC)
+	}
+	gotDKIM := parsed.Records["selector._domainkey.example.com."][0].RData
+	if gotDKIM != dkim {
+		t.Fatalf("DKIM RDATA round-trip = %q, want %q", gotDKIM, dkim)
+	}
+	gotSPF := parsed.Records["example.com."][0].RData
+	if gotSPF != spf {
+		t.Fatalf("SPF RDATA round-trip = %q, want %q", gotSPF, spf)
+	}
+}
+
 // ============================================================================
 // FindDNAME (zone.go) — 0% coverage
 // ============================================================================
 
 func TestFindDNAME_Basic(t *testing.T) {
-	// DNAME at a name that will appear in the intermediates list.
-	// With origin "example.com." and query "foo.dname.example.com.",
-	// intermediates = ["foo.dname.example.com."] (parent "dname.example.com." != origin, appended;
-	// then "dname.example.com." has parent == origin, breaks without appending).
-	// So DNAME at "foo.dname.example.com." would be found.
-	// But for DNAME at the intermediate closest to origin, we need query "a.b.example.com."
-	// where DNAME is at "a.b.example.com." itself.
-	//
-	// Actually, let's use a simpler setup: query "www.example.com." won't work because
-	// parent of "www.example.com." is "example.com." == origin, so intermediates is empty.
-	// We need query "a.b.example.com." with DNAME at "a.b.example.com.".
-
 	z := newTestZone("example.com.", map[string][]Record{
 		"example.com.": {
 			{Name: "example.com.", Type: "SOA", RData: "ns1 admin 1 3600 600 86400 300"},
@@ -839,23 +973,19 @@ func TestFindDNAME_Basic(t *testing.T) {
 		},
 	})
 
-	rec, target, found := z.FindDNAME("a.b.example.com.")
+	rec, target, found := z.FindDNAME("x.a.b.example.com.")
 	if !found {
-		t.Fatal("expected DNAME match")
+		t.Fatal("expected DNAME match for subdomain below DNAME owner")
 	}
 	if rec.Type != "DNAME" {
 		t.Errorf("record type = %q, want DNAME", rec.Type)
 	}
-	// synthesize: TrimSuffix("a.b.example.com.", "a.b.example.com.") = "" + "other.net." = "other.net."
-	if target != "other.net." {
-		t.Errorf("synthesized target = %q, want other.net.", target)
+	if target != "x.other.net." {
+		t.Errorf("synthesized target = %q, want x.other.net.", target)
 	}
 }
 
 func TestFindDNAME_SubdomainOfDNAME(t *testing.T) {
-	// query "x.a.b.example.com." with DNAME at "a.b.example.com."
-	// intermediates: "x.a.b.example.com." (parent "a.b.example.com." != origin), "a.b.example.com." (parent "example.com." == origin, appended, break)
-	// Walk reverse: check "a.b.example.com." first, find DNAME
 	z := newTestZone("example.com.", map[string][]Record{
 		"example.com.": {
 			{Name: "example.com.", Type: "SOA", RData: "ns1 admin 1 3600 600 86400 300"},
@@ -868,6 +998,28 @@ func TestFindDNAME_SubdomainOfDNAME(t *testing.T) {
 	_, target, found := z.FindDNAME("x.a.b.example.com.")
 	if !found {
 		t.Fatal("expected DNAME match for subdomain of DNAME owner")
+	}
+	if target != "x.other.net." {
+		t.Errorf("synthesized target = %q, want x.other.net.", target)
+	}
+}
+
+func TestFindDNAME_ReturnsAbsoluteOwnerForRelativeRecordName(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"example.com.": {
+			{Name: "example.com.", Type: "SOA", RData: "ns1 admin 1 3600 600 86400 300"},
+		},
+		"a.b.example.com.": {
+			{Name: "a.b", Type: "DNAME", RData: "other.net."},
+		},
+	})
+
+	rec, target, found := z.FindDNAME("x.a.b.example.com.")
+	if !found {
+		t.Fatal("expected DNAME match for relative stored owner")
+	}
+	if rec.Name != "a.b.example.com." {
+		t.Errorf("DNAME owner = %q, want absolute owner a.b.example.com.", rec.Name)
 	}
 	if target != "x.other.net." {
 		t.Errorf("synthesized target = %q, want x.other.net.", target)
@@ -900,30 +1052,49 @@ func TestFindDNAME_OutOfZone(t *testing.T) {
 	}
 }
 
-func TestFindDNAME_AtOrigin(t *testing.T) {
-	// When querying the origin itself with a DNAME at origin,
-	// the intermediates builder splits "example.com." into ["example.com."]
-	// and the DNAME at "example.com." IS found.
+func TestFindDNAME_PartialLabelSuffixOutOfZone(t *testing.T) {
 	z := newTestZone("example.com.", map[string][]Record{
 		"example.com.": {
 			{Name: "example.com.", Type: "DNAME", RData: "example.net."},
 		},
 	})
 
-	_, target, found := z.FindDNAME("example.com.")
-	if !found {
-		t.Fatal("expected DNAME match at origin (DNAME at origin is found)")
+	_, _, found := z.FindDNAME("badexample.com.")
+	if found {
+		t.Error("expected no DNAME match for partial-label suffix outside zone")
 	}
-	// TrimSuffix("example.com.", "example.com.") = "" + "example.net." = "example.net."
-	if target != "example.net." {
-		t.Errorf("synthesized target = %q, want example.net.", target)
+}
+
+func TestFindDNAME_AtOrigin(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"example.com.": {
+			{Name: "example.com.", Type: "DNAME", RData: "example.net."},
+		},
+	})
+
+	_, _, found := z.FindDNAME("example.com.")
+	if found {
+		t.Fatal("DNAME must not synthesize for its exact owner name")
+	}
+}
+
+func TestFindDNAME_OriginAppliesBelowOrigin(t *testing.T) {
+	z := newTestZone("example.com.", map[string][]Record{
+		"example.com.": {
+			{Name: "example.com.", Type: "DNAME", RData: "example.net."},
+		},
+	})
+
+	_, target, found := z.FindDNAME("www.example.com.")
+	if !found {
+		t.Fatal("expected DNAME at origin to apply below origin")
+	}
+	if target != "www.example.net." {
+		t.Errorf("synthesized target = %q, want www.example.net.", target)
 	}
 }
 
 func TestFindDNAME_OneLabelDeep(t *testing.T) {
-	// Query "www.example.com." with origin "example.com."
-	// parent of "www.example.com." = "example.com." == origin => break immediately
-	// intermediates is empty, so no DNAME match even if DNAME at "www.example.com."
 	z := newTestZone("example.com.", map[string][]Record{
 		"www.example.com.": {
 			{Name: "www.example.com.", Type: "DNAME", RData: "other.net."},
@@ -1158,6 +1329,18 @@ func TestZONEMD_Verify_DifferentHash(t *testing.T) {
 	}
 }
 
+func TestZONEMD_Verify_Nil(t *testing.T) {
+	zmd := &ZONEMD{ZoneName: "a.com.", Hash: []byte{0x01}, Algorithm: 1}
+	if zmd.Verify(nil) {
+		t.Fatal("Verify(nil) should return false")
+	}
+
+	var nilZMD *ZONEMD
+	if nilZMD.Verify(zmd) {
+		t.Fatal("nil receiver Verify should return false")
+	}
+}
+
 // ============================================================================
 // parseRecordType (zonemd.go) — 0%
 // ============================================================================
@@ -1185,6 +1368,12 @@ func TestParseRecordType(t *testing.T) {
 		{"NSEC3", 50, false},
 		{"NSEC3PARAM", 51, false},
 		{"TLSA", 52, false},
+		{"CAA", 257, false},
+		{"URI", 256, false},
+		{"SVCB", 64, false},
+		{"HTTPS", 65, false},
+		{"DNAME", 39, false},
+		{"DKIM", 16, false},
 		{"ZONEMD", 63, false},
 		{"TYPE63", 63, false},
 		{"a", 1, false}, // case insensitive
@@ -1205,6 +1394,23 @@ func TestParseRecordType(t *testing.T) {
 				if got != tt.want {
 					t.Errorf("parseRecordType(%q) = %d, want %d", tt.input, got, tt.want)
 				}
+			}
+		})
+	}
+}
+
+func TestParseRecordTypeSupportsZoneRecordTypes(t *testing.T) {
+	for rtype := range recordTypes {
+		t.Run(rtype, func(t *testing.T) {
+			got, err := parseRecordType(rtype)
+			if err != nil {
+				t.Fatalf("parseRecordType(%q) returned error: %v", rtype, err)
+			}
+			if got == 0 {
+				t.Fatalf("parseRecordType(%q) returned zero type", rtype)
+			}
+			if rtype == "DKIM" && got != protocol.TypeTXT {
+				t.Fatalf("parseRecordType(%q) = %d, want TXT type %d", rtype, got, protocol.TypeTXT)
 			}
 		})
 	}
@@ -1325,6 +1531,18 @@ func TestSerializeRecordData_MX(t *testing.T) {
 	}
 }
 
+func TestSerializeRecordData_MXInvalidPriorityDoesNotCollideWithZero(t *testing.T) {
+	invalid := serializeRecordData(Record{Type: "MX", RData: "bad mail.example.com."})
+	validZero := serializeRecordData(Record{Type: "MX", RData: "0 mail.example.com."})
+
+	if bytes.Equal(invalid, validZero) {
+		t.Fatal("invalid MX priority serialized identically to valid zero priority")
+	}
+	if string(invalid) != "bad mail.example.com." {
+		t.Fatalf("invalid MX priority serialized to %q, want raw RDATA", string(invalid))
+	}
+}
+
 func TestSerializeRecordData_TXT(t *testing.T) {
 	rec := Record{Type: "TXT", RData: "hello world"}
 	data := serializeRecordData(rec)
@@ -1353,6 +1571,21 @@ func TestSerializeRecordData_SPF(t *testing.T) {
 	data := serializeRecordData(rec)
 	if len(data) == 0 {
 		t.Fatal("SPF should serialize to non-empty bytes")
+	}
+}
+
+func TestSerializeRecordData_SPF_Long(t *testing.T) {
+	longStr := strings.Repeat("x", 300)
+	rec := Record{Type: "SPF", RData: longStr}
+	data := serializeRecordData(rec)
+	if len(data) != 302 {
+		t.Fatalf("long SPF len = %d, want 302", len(data))
+	}
+	if data[0] != 255 {
+		t.Fatalf("first SPF chunk length = %d, want 255", data[0])
+	}
+	if data[256] != 45 {
+		t.Fatalf("second SPF chunk length = %d, want 45", data[256])
 	}
 }
 
@@ -1404,7 +1637,10 @@ func TestBuildCanonicalRRset(t *testing.T) {
 	ttl := uint32(3600)
 	rdataList := [][]byte{{192, 0, 2, 1}}
 
-	result := buildCanonicalRRset(name, rtype, ttl, rdataList)
+	result, err := buildCanonicalRRset(name, rtype, ttl, rdataList)
+	if err != nil {
+		t.Fatalf("buildCanonicalRRset: %v", err)
+	}
 	if len(result) == 0 {
 		t.Fatal("buildCanonicalRRset should return non-empty bytes")
 	}
@@ -1429,6 +1665,40 @@ func TestBuildCanonicalRRset(t *testing.T) {
 	}
 	if result[nameWireLen+8] != 0x00 || result[nameWireLen+9] != 0x04 {
 		t.Errorf("rdlength != 4: %x %x", result[nameWireLen+8], result[nameWireLen+9])
+	}
+}
+
+func TestBuildCanonicalRRsetRejectsOversizedRData(t *testing.T) {
+	_, err := buildCanonicalRRset("www.example.com.", 16, 300, [][]byte{make([]byte, 0x10000)})
+	if err == nil {
+		t.Fatal("expected oversized RDATA to fail")
+	}
+}
+
+func TestComputeZoneMDRejectsOversizedRData(t *testing.T) {
+	z := &Zone{
+		Origin: "example.com.",
+		SOA: &SOARecord{
+			MName: "ns1.example.com.", RName: "hostmaster.example.com.",
+			Serial: 1, Refresh: 3600, Retry: 900, Expire: 604800, Minimum: 86400,
+		},
+		Records: map[string][]Record{
+			"www.example.com.": {
+				{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "TXT", RData: strings.Repeat("a", 0x10000)},
+			},
+		},
+	}
+
+	_, err := ComputeZoneMD(z, ZONEMDSHA256)
+	if err == nil {
+		t.Fatal("expected ComputeZoneMD to reject oversized RDATA")
+	}
+	var zmdErr *ZoneMDError
+	if !errorAs(err, &zmdErr) {
+		t.Fatalf("expected *ZoneMDError, got %T: %v", err, err)
+	}
+	if !strings.Contains(zmdErr.Msg, "rdata too large") {
+		t.Fatalf("unexpected ZoneMDError message: %q", zmdErr.Msg)
 	}
 }
 

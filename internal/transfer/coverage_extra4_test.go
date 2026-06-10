@@ -211,7 +211,7 @@ func TestAXFRServer_zoneRecordToRR_InvalidRecordName_CoverageExtra4(t *testing.T
 	longLabel := strings.Repeat("a", 70)
 	_, err := s.zoneRecordToRR(longLabel+".example.com.", zone.Record{
 		Name: longLabel + ".example.com.", Type: "A", TTL: 3600, RData: "1.2.3.4",
-	}, "example.com.")
+	})
 	if err == nil {
 		t.Error("expected error for invalid record name in zoneRecordToRR")
 	}

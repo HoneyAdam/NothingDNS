@@ -49,6 +49,9 @@ type TKEYRecord struct {
 	// Security parameters (depends on mode)
 	SecurityParameters []byte
 
+	// Key inception time
+	Inception time.Time
+
 	// Key expiration time
 	Expiration time.Time
 
@@ -107,11 +110,26 @@ func TKEYErrorString(err uint16) string {
 
 // TKEYToResourceRecord converts a TKEY record to a protocol ResourceRecord.
 func TKEYToResourceRecord(tkey *TKEYRecord) (*protocol.ResourceRecord, error) {
-	// Calculate RDATA length
-	// Algorithm name + 2 (expiration) + 2 (mode) + 2 (error) + 2 (key len) + key + 2 (other len) + other
+	if tkey == nil {
+		return nil, fmt.Errorf("nil TKEY record")
+	}
+	if len(tkey.KeyData) > 65535 {
+		return nil, fmt.Errorf("TKEY key data too large: %d bytes", len(tkey.KeyData))
+	}
+	if len(tkey.OtherData) > 65535 {
+		return nil, fmt.Errorf("TKEY other data too large: %d bytes", len(tkey.OtherData))
+	}
+
+	algNameParsed, err := protocol.ParseName(tkey.Algorithm)
+	if err != nil {
+		return nil, fmt.Errorf("parsing algorithm name: %w", err)
+	}
+
 	algNameWire := protocol.CanonicalWireName(tkey.Algorithm)
 
-	rdataLen := len(algNameWire) + 2 + 2 + 2 + 2 + len(tkey.KeyData) + 2 + len(tkey.OtherData)
+	// RFC 2930 §2: Algorithm, Inception u32, Expiration u32, Mode u16,
+	// Error u16, Key Size u16, Key Data, Other Size u16, Other Data.
+	rdataLen := len(algNameWire) + 4 + 4 + 2 + 2 + 2 + len(tkey.KeyData) + 2 + len(tkey.OtherData)
 	rdata := make([]byte, rdataLen)
 	offset := 0
 
@@ -119,10 +137,23 @@ func TKEYToResourceRecord(tkey *TKEYRecord) (*protocol.ResourceRecord, error) {
 	copy(rdata[offset:], algNameWire)
 	offset += len(algNameWire)
 
-	// Expiration (48-bit time value)
-	expiryBytes := formatTKEYTime(tkey.Expiration)
-	copy(rdata[offset:], expiryBytes)
-	offset += 8 // 48-bit time
+	// Inception and Expiration are 32-bit Unix times.
+	inception := tkey.Inception
+	if inception.IsZero() {
+		inception = tkey.Expiration.Add(-time.Hour)
+	}
+	inceptionUnix, err := formatTKEYTime(inception)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TKEY inception: %w", err)
+	}
+	binary.BigEndian.PutUint32(rdata[offset:], inceptionUnix)
+	offset += 4
+	expirationUnix, err := formatTKEYTime(tkey.Expiration)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TKEY expiration: %w", err)
+	}
+	binary.BigEndian.PutUint32(rdata[offset:], expirationUnix)
+	offset += 4
 
 	// Mode
 	binary.BigEndian.PutUint16(rdata[offset:], tkey.Mode)
@@ -143,11 +174,6 @@ func TKEYToResourceRecord(tkey *TKEYRecord) (*protocol.ResourceRecord, error) {
 	offset += 2
 	copy(rdata[offset:], tkey.OtherData)
 
-	algNameParsed, err := protocol.ParseName(tkey.Algorithm)
-	if err != nil {
-		return nil, fmt.Errorf("parsing algorithm name: %w", err)
-	}
-
 	return &protocol.ResourceRecord{
 		Name:  algNameParsed,
 		Type:  protocol.TypeTKEY,
@@ -157,18 +183,13 @@ func TKEYToResourceRecord(tkey *TKEYRecord) (*protocol.ResourceRecord, error) {
 	}, nil
 }
 
-// formatTKEYTime formats a time for TKEY RDATA (48-bit Unix time).
-func formatTKEYTime(t time.Time) []byte {
-	unixTime := uint64(t.Unix())
-	result := make([]byte, 8)
-	// TKEY uses 48-bit time, top 16 bits first
-	result[0] = byte(unixTime >> 40)
-	result[1] = byte(unixTime >> 32)
-	result[2] = byte(unixTime >> 24)
-	result[3] = byte(unixTime >> 16)
-	result[4] = byte(unixTime >> 8)
-	result[5] = byte(unixTime)
-	return result[:6]
+// formatTKEYTime formats a time for TKEY RDATA (32-bit Unix time).
+func formatTKEYTime(t time.Time) (uint32, error) {
+	sec := t.Unix()
+	if sec < 0 || sec > int64(^uint32(0)) {
+		return 0, fmt.Errorf("time %s outside uint32 Unix range", t.UTC().Format(time.RFC3339))
+	}
+	return uint32(sec), nil
 }
 
 // TKEYQuery builds a TKEY query record for key assignment.
@@ -182,10 +203,12 @@ func TKEYQuery(algorithm string, mode uint16, keySize int) (*TKEYRecord, error) 
 		return nil, fmt.Errorf("generating key data: %w", err)
 	}
 
+	now := time.Now()
 	return &TKEYRecord{
 		Algorithm:          algorithm,
 		SecurityParameters: nil,
-		Expiration:         time.Now().Add(3600 * time.Second), // 1 hour default
+		Inception:          now,
+		Expiration:         now.Add(time.Hour),
 		Mode:               mode,
 		Error:              TKEYErrNoError,
 		KeyData:            keyData,
@@ -207,10 +230,12 @@ func GenerateTKEYDiffieHellman(algorithm string, prime, base []byte, privateValu
 		return nil, err
 	}
 
+	now := time.Now()
 	return &TKEYRecord{
 		Algorithm:          algorithm,
 		SecurityParameters: secParams,
-		Expiration:         time.Now().Add(3600 * time.Second),
+		Inception:          now,
+		Expiration:         now.Add(time.Hour),
 		Mode:               TKEYModeDiffieHellman,
 		Error:              TKEYErrNoError,
 		KeyData:            publicValue,
@@ -269,11 +294,15 @@ func ValidateTKEY(tkey *TKEYRecord) error {
 	}
 
 	// Check expiration is in the future
-	if tkey.Expiration.Before(time.Now()) {
+	if tkeyExpiredAt(tkey.Expiration, time.Now()) {
 		return fmt.Errorf("TKEY record has expired")
 	}
 
 	return nil
+}
+
+func tkeyExpiredAt(expiration, now time.Time) bool {
+	return !now.Before(expiration)
 }
 
 // String returns a human-readable representation of the TKEY record.

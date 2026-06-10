@@ -2,6 +2,8 @@ package load
 
 import (
 	"context"
+	"encoding/binary"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -68,17 +70,15 @@ func TestIntegrationLoadWithServer(t *testing.T) {
 					conn.SetDeadline(time.Now().Add(3 * time.Second))
 					// Read 2-byte length prefix
 					var lenBuf [2]byte
-					_, err := conn.Read(lenBuf[:])
-					if err != nil {
+					if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
 						return
 					}
-					msgLen := int(lenBuf[0])<<8 | int(lenBuf[1])
+					msgLen := int(binary.BigEndian.Uint16(lenBuf[:]))
 					if msgLen > 4096 || msgLen < 12 {
 						return
 					}
 					buf := make([]byte, msgLen)
-					_, err = conn.Read(buf)
-					if err != nil {
+					if _, err := io.ReadFull(conn, buf); err != nil {
 						return
 					}
 					// Set QR bit to make it a response
@@ -111,8 +111,15 @@ func TestIntegrationLoadWithServer(t *testing.T) {
 	}
 
 	total := result.Success + result.Errors + result.Timeouts
-	if total == 0 {
-		t.Fatal("no queries were attempted")
+	wantTotal := int64(cfg.Queries * cfg.Workers)
+	if total != wantTotal {
+		t.Fatalf("total queries = %d, want %d", total, wantTotal)
+	}
+	if result.Success != wantTotal {
+		t.Fatalf("successful queries = %d, want %d (errors=%d timeouts=%d)", result.Success, wantTotal, result.Errors, result.Timeouts)
+	}
+	if result.Errors != 0 || result.Timeouts != 0 {
+		t.Fatalf("unexpected failures: errors=%d timeouts=%d", result.Errors, result.Timeouts)
 	}
 
 	// Log results for debugging

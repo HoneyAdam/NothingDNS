@@ -151,6 +151,38 @@ func TestRFC9230_WrongKeyID(t *testing.T) {
 	}
 }
 
+func TestMarshalODoHMessageRejectsLengthOverflow(t *testing.T) {
+	if _, err := marshalODoHMessage(&odohMessage{
+		msgType:          odohMsgTypeQuery,
+		keyID:            make([]byte, 65536),
+		encryptedMessage: []byte{1},
+	}); err == nil {
+		t.Fatal("expected oversized key_id to fail")
+	}
+
+	if _, err := marshalODoHMessage(&odohMessage{
+		msgType:          odohMsgTypeQuery,
+		keyID:            []byte{1},
+		encryptedMessage: make([]byte, 65536),
+	}); err == nil {
+		t.Fatal("expected oversized encrypted_message to fail")
+	}
+}
+
+func TestEncryptQueryRFC9230RejectsOversizedDNSQuery(t *testing.T) {
+	target, err := NewObliviousTarget(
+		NewODoHConfig("target.example.com", "proxy.example.com"),
+		&rfc9230MockHandler{},
+	)
+	if err != nil {
+		t.Fatalf("NewObliviousTarget: %v", err)
+	}
+
+	if _, _, err := encryptQueryRFC9230(target.ConfigContents(), make([]byte, 65536)); err == nil {
+		t.Fatal("expected oversized DNS query to fail")
+	}
+}
+
 // TestRFC9230_ConfigsObjectShape verifies the outer-wrapped
 // ObliviousDoHConfigs object has the expected header so clients can
 // parse it.
@@ -174,6 +206,18 @@ func TestRFC9230_ConfigsObjectShape(t *testing.T) {
 	version := uint16(cfgs[2])<<8 | uint16(cfgs[3])
 	if version != 0x0001 {
 		t.Errorf("version = %#x, want 0x0001", version)
+	}
+}
+
+func TestRFC9230_ConfigsObjectRejectsOversizedLengths(t *testing.T) {
+	kp := &odohKeyPair{configBytes: make([]byte, 65536)}
+	if _, err := kp.configsObject(); err == nil {
+		t.Fatal("expected oversized config contents to fail")
+	}
+
+	target := &ObliviousTarget{keyPair: kp}
+	if cfgs := target.ConfigsObject(); cfgs != nil {
+		t.Fatalf("ConfigsObject with oversized config returned %d bytes, want nil", len(cfgs))
 	}
 }
 

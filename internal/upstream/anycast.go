@@ -63,6 +63,26 @@ func (b *AnycastBackend) IsHealthy() bool {
 	return b.healthy
 }
 
+func (b *AnycastBackend) snapshot() *AnycastBackend {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return &AnycastBackend{
+		PhysicalIP:   b.PhysicalIP,
+		Port:         b.Port,
+		Region:       b.Region,
+		Zone:         b.Zone,
+		Weight:       b.Weight,
+		healthy:      b.healthy,
+		lastCheck:    b.lastCheck,
+		latency:      b.latency,
+		failCount:    b.failCount,
+		successCount: b.successCount,
+	}
+}
+
 // markFailure marks the backend as having failed.
 func (b *AnycastBackend) markFailure() {
 	b.mu.Lock()
@@ -272,10 +292,30 @@ func (g *AnycastGroup) GetHealthyBackends() []*AnycastBackend {
 	var healthy []*AnycastBackend
 	for _, b := range g.Backends {
 		if b.IsHealthy() {
-			healthy = append(healthy, b)
+			healthy = append(healthy, b.snapshot())
 		}
 	}
 	return healthy
+}
+
+func (g *AnycastGroup) snapshot() *AnycastGroup {
+	if g == nil {
+		return nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	backends := make([]*AnycastBackend, len(g.Backends))
+	for i, backend := range g.Backends {
+		backends[i] = backend.snapshot()
+	}
+	return &AnycastGroup{
+		AnycastIP:       g.AnycastIP,
+		Backends:        backends,
+		HealthCheck:     g.HealthCheck,
+		FailoverTimeout: g.FailoverTimeout,
+		activeIndex:     atomic.LoadUint32(&g.activeIndex),
+	}
 }
 
 // Stats returns statistics for the anycast group.

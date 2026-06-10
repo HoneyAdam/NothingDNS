@@ -231,6 +231,28 @@ func TestParseProxyRequestMissingCiphertext(t *testing.T) {
 	}
 }
 
+func TestParseProxyRequestTruncatedPublicKeyValue(t *testing.T) {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(4))
+	buf.Write([]byte("pu"))
+
+	if _, err := parseProxyRequest(buf.Bytes()); err == nil {
+		t.Fatal("expected error for truncated public key value")
+	}
+}
+
+func TestParseProxyRequestTruncatedCiphertextValue(t *testing.T) {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(4))
+	buf.Write([]byte("pubK"))
+	binary.Write(&buf, binary.BigEndian, uint16(5))
+	buf.Write([]byte("ci"))
+
+	if _, err := parseProxyRequest(buf.Bytes()); err == nil {
+		t.Fatal("expected error for truncated ciphertext value")
+	}
+}
+
 func TestParseProxyRequestMissingNonce(t *testing.T) {
 	var buf bytes.Buffer
 	binary.Write(&buf, binary.BigEndian, uint16(4))
@@ -250,10 +272,24 @@ func TestParseProxyRequestTruncatedNonce(t *testing.T) {
 	buf.Write([]byte("pubK"))
 	binary.Write(&buf, binary.BigEndian, uint16(5))
 	buf.Write([]byte("ciphe"))
-	// No nonce bytes at all — r.Read(nonce) will get 0 bytes and return io.EOF
+	buf.Write(make([]byte, 6))
 	_, err := parseProxyRequest(buf.Bytes())
 	if err == nil {
-		t.Error("expected error for missing nonce")
+		t.Error("expected error for partial nonce")
+	}
+}
+
+func TestParseProxyRequestRejectsTrailingData(t *testing.T) {
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.BigEndian, uint16(4))
+	buf.Write([]byte("pubK"))
+	binary.Write(&buf, binary.BigEndian, uint16(5))
+	buf.Write([]byte("ciphe"))
+	buf.Write(make([]byte, 12))
+	buf.WriteByte(0xff)
+
+	if _, err := parseProxyRequest(buf.Bytes()); err == nil {
+		t.Fatal("expected error for trailing proxy request data")
 	}
 }
 
@@ -293,6 +329,40 @@ func TestBuildProxyRequestNilFields(t *testing.T) {
 	}
 	if len(parsed.PublicKey) != 0 || len(parsed.Ciphertext) != 0 {
 		t.Error("expected zero-length slices for nil fields")
+	}
+}
+
+func TestBuildProxyRequestRejectsLengthOverflow(t *testing.T) {
+	msg := &ObliviousDNSMessage{
+		PublicKey:  make([]byte, 65536),
+		Ciphertext: []byte{1},
+		Nonce:      make([]byte, 12),
+	}
+	if _, err := buildProxyRequest(msg); err == nil {
+		t.Fatal("expected oversized public key to fail")
+	}
+
+	msg.PublicKey = []byte{1}
+	msg.Ciphertext = make([]byte, 65536)
+	if _, err := buildProxyRequest(msg); err == nil {
+		t.Fatal("expected oversized ciphertext to fail")
+	}
+}
+
+func TestBuildProxyResponseRejectsLengthOverflow(t *testing.T) {
+	msg := &ObliviousDNSMessage{
+		PublicKey:  make([]byte, 65536),
+		Ciphertext: []byte{1},
+		Nonce:      make([]byte, 12),
+	}
+	if _, err := buildProxyResponse(msg); err == nil {
+		t.Fatal("expected oversized public key to fail")
+	}
+
+	msg.PublicKey = []byte{1}
+	msg.Ciphertext = make([]byte, 65536)
+	if _, err := buildProxyResponse(msg); err == nil {
+		t.Fatal("expected oversized ciphertext to fail")
 	}
 }
 
@@ -1255,6 +1325,19 @@ func TestObliviousProxyServeHTTPLargeBody(t *testing.T) {
 	}
 }
 
+func TestObliviousProxyServeHTTPRejectsOversizedBody(t *testing.T) {
+	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	proxy, _ := NewObliviousProxy(cfg)
+
+	req := httptest.NewRequest("POST", "http://test/", bytes.NewReader(make([]byte, maxBodySize+1)))
+	w := httptest.NewRecorder()
+
+	proxy.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // helper functions
 // ---------------------------------------------------------------------------
@@ -1375,7 +1458,7 @@ func TestClientEncapsulateQueryDeriveSharedSecretError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ObliviousClient.sendToProxy -- large response truncation
+// ObliviousClient.sendToProxy -- large response rejection
 // ---------------------------------------------------------------------------
 
 func TestClientSendToProxyLargeResponse(t *testing.T) {
@@ -1394,12 +1477,32 @@ func TestClientSendToProxyLargeResponse(t *testing.T) {
 		Ciphertext: []byte("test"),
 		Nonce:      make([]byte, 12),
 	}
-	parsed, err := client.sendToProxy(msg)
-	if err != nil {
-		t.Fatalf("sendToProxy failed: %v", err)
+	_, err := client.sendToProxy(msg)
+	if err == nil {
+		t.Fatal("expected oversized proxy response to fail")
 	}
-	if parsed == nil {
-		t.Error("parsed response is nil")
+	if !contains(err.Error(), "too large") {
+		t.Fatalf("error = %q, want oversized body context", err.Error())
+	}
+}
+
+func TestProxyForwardRawRejectsOversizedTargetResponse(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write(make([]byte, maxBodySize+1))
+	}))
+	defer ts.Close()
+
+	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	cfg.TargetURL = ts.URL
+	proxy, _ := NewObliviousProxy(cfg)
+
+	_, err := proxy.forwardRaw([]byte("dummy"))
+	if err == nil {
+		t.Fatal("expected oversized target response to fail")
+	}
+	if !contains(err.Error(), "too large") {
+		t.Fatalf("error = %q, want oversized body context", err.Error())
 	}
 }
 
@@ -1476,6 +1579,19 @@ func TestObliviousTargetServeHTTPBodyReadError(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestObliviousTargetServeHTTPRejectsOversizedBody(t *testing.T) {
+	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	target, _ := NewObliviousTarget(cfg, &mockHandler{})
+
+	req := httptest.NewRequest("POST", "http://test/", bytes.NewReader(make([]byte, maxBodySize+1)))
+	w := httptest.NewRecorder()
+
+	target.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
 	}
 }
 

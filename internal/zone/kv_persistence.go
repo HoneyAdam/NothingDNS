@@ -32,11 +32,37 @@ func NewKVPersistence(manager *Manager, kvStore *storage.KVStore) *KVPersistence
 	}
 }
 
-// Enable activates KV store persistence.
+// Enable activates KV store persistence and installs a mutation hook on the
+// underlying Manager, so EVERY zone mutation that goes through the manager —
+// REST API handlers, MCP tools, Raft apply on each cluster node, gossip
+// replication, or any future caller — is persisted to (or deleted from) the
+// KV store automatically. Callers no longer persist explicitly; paths that
+// mutate a *Zone directly (DDNS via transfer.ApplyUpdate) must call
+// Manager.NotifyMutated instead.
+//
+// Persistence is deliberately best-effort: failures are logged via the
+// manager's logger and do NOT fail the mutation, matching how the manager
+// already treats zone-file disk writes ("zone is loaded in memory; log the
+// error but don't fail"). NOTE: this is a behavior change for the REST API,
+// which previously returned 500 when the explicit post-mutation KV persist
+// failed even though the mutation itself had succeeded in memory.
 func (k *KVPersistence) Enable() {
 	k.mu.Lock()
 	k.enabled = true
+	manager := k.manager
 	k.mu.Unlock()
+
+	manager.SetMutationHook(func(zoneName string, deleted bool) {
+		var err error
+		if deleted {
+			err = k.DeleteFromKV(zoneName)
+		} else {
+			err = k.PersistZone(zoneName)
+		}
+		if err != nil {
+			manager.warnf("zone: KV persistence for %s failed: %v", zoneName, err)
+		}
+	})
 }
 
 // PersistZone persists a zone to the KV store.

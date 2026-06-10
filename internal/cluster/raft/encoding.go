@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // TLV-encoded RPC framing (replaces gob to close VULN-037/VULN-048).
@@ -63,7 +65,9 @@ func (fw *frameWriter) writeFramed(msgType uint8, msg any) error {
 	if len(plainPayload) > maxRPCMessageBytes {
 		return fmt.Errorf("payload exceeds maxRPCMessageBytes (%d > %d)", len(plainPayload), maxRPCMessageBytes)
 	}
-	if err := binary.Write(fw.w, binary.BigEndian, msgType); err != nil {
+	var msgTypeBuf [1]byte
+	msgTypeBuf[0] = msgType
+	if err := util.WriteFull(fw.w, msgTypeBuf[:]); err != nil {
 		return err
 	}
 	// Generate random nonce.
@@ -75,11 +79,10 @@ func (fw *frameWriter) writeFramed(msgType uint8, msg any) error {
 	// Write length prefix.
 	var lengthBuf [4]byte
 	binary.BigEndian.PutUint32(lengthBuf[:], uint32(len(ciphertext)))
-	if _, err := fw.w.Write(lengthBuf[:]); err != nil {
+	if err := util.WriteFull(fw.w, lengthBuf[:]); err != nil {
 		return err
 	}
-	_, err = fw.w.Write(ciphertext)
-	return err
+	return util.WriteFull(fw.w, ciphertext)
 }
 
 // writeRaw writes a plaintext TLV frame (no AEAD).
@@ -90,11 +93,10 @@ func (fw *frameWriter) writeRaw(msgType uint8, plainPayload []byte) error {
 	var header [frameHeaderSize]byte
 	header[0] = msgType
 	binary.BigEndian.PutUint32(header[1:], uint32(len(plainPayload)))
-	if _, err := fw.w.Write(header[:]); err != nil {
+	if err := util.WriteFull(fw.w, header[:]); err != nil {
 		return err
 	}
-	_, err := fw.w.Write(plainPayload)
-	return err
+	return util.WriteFull(fw.w, plainPayload)
 }
 
 // frameReader reads TLV-framed messages.

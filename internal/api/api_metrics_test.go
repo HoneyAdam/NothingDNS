@@ -106,6 +106,40 @@ func TestHandleQueryLog_InvalidParams(t *testing.T) {
 	}
 }
 
+func TestHandleQueryLogSkipsNilQueries(t *testing.T) {
+	s, token := setupMetricsServer(t)
+	s.dashboardServer = dashboard.NewServer()
+	t.Cleanup(s.dashboardServer.Stop)
+
+	s.dashboardServer.RecordQuery(nil)
+	s.dashboardServer.RecordQuery(&dashboard.QueryEvent{
+		Timestamp: time.Now(),
+		ClientIP:  "192.0.2.10",
+		Domain:    "example.com",
+		QueryType: "A",
+		Protocol:  "udp",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/query-log", nil)
+	req = withTestAdminAuth(req, token)
+	rec := httptest.NewRecorder()
+	s.handleQueryLog(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp QueryLogResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Queries) != 1 {
+		t.Fatalf("expected one non-nil query, got %d", len(resp.Queries))
+	}
+	if resp.Queries[0].Domain != "example.com" {
+		t.Fatalf("query domain = %q, want example.com", resp.Queries[0].Domain)
+	}
+}
+
 func TestHandleQueryLog_Unauthorized(t *testing.T) {
 	s, _ := setupMetricsServer(t)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/query-log", nil)

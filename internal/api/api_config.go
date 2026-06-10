@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -254,31 +255,41 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 	// current values.
 	cfg := s.cache.GetConfig()
 	if req.Size != nil {
+		if *req.Size < 1 {
+			s.writeError(w, http.StatusBadRequest, "size must be at least 1")
+			return
+		}
 		cfg.Capacity = *req.Size
 	}
-	if req.MinTTL != nil {
-		cfg.MinTTL = time.Duration(*req.MinTTL) * time.Second
-	}
-	if req.MaxTTL != nil {
-		cfg.MaxTTL = time.Duration(*req.MaxTTL) * time.Second
-	}
-	if req.DefaultTTL != nil {
-		cfg.DefaultTTL = time.Duration(*req.DefaultTTL) * time.Second
-	}
-	if req.NegativeTTL != nil {
-		cfg.NegativeTTL = time.Duration(*req.NegativeTTL) * time.Second
+	// Seconds-valued fields share identical validate-and-assign logic;
+	// table order preserves which field's error is reported first.
+	for _, f := range []struct {
+		name string
+		src  *int
+		dst  *time.Duration
+	}{
+		{"min_ttl", req.MinTTL, &cfg.MinTTL},
+		{"max_ttl", req.MaxTTL, &cfg.MaxTTL},
+		{"default_ttl", req.DefaultTTL, &cfg.DefaultTTL},
+		{"negative_ttl", req.NegativeTTL, &cfg.NegativeTTL},
+		{"prefetch_threshold", req.PrefetchThreshold, &cfg.PrefetchThreshold},
+		{"stale_grace_secs", req.StaleGraceSecs, &cfg.StaleGrace},
+	} {
+		if f.src == nil {
+			continue
+		}
+		d, err := cacheConfigSeconds(f.name, *f.src)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		*f.dst = d
 	}
 	if req.Prefetch != nil {
 		cfg.PrefetchEnabled = *req.Prefetch
 	}
-	if req.PrefetchThreshold != nil {
-		cfg.PrefetchThreshold = time.Duration(*req.PrefetchThreshold) * time.Second
-	}
 	if req.ServeStale != nil {
 		cfg.ServeStale = *req.ServeStale
-	}
-	if req.StaleGraceSecs != nil {
-		cfg.StaleGrace = time.Duration(*req.StaleGraceSecs) * time.Second
 	}
 	// \`Enabled\` has no corresponding field on cache.Config; the
 	// cache's lifecycle is owned by the manager. Accept it on input
@@ -288,6 +299,17 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 	s.cache.UpdateConfig(cfg)
 
 	s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "Cache configuration updated"})
+}
+
+func cacheConfigSeconds(field string, seconds int) (time.Duration, error) {
+	if seconds < 0 {
+		return 0, fmt.Errorf("%s cannot be negative", field)
+	}
+	const maxDurationSeconds = int64(1<<63-1) / int64(time.Second)
+	if int64(seconds) > maxDurationSeconds {
+		return 0, fmt.Errorf("%s is too large", field)
+	}
+	return time.Duration(seconds) * time.Second, nil
 }
 
 // handleGeoDNSStats returns GeoDNS engine statistics.

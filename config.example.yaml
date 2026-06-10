@@ -97,6 +97,9 @@ cluster:
 # STORAGE CONFIGURATION
 # =============================================================================
 # storage:
+#   # Directory for the embedded persistent database (data.db).
+#   # Keeps zone records durable even when zone files are absent.
+#   data_dir: /var/lib/nothingdns
 #   # SECURITY-REPORT.md L-6: Optional at-rest encryption for the KV
 #   # data file (zone state, etc.). 32-byte hex key. MUST differ from
 #   # cluster.encryption_key and cluster.snapshot_encryption_key.

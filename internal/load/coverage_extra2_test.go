@@ -2,10 +2,13 @@ package load
 
 import (
 	"context"
+	"io"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // ---------------------------------------------------------------------------
@@ -117,4 +120,85 @@ func TestRunner_UDPProtocol(t *testing.T) {
 	if result == nil {
 		t.Fatal("expected non-nil result")
 	}
+}
+
+func TestWriteFullRetriesPartialWrites(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	data := []byte{1, 2, 3, 4, 5}
+
+	if err := util.WriteFull(conn, data); err != nil {
+		t.Fatalf("WriteFull error: %v", err)
+	}
+	if string(conn.written) != string(data) {
+		t.Fatalf("written bytes = %v, want %v", conn.written, data)
+	}
+	if conn.calls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.calls)
+	}
+}
+
+func TestWriteFullRejectsZeroByteWrite(t *testing.T) {
+	conn := &partialWriteConn{}
+	err := util.WriteFull(conn, []byte{1, 2, 3})
+	if err != io.ErrNoProgress {
+		t.Fatalf("WriteFull error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+func TestWritePacketRejectsPartialDatagramWrite(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	_, err := writePacket(conn, []byte{1, 2, 3})
+	if err != io.ErrShortWrite {
+		t.Fatalf("writePacket error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if conn.calls != 1 {
+		t.Fatalf("writePacket should not retry datagrams, got %d calls", conn.calls)
+	}
+}
+
+type partialWriteConn struct {
+	maxWrite int
+	written  []byte
+	calls    int
+}
+
+func (c *partialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(p) {
+		n = len(p)
+	}
+	c.written = append(c.written, p[:n]...)
+	return n, nil
+}
+
+func (c *partialWriteConn) Close() error {
+	return nil
+}
+
+func (c *partialWriteConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return nil
 }

@@ -59,6 +59,40 @@ type Request struct {
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 	ID      interface{}     `json:"id,omitempty"`
+	hasID   bool            `json:"-"`
+}
+
+// UnmarshalJSON tracks whether the request contained an id member. JSON-RPC
+// distinguishes notifications (no id member) from requests whose id is null.
+// Decoding id into a json.RawMessage makes the distinction observable in a
+// single pass: an absent member leaves the RawMessage nil, while `"id":null`
+// yields the literal "null".
+func (r *Request) UnmarshalJSON(data []byte) error {
+	type requestJSON struct {
+		JSONRPC string          `json:"jsonrpc"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params,omitempty"`
+		ID      json.RawMessage `json:"id"`
+	}
+	var decoded requestJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	r.JSONRPC = decoded.JSONRPC
+	r.Method = decoded.Method
+	r.Params = decoded.Params
+	r.ID = nil
+	r.hasID = decoded.ID != nil
+	if r.hasID {
+		if err := json.Unmarshal(decoded.ID, &r.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Request) isNotification() bool {
+	return !r.hasID && r.ID == nil
 }
 
 // Response represents a JSON-RPC response
@@ -288,6 +322,7 @@ func NewServer(name, version string, handler Handler) *Server {
 
 // HandleRequest handles a single JSON-RPC request
 func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Response) {
+	notification := req.isNotification()
 	resp = &Response{
 		JSONRPC: JsonRPC,
 		ID:      req.ID,
@@ -298,6 +333,10 @@ func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Respons
 	// InternalError and keep serving.
 	defer func() {
 		if r := recover(); r != nil {
+			if notification {
+				resp = nil
+				return
+			}
 			resp.Result = nil
 			resp.Error = &RPCError{
 				Code:    InternalError,
@@ -308,6 +347,9 @@ func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Respons
 
 	result, err := s.dispatch(ctx, req.Method, req.Params)
 	if err != nil {
+		if notification {
+			return nil
+		}
 		var rpcErr *RPCError
 		if errors.As(err, &rpcErr) {
 			resp.Error = rpcErr
@@ -320,6 +362,9 @@ func (s *Server) HandleRequest(ctx context.Context, req *Request) (resp *Respons
 		return resp
 	}
 
+	if notification {
+		return nil
+	}
 	resp.Result = result
 	return resp
 }
@@ -485,11 +530,14 @@ func (s *StdioServer) Run(ctx context.Context) error {
 			continue
 		}
 
+		// HandleRequest returns nil for every notification, so any
+		// non-nil response belongs to a request that expects a reply.
 		resp := s.server.HandleRequest(ctx, &req)
-		if resp.ID != nil || resp.Error != nil {
-			if err := encoder.Encode(resp); err != nil {
-				return fmt.Errorf("encode response: %w", err)
-			}
+		if resp == nil {
+			continue
+		}
+		if err := encoder.Encode(resp); err != nil {
+			return fmt.Errorf("encode response: %w", err)
 		}
 	}
 }
@@ -580,6 +628,9 @@ func (t *SSETransport) HandleMessage(ctx context.Context, data []byte) ([]byte, 
 	}
 
 	resp := t.server.HandleRequest(ctx, &req)
+	if resp == nil {
+		return nil, nil
+	}
 	return json.Marshal(resp)
 }
 

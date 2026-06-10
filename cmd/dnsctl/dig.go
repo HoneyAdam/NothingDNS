@@ -6,16 +6,22 @@ import (
 	"io"
 	"net"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // digQueryTCP performs a single-shot DNS-over-TCP query (RFC 1035
 // §4.2.2 two-byte length prefix) and returns the parsed response.
 // Used by cmdDig when the UDP response has the TC bit set.
 func digQueryTCP(addr string, query []byte) (*protocol.Message, error) {
+	if len(query) > 0xffff {
+		return nil, fmt.Errorf("tcp query too large: %d bytes (max 65535)", len(query))
+	}
+
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("dial tcp %s: %w", addr, err)
@@ -27,10 +33,10 @@ func digQueryTCP(addr string, query []byte) (*protocol.Message, error) {
 
 	var prefix [2]byte
 	binary.BigEndian.PutUint16(prefix[:], uint16(len(query)))
-	if _, err := conn.Write(prefix[:]); err != nil {
+	if err := util.WriteFull(conn, prefix[:]); err != nil {
 		return nil, fmt.Errorf("write tcp len-prefix: %w", err)
 	}
-	if _, err := conn.Write(query); err != nil {
+	if err := util.WriteFull(conn, query); err != nil {
 		return nil, fmt.Errorf("write tcp body: %w", err)
 	}
 
@@ -155,7 +161,7 @@ func cmdDig(args []string) error {
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return fmt.Errorf("setting deadline: %w", err)
 	}
-	if _, err := conn.Write(buf[:n]); err != nil {
+	if _, err := writePacket(conn, buf[:n]); err != nil {
 		return fmt.Errorf("sending query: %w", err)
 	}
 
@@ -184,7 +190,11 @@ func cmdDig(args []string) error {
 		}
 	}
 
-	// Display results
+	printDigResponse(qname, qtypeStr, server, addr, wantDNSSEC, resp)
+	return nil
+}
+
+func printDigResponse(qname, qtypeStr, server, addr string, wantDNSSEC bool, resp *protocol.Message) {
 	fmt.Printf("; Query: %s %s @%s\n", qname, qtypeStr, server)
 	if wantDNSSEC {
 		fmt.Println("; +dnssec")
@@ -220,7 +230,7 @@ func cmdDig(args []string) error {
 	// Question section
 	fmt.Println(";; QUESTION SECTION:")
 	for _, q := range resp.Questions {
-		fmt.Printf(";%s\t\t%s\t%s\n", q.Name.String(), "IN", protocol.TypeString(q.QType))
+		printDigQuestion(q)
 	}
 	fmt.Println()
 
@@ -228,13 +238,7 @@ func cmdDig(args []string) error {
 	if len(resp.Answers) > 0 {
 		fmt.Println(";; ANSWER SECTION:")
 		for _, rr := range resp.Answers {
-			dataStr := "; NODATA"
-			if rr.Data != nil {
-				dataStr = rr.Data.String()
-			}
-			fmt.Printf("%s\t%d\t%s\t%s\t%s\n",
-				rr.Name.String(), rr.TTL, "IN",
-				protocol.TypeString(rr.Type), dataStr)
+			printDigRR(rr)
 		}
 		fmt.Println()
 	}
@@ -243,13 +247,7 @@ func cmdDig(args []string) error {
 	if len(resp.Authorities) > 0 {
 		fmt.Println(";; AUTHORITY SECTION:")
 		for _, rr := range resp.Authorities {
-			dataStr := "; NODATA"
-			if rr.Data != nil {
-				dataStr = rr.Data.String()
-			}
-			fmt.Printf("%s\t%d\t%s\t%s\t%s\n",
-				rr.Name.String(), rr.TTL, "IN",
-				protocol.TypeString(rr.Type), dataStr)
+			printDigRR(rr)
 		}
 		fmt.Println()
 	}
@@ -258,13 +256,7 @@ func cmdDig(args []string) error {
 	if len(resp.Additionals) > 0 {
 		fmt.Println(";; ADDITIONAL SECTION:")
 		for _, rr := range resp.Additionals {
-			dataStr := "; NODATA"
-			if rr.Data != nil {
-				dataStr = rr.Data.String()
-			}
-			fmt.Printf("%s\t%d\t%s\t%s\t%s\n",
-				rr.Name.String(), rr.TTL, "IN",
-				protocol.TypeString(rr.Type), dataStr)
+			printDigRR(rr)
 		}
 		fmt.Println()
 	}
@@ -281,6 +273,60 @@ func cmdDig(args []string) error {
 		fmt.Printf(";; SERVER: %s\n", addr)
 	}
 	fmt.Printf(";; WHEN: %s\n", time.Now().Format("Mon Jan 02 15:04:05 MST 2006"))
+}
 
-	return nil
+func printDigQuestion(q *protocol.Question) {
+	if q == nil {
+		fmt.Printf(";%s\t\t%s\t%s\n", "<nil>", "IN", "UNKNOWN")
+		return
+	}
+	name := "<nil>"
+	if q.Name != nil {
+		name = q.Name.String()
+	}
+	fmt.Printf(";%s\t\t%s\t%s\n", name, "IN", protocol.TypeString(q.QType))
+}
+
+func printDigRR(rr *protocol.ResourceRecord) {
+	if rr == nil {
+		fmt.Printf("%s\t%d\t%s\t%s\t%s\n", "<nil>", 0, "IN", "UNKNOWN", "; NODATA")
+		return
+	}
+	name := "<nil>"
+	if rr.Name != nil {
+		name = rr.Name.String()
+	}
+	fmt.Printf("%s\t%d\t%s\t%s\t%s\n",
+		name, rr.TTL, "IN", protocol.TypeString(rr.Type), formatDigRData(rr.Data))
+}
+
+func formatDigRData(data protocol.RData) string {
+	if isNilDigRData(data) {
+		return "; NODATA"
+	}
+	return data.String()
+}
+
+func isNilDigRData(data protocol.RData) bool {
+	if data == nil {
+		return true
+	}
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	n, err := conn.Write(data)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }

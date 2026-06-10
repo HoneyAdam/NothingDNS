@@ -150,8 +150,35 @@ func TestCluster_ElectsSingleLeader(t *testing.T) {
 
 	leader := waitForLeader(t, nodes, 3*time.Second)
 
-	// All non-leaders must be followers and agree the cluster has one
-	// leader at a term >= the leader's.
+	// waitForLeader returns as soon as one node becomes leader; followers may
+	// still be processing the first heartbeat. Wait for their observable
+	// leadership state to catch up before asserting.
+	if !waitUntil(3*time.Second, func() bool {
+		leaderTerm := leader.Term()
+		for _, n := range nodes {
+			if n == leader {
+				continue
+			}
+			if n.State() != StateFollower {
+				return false
+			}
+			if n.LeaderID() != leader.config.NodeID {
+				return false
+			}
+			if n.Term() < leaderTerm {
+				return false
+			}
+		}
+		return true
+	}) {
+		for _, n := range nodes {
+			t.Logf("%s state=%s leader=%q term=%d", n.config.NodeID, n.State(), n.LeaderID(), n.Term())
+		}
+		t.Fatalf("followers did not converge on leader %q", leader.config.NodeID)
+	}
+
+	// All non-leaders must be followers and agree the cluster has one leader
+	// at a term >= the leader's.
 	leaderTerm := leader.Term()
 	for _, n := range nodes {
 		if n == leader {

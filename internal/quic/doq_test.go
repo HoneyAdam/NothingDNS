@@ -315,6 +315,33 @@ func TestDoQConstants(t *testing.T) {
 	}
 }
 
+type stringAddr string
+
+func (a stringAddr) Network() string { return "test" }
+func (a stringAddr) String() string  { return string(a) }
+
+func TestDoQRemoteIP(t *testing.T) {
+	tests := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{name: "nil", addr: nil, want: "unknown"},
+		{name: "udp", addr: &net.UDPAddr{IP: net.ParseIP("192.0.2.10"), Port: 853}, want: "192.0.2.10"},
+		{name: "tcp hostport", addr: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 853}, want: "2001:db8::1"},
+		{name: "custom hostport", addr: stringAddr("198.51.100.20:853"), want: "198.51.100.20"},
+		{name: "custom opaque", addr: stringAddr("opaque-peer"), want: "opaque-peer"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := doqRemoteIP(tt.addr); got != tt.want {
+				t.Fatalf("doqRemoteIP(%v) = %q, want %q", tt.addr, got, tt.want)
+			}
+		})
+	}
+}
+
 // =================== Handler Adapter Tests ===================
 
 func TestDoQHandlerFunc(t *testing.T) {

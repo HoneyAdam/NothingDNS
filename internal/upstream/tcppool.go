@@ -14,9 +14,20 @@ type tcpConn struct {
 	lastUsedAt time.Time
 	pool       *tcpConnPool
 	inUse      atomic.Bool
+	closed     atomic.Bool
 }
 
 func (c *tcpConn) close() error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	if c.pool != nil && c.closed.CompareAndSwap(false, true) {
+		c.pool.mu.Lock()
+		if c.pool.active > 0 {
+			c.pool.active--
+		}
+		c.pool.mu.Unlock()
+	}
 	return c.conn.Close()
 }
 
@@ -30,7 +41,7 @@ type tcpConnPool struct {
 
 	mu     sync.Mutex
 	idle   []*tcpConn // ready for reuse
-	active int        // currently in-flight
+	active int        // open pooled connections
 	closed bool
 }
 
@@ -57,6 +68,10 @@ func newTCPConnPool(address string, maxIdle, maxTotal int, idleTimeout, dialTime
 // get retrieves or creates a TCP connection.
 func (p *tcpConnPool) get() (*tcpConn, error) {
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, net.ErrClosed
+	}
 
 	// Try to get an idle connection
 	for len(p.idle) > 0 {
@@ -64,16 +79,14 @@ func (p *tcpConnPool) get() (*tcpConn, error) {
 		p.idle = p.idle[:len(p.idle)-1]
 
 		// Check if the idle connection is still valid
-		if time.Since(c.lastUsedAt) > p.idleTimeout {
-			_ = c.close()
-			p.active--
+		if tcpIdleTimeoutReachedAt(c.lastUsedAt, time.Now(), p.idleTimeout) {
+			_ = p.closeConnLocked(c)
 			continue
 		}
 
 		// Check if connection is still alive with a zero-read deadline
 		if err := c.conn.SetReadDeadline(time.Now()); err != nil {
-			_ = c.close()
-			p.active--
+			_ = p.closeConnLocked(c)
 			continue
 		}
 		// Reset deadline to zero (blocking)
@@ -112,13 +125,18 @@ func (p *tcpConnPool) get() (*tcpConn, error) {
 		return nil, err
 	}
 
-	return &tcpConn{
+	tc := &tcpConn{
 		conn:       conn,
 		createdAt:  time.Now(),
 		lastUsedAt: time.Now(),
 		pool:       p,
-		inUse:      atomic.Bool{},
-	}, nil
+	}
+	tc.inUse.Store(true)
+	return tc, nil
+}
+
+func tcpIdleTimeoutReachedAt(lastUsedAt, now time.Time, idleTimeout time.Duration) bool {
+	return !now.Before(lastUsedAt.Add(idleTimeout))
 }
 
 // put returns a connection to the pool or closes it.
@@ -136,15 +154,13 @@ func (p *tcpConnPool) put(c *tcpConn) {
 	defer p.mu.Unlock()
 
 	if p.closed {
-		_ = c.close()
-		p.active--
+		_ = p.closeConnLocked(c)
 		return
 	}
 
 	// If too many idle, close this one
 	if len(p.idle) >= p.maxIdle {
-		_ = c.close()
-		p.active--
+		_ = p.closeConnLocked(c)
 		return
 	}
 
@@ -158,7 +174,18 @@ func (p *tcpConnPool) closeAll() {
 
 	p.closed = true
 	for _, c := range p.idle {
-		_ = c.close()
+		_ = p.closeConnLocked(c)
 	}
 	p.idle = nil
+}
+
+// closeConnLocked closes a pooled connection while p.mu is already held.
+func (p *tcpConnPool) closeConnLocked(c *tcpConn) error {
+	if c == nil || c.conn == nil {
+		return nil
+	}
+	if c.pool == p && c.closed.CompareAndSwap(false, true) && p.active > 0 {
+		p.active--
+	}
+	return c.conn.Close()
 }

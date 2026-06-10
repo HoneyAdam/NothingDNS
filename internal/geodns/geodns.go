@@ -98,13 +98,20 @@ func (e *Engine) LoadMMDB(path string) error {
 		return fmt.Errorf("geodns: read mmdb: %w", err)
 	}
 
-	nodeCount, recordSize, ipVersion, _, _, err := mmdbParseMetadata(data)
+	nodeCount, recordSize, ipVersion, metadataStart, _, err := mmdbParseMetadata(data)
 	if err != nil {
 		return fmt.Errorf("geodns: parse metadata: %w", err)
 	}
 
 	// Tree size = nodeCount * (2*recordSize) bits = nodeCount * recordSize / 4 bytes.
-	treeBytes := nodeCount * (recordSize * 2) / 8
+	treeBytes64 := uint64(nodeCount) * uint64(recordSize*2) / 8
+	if treeBytes64 > uint64(^uint32(0)) {
+		return fmt.Errorf("geodns: mmdb tree too large: %d bytes", treeBytes64)
+	}
+	if treeBytes64 > uint64(metadataStart) || metadataStart < int(treeBytes64)+16 {
+		return fmt.Errorf("geodns: invalid mmdb tree size %d before metadata offset %d", treeBytes64, metadataStart)
+	}
+	treeBytes := uint32(treeBytes64)
 
 	e.mu.Lock()
 	e.mmdbData = data
@@ -244,6 +251,9 @@ func (e *Engine) mmdbLookup(ip net.IP) map[string]interface{} {
 
 	// Tree walk to get the data-section offset (absolute file offset).
 	treeBytes := e.mmdbTreeSize
+	if uint64(treeBytes) > uint64(len(e.mmdbData)) {
+		return nil
+	}
 	tree := e.mmdbData[:treeBytes]
 	dataOff, ok, err := mmdbLookup(tree, e.mmdbNodeCount, e.mmdbRecordSize, lookupIP, bits)
 	if err != nil || !ok {

@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"fmt"
 	"hash/maphash"
 	"strconv"
 	"strings"
@@ -53,15 +52,25 @@ type Entry struct {
 
 // IsExpired returns true if the entry has expired.
 func (e *Entry) IsExpired(now time.Time) bool {
-	return now.After(e.ExpireTime)
+	if e == nil {
+		return true
+	}
+	return !now.Before(e.ExpireTime)
 }
 
 // ShouldPrefetch returns true if prefetch is due for this entry.
 func (e *Entry) ShouldPrefetch(now time.Time) bool {
-	if !e.CanPrefetch || e.IsNegative {
+	if e == nil || !e.CanPrefetch || e.IsNegative {
 		return false
 	}
-	return now.After(e.PrefetchDue)
+	return !now.Before(e.PrefetchDue)
+}
+
+func staleDeadlineReached(now time.Time, entry *Entry, grace time.Duration) bool {
+	if entry == nil {
+		return true
+	}
+	return !now.Before(entry.ExpireTime.Add(grace))
 }
 
 // RemainingTTL returns the remaining TTL for this entry in seconds.
@@ -69,11 +78,18 @@ func (e *Entry) RemainingTTL(now time.Time) uint32 {
 	if e.IsExpired(now) {
 		return 0
 	}
-	remaining := e.ExpireTime.Sub(now)
-	if remaining < 0 {
+	return remainingSecondsUint32(e.ExpireTime.Sub(now))
+}
+
+func remainingSecondsUint32(remaining time.Duration) uint32 {
+	seconds := int64(remaining / time.Second)
+	if seconds <= 0 {
 		return 0
 	}
-	return uint32(remaining.Seconds())
+	if seconds > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(seconds)
 }
 
 // Stats tracks cache statistics. Numeric counters are accessed atomically.
@@ -324,8 +340,7 @@ func (c *Cache) Get(key string) *Entry {
 		// Re-verify the same entry is still there (may have changed).
 		if e, ok := s.entries[key]; ok && e == entry {
 			if c.serveStale {
-				staleDeadline := entry.ExpireTime.Add(c.staleGrace)
-				if now.After(staleDeadline) {
+				if staleDeadlineReached(now, entry, c.staleGrace) {
 					s.removeEntry(entry)
 				}
 			} else {
@@ -406,24 +421,25 @@ func (c *Cache) GetStale(key string) *Entry {
 
 	s := c.shardOf(key)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	entry, exists := s.entries[key]
 	if !exists {
+		s.mu.Unlock()
 		return nil
 	}
 
 	now := time.Now()
 	if !entry.IsExpired(now) {
 		// Not expired — normal Get should be used
+		s.mu.Unlock()
 		return nil
 	}
 
 	// Check if within stale grace period
-	staleDeadline := entry.ExpireTime.Add(c.staleGrace)
-	if now.After(staleDeadline) {
+	if staleDeadlineReached(now, entry, c.staleGrace) {
 		// Past stale grace — remove it
 		s.removeEntry(entry)
+		s.mu.Unlock()
 		return nil
 	}
 
@@ -433,13 +449,21 @@ func (c *Cache) GetStale(key string) *Entry {
 
 	staleEntry := &Entry{
 		Key:        entry.Key,
-		Message:    entry.Message,
 		RCode:      entry.RCode,
 		TTL:        30, // RFC 8767: stale TTL
 		ExpireTime: entry.ExpireTime,
 		IsNegative: entry.IsNegative,
 		IsStale:    true,
 	}
+	cachedMsg := entry.Message
+	s.mu.Unlock()
+
+	// Deep-copy outside the shard lock: stale serving fires for every query
+	// during an upstream outage, and copying under the mutex would serialize
+	// the whole shard behind allocation-heavy work. The cached Message is
+	// never mutated in place, so copying from it unlocked is safe. Callers
+	// own the returned copy and may hand it to reply() directly.
+	staleEntry.Message = cachedMsg.Copy()
 	return staleEntry
 }
 
@@ -452,8 +476,12 @@ func (c *Cache) StaleServed() uint64 {
 	return total
 }
 
-// Set adds or updates an entry in the cache.
+// Set adds or updates an entry in the cache. The message is deep-copied
+// before the shard lock is taken, so callers may keep using (and mutating)
+// their copy after Set returns.
 func (c *Cache) Set(key string, msg *protocol.Message, ttl uint32) {
+	msg = msg.Copy() // copy outside the shard lock
+
 	s := c.shardOf(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -463,10 +491,26 @@ func (c *Cache) Set(key string, msg *protocol.Message, ttl uint32) {
 
 // SetNegative adds a negative cache entry (NXDOMAIN or NODATA).
 func (c *Cache) SetNegative(key string, rcode uint8) {
+	c.setNegative(key, rcode, c.negativeTTL)
+}
+
+// SetNegativeWithTTL adds a negative cache entry with an RFC 2308 TTL in
+// seconds (derived from the upstream SOA). The operator-configured negative
+// TTL acts as a ceiling: the SOA value can shorten negative caching but never
+// extend it, so a hostile or misconfigured zone cannot pin NXDOMAIN/NODATA
+// answers beyond what the operator allowed.
+func (c *Cache) SetNegativeWithTTL(key string, rcode uint8, ttl uint32) {
+	d := time.Duration(ttl) * time.Second
+	if c.negativeTTL > 0 && d > c.negativeTTL {
+		d = c.negativeTTL
+	}
+	c.setNegative(key, rcode, d)
+}
+
+func (c *Cache) setNegative(key string, rcode uint8, ttl time.Duration) {
 	// Apply min/max TTL constraints to negative TTL.
 	// maxTTL == 0 means "no upper bound" — only clamp when a positive ceiling
 	// has been configured (otherwise zero-clamp expires the entry immediately).
-	ttl := c.negativeTTL
 	if ttl < c.minTTL {
 		ttl = c.minTTL
 	}
@@ -490,7 +534,9 @@ func (c *Cache) SetNegative(key string, rcode uint8) {
 }
 
 // setInternal adds or updates an entry with the given TTL. Must be called
-// with the shard's mutex held.
+// with the shard's mutex held. It takes ownership of msg — callers must pass
+// a message that is not aliased elsewhere (deep-copy before locking if
+// needed); copying here would run the allocation-heavy copy under the lock.
 func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, ttl uint32, isPrefetch bool) {
 	// Apply min/max TTL constraints.
 	// maxTTL == 0 means "no upper bound" — only clamp when a positive ceiling
@@ -708,8 +754,14 @@ func (c *Cache) Invalidate(key string) {
 }
 
 // InvalidatePattern removes entries matching a pattern and broadcasts invalidations.
-// Pattern uses prefix matching (e.g., "example.com" matches "www.example.com:A")
+// Pattern matches a domain and its subdomains (e.g. "example.com" matches
+// "www.example.com" but not "badexample.com").
 func (c *Cache) InvalidatePattern(pattern string) []string {
+	pattern = normalizeInvalidatePattern(pattern)
+	if pattern == "" {
+		return nil
+	}
+
 	var invalidated []string
 
 	for i := range c.shards {
@@ -718,7 +770,7 @@ func (c *Cache) InvalidatePattern(pattern string) []string {
 		for key := range s.entries {
 			// Extract domain from key (format: "domain:type")
 			domain, _ := ExtractQueryInfo(key)
-			if strings.Contains(domain, pattern) || strings.HasSuffix(domain, pattern) {
+			if invalidationPatternMatches(domain, pattern) {
 				if entry, exists := s.entries[key]; exists {
 					s.removeEntry(entry)
 					invalidated = append(invalidated, key)
@@ -739,6 +791,18 @@ func (c *Cache) InvalidatePattern(pattern string) []string {
 		}
 	}
 	return invalidated
+}
+
+func normalizeInvalidatePattern(pattern string) string {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	pattern = strings.TrimSuffix(pattern, ".")
+	return pattern
+}
+
+func invalidationPatternMatches(domain, pattern string) bool {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	domain = strings.TrimSuffix(domain, ".")
+	return domain == pattern || strings.HasSuffix(domain, "."+pattern)
 }
 
 // Stats returns a copy of the current cache statistics, summed across shards.
@@ -855,6 +919,8 @@ func (c *Cache) UpdateConfig(cfg Config) {
 
 // OnPrefetchComplete marks a prefetch as complete and resets the prefetch flag.
 func (c *Cache) OnPrefetchComplete(key string, msg *protocol.Message, ttl uint32) {
+	msg = msg.Copy() // setInternal takes ownership; copy outside the shard lock
+
 	s := c.shardOf(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -883,11 +949,11 @@ func ExtractQueryInfo(key string) (string, uint16) {
 	} else {
 		typeStr = rest[:second]
 	}
-	var qtype uint16
-	if _, err := fmt.Sscanf(typeStr, "%d", &qtype); err != nil {
+	qtype, err := strconv.ParseUint(typeStr, 10, 16)
+	if err != nil {
 		return "", 0
 	}
-	return key[:first], qtype
+	return key[:first], uint16(qtype)
 }
 
 // CacheEntryJSON is a JSON-serializable cache entry for persistence.
@@ -964,7 +1030,7 @@ func (c *Cache) Load(entries []CacheEntryJSON) (restored int) {
 		}
 
 		// Calculate remaining TTL
-		remainingTTL := uint32(e.ExpireTime.Sub(now).Seconds())
+		remainingTTL := remainingSecondsUint32(e.ExpireTime.Sub(now))
 		if remainingTTL == 0 {
 			continue
 		}

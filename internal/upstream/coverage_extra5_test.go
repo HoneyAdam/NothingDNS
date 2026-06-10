@@ -23,6 +23,13 @@ func TestConfig_HealthCheckDuration_Custom(t *testing.T) {
 	}
 }
 
+func TestConfig_HealthCheckDuration_InvalidUsesDefault(t *testing.T) {
+	cfg := Config{HealthCheck: -time.Second}
+	if d := cfg.HealthCheckDuration(); d != 30*time.Second {
+		t.Errorf("expected default 30s, got %v", d)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Client.IsHealthy
 // ---------------------------------------------------------------------------

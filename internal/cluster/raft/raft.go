@@ -336,13 +336,13 @@ type LeadershipState struct {
 
 // NewNode creates a new Raft node.
 func NewNode(config Config, peers []NodeID, transport Transport) *Node {
-	if config.HeartbeatInterval == 0 {
+	if config.HeartbeatInterval <= 0 {
 		config.HeartbeatInterval = 150 * time.Millisecond
 	}
-	if config.ElectionTimeout == 0 {
+	if config.ElectionTimeout <= 0 {
 		config.ElectionTimeout = 1000 * time.Millisecond
 	}
-	if config.MaxLogEntries == 0 {
+	if config.MaxLogEntries <= 0 {
 		config.MaxLogEntries = 128
 	}
 

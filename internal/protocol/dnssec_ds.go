@@ -32,6 +32,10 @@ func (r *RDataDS) Type() uint16 { return TypeDS }
 
 // Pack serializes the DS record to wire format.
 func (r *RDataDS) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil DS record")
+	}
+
 	startOffset := offset
 
 	// Key Tag (2 bytes)
@@ -68,6 +72,10 @@ func (r *RDataDS) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the DS record from wire format.
 func (r *RDataDS) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil DS record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -103,16 +111,28 @@ func (r *RDataDS) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 
 // String returns the DS record in presentation format.
 func (r *RDataDS) String() string {
+	if r == nil {
+		return ""
+	}
+
 	return fmt.Sprintf("%d %d %d %s", r.KeyTag, r.Algorithm, r.DigestType, hex.EncodeToString(r.Digest))
 }
 
 // Len returns the wire length of the DS record.
 func (r *RDataDS) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	return 4 + len(r.Digest)
 }
 
 // Copy creates a deep copy of the DS record.
 func (r *RDataDS) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	digestCopy := make([]byte, len(r.Digest))
 	copy(digestCopy, r.Digest)
 	return &RDataDS{

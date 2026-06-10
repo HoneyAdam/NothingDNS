@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"encoding/binary"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -184,7 +186,10 @@ func TestEncodeDecodeRecordsRoundTrip(t *testing.T) {
 		{Name: "test.example.com.", TTL: 3600, Class: "IN", Type: "TXT", RData: "v=spf1 include:_spf.example.com ~all"},
 	}
 
-	encoded := encodeRecords(original)
+	encoded, err := encodeRecords(original)
+	if err != nil {
+		t.Fatalf("encodeRecords: %v", err)
+	}
 	decoded, err := decodeRecords(encoded)
 	if err != nil {
 		t.Fatalf("decodeRecords: %v", err)
@@ -198,6 +203,79 @@ func TestEncodeDecodeRecordsRoundTrip(t *testing.T) {
 		if decoded[i] != original[i] {
 			t.Errorf("record[%d] = %+v, want %+v", i, decoded[i], original[i])
 		}
+	}
+}
+
+func TestEncodeRecordsRejectsOversizedFields(t *testing.T) {
+	tests := []struct {
+		name   string
+		record StoredRecord
+	}{
+		{
+			name:   "name",
+			record: StoredRecord{Name: strings.Repeat("a", 0x10000), Class: "IN", Type: "TXT", RData: "ok"},
+		},
+		{
+			name:   "class",
+			record: StoredRecord{Name: "www.example.com.", Class: strings.Repeat("C", 0x100), Type: "TXT", RData: "ok"},
+		},
+		{
+			name:   "type",
+			record: StoredRecord{Name: "www.example.com.", Class: "IN", Type: strings.Repeat("T", 0x100), RData: "ok"},
+		},
+		{
+			name:   "rdata",
+			record: StoredRecord{Name: "www.example.com.", Class: "IN", Type: "TXT", RData: strings.Repeat("x", 0x10000)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := encodeRecords([]StoredRecord{tt.record}); err == nil {
+				t.Fatal("encodeRecords accepted field that cannot be represented in the wire format")
+			}
+		})
+	}
+}
+
+func TestZoneStoreSaveZoneRejectsOversizedRecord(t *testing.T) {
+	zs, cleanup := newTestZoneStore(t)
+	defer cleanup()
+
+	meta := ZoneMeta{Origin: "example.com.", DefaultTTL: 3600}
+	records := map[string][]StoredRecord{
+		"www.example.com.": {
+			{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "TXT", RData: strings.Repeat("x", 0x10000)},
+		},
+	}
+
+	if err := zs.SaveZone("example.com.", meta, records); err == nil {
+		t.Fatal("SaveZone accepted an oversized record that would corrupt the stored zone")
+	}
+}
+
+func TestDecodeRecordsRejectsTrailingData(t *testing.T) {
+	encoded, err := encodeRecords([]StoredRecord{
+		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "192.0.2.1"},
+	})
+	if err != nil {
+		t.Fatalf("encodeRecords: %v", err)
+	}
+	encoded = append(encoded, 0xff)
+
+	if _, err := decodeRecords(encoded); err == nil {
+		t.Fatal("decodeRecords accepted trailing bytes after the declared records")
+	}
+}
+
+func TestDecodeRecordsRejectsImpossibleRecordCountBeforeAllocation(t *testing.T) {
+	data := make([]byte, 4)
+	binary.BigEndian.PutUint32(data, maxStoredRecordsPerZone)
+
+	if _, err := decodeRecords(data); err == nil {
+		t.Fatal("decodeRecords accepted record count that cannot fit in data")
+	} else if !strings.Contains(err.Error(), "data capacity") {
+		t.Fatalf("decodeRecords error = %v, want data capacity error", err)
 	}
 }
 

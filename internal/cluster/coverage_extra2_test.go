@@ -795,6 +795,21 @@ func TestGossipProtocol_IsLeaderAlive_RecentHeartbeat(t *testing.T) {
 	}
 }
 
+func TestHeartbeatTimedOutAtBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	timeout := 15 * time.Second
+
+	if heartbeatTimedOutAt(now.Add(-timeout+time.Nanosecond), now, timeout) {
+		t.Error("heartbeat should still be alive before timeout boundary")
+	}
+	if !heartbeatTimedOutAt(now.Add(-timeout), now, timeout) {
+		t.Error("heartbeat should be timed out at exact timeout boundary")
+	}
+	if !heartbeatTimedOutAt(now.Add(-timeout-time.Nanosecond), now, timeout) {
+		t.Error("heartbeat should be timed out after timeout boundary")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 13. GossipProtocol.GetClusterMetrics aggregation
 // ---------------------------------------------------------------------------

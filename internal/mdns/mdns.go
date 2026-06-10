@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -56,6 +57,20 @@ func (s *Service) ServiceTypeName() string {
 	return fmt.Sprintf("%s.%s.", s.ServiceType, s.Domain)
 }
 
+func cloneService(s *Service) *Service {
+	if s == nil {
+		return nil
+	}
+	clone := *s
+	if s.TXT != nil {
+		clone.TXT = make(map[string]string, len(s.TXT))
+		for k, v := range s.TXT {
+			clone.TXT[k] = v
+		}
+	}
+	return &clone
+}
+
 // Responder implements an mDNS responder for .local domains.
 type Responder struct {
 	// Configuration
@@ -80,9 +95,10 @@ type Responder struct {
 	logger *util.Logger
 
 	// Control channels
-	stopCh   chan struct{}
-	stopOnce sync.Once // guards Stop() against the second-call panic
-	wg       sync.WaitGroup
+	lifecycleMu sync.Mutex
+	stopCh      chan struct{}
+	running     bool
+	wg          sync.WaitGroup
 
 	// Probe state for hostname claiming
 	probedHostnames map[string]bool
@@ -125,7 +141,6 @@ func NewResponder(config Config, logger *util.Logger) *Responder {
 		hostnames:       make(map[string]net.IP),
 		cache:           NewCache(),
 		logger:          logger,
-		stopCh:          make(chan struct{}),
 		probedHostnames: make(map[string]bool),
 	}
 }
@@ -136,30 +151,44 @@ func (r *Responder) Start() error {
 		return nil
 	}
 
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
+	if r.running {
+		return nil
+	}
+
 	// Join multicast group
 	addr := &net.UDPAddr{
 		IP:   net.ParseIP(r.config.MulticastIP),
 		Port: r.config.Port,
 	}
 
-	var err error
+	var (
+		conn *net.UDPConn
+		err  error
+	)
 	if r.config.Interface != nil {
-		r.conn, err = net.ListenMulticastUDP("udp4", r.config.Interface, addr)
+		conn, err = net.ListenMulticastUDP("udp4", r.config.Interface, addr)
 	} else {
-		r.conn, err = net.ListenMulticastUDP("udp4", nil, addr)
+		conn, err = net.ListenMulticastUDP("udp4", nil, addr)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to join multicast group: %w", err)
 	}
 
-	// Set buffer sizes
-	_ = r.conn.SetReadBuffer(65536)
-	_ = r.conn.SetWriteBuffer(65536)
+	// Socket buffer tuning is best-effort; the responder can run with OS defaults.
+	_ = conn.SetReadBuffer(65536)
+	_ = conn.SetWriteBuffer(65536)
+
+	stopCh := make(chan struct{})
+	r.conn = conn
+	r.stopCh = stopCh
+	r.running = true
 
 	// Start listeners
 	r.wg.Add(2)
-	go r.receiveLoop()
-	go r.maintenanceLoop()
+	go r.receiveLoop(conn, stopCh)
+	go r.maintenanceLoop(stopCh)
 
 	if r.logger != nil {
 		r.logger.Infof("mDNS responder started on %s:%d", r.config.MulticastIP, r.config.Port)
@@ -168,23 +197,27 @@ func (r *Responder) Start() error {
 	return nil
 }
 
-// Stop stops the mDNS responder. Idempotent — a second call is a
-// no-op rather than the close-of-closed-channel panic the bare
-// close(r.stopCh) used to produce.
+// Stop stops the mDNS responder.
 func (r *Responder) Stop() {
-	closed := false
-	r.stopOnce.Do(func() {
-		close(r.stopCh)
-		closed = true
-	})
-	if !closed {
+	r.lifecycleMu.Lock()
+	if !r.running {
+		r.lifecycleMu.Unlock()
 		return
 	}
-	r.wg.Wait()
 
-	if r.conn != nil {
-		_ = r.conn.Close()
+	stopCh := r.stopCh
+	conn := r.conn
+	r.stopCh = nil
+	r.conn = nil
+	r.running = false
+
+	close(stopCh)
+	if conn != nil {
+		// Closing during shutdown is best-effort; receiveLoop exits on stopCh.
+		_ = conn.Close()
 	}
+	r.wg.Wait()
+	r.lifecycleMu.Unlock()
 
 	if r.logger != nil {
 		r.logger.Info("mDNS responder stopped")
@@ -275,20 +308,26 @@ func (r *Responder) GetCachedService(fullName string) *Service {
 }
 
 // receiveLoop handles incoming mDNS packets.
-func (r *Responder) receiveLoop() {
+func (r *Responder) receiveLoop(conn *net.UDPConn, stopCh <-chan struct{}) {
 	defer r.wg.Done()
 
 	buf := make([]byte, 65536)
 	for {
 		select {
-		case <-r.stopCh:
+		case <-stopCh:
 			return
 		default:
 		}
 
-		_ = r.conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-		n, src, err := r.conn.ReadFromUDP(buf)
+		// Deadline updates keep Stop responsive; a failed update is handled by ReadFromUDP.
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
+			select {
+			case <-stopCh:
+				return
+			default:
+			}
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				continue
@@ -622,12 +661,26 @@ func (r *Responder) sendMulticast(msg *protocol.Message, dst *net.UDPAddr) {
 	}
 
 	// Write to multicast socket
-	_, err = r.conn.WriteToUDP(buf[:n], dst)
-	if err != nil {
+	if _, err = writeUDPPacket(r.conn, buf[:n], dst); err != nil {
 		if r.logger != nil {
 			r.logger.Debugf("mDNS: failed to send multicast: %v", err)
 		}
 	}
+}
+
+type udpPacketWriter interface {
+	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+}
+
+func writeUDPPacket(conn udpPacketWriter, data []byte, dst *net.UDPAddr) (int, error) {
+	n, err := conn.WriteToUDP(data, dst)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 // generateTransactionID generates a random transaction ID for mDNS messages.
@@ -679,7 +732,7 @@ func (r *Responder) probeHostname(hostname string) error {
 }
 
 // maintenanceLoop handles periodic maintenance tasks.
-func (r *Responder) maintenanceLoop() {
+func (r *Responder) maintenanceLoop(stopCh <-chan struct{}) {
 	defer r.wg.Done()
 
 	ticker := time.NewTicker(30 * time.Second)
@@ -687,7 +740,7 @@ func (r *Responder) maintenanceLoop() {
 
 	for {
 		select {
-		case <-r.stopCh:
+		case <-stopCh:
 			return
 		case <-ticker.C:
 			r.announceAll()
@@ -722,6 +775,10 @@ type cacheEntry struct {
 	expiresAt time.Time
 }
 
+func mdnsCacheExpiredAt(now, expiresAt time.Time) bool {
+	return !now.Before(expiresAt)
+}
+
 // NewCache creates a new service cache.
 func NewCache() *Cache {
 	return &Cache{
@@ -735,32 +792,40 @@ func (c *Cache) Add(svc *Service) {
 	defer c.mu.Unlock()
 
 	c.entries[svc.FullServiceName()] = &cacheEntry{
-		service:   svc,
+		service:   cloneService(svc),
 		expiresAt: time.Now().Add(time.Duration(svc.TTL) * time.Second),
 	}
 }
 
 // Get retrieves a service from the cache.
 func (c *Cache) Get(fullName string) *Service {
+	return c.getAt(fullName, time.Now())
+}
+
+func (c *Cache) getAt(fullName string, now time.Time) *Service {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	entry, ok := c.entries[fullName]
-	if !ok || time.Now().After(entry.expiresAt) {
+	if !ok || mdnsCacheExpiredAt(now, entry.expiresAt) {
 		return nil
 	}
-	return entry.service
+	return cloneService(entry.service)
 }
 
 // GetServices returns all cached services of a given type.
 func (c *Cache) GetServices(serviceType string) []*Service {
+	return c.getServicesAt(serviceType, time.Now())
+}
+
+func (c *Cache) getServicesAt(serviceType string, now time.Time) []*Service {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	var result []*Service
 	for _, entry := range c.entries {
-		if entry.service.ServiceType == serviceType && time.Now().Before(entry.expiresAt) {
-			result = append(result, entry.service)
+		if entry.service.ServiceType == serviceType && !mdnsCacheExpiredAt(now, entry.expiresAt) {
+			result = append(result, cloneService(entry.service))
 		}
 	}
 	return result
@@ -768,12 +833,15 @@ func (c *Cache) GetServices(serviceType string) []*Service {
 
 // Expire removes expired entries from the cache.
 func (c *Cache) Expire() {
+	c.expireAt(time.Now())
+}
+
+func (c *Cache) expireAt(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := time.Now()
 	for name, entry := range c.entries {
-		if now.After(entry.expiresAt) {
+		if mdnsCacheExpiredAt(now, entry.expiresAt) {
 			delete(c.entries, name)
 		}
 	}

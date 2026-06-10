@@ -37,6 +37,24 @@ func (s *Server) IsHealthy() bool {
 	return s.healthy
 }
 
+func (s *Server) snapshot() *Server {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &Server{
+		Address:     s.Address,
+		Network:     s.Network,
+		Timeout:     s.Timeout,
+		HealthCheck: s.HealthCheck,
+		healthy:     s.healthy,
+		lastFailure: s.lastFailure,
+		failCount:   s.failCount,
+		latency:     s.latency,
+	}
+}
+
 // markFailure marks the server as having failed.
 func (s *Server) markFailure() {
 	s.mu.Lock()
@@ -60,9 +78,10 @@ func (s *Server) markSuccess(latency time.Duration) {
 // Client forwards DNS queries to upstream servers.
 type Client struct {
 	// Configuration
-	servers  []*Server
-	strategy Strategy
-	timeout  time.Duration
+	servers     []*Server
+	strategy    Strategy
+	timeout     time.Duration
+	healthCheck time.Duration
 
 	// Buffer pools
 	udpPool map[string]*sync.Pool // address -> buffer pool
@@ -120,7 +139,7 @@ type Config struct {
 
 // HealthCheckDuration returns the health check interval from the config.
 func (c *Config) HealthCheckDuration() time.Duration {
-	if c.HealthCheck == 0 {
+	if c.HealthCheck <= 0 {
 		return 30 * time.Second
 	}
 	return c.HealthCheck
@@ -141,11 +160,18 @@ func NewClient(config Config) (*Client, error) {
 	if len(config.Servers) == 0 {
 		return nil, fmt.Errorf("no upstream servers configured")
 	}
+	if config.Timeout <= 0 {
+		config.Timeout = 5 * time.Second
+	}
+	if config.HealthCheck <= 0 {
+		config.HealthCheck = 30 * time.Second
+	}
 
 	client := &Client{
 		servers:      make([]*Server, 0, len(config.Servers)),
 		strategy:     StrategyFromString(config.Strategy),
 		timeout:      config.Timeout,
+		healthCheck:  config.HealthCheck,
 		udpPool:      make(map[string]*sync.Pool),
 		tcpPool:      make(map[string]*sync.Pool),
 		tcpConnPools: make(map[string]*tcpConnPool),
@@ -484,7 +510,7 @@ func (c *Client) queryUDPBuf(server *Server, msg *protocol.Message, buf []byte) 
 
 	// Send query
 	start := time.Now()
-	if _, err := conn.Write(packed); err != nil {
+	if _, err := writePacket(conn, packed); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
@@ -613,14 +639,14 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Send length-prefixed query
 	length := uint16(len(packed))
 	lengthBuf := []byte{byte(length >> 8), byte(length)}
-	if _, err := tc.conn.Write(lengthBuf); err != nil {
+	if err := util.WriteFull(tc.conn, lengthBuf); err != nil {
 		_ = tc.close()
 		tc = nil // don't return broken conn to pool
 		return nil, fmt.Errorf("send length: %w", err)
 	}
 
 	start := time.Now()
-	if _, err := tc.conn.Write(packed); err != nil {
+	if err := util.WriteFull(tc.conn, packed); err != nil {
 		_ = tc.close()
 		tc = nil
 		return nil, fmt.Errorf("send query: %w", err)
@@ -663,11 +689,22 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	return resp, nil
 }
 
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	n, err := conn.Write(data)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
 // healthCheckLoop periodically checks server health.
 func (c *Client) healthCheckLoop(ctx context.Context) {
 	defer c.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.healthCheck)
 	defer ticker.Stop()
 
 	for {
@@ -745,7 +782,14 @@ func (c *Client) IsHealthy() bool {
 
 // Servers returns the list of upstream servers.
 func (c *Client) Servers() []*Server {
-	return c.servers
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	servers := make([]*Server, len(c.servers))
+	for i, server := range c.servers {
+		servers[i] = server.snapshot()
+	}
+	return servers
 }
 
 // AddServer adds a new upstream server dynamically.

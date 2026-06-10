@@ -77,11 +77,35 @@ func WriteZone(z *Zone) (string, error) {
 			}
 
 			b.WriteString(fmt.Sprintf("%s\t%d\t%s\t%s\t%s\n",
-				rname, ttl, r.Class, r.Type, r.RData))
+				rname, ttl, r.Class, r.Type, formatRDataForZone(r)))
 		}
 	}
 
 	return b.String(), nil
+}
+
+func formatRDataForZone(r Record) string {
+	switch strings.ToUpper(r.Type) {
+	case "TXT", "SPF", "DKIM":
+		return quoteZoneCharacterString(r.RData)
+	default:
+		return r.RData
+	}
+}
+
+func quoteZoneCharacterString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\', '"':
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // relativize converts an absolute name to relative within the zone origin.

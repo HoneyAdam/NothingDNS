@@ -10,6 +10,7 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/auth"
 	"github.com/nothingdns/nothingdns/internal/config"
+	"github.com/nothingdns/nothingdns/internal/storage"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
@@ -111,6 +112,77 @@ func TestHandleZones_CreateZone(t *testing.T) {
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestZoneMutationsPersistToKV(t *testing.T) {
+	s, user := newServerWithAuthAndZones(t)
+	kv, err := storage.OpenKVStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenKVStore: %v", err)
+	}
+	defer kv.Close()
+	// Enable installs the mutation hook on s.zoneManager — no explicit API
+	// server wiring needed; durability now rides on the manager itself.
+	kvp := zone.NewKVPersistence(s.zoneManager, kv)
+	kvp.Enable()
+
+	createBody, _ := json.Marshal(map[string]any{
+		"name":        "kvapi.example.",
+		"ttl":         3600,
+		"admin_email": "admin.kvapi.example.",
+		"nameservers": []string{"ns1.kvapi.example."},
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/zones", bytes.NewReader(createBody))
+	createReq.Header.Set("Content-Type", "application/json")
+	createReq = createReq.WithContext(WithUser(createReq.Context(), user))
+	createRec := httptest.NewRecorder()
+	s.handleZones(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	if _, found, err := kvp.LoadFromKV("kvapi.example."); err != nil {
+		t.Fatalf("LoadFromKV after create: %v", err)
+	} else if !found {
+		t.Fatal("expected created zone in KV")
+	}
+
+	addBody, _ := json.Marshal(map[string]any{
+		"name": "www.kvapi.example.",
+		"type": "A",
+		"ttl":  300,
+		"data": "192.0.2.44",
+	})
+	addReq := httptest.NewRequest(http.MethodPost, "/api/v1/zones/kvapi.example./records", bytes.NewReader(addBody))
+	addReq = addReq.WithContext(WithUser(addReq.Context(), user))
+	addRec := httptest.NewRecorder()
+	s.handleZoneActions(addRec, addReq)
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("add record expected 201, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+	z, found, err := kvp.LoadFromKV("kvapi.example.")
+	if err != nil {
+		t.Fatalf("LoadFromKV after add: %v", err)
+	}
+	if !found {
+		t.Fatal("expected zone in KV after add")
+	}
+	records := z.Records["www.kvapi.example."]
+	if len(records) != 1 || records[0].RData != "192.0.2.44" {
+		t.Fatalf("KV records after add = %#v, want A 192.0.2.44", records)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/zones/kvapi.example.", nil)
+	deleteReq = deleteReq.WithContext(WithUser(deleteReq.Context(), user))
+	deleteRec := httptest.NewRecorder()
+	s.handleZoneActions(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete expected 200, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, found, err := kvp.LoadFromKV("kvapi.example."); err != nil {
+		t.Fatalf("LoadFromKV after delete: %v", err)
+	} else if found {
+		t.Fatal("expected deleted zone removed from KV")
 	}
 }
 
@@ -467,18 +539,50 @@ func TestHandleZoneActions_UpdateRecordMissingFields(t *testing.T) {
 	s, user := newServerWithAuthAndZones(t)
 	createTestZone(t, s.zoneManager, "example.com.")
 
-	body, _ := json.Marshal(map[string]any{
-		"name": "www.example.com.",
-	})
-	req := httptest.NewRequest(http.MethodPut, "/api/v1/zones/example.com./records", bytes.NewReader(body))
-	ctx := WithUser(req.Context(), user)
-	req = req.WithContext(ctx)
-	rec := httptest.NewRecorder()
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{
+			name: "missing type",
+			body: map[string]any{
+				"name": "www.example.com.",
+			},
+		},
+		{
+			name: "missing old data",
+			body: map[string]any{
+				"name": "www.example.com.",
+				"type": "A",
+				"ttl":  600,
+				"data": "5.6.7.8",
+			},
+		},
+		{
+			name: "missing new data",
+			body: map[string]any{
+				"name":     "www.example.com.",
+				"type":     "A",
+				"old_data": "1.2.3.4",
+				"ttl":      600,
+			},
+		},
+	}
 
-	s.handleZoneActions(rec, req)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, _ := json.Marshal(tt.body)
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/zones/example.com./records", bytes.NewReader(body))
+			ctx := WithUser(req.Context(), user)
+			req = req.WithContext(ctx)
+			rec := httptest.NewRecorder()
 
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d", rec.Code)
+			s.handleZoneActions(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("expected 400, got %d", rec.Code)
+			}
+		})
 	}
 }
 

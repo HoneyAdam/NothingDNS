@@ -764,6 +764,34 @@ func TestEDNS0ClientSubnet(t *testing.T) {
 	}
 }
 
+func TestMessageCopyCopiesRawBody(t *testing.T) {
+	msg := &Message{
+		Header: Header{
+			ID:    0x1234,
+			Flags: Flags{Opcode: OpcodeDSO},
+		},
+		RawBody: []byte{0x00, 0x01, 0x00, 0x02, 0xAA, 0xBB},
+	}
+
+	cp := msg.Copy()
+	if cp == nil {
+		t.Fatal("Copy returned nil")
+	}
+	if !bytes.Equal(cp.RawBody, msg.RawBody) {
+		t.Fatalf("RawBody copy = %v, want %v", cp.RawBody, msg.RawBody)
+	}
+
+	cp.RawBody[0] = 0xFF
+	if msg.RawBody[0] == 0xFF {
+		t.Fatal("Copy RawBody aliases original RawBody")
+	}
+
+	msg.RawBody[1] = 0xEE
+	if cp.RawBody[1] == 0xEE {
+		t.Fatal("original RawBody aliases copy RawBody")
+	}
+}
+
 // Helper function
 func must[T any](v T, err error) T {
 	if err != nil {

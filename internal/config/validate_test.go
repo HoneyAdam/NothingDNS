@@ -111,6 +111,88 @@ func TestValidateServer(t *testing.T) {
 	}
 }
 
+func TestValidateResolution(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       *Config
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:    "valid default resolution config",
+			cfg:     DefaultConfig(),
+			wantErr: false,
+		},
+		{
+			name: "negative max_depth",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Resolution.MaxDepth = -1
+				return c
+			}(),
+			wantErr:   true,
+			errSubstr: "max_depth cannot be negative",
+		},
+		{
+			name: "negative edns0 buffer size",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Resolution.EDNS0BufferSize = -1
+				return c
+			}(),
+			wantErr:   true,
+			errSubstr: "edns0_buffer_size",
+		},
+		{
+			name: "edns0 buffer size over uint16",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Resolution.EDNS0BufferSize = 65536
+				return c
+			}(),
+			wantErr:   true,
+			errSubstr: "edns0_buffer_size",
+		},
+		{
+			name: "invalid timeout",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Resolution.Timeout = "eventually"
+				return c
+			}(),
+			wantErr:   true,
+			errSubstr: "invalid timeout",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errors := tt.cfg.Validate()
+			if tt.wantErr {
+				if len(errors) == 0 {
+					t.Fatalf("expected errors but got none")
+				}
+				if tt.errSubstr != "" {
+					found := false
+					for _, err := range errors {
+						if strings.Contains(err, tt.errSubstr) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Fatalf("errors = %v, want substring %q", errors, tt.errSubstr)
+					}
+				}
+				return
+			}
+			if len(errors) > 0 {
+				t.Fatalf("expected no errors but got: %v", errors)
+			}
+		})
+	}
+}
+
 func TestValidateUpstream(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -151,6 +233,26 @@ func TestValidateUpstream(t *testing.T) {
 				return c
 			}(),
 			wantErr: true,
+		},
+		{
+			name: "invalid health check duration",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Upstream.HealthCheck = "eventually"
+				return c
+			}(),
+			wantErr:  true,
+			errCount: 1,
+		},
+		{
+			name: "invalid failover timeout duration",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Upstream.FailoverTimeout = "soon"
+				return c
+			}(),
+			wantErr:  true,
+			errCount: 1,
 		},
 		{
 			name: "valid round_robin strategy",
@@ -608,6 +710,154 @@ func TestValidateMultipleErrors(t *testing.T) {
 	}
 	if !hasLogging {
 		t.Error("expected logging validation errors")
+	}
+}
+
+func TestValidateDurationFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		errSubstr string
+	}{
+		{
+			name: "invalid shutdown timeout",
+			mutate: func(c *Config) {
+				c.ShutdownTimeout = "eventually"
+			},
+			errSubstr: "invalid shutdown_timeout",
+		},
+		{
+			name: "invalid cookie secret rotation",
+			mutate: func(c *Config) {
+				c.Cookie.SecretRotation = "hourly"
+			},
+			errSubstr: "cookie: invalid secret_rotation",
+		},
+		{
+			name: "invalid slave zone timeout",
+			mutate: func(c *Config) {
+				c.SlaveZones = []SlaveZoneConfig{{
+					ZoneName:      "example.com.",
+					Masters:       []string{"192.0.2.1:53"},
+					TransferType:  "ixfr",
+					Timeout:       "later",
+					RetryInterval: "5m",
+				}}
+			},
+			errSubstr: "slave_zones[0]: invalid timeout",
+		},
+		{
+			name: "invalid slave zone retry interval",
+			mutate: func(c *Config) {
+				c.SlaveZones = []SlaveZoneConfig{{
+					ZoneName:      "example.com.",
+					Masters:       []string{"192.0.2.1:53"},
+					TransferType:  "ixfr",
+					Timeout:       "30s",
+					RetryInterval: "later",
+				}}
+			},
+			errSubstr: "slave_zones[0]: invalid retry_interval",
+		},
+		{
+			name: "invalid DSO session timeout",
+			mutate: func(c *Config) {
+				c.DSO.SessionTimeout = "later"
+			},
+			errSubstr: "dso: invalid session_timeout",
+		},
+		{
+			name: "invalid DSO heartbeat interval",
+			mutate: func(c *Config) {
+				c.DSO.HeartbeatInterval = "sometimes"
+			},
+			errSubstr: "dso: invalid heartbeat_interval",
+		},
+		{
+			name: "invalid mDNS multicast IP",
+			mutate: func(c *Config) {
+				c.MDNS.Enabled = true
+				c.MDNS.MulticastIP = "not-an-ip"
+			},
+			errSubstr: "mdns: multicast_ip",
+		},
+		{
+			name: "invalid mDNS port",
+			mutate: func(c *Config) {
+				c.MDNS.Enabled = true
+				c.MDNS.Port = 70000
+			},
+			errSubstr: "mdns: invalid port",
+		},
+		{
+			name: "invalid ODoH KEM",
+			mutate: func(c *Config) {
+				c.ODoH.Enabled = true
+				c.ODoH.KEM = 99
+			},
+			errSubstr: "odoh: unsupported kem",
+		},
+		{
+			name: "invalid ODoH KDF",
+			mutate: func(c *Config) {
+				c.ODoH.Enabled = true
+				c.ODoH.KDF = 2
+			},
+			errSubstr: "odoh: unsupported kdf",
+		},
+		{
+			name: "invalid ODoH AEAD",
+			mutate: func(c *Config) {
+				c.ODoH.Enabled = true
+				c.ODoH.AEAD = 2
+			},
+			errSubstr: "odoh: unsupported aead",
+		},
+		{
+			name: "invalid HTTP ODoH KEM",
+			mutate: func(c *Config) {
+				c.Server.HTTP.ODoHEnabled = true
+				c.Server.HTTP.ODoHKEM = 99
+			},
+			errSubstr: "http: unsupported odoh_kem",
+		},
+		{
+			name: "invalid ODoH target URL",
+			mutate: func(c *Config) {
+				c.ODoH.Enabled = true
+				c.ODoH.TargetURL = "://bad"
+			},
+			errSubstr: "odoh: invalid target_url",
+		},
+		{
+			name: "catalog enabled but runtime integration unavailable",
+			mutate: func(c *Config) {
+				c.Catalog.Enabled = true
+			},
+			errSubstr: "catalog: enabled but catalog zones are not wired into the daemon runtime",
+		},
+		{
+			name: "YANG enabled but runtime integration unavailable",
+			mutate: func(c *Config) {
+				c.YANG.Enabled = true
+			},
+			errSubstr: "yang: enabled but YANG services are not wired into the daemon runtime",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tt.mutate(c)
+
+			errors := c.Validate()
+			for _, err := range errors {
+				if strings.Contains(err, tt.errSubstr) {
+					return
+				}
+			}
+			t.Fatalf("errors = %v, want substring %q", errors, tt.errSubstr)
+		})
 	}
 }
 

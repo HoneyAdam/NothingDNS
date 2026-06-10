@@ -469,11 +469,24 @@ func (t *Tokenizer) readNumber() Token {
 func (t *Tokenizer) readScalar() Token {
 	start := t.pos
 	startCol := t.col
+	inEnvBraced := false
 
 	for {
 		ch := t.peek()
 		if ch == 0 || ch == '\n' || ch == '\r' || ch == '#' {
 			break
+		}
+		if inEnvBraced {
+			t.next()
+			if ch == '}' {
+				inEnvBraced = false
+			}
+			continue
+		}
+		if ch == '{' && t.pos > start && t.input[t.pos-1] == '$' {
+			inEnvBraced = true
+			t.next()
+			continue
 		}
 		// Stop at structural characters
 		if ch == ',' || ch == '[' || ch == ']' || ch == '{' || ch == '}' {

@@ -32,10 +32,10 @@ type OTLPExporter struct {
 
 // NewOTLPExporter creates a new OTLP exporter.
 func NewOTLPExporter(cfg ExporterConfig) *OTLPExporter {
-	if cfg.BatchSize == 0 {
+	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100
 	}
-	if cfg.BatchTimeout == 0 {
+	if cfg.BatchTimeout <= 0 {
 		cfg.BatchTimeout = 5 * time.Second
 	}
 	if cfg.Protocol == "" {
@@ -284,8 +284,13 @@ func (e *JaegerExporter) Flush() {
 	if err != nil {
 		return
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		return
+	}
+	if resp.StatusCode >= 400 {
+		return
+	}
 
 	e.batch = e.batch[:0]
 }

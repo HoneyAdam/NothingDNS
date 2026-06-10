@@ -25,19 +25,24 @@ const (
 	DSOTypeRequest  = 0x0000
 	DSOTypeResponse = 0x8000
 
-	// TLV types per RFC 8490 Section 4
-	DSOTLVPadding        = 0x00 // Padding TLV
-	DSOTLVKeepalive      = 0x01 // Keepalive TLV
-	DSOTLVRetryDelay     = 0x02 // Retry Delay TLV
-	DSOTLVSessionID      = 0x03 // Session ID TLV
-	DSOTLVEncryption     = 0x04 // Encryption Negotiation TLV
-	DSOTLVMaximumPayload = 0x05 // Maximum Payload Size TLV
+	// TLV types per RFC 8490 Section 10.3 / IANA DSO Type Codes.
+	DSOTLVReserved   = 0x00 // Reserved; never a valid DSO TLV type
+	DSOTLVKeepalive  = 0x01 // Keepalive TLV
+	DSOTLVRetryDelay = 0x02 // Retry Delay TLV
+	DSOTLVPadding    = 0x03 // Encryption Padding TLV
+
+	// NothingDNS-private experimental TLVs. RFC 8490 reserves F800-FBFF for
+	// experimental/local use; keep non-standard helpers out of the IANA
+	// session-management range so they do not collide with registered TLVs.
+	DSOTLVSessionID      = 0xF800 // Experimental Session ID TLV
+	DSOTLVEncryption     = 0xF801 // Experimental Encryption Negotiation TLV
+	DSOTLVMaximumPayload = 0xF802 // Experimental Maximum Payload Size TLV
 
 	// RFC 8490 Section 4.1.1: Default inactivity timeout is 15 seconds
 	DefaultInactivityTimeout = 15 * time.Second
 
-	// RFC 8490 Section 4.1.1: Keepalive interval minimum is 1 second
-	MinKeepaliveInterval = 1 * time.Second
+	// RFC 8490 Section 7.1: Keepalive interval MUST NOT be less than 10 seconds.
+	MinKeepaliveInterval = 10 * time.Second
 
 	// Default maximum payload size
 	DefaultMaxPayloadSize = 65535
@@ -84,7 +89,11 @@ type Session struct {
 func (s *Session) IsExpired(timeout time.Duration) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return time.Since(s.LastActivity) > timeout
+	return sessionExpiredAt(s.LastActivity, time.Now(), timeout)
+}
+
+func sessionExpiredAt(lastActivity, now time.Time, timeout time.Duration) bool {
+	return !now.Before(lastActivity.Add(timeout))
 }
 
 // Close closes the session.
@@ -132,6 +141,9 @@ func (t *TLV) Size() int {
 
 // Pack serializes the TLV to wire format.
 func (t *TLV) Pack(buf []byte, offset int) (int, error) {
+	if err := t.validateLength(); err != nil {
+		return 0, err
+	}
 	if offset+t.Size() > len(buf) {
 		return 0, fmt.Errorf("buffer too small for TLV")
 	}
@@ -141,6 +153,13 @@ func (t *TLV) Pack(buf []byte, offset int) (int, error) {
 	copy(buf[offset+4:], t.Value)
 
 	return t.Size(), nil
+}
+
+func (t *TLV) validateLength() error {
+	if len(t.Value) > 0xffff {
+		return fmt.Errorf("DSO TLV type %d value too large: %d bytes (max 65535)", t.Type, len(t.Value))
+	}
+	return nil
 }
 
 // UnpackTLV deserializes a TLV from wire format.
@@ -167,9 +186,9 @@ func UnpackTLV(buf []byte, offset int) (*TLV, int, error) {
 // NewKeepaliveTLV creates a Keepalive TLV with primary and secondary timeouts.
 func NewKeepaliveTLV(primaryTimeout, secondaryTimeout time.Duration) *TLV {
 	// RFC 8490 Section 4.1: Keepalive TLV format
-	// Timeout values are in units of 100 milliseconds
-	primary := uint32(primaryTimeout.Milliseconds() / 100)
-	secondary := uint32(secondaryTimeout.Milliseconds() / 100)
+	// Timeout values are unsigned 32-bit milliseconds.
+	primary := durationMillis32(primaryTimeout)
+	secondary := durationMillis32(secondaryTimeout)
 
 	value := make([]byte, 8)
 	binary.BigEndian.PutUint32(value[0:], primary)
@@ -193,9 +212,8 @@ func ParseKeepaliveTLV(tlv *TLV) (primary, secondary time.Duration, err error) {
 	primaryUnits := binary.BigEndian.Uint32(tlv.Value[0:])
 	secondaryUnits := binary.BigEndian.Uint32(tlv.Value[4:])
 
-	// Convert from 100ms units to Duration
-	primary = time.Duration(primaryUnits) * 100 * time.Millisecond
-	secondary = time.Duration(secondaryUnits) * 100 * time.Millisecond
+	primary = time.Duration(primaryUnits) * time.Millisecond
+	secondary = time.Duration(secondaryUnits) * time.Millisecond
 
 	return primary, secondary, nil
 }
@@ -225,16 +243,26 @@ func ParseSessionIDTLV(tlv *TLV) (uint64, error) {
 
 // NewRetryDelayTLV creates a Retry Delay TLV.
 func NewRetryDelayTLV(delay time.Duration) *TLV {
-	// Delay in units of 100 milliseconds
-	units := uint32(delay.Milliseconds() / 100)
+	delayMS := durationMillis32(delay)
 
 	value := make([]byte, 4)
-	binary.BigEndian.PutUint32(value, units)
+	binary.BigEndian.PutUint32(value, delayMS)
 
 	return &TLV{
 		Type:  DSOTLVRetryDelay,
 		Value: value,
 	}
+}
+
+func durationMillis32(d time.Duration) uint32 {
+	ms := d.Milliseconds()
+	if ms <= 0 {
+		return 0
+	}
+	if ms > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(ms)
 }
 
 // NewMaximumPayloadTLV creates a Maximum Payload Size TLV.
@@ -263,6 +291,7 @@ type Manager struct {
 
 	// Configuration
 	inactivityTimeout time.Duration
+	keepaliveInterval time.Duration
 	maxSessions       int
 	allowPlainTCP     bool
 	maxPayloadSize    uint16
@@ -284,6 +313,7 @@ type Manager struct {
 type Config struct {
 	Enabled           bool
 	InactivityTimeout time.Duration
+	KeepaliveInterval time.Duration
 	MaxSessions       int
 	MaxPayloadSize    uint16
 
@@ -299,6 +329,7 @@ func DefaultConfig() Config {
 	return Config{
 		Enabled:           false,
 		InactivityTimeout: DefaultInactivityTimeout,
+		KeepaliveInterval: MinKeepaliveInterval,
 		MaxSessions:       1000,
 		MaxPayloadSize:    DefaultMaxPayloadSize,
 	}
@@ -308,6 +339,12 @@ func DefaultConfig() Config {
 func NewManager(config Config, logger *util.Logger) *Manager {
 	if config.InactivityTimeout == 0 {
 		config.InactivityTimeout = DefaultInactivityTimeout
+	}
+	if config.KeepaliveInterval == 0 {
+		config.KeepaliveInterval = config.InactivityTimeout / 3
+	}
+	if config.KeepaliveInterval < MinKeepaliveInterval {
+		config.KeepaliveInterval = MinKeepaliveInterval
 	}
 	if config.MaxPayloadSize == 0 {
 		config.MaxPayloadSize = DefaultMaxPayloadSize
@@ -319,6 +356,7 @@ func NewManager(config Config, logger *util.Logger) *Manager {
 	return &Manager{
 		sessions:          make(map[uint64]*Session),
 		inactivityTimeout: config.InactivityTimeout,
+		keepaliveInterval: config.KeepaliveInterval,
 		maxSessions:       config.MaxSessions,
 		maxPayloadSize:    config.MaxPayloadSize,
 		allowPlainTCP:     config.AllowPlainTCP,
@@ -406,7 +444,7 @@ func (m *Manager) CreateSession(conn net.Conn) (*Session, error) {
 		RemoteAddr:    conn.RemoteAddr(),
 		CreatedAt:     now,
 		LastActivity:  now,
-		KeepaliveTime: m.inactivityTimeout / 3,
+		KeepaliveTime: m.keepaliveInterval,
 		MaxPayload:    m.maxPayloadSize,
 		stopCh:        make(chan struct{}),
 		doneCh:        make(chan struct{}),
@@ -496,7 +534,7 @@ func (m *Manager) cleanupExpiredSessions() {
 
 	now := time.Now()
 	for id, session := range m.sessions {
-		if now.Sub(session.LastActivity) > m.inactivityTimeout {
+		if sessionExpiredAt(session.LastActivity, now, m.inactivityTimeout) {
 			session.Close()
 			delete(m.sessions, id)
 			if m.logger != nil {
@@ -519,6 +557,7 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 
 	// Process TLVs
 	var responseTLVs []*TLV
+	isPrimary := true
 	for len(tlvBuf) > 0 {
 		tlv, consumed, err := UnpackTLV(tlvBuf, 0)
 		if err != nil {
@@ -528,9 +567,12 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 		switch tlv.Type {
 		case DSOTLVKeepalive:
 			// Process keepalive request and respond
-			primary, secondary, err := ParseKeepaliveTLV(tlv)
+			_, keepaliveInterval, err := ParseKeepaliveTLV(tlv)
 			if err != nil {
 				return nil, err
+			}
+			if keepaliveInterval < MinKeepaliveInterval {
+				keepaliveInterval = MinKeepaliveInterval
 			}
 			// Writes to session.KeepaliveTime / keepalivesEnabled race
 			// against SendKeepalive (which reads KeepaliveTime under no
@@ -538,10 +580,10 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 			// the field update with session.mu so the keepalive ticker
 			// and this handler stay coherent.
 			session.mu.Lock()
-			session.KeepaliveTime = primary
+			session.KeepaliveTime = keepaliveInterval
 			session.keepalivesEnabled = true
 			session.mu.Unlock()
-			responseTLVs = append(responseTLVs, NewKeepaliveTLV(primary, secondary))
+			responseTLVs = append(responseTLVs, NewKeepaliveTLV(m.inactivityTimeout, keepaliveInterval))
 
 		case DSOTLVMaximumPayload:
 			// Acknowledge max payload
@@ -561,22 +603,32 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 			}
 
 		case DSOTLVPadding:
-			// Ignore padding in requests
+			// Encryption Padding is only valid as an Additional TLV.
+			if isPrimary {
+				return nil, fmt.Errorf("padding TLV not allowed as primary")
+			}
+			// Ignore padding Additional TLVs in requests.
 
 		case DSOTLVRetryDelay:
 			// Not valid in requests
 			return nil, fmt.Errorf("retry delay TLV not allowed in requests")
 
 		default:
-			// Unknown TLV - send DSO code 1 (Invalid DSO)
-			return nil, fmt.Errorf("unknown TLV type: %d", tlv.Type)
+			if isPrimary {
+				return nil, fmt.Errorf("unknown primary TLV type: %d", tlv.Type)
+			}
+			// Unknown additional TLVs are ignored per RFC 8490 TLV handling.
 		}
 
+		isPrimary = false
 		tlvBuf = tlvBuf[consumed:]
 	}
 
 	// Build response
-	response := m.buildDSOResponse(msg, responseTLVs)
+	response, err := m.buildDSOResponse(msg, responseTLVs)
+	if err != nil {
+		return nil, err
+	}
 	return response, nil
 }
 
@@ -602,7 +654,7 @@ func (m *Manager) extractTLVs(msg *protocol.Message) ([]byte, error) {
 }
 
 // buildDSOResponse builds a DSO response message.
-func (m *Manager) buildDSOResponse(request *protocol.Message, tlvs []*TLV) *protocol.Message {
+func (m *Manager) buildDSOResponse(request *protocol.Message, tlvs []*TLV) (*protocol.Message, error) {
 	// Clone the request header
 	response := &protocol.Message{
 		Header: request.Header,
@@ -611,10 +663,18 @@ func (m *Manager) buildDSOResponse(request *protocol.Message, tlvs []*TLV) *prot
 	// Set response flag (QR = true for response)
 	response.Header.Flags.QR = true
 
-	// DSO responses use RCODE=0 (NOERROR) with response TLVs in additional section
-	response.Header.ARCount = uint16(len(tlvs))
+	response.Header.QDCount = 0
+	response.Header.ANCount = 0
+	response.Header.NSCount = 0
+	response.Header.ARCount = 0
 
-	return response
+	body, err := packTLVs(tlvs)
+	if err != nil {
+		return nil, err
+	}
+	response.RawBody = body
+
+	return response, nil
 }
 
 // SendKeepalive sends an unsolicited DSO keepalive TLV on the session
@@ -683,7 +743,7 @@ func (m *Manager) SendKeepalive(session *Session) error {
 		// Non-fatal: continue and let Write block on the underlying timeout.
 		_ = err
 	}
-	if _, err := session.Conn.Write(out); err != nil {
+	if err := util.WriteFull(session.Conn, out); err != nil {
 		return fmt.Errorf("dso: write keepalive: %w", err)
 	}
 	// Reset write deadline.
@@ -698,27 +758,64 @@ func (m *Manager) SendKeepalive(session *Session) error {
 
 // IsDSOMessage checks if a message is a DSO message.
 func IsDSOMessage(msg *protocol.Message) bool {
+	if msg == nil {
+		return false
+	}
 	// DSO messages have OPCODE 6
 	return msg.Header.Flags.Opcode == 6
 }
 
 // CreateDSOMessage creates a new DSO message with given TLVs.
 func CreateDSOMessage(tlvs []*TLV) (*protocol.Message, error) {
+	body, err := packTLVs(tlvs)
+	if err != nil {
+		return nil, err
+	}
+	if protocol.HeaderLen+len(body) > 0xffff {
+		return nil, fmt.Errorf("DSO message too large: %d bytes (max 65535)", protocol.HeaderLen+len(body))
+	}
+
 	msg := &protocol.Message{
 		Header: protocol.Header{
-			ID: 0, // DSO uses ID=0
+			ID: 0,
 			Flags: protocol.Flags{
-				QR:     false, // Query
-				Opcode: 6,     // DSO
+				QR:     false,
+				Opcode: 6,
 			},
 			QDCount: 0,
 			ANCount: 0,
 			NSCount: 0,
-			ARCount: uint16(len(tlvs)),
+			ARCount: 0,
 		},
+		RawBody: body,
 	}
 
 	return msg, nil
+}
+
+func packTLVs(tlvs []*TLV) ([]byte, error) {
+	if len(tlvs) == 0 {
+		return nil, nil
+	}
+
+	size := 0
+	for _, tlv := range tlvs {
+		if tlv == nil {
+			return nil, fmt.Errorf("nil DSO TLV")
+		}
+		size += tlv.Size()
+	}
+
+	body := make([]byte, size)
+	offset := 0
+	for _, tlv := range tlvs {
+		n, err := tlv.Pack(body, offset)
+		if err != nil {
+			return nil, err
+		}
+		offset += n
+	}
+	return body, nil
 }
 
 // Handler is an interface for handling DSO messages.

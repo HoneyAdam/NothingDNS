@@ -4,6 +4,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -83,6 +84,55 @@ func TestMetricsCollectorDisabled(t *testing.T) {
 	// Stop should not fail when disabled
 	if err := m.Stop(); err != nil {
 		t.Errorf("Stop should not fail when disabled: %v", err)
+	}
+}
+
+func TestMetricsCollectorDoubleStartStopReturns(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	bind := ln.Addr().String()
+	ln.Close()
+
+	m := New(Config{
+		Enabled:   true,
+		Bind:      bind,
+		Path:      "/metrics",
+		AuthToken: "test-token",
+	})
+
+	if err := m.Start(); err != nil {
+		t.Fatalf("Failed to start metrics server: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		conn, err := net.DialTimeout("tcp", bind, 10*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Metrics server did not start listening on %s: %v", bind, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := m.Start(); err != nil {
+		t.Fatalf("Second Start failed: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- m.Stop()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Stop failed: %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Stop did not return after double Start")
 	}
 }
 
@@ -498,6 +548,36 @@ func TestRecordQueryLatency_PrometheusOutput(t *testing.T) {
 	}
 }
 
+func TestRecordQueryLatency_PrometheusBucketsAreCumulative(t *testing.T) {
+	cfg := Config{Enabled: true}
+	m := New(cfg)
+
+	m.RecordQueryLatency("A", 2*time.Millisecond)
+	m.RecordQueryLatency("A", 20*time.Millisecond)
+	m.RecordQueryLatency("A", 2*time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rr := httptest.NewRecorder()
+
+	m.handleMetrics(rr, req)
+
+	body := rr.Body.String()
+	expected := []string{
+		`nothingdns_query_duration_seconds_bucket{type="A",le="0.001"} 0`,
+		`nothingdns_query_duration_seconds_bucket{type="A",le="0.005"} 1`,
+		`nothingdns_query_duration_seconds_bucket{type="A",le="0.01"} 1`,
+		`nothingdns_query_duration_seconds_bucket{type="A",le="0.025"} 2`,
+		`nothingdns_query_duration_seconds_bucket{type="A",le="+Inf"} 3`,
+		`nothingdns_query_duration_seconds_count{type="A"} 3`,
+	}
+
+	for _, line := range expected {
+		if !strings.Contains(body, line) {
+			t.Fatalf("expected metrics output to contain %q\nbody:\n%s", line, body)
+		}
+	}
+}
+
 func TestRecordRateLimited(t *testing.T) {
 	cfg := Config{
 		Enabled:   true,
@@ -577,4 +657,44 @@ func TestRecordHistorySnapshot(t *testing.T) {
 
 	// Now record snapshot with data
 	m.recordHistorySnapshot()
+}
+
+func TestRecordHistorySnapshotLatencyAverage(t *testing.T) {
+	cfg := Config{Enabled: true}
+	m := New(cfg)
+
+	m.RecordQueryLatency("A", 10*time.Millisecond)
+	m.RecordQueryLatency("A", 30*time.Millisecond)
+	m.RecordQueryLatency("MX", 100*time.Millisecond)
+	m.recordHistorySnapshot()
+
+	history := m.GetHistory()
+	if history.Count != 1 {
+		t.Fatalf("Expected one history sample, got %d", history.Count)
+	}
+	if history.LatencyMs[0] != 46 {
+		t.Fatalf("Expected latency average across observations to be 46ms, got %dms", history.LatencyMs[0])
+	}
+}
+
+func TestUptimeClampsFutureStartTime(t *testing.T) {
+	m := New(Config{Enabled: true})
+	m.startTime = time.Now().Add(time.Hour)
+
+	metricsRecorder := httptest.NewRecorder()
+	m.handleMetrics(metricsRecorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if body := metricsRecorder.Body.String(); !strings.Contains(body, "nothingdns_server_uptime_seconds 0.00") {
+		t.Fatalf("future start time should render zero uptime, got:\n%s", body)
+	}
+
+	snapshot := m.Snapshot()
+	if snapshot.UptimeSeconds != 0 {
+		t.Fatalf("future start time snapshot uptime = %d, want 0", snapshot.UptimeSeconds)
+	}
+
+	healthRecorder := httptest.NewRecorder()
+	m.handleHealth(healthRecorder, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if body := healthRecorder.Body.String(); !strings.Contains(body, `"uptime":"0s"`) {
+		t.Fatalf("future start time health uptime should be zero, got %s", body)
+	}
 }

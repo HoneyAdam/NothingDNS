@@ -2,8 +2,8 @@ package util
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 // Domain constants per RFC 1035
@@ -111,6 +111,9 @@ func ParseDomain(name string) (*Domain, error) {
 
 // String returns the domain as a string.
 func (d *Domain) String() string {
+	if d == nil {
+		return ""
+	}
 	result := strings.Join(d.Labels, ".")
 	if d.IsFQDN {
 		result += "."
@@ -120,6 +123,9 @@ func (d *Domain) String() string {
 
 // Length returns the length of the domain name in bytes.
 func (d *Domain) Length() int {
+	if d == nil {
+		return 0
+	}
 	length := 0
 	for i, label := range d.Labels {
 		length += len(label)
@@ -139,28 +145,42 @@ func (d *Domain) Normalize() string {
 
 // IsRoot returns true if this is the root domain (.) or empty.
 func (d *Domain) IsRoot() bool {
+	if d == nil {
+		return true
+	}
 	return len(d.Labels) == 0 || (len(d.Labels) == 1 && d.Labels[0] == "")
 }
 
 // IsWildcard returns true if the domain is a wildcard (starts with *).
 func (d *Domain) IsWildcard() bool {
+	if d == nil {
+		return false
+	}
 	return len(d.Labels) > 0 && d.Labels[0] == "*"
 }
 
 // Parent returns the parent domain.
 // Returns nil if this is the root domain.
 func (d *Domain) Parent() *Domain {
+	if d == nil {
+		return &Domain{Labels: []string{}}
+	}
 	if len(d.Labels) <= 1 {
 		return &Domain{Labels: []string{}, IsFQDN: d.IsFQDN}
 	}
+	labels := make([]string, len(d.Labels)-1)
+	copy(labels, d.Labels[1:])
 	return &Domain{
-		Labels: d.Labels[1:],
+		Labels: labels,
 		IsFQDN: d.IsFQDN,
 	}
 }
 
 // HasParent returns true if this domain is a subdomain of the given parent.
 func (d *Domain) HasParent(parent *Domain) bool {
+	if d == nil || parent == nil {
+		return false
+	}
 	if len(parent.Labels) > len(d.Labels) {
 		return false
 	}
@@ -176,6 +196,9 @@ func (d *Domain) HasParent(parent *Domain) bool {
 
 // Equal returns true if the domains are equal (case-insensitive).
 func (d *Domain) Equal(other *Domain) bool {
+	if d == nil || other == nil {
+		return false
+	}
 	if len(d.Labels) != len(other.Labels) {
 		return false
 	}
@@ -191,6 +214,9 @@ func (d *Domain) Equal(other *Domain) bool {
 // For wire format, labels are written in normal order, but when comparing
 // domains, we often compare from the root (TLD first).
 func (d *Domain) WireLabels() []string {
+	if d == nil {
+		return nil
+	}
 	// Return a copy
 	labels := make([]string, len(d.Labels))
 	copy(labels, d.Labels)
@@ -199,6 +225,9 @@ func (d *Domain) WireLabels() []string {
 
 // ReverseLabels returns the labels in reverse order (for comparison).
 func (d *Domain) ReverseLabels() []string {
+	if d == nil {
+		return nil
+	}
 	labels := make([]string, len(d.Labels))
 	for i, label := range d.Labels {
 		labels[len(d.Labels)-1-i] = label
@@ -387,13 +416,9 @@ func UnescapeLabel(label string) (string, error) {
 				if i+3 >= len(label) {
 					return "", fmt.Errorf("incomplete decimal escape at position %d", i)
 				}
-				var val int
-				_, err := fmt.Sscanf(label[i+1:i+4], "%d", &val)
+				val, err := strconv.ParseUint(label[i+1:i+4], 10, 8)
 				if err != nil {
 					return "", fmt.Errorf("invalid decimal escape at position %d", i)
-				}
-				if !utf8.ValidRune(rune(val)) {
-					return "", fmt.Errorf("invalid rune value %d", val)
 				}
 				result.WriteByte(byte(val))
 				i += 3

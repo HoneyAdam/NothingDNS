@@ -10,9 +10,11 @@ import (
 )
 
 func TestTrustAnchorIsValid(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name     string
 		anchor   *TrustAnchor
+		now      time.Time
 		expected bool
 	}{
 		{
@@ -71,11 +73,47 @@ func TestTrustAnchorIsValid(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			name: "valid exactly at ValidFrom",
+			anchor: &TrustAnchor{
+				Zone:       ".",
+				KeyTag:     20326,
+				Algorithm:  protocol.AlgorithmRSASHA256,
+				DigestType: 2,
+				Digest:     []byte{0x01, 0x02, 0x03},
+				ValidFrom:  now,
+			},
+			now:      now,
+			expected: true,
+		},
+		{
+			name: "expired exactly at ValidUntil",
+			anchor: &TrustAnchor{
+				Zone:       ".",
+				KeyTag:     20326,
+				Algorithm:  protocol.AlgorithmRSASHA256,
+				DigestType: 2,
+				Digest:     []byte{0x01, 0x02, 0x03},
+				ValidFrom:  now.Add(-time.Hour),
+				ValidUntil: &now,
+			},
+			now:      now,
+			expected: false,
+		},
+		{
+			name:     "nil anchor",
+			anchor:   nil,
+			now:      now,
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := tt.anchor.IsValid()
+			if !tt.now.IsZero() {
+				result = tt.anchor.isValidAt(tt.now)
+			}
 			if result != tt.expected {
 				t.Errorf("IsValid() = %v, want %v", result, tt.expected)
 			}
@@ -139,6 +177,11 @@ func TestTrustAnchorMatchesDS(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			name:     "nil DS",
+			ds:       nil,
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -149,10 +192,16 @@ func TestTrustAnchorMatchesDS(t *testing.T) {
 			}
 		})
 	}
+
+	var nilAnchor *TrustAnchor
+	if nilAnchor.MatchesDS(&protocol.RDataDS{}) {
+		t.Error("MatchesDS should return false for nil anchor")
+	}
 }
 
 func TestTrustAnchorStore(t *testing.T) {
 	store := NewTrustAnchorStore()
+	validUntil := time.Now().Add(time.Hour)
 
 	anchor1 := &TrustAnchor{
 		Zone:       ".",
@@ -160,7 +209,9 @@ func TestTrustAnchorStore(t *testing.T) {
 		Algorithm:  protocol.AlgorithmRSASHA256,
 		DigestType: 2,
 		Digest:     []byte{0x01, 0x02},
+		PublicKey:  []byte{0x11, 0x12},
 		ValidFrom:  time.Now().Add(-time.Hour),
+		ValidUntil: &validUntil,
 	}
 
 	anchor2 := &TrustAnchor{
@@ -175,6 +226,11 @@ func TestTrustAnchorStore(t *testing.T) {
 	// Test AddAnchor
 	store.AddAnchor(anchor1)
 	store.AddAnchor(anchor2)
+	store.AddAnchor(nil)
+	anchor1.KeyTag = 1
+	anchor1.Digest[0] = 0xFF
+	anchor1.PublicKey[0] = 0xFF
+	*anchor1.ValidUntil = time.Now().Add(-time.Hour)
 
 	// Test GetAnchorsForZone
 	rootAnchors := store.GetAnchorsForZone(".")
@@ -183,6 +239,32 @@ func TestTrustAnchorStore(t *testing.T) {
 	}
 	if rootAnchors[0].KeyTag != 20326 {
 		t.Errorf("Expected KeyTag 20326, got %d", rootAnchors[0].KeyTag)
+	}
+	if !bytes.Equal(rootAnchors[0].Digest, []byte{0x01, 0x02}) {
+		t.Errorf("Expected stored digest to be isolated, got %x", rootAnchors[0].Digest)
+	}
+	if !bytes.Equal(rootAnchors[0].PublicKey, []byte{0x11, 0x12}) {
+		t.Errorf("Expected stored public key to be isolated, got %x", rootAnchors[0].PublicKey)
+	}
+	if rootAnchors[0].ValidUntil == nil || !rootAnchors[0].ValidUntil.After(time.Now()) {
+		t.Error("Expected stored ValidUntil to be isolated")
+	}
+	rootAnchors[0].KeyTag = 2
+	rootAnchors[0].Digest[0] = 0xEE
+	rootAnchors[0].PublicKey[0] = 0xEE
+	*rootAnchors[0].ValidUntil = time.Now().Add(-time.Hour)
+	rootAnchors = store.GetAnchorsForZone(".")
+	if rootAnchors[0].KeyTag != 20326 {
+		t.Errorf("Expected returned anchor to be isolated, got KeyTag %d", rootAnchors[0].KeyTag)
+	}
+	if !bytes.Equal(rootAnchors[0].Digest, []byte{0x01, 0x02}) {
+		t.Errorf("Expected returned digest to be isolated, got %x", rootAnchors[0].Digest)
+	}
+	if !bytes.Equal(rootAnchors[0].PublicKey, []byte{0x11, 0x12}) {
+		t.Errorf("Expected returned public key to be isolated, got %x", rootAnchors[0].PublicKey)
+	}
+	if rootAnchors[0].ValidUntil == nil || !rootAnchors[0].ValidUntil.After(time.Now()) {
+		t.Error("Expected returned ValidUntil to be isolated")
 	}
 
 	exampleAnchors := store.GetAnchorsForZone("example.com.")
@@ -200,6 +282,25 @@ func TestTrustAnchorStore(t *testing.T) {
 	}
 	if len(remaining) != 1 || remaining[0] != "www" {
 		t.Errorf("Expected remaining ['www'], got %v", remaining)
+	}
+	anchor.KeyTag = 2
+	anchor.Digest[0] = 0xEE
+	anchor, _ = store.FindClosestAnchor("www.example.com.")
+	if anchor.KeyTag != 12345 {
+		t.Errorf("Expected closest anchor to be isolated, got KeyTag %d", anchor.KeyTag)
+	}
+	if !bytes.Equal(anchor.Digest, []byte{0x03, 0x04}) {
+		t.Errorf("Expected closest anchor digest to be isolated, got %x", anchor.Digest)
+	}
+	anchor, remaining = store.FindClosestAnchor("WWW.EXAMPLE.COM")
+	if anchor == nil {
+		t.Fatal("Expected to find anchor for uppercase www.example.com")
+	}
+	if anchor.Zone != "example.com." {
+		t.Errorf("Expected uppercase lookup to find example.com., got %s", anchor.Zone)
+	}
+	if len(remaining) != 1 || remaining[0] != "www" {
+		t.Errorf("Expected uppercase lookup remaining ['www'], got %v", remaining)
 	}
 
 	// Test FindClosestAnchor for root
@@ -437,6 +538,13 @@ func TestTrustAnchorMatchesDNSKEY(t *testing.T) {
 	if anchor2.MatchesDNSKEY(dnskey) {
 		t.Error("MatchesDNSKEY should return false when anchor has nil PublicKey")
 	}
+	if anchor.MatchesDNSKEY(nil) {
+		t.Error("MatchesDNSKEY should return false for nil DNSKEY")
+	}
+	var nilAnchor *TrustAnchor
+	if nilAnchor.MatchesDNSKEY(dnskey) {
+		t.Error("MatchesDNSKEY should return false for nil anchor")
+	}
 
 	// Test with wrong algorithm
 	dnskey2 := &protocol.RDataDNSKEY{
@@ -530,6 +638,13 @@ func TestDSFromDNSKEY(t *testing.T) {
 	if len(ds.Digest) != 32 { // SHA-256 = 32 bytes
 		t.Errorf("Expected 32 byte digest, got %d", len(ds.Digest))
 	}
+	dnskey.PublicKey[0] = 0xFF
+	if bytes.Equal(ds.PublicKey, dnskey.PublicKey) {
+		t.Error("DSFromDNSKEY should copy DNSKEY public key bytes")
+	}
+	if !bytes.Equal(ds.PublicKey, []byte{0x01, 0x02, 0x03, 0x04, 0x05}) {
+		t.Errorf("DSFromDNSKEY public key changed after source mutation: %x", ds.PublicKey)
+	}
 
 	// Test SHA-1 (type 1)
 	ds1, err := DSFromDNSKEY("example.com.", dnskey, 1)
@@ -553,6 +668,10 @@ func TestDSFromDNSKEY(t *testing.T) {
 	_, err = DSFromDNSKEY("example.com.", dnskey, 99)
 	if err == nil {
 		t.Error("Expected error for unsupported digest type")
+	}
+	_, err = DSFromDNSKEY("example.com.", nil, 2)
+	if err == nil {
+		t.Error("Expected error for nil DNSKEY")
 	}
 }
 

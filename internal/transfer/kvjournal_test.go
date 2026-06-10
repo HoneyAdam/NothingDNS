@@ -1,6 +1,7 @@
 package transfer
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -40,6 +41,22 @@ func TestKVJournalStore_NewKVJournalStoreWithKey(t *testing.T) {
 	}
 }
 
+func TestKVJournalStore_OpenKVJournalStoreRejectsInvalidDataDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	dataFile := filepath.Join(tmpDir, "not-a-directory")
+	if err := os.WriteFile(dataFile, []byte("not a dir"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	store, err := OpenKVJournalStore(dataFile)
+	if err == nil {
+		t.Fatal("OpenKVJournalStore should reject a dataDir that is a file")
+	}
+	if store != nil {
+		t.Fatalf("OpenKVJournalStore store = %#v, want nil on error", store)
+	}
+}
+
 func TestKVJournalStore_SetMaxJournalSize(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := NewKVJournalStore(tmpDir)
@@ -52,6 +69,66 @@ func TestKVJournalStore_SetMaxJournalSize(t *testing.T) {
 	store.SetMaxJournalSize(200)
 	if store.maxJournalSize != 200 {
 		t.Errorf("maxJournalSize = %d, want 200", store.maxJournalSize)
+	}
+
+	store.SetMaxJournalSize(-1)
+	if store.maxJournalSize != 200 {
+		t.Errorf("maxJournalSize = %d, want unchanged 200 for negative input", store.maxJournalSize)
+	}
+}
+
+func TestKVJournalStore_SetMaxJournalSize_NegativeDoesNotWipeJournal(t *testing.T) {
+	store := NewKVJournalStore(t.TempDir())
+	zoneName := "example.com."
+
+	store.SetMaxJournalSize(2)
+	for serial := uint32(1); serial <= 2; serial++ {
+		if err := store.SaveEntry(zoneName, &IXFRJournalEntry{Serial: serial, Timestamp: time.Now()}); err != nil {
+			t.Fatalf("SaveEntry(%d): %v", serial, err)
+		}
+	}
+
+	store.SetMaxJournalSize(-1)
+	if err := store.SaveEntry(zoneName, &IXFRJournalEntry{Serial: 3, Timestamp: time.Now()}); err != nil {
+		t.Fatalf("SaveEntry(3): %v", err)
+	}
+
+	entries, err := store.LoadEntries(zoneName)
+	if err != nil {
+		t.Fatalf("LoadEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("entries len = %d, want 2", len(entries))
+	}
+	if entries[0].Serial != 2 || entries[1].Serial != 3 {
+		t.Fatalf("remaining serials = [%d %d], want [2 3]", entries[0].Serial, entries[1].Serial)
+	}
+}
+
+func TestKVJournalStore_SaveEntryRejectsNilEntry(t *testing.T) {
+	store := NewKVJournalStore(t.TempDir())
+
+	err := store.SaveEntry("example.com.", nil)
+	if err == nil || err.Error() != "journal entry is nil" {
+		t.Fatalf("SaveEntry(nil) error = %v, want journal entry is nil", err)
+	}
+}
+
+func TestKVJournalStore_NilReceiver(t *testing.T) {
+	var store *KVJournalStore
+
+	store.SetMaxJournalSize(10)
+
+	if err := store.SaveEntry("example.com.", &IXFRJournalEntry{Serial: 1}); err == nil || err.Error() != "journal store is nil" {
+		t.Fatalf("SaveEntry on nil store error = %v, want journal store is nil", err)
+	}
+
+	if entries, err := store.LoadEntries("example.com."); err == nil || err.Error() != "journal store is nil" || entries != nil {
+		t.Fatalf("LoadEntries on nil store entries=%v error=%v, want nil entries and journal store is nil", entries, err)
+	}
+
+	if err := store.Truncate("example.com.", 1); err == nil || err.Error() != "journal store is nil" {
+		t.Fatalf("Truncate on nil store error = %v, want journal store is nil", err)
 	}
 }
 
@@ -178,6 +255,47 @@ func TestKVJournalStore_Truncate(t *testing.T) {
 	}
 }
 
+func TestKVJournalStore_TruncateHonorsKeepCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewKVJournalStore(tmpDir)
+	store.SetMaxJournalSize(10)
+
+	zoneName := "example.com."
+	for serial := uint32(1); serial <= 5; serial++ {
+		entry := &IXFRJournalEntry{
+			Serial:    serial,
+			Timestamp: time.Now(),
+		}
+		if err := store.SaveEntry(zoneName, entry); err != nil {
+			t.Fatalf("SaveEntry(%d) failed: %v", serial, err)
+		}
+	}
+
+	if err := store.Truncate(zoneName, 2); err != nil {
+		t.Fatalf("Truncate failed: %v", err)
+	}
+
+	entries, err := store.LoadEntries(zoneName)
+	if err != nil {
+		t.Fatalf("LoadEntries failed: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("LoadEntries returned %d entries, want 2", len(entries))
+	}
+	if entries[0].Serial != 4 || entries[1].Serial != 5 {
+		t.Fatalf("remaining serials = [%d %d], want [4 5]", entries[0].Serial, entries[1].Serial)
+	}
+}
+
+func TestKVJournalStore_TruncateRejectsNegativeKeepCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewKVJournalStore(tmpDir)
+
+	if err := store.Truncate("example.com.", -1); err == nil {
+		t.Fatal("expected negative keepCount to fail")
+	}
+}
+
 func TestKVJournalStore_SaveEntryWithHMAC(t *testing.T) {
 	tmpDir := t.TempDir()
 	key := []byte("test-key-32-bytes-long-for-hmac!")
@@ -229,6 +347,56 @@ func TestKVJournalStore_SaveEntryWithHMAC(t *testing.T) {
 	if loaded[0].Serial != entry.Serial {
 		t.Errorf("Serial = %d, want %d", loaded[0].Serial, entry.Serial)
 	}
+}
+
+func TestKVJournalStore_WriteEntryCompletesPartialWrites(t *testing.T) {
+	key := []byte("test-key-32-bytes-long-for-hmac!")
+	store := NewKVJournalStore(t.TempDir(), key)
+	writer := &chunkedJournalWriter{maxWrite: 3}
+	entry := &IXFRJournalEntry{
+		Serial:    2024010101,
+		Added:     []zone.RecordChange{{Name: "test.example.com.", Type: protocol.TypeA, TTL: 300}},
+		Timestamp: time.Now(),
+	}
+
+	if err := store.writeEntry(writer, entry); err != nil {
+		t.Fatalf("writeEntry: %v", err)
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+
+	journalPath := filepath.Join(t.TempDir(), "entry.journal")
+	if err := os.WriteFile(journalPath, writer.buf.Bytes(), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	f, err := os.Open(journalPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer f.Close()
+
+	var loaded IXFRJournalEntry
+	if err := readEntryHMAC(f, &loaded, key); err != nil {
+		t.Fatalf("readEntryHMAC: %v", err)
+	}
+	if loaded.Serial != entry.Serial || len(loaded.Added) != 1 || loaded.Added[0].Name != entry.Added[0].Name {
+		t.Fatalf("loaded entry = %+v, want %+v", loaded, entry)
+	}
+}
+
+type chunkedJournalWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (w *chunkedJournalWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.maxWrite <= 0 || len(p) <= w.maxWrite {
+		return w.buf.Write(p)
+	}
+	return w.buf.Write(p[:w.maxWrite])
 }
 
 func TestKVJournalStore_InvalidHMACKey(t *testing.T) {

@@ -96,6 +96,36 @@ func TestGetStaleEnabled(t *testing.T) {
 	}
 }
 
+func TestGetStaleReturnsMessageCopy(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ServeStale = true
+	cfg.StaleGrace = time.Hour
+	cfg.MinTTL = 0
+	cfg.MaxTTL = time.Hour
+	c := New(cfg)
+
+	c.Set("test:1", newTestMessage(), 0)
+
+	stale := c.GetStale("test:1")
+	if stale == nil || stale.Message == nil {
+		t.Fatal("expected stale message")
+	}
+
+	stale.Message.Header.ID = 0xBEEF
+	stale.Message.Answers[0].TTL = 1
+
+	stale = c.GetStale("test:1")
+	if stale == nil || stale.Message == nil {
+		t.Fatal("expected stale message after mutating previous result")
+	}
+	if stale.Message.Header.ID != 1234 {
+		t.Fatalf("stale message aliases cached header: got %#x", stale.Message.Header.ID)
+	}
+	if stale.Message.Answers[0].TTL != 300 {
+		t.Fatalf("stale message aliases cached answer: got TTL %d", stale.Message.Answers[0].TTL)
+	}
+}
+
 func TestGetStaleGracePeriodExpired(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServeStale = true
@@ -118,6 +148,29 @@ func TestGetStaleGracePeriodExpired(t *testing.T) {
 	stale := c.GetStale("test:1")
 	if stale != nil {
 		t.Error("expected nil from GetStale after grace period")
+	}
+}
+
+func TestStaleDeadlineReachedBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	entry := &Entry{
+		ExpireTime: now.Add(-1 * time.Hour),
+	}
+	grace := 1 * time.Hour
+
+	if staleDeadlineReached(now.Add(-time.Nanosecond), entry, grace) {
+		t.Error("stale deadline should not be reached before the boundary")
+	}
+	if !staleDeadlineReached(now, entry, grace) {
+		t.Error("stale deadline should be reached exactly at the boundary")
+	}
+	if !staleDeadlineReached(now.Add(time.Nanosecond), entry, grace) {
+		t.Error("stale deadline should be reached after the boundary")
+	}
+
+	var nilEntry *Entry
+	if !staleDeadlineReached(now, nilEntry, grace) {
+		t.Error("nil entry should be treated as past stale deadline")
 	}
 }
 

@@ -10,7 +10,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // Snapshot contains the state machine state at a point in time.
@@ -157,12 +161,10 @@ func (s *Snapshotter) Load() (*Snapshot, error) {
 		if f.IsDir() || len(f.Name()) < 6 {
 			continue
 		}
-		var idx Index
-		if _, err := fmt.Sscanf(f.Name(), "snapshot-%d", &idx); err == nil {
-			if idx > latestIndex {
-				latestIndex = idx
-				latest = f.Name()
-			}
+		idx, ok := parseSnapshotFilename(f.Name())
+		if ok && idx > latestIndex {
+			latestIndex = idx
+			latest = f.Name()
 		}
 	}
 
@@ -178,6 +180,23 @@ func (s *Snapshotter) Load() (*Snapshot, error) {
 	defer f.Close()
 
 	return s.readSnapshot(f)
+}
+
+func parseSnapshotFilename(name string) (Index, bool) {
+	idxStr, ok := strings.CutPrefix(name, "snapshot-")
+	if !ok || idxStr == "" {
+		return 0, false
+	}
+	for i := 0; i < len(idxStr); i++ {
+		if idxStr[i] < '0' || idxStr[i] > '9' {
+			return 0, false
+		}
+	}
+	idx, err := strconv.ParseUint(idxStr, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return Index(idx), true
 }
 
 // writeSnapshot writes a snapshot to a writer.
@@ -206,8 +225,7 @@ func (s *Snapshotter) writeSnapshot(w io.Writer, snap *Snapshot) error {
 		out = append(out, aad[1:3]...)
 		out = append(out, nonce...)
 		out = append(out, ct...)
-		_, err = w.Write(out)
-		return err
+		return util.WriteFull(w, out)
 	}
 	return s.writePlainSnapshot(w, snap)
 }
@@ -220,51 +238,51 @@ func (s *Snapshotter) writePlainSnapshot(w io.Writer, snap *Snapshot) error {
 
 	// Index
 	binary.BigEndian.PutUint64(buf, uint64(snap.Index))
-	if _, err := w.Write(buf); err != nil {
+	if err := util.WriteFull(w, buf); err != nil {
 		return err
 	}
 
 	// Term
 	binary.BigEndian.PutUint64(buf, uint64(snap.Term))
-	if _, err := w.Write(buf); err != nil {
+	if err := util.WriteFull(w, buf); err != nil {
 		return err
 	}
 
 	// LastIndex
 	binary.BigEndian.PutUint64(buf, uint64(snap.LastIndex))
-	if _, err := w.Write(buf); err != nil {
+	if err := util.WriteFull(w, buf); err != nil {
 		return err
 	}
 
 	// LastTerm
 	binary.BigEndian.PutUint64(buf, uint64(snap.LastTerm))
-	if _, err := w.Write(buf); err != nil {
+	if err := util.WriteFull(w, buf); err != nil {
 		return err
 	}
 
 	// Data
 	binary.BigEndian.PutUint64(buf, uint64(len(snap.Data)))
-	if _, err := w.Write(buf); err != nil {
+	if err := util.WriteFull(w, buf); err != nil {
 		return err
 	}
-	if _, err := w.Write(snap.Data); err != nil {
+	if err := util.WriteFull(w, snap.Data); err != nil {
 		return err
 	}
 
 	// Membership
 	membershipLen := make([]byte, 4)
 	binary.BigEndian.PutUint32(membershipLen, uint32(len(snap.Membership)))
-	if _, err := w.Write(membershipLen); err != nil {
+	if err := util.WriteFull(w, membershipLen); err != nil {
 		return err
 	}
 	for _, peerID := range snap.Membership {
 		peerBytes := []byte(peerID)
 		lenBytes := make([]byte, 4)
 		binary.BigEndian.PutUint32(lenBytes, uint32(len(peerBytes)))
-		if _, err := w.Write(lenBytes); err != nil {
+		if err := util.WriteFull(w, lenBytes); err != nil {
 			return err
 		}
-		if _, err := w.Write(peerBytes); err != nil {
+		if err := util.WriteFull(w, peerBytes); err != nil {
 			return err
 		}
 	}

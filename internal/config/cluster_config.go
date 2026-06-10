@@ -12,6 +12,11 @@ import (
 // operators can opt the on-disk KV file into AES-256-GCM
 // confidentiality without touching any other subsystem's keys.
 type StorageConfig struct {
+	// DataDir is where the embedded persistent database stores data.db.
+	// Empty keeps the historical behavior: use zone_dir, or "." when
+	// zone_dir is also empty.
+	DataDir string `yaml:"data_dir"`
+
 	// EncryptionKey, when set, AES-256-GCM-encrypts the KV data file
 	// at rest (32 bytes, hex-encoded). Empty disables encryption
 	// (existing plain on-disk files keep loading). Use a DIFFERENT
@@ -120,10 +125,15 @@ func unmarshalCluster(node *Node, cfg *ClusterConfig) error {
 	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
 	cfg.NodeID = node.GetString("node_id")
 	cfg.BindAddr = node.GetString("bind_addr")
-	cfg.GossipPort = getInt(node, "gossip_port", cfg.GossipPort)
+	var err error
+	if cfg.GossipPort, err = getRequiredInt(node, "gossip_port", cfg.GossipPort); err != nil {
+		return err
+	}
 	cfg.Region = node.GetString("region")
 	cfg.Zone = node.GetString("zone")
-	cfg.Weight = getInt(node, "weight", cfg.Weight)
+	if cfg.Weight, err = getRequiredInt(node, "weight", cfg.Weight); err != nil {
+		return err
+	}
 	cfg.CacheSync = getBool(node, "cache_sync", cfg.CacheSync)
 	cfg.EncryptionKey = node.GetString("encryption_key")
 	cfg.SnapshotEncryptionKey = node.GetString("snapshot_encryption_key")
@@ -141,7 +151,9 @@ func unmarshalCluster(node *Node, cfg *ClusterConfig) error {
 		cfg.RPC.TLSCertFile = rpcNode.GetString("tls_cert_file")
 		cfg.RPC.TLSKeyFile = rpcNode.GetString("tls_key_file")
 		cfg.RPC.TLSCACertFile = rpcNode.GetString("tls_ca_cert_file")
-		cfg.RPC.MinTLSVersion = getInt(rpcNode, "min_tls_version", 12)
+		if cfg.RPC.MinTLSVersion, err = getRequiredInt(rpcNode, "min_tls_version", 12); err != nil {
+			return fmt.Errorf("rpc: %w", err)
+		}
 	}
 
 	// Parse seed nodes

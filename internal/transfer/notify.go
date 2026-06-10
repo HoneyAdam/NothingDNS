@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -69,7 +70,7 @@ func (s *NOTIFYSender) SendNOTIFY(zoneName string, serial uint32, slaveAddr stri
 		return fmt.Errorf("packing NOTIFY request: %w", err)
 	}
 
-	if _, err := conn.Write(buf[:n]); err != nil {
+	if _, err := writePacket(conn, buf[:n]); err != nil {
 		return fmt.Errorf("sending NOTIFY: %w", err)
 	}
 
@@ -104,6 +105,21 @@ func (s *NOTIFYSender) SendNOTIFY(zoneName string, serial uint32, slaveAddr stri
 	}
 
 	return nil
+}
+
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	total := 0
+	for total < len(data) {
+		n, err := conn.Write(data[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+	return total, nil
 }
 
 // buildNOTIFYRequest builds a NOTIFY request message
@@ -175,7 +191,7 @@ func (s *NOTIFYSender) buildNOTIFYRequest(zoneName string, serial uint32) (*prot
 // NOTIFYSlaveHandler handles incoming NOTIFY requests on slave servers
 type NOTIFYSlaveHandler struct {
 	zones           map[string]*zone.Zone
-	zonesMu         sync.RWMutex
+	zonesMu         *sync.RWMutex
 	notifyChan      chan *NOTIFYRequest
 	serialCheck     SerialChecker
 	closeOnce       sync.Once
@@ -190,8 +206,15 @@ type SerialChecker func(zoneName string, serial uint32) bool
 func NewNOTIFYSlaveHandler(zones map[string]*zone.Zone) *NOTIFYSlaveHandler {
 	return &NOTIFYSlaveHandler{
 		zones:      zones,
+		zonesMu:    &sync.RWMutex{},
 		notifyChan: make(chan *NOTIFYRequest, 100),
 	}
+}
+
+// SetZonesMu sets an external mutex to protect the shared zones map.
+// Use this when multiple components share the same zones map.
+func (h *NOTIFYSlaveHandler) SetZonesMu(mu *sync.RWMutex) {
+	h.zonesMu = mu
 }
 
 // AddNotifyAllowed adds an authorized master IP or CIDR range.
@@ -254,6 +277,10 @@ func (h *NOTIFYSlaveHandler) GetNotifyChannel() <-chan *NOTIFYRequest {
 // HandleNOTIFY processes an incoming NOTIFY request
 // Returns the response to send back to the master
 func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP) (*protocol.Message, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil NOTIFY request")
+	}
+
 	// Check if client IP is authorized
 	if !h.isNOTIFYAllowed(clientIP) {
 		return h.createNOTIFYResponse(req, protocol.RcodeRefused), nil
@@ -281,8 +308,8 @@ func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP
 	}
 
 	// Validate request
-	if len(req.Questions) != 1 {
-		return nil, fmt.Errorf("NOTIFY requires exactly one question")
+	if len(req.Questions) != 1 || req.Questions[0] == nil || req.Questions[0].Name == nil {
+		return h.createNOTIFYResponse(req, protocol.RcodeFormatError), fmt.Errorf("NOTIFY requires exactly one valid question")
 	}
 
 	question := req.Questions[0]
@@ -303,6 +330,9 @@ func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP
 	// Extract serial from Answer section
 	var receivedSerial uint32
 	for _, rr := range req.Answers {
+		if rr == nil {
+			continue
+		}
 		if rr.Type == protocol.TypeSOA {
 			if soaData, ok := rr.Data.(*protocol.RDataSOA); ok {
 				receivedSerial = soaData.Serial
@@ -314,6 +344,9 @@ func (h *NOTIFYSlaveHandler) HandleNOTIFY(req *protocol.Message, clientIP net.IP
 	// If no serial in Answer section, check Authority section (older implementations)
 	if receivedSerial == 0 {
 		for _, rr := range req.Authorities {
+			if rr == nil {
+				continue
+			}
 			if rr.Type == protocol.TypeSOA {
 				if soaData, ok := rr.Data.(*protocol.RDataSOA); ok {
 					receivedSerial = soaData.Serial
@@ -362,6 +395,13 @@ func (h *NOTIFYSlaveHandler) createNOTIFYResponse(req *protocol.Message, rcode u
 	flags := protocol.NewResponseFlags(rcode)
 	flags.AA = true
 	flags.Opcode = protocol.OpcodeNotify
+	if req == nil {
+		return &protocol.Message{
+			Header: protocol.Header{
+				Flags: flags,
+			},
+		}
+	}
 	return &protocol.Message{
 		Header: protocol.Header{
 			ID:    req.Header.ID,
@@ -373,10 +413,16 @@ func (h *NOTIFYSlaveHandler) createNOTIFYResponse(req *protocol.Message, rcode u
 
 // IsNOTIFYRequest checks if a message is a NOTIFY request
 func IsNOTIFYRequest(msg *protocol.Message) bool {
+	if msg == nil {
+		return false
+	}
 	return msg.Header.Flags.Opcode == protocol.OpcodeNotify && !msg.Header.Flags.QR
 }
 
 // IsNOTIFYResponse checks if a message is a NOTIFY response
 func IsNOTIFYResponse(msg *protocol.Message) bool {
+	if msg == nil {
+		return false
+	}
 	return msg.Header.Flags.Opcode == protocol.OpcodeNotify && msg.Header.Flags.QR
 }

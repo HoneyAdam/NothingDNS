@@ -73,13 +73,14 @@ func TestRadixZoneProvider_NilTree(t *testing.T) {
 		t.Errorf("nil-tree GetZone should miss, got %v", z)
 	}
 	if list := p.ListZones(); list != nil {
-		t.Errorf("ListZones should return nil (radix has no List), got %v", list)
+		t.Errorf("nil-tree ListZones should return nil, got %v", list)
 	}
 }
 
 func TestRadixZoneProvider_NonNilTree(t *testing.T) {
 	tree := zone.NewRadixTree()
 	tree.Insert("example.com.", makeZone("example.com."))
+	tree.Insert("sub.example.com.", makeZone("sub.example.com."))
 	p := &radixZoneProvider{tree: tree}
 
 	matches := p.FindZones("host.example.com.")
@@ -88,6 +89,19 @@ func TestRadixZoneProvider_NonNilTree(t *testing.T) {
 	}
 	if z, ok := p.GetZone("example.com."); !ok || z.Origin != "example.com." {
 		t.Errorf("GetZone(example.com.) = %v %v", z, ok)
+	}
+	if z, ok := p.GetZone("EXAMPLE.COM."); !ok || z.Origin != "example.com." {
+		t.Errorf("GetZone(EXAMPLE.COM.) = %v %v", z, ok)
+	}
+	list := p.ListZones()
+	if len(list) != 2 {
+		t.Fatalf("ListZones len = %d, want 2", len(list))
+	}
+	if _, ok := list["example.com."]; !ok {
+		t.Fatal("ListZones missing example.com.")
+	}
+	if _, ok := list["sub.example.com."]; !ok {
+		t.Fatal("ListZones missing sub.example.com.")
 	}
 	// Sub-origin probe must not be reported as an exact match.
 	if _, ok := p.GetZone("host.example.com."); ok {

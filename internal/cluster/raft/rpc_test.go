@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +112,36 @@ func TestInMemoryTransport_SelfRouting(t *testing.T) {
 	_, err := transport.SendAppendEntries(ctx, "self", AppendRequest{})
 	if err == nil {
 		t.Error("expected error for self-routing, got nil")
+	}
+}
+
+type nonDeadlineListener struct{}
+
+func (nonDeadlineListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (nonDeadlineListener) Close() error              { return nil }
+func (nonDeadlineListener) Addr() net.Addr            { return dummyAddr("non-deadline") }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return "test" }
+func (a dummyAddr) String() string  { return string(a) }
+
+func TestSetListenerDeadlineHandlesWrappedListeners(t *testing.T) {
+	deadline := time.Now().Add(time.Second)
+	if err := setListenerDeadline(nonDeadlineListener{}, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(nonDeadlineListener) error = %v", err)
+	}
+	if err := setListenerDeadline(nil, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(nil) error = %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer listener.Close()
+	if err := setListenerDeadline(listener, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(tcp listener) error = %v", err)
 	}
 }
 

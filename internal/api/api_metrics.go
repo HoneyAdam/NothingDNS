@@ -140,6 +140,9 @@ func (s *Server) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]QueryLogEntry, 0, len(queries))
 	for _, q := range queries {
+		if q == nil {
+			continue
+		}
 		clientIP := q.ClientIP
 		if !isAdmin {
 			clientIP = redactIP(clientIP)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -1287,6 +1288,40 @@ func TestSnapshotterMultipleSnapshots(t *testing.T) {
 	}
 	if loaded.Index != 30 {
 		t.Errorf("expected latest snapshot with Index=30, got %d", loaded.Index)
+	}
+}
+
+func TestSnapshotterIgnoresTemporarySnapshotFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	snap, err := NewSnapshotter(tmpDir)
+	if err != nil {
+		t.Fatalf("NewSnapshotter failed: %v", err)
+	}
+
+	snapshot := &Snapshot{
+		Index:      10,
+		Term:       1,
+		LastIndex:  9,
+		LastTerm:   1,
+		Data:       []byte("stable snapshot"),
+		Membership: []NodeID{"node1"},
+	}
+	if err := snap.Save(snapshot); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "snapshot-20.tmp"), []byte("partial snapshot"), 0600); err != nil {
+		t.Fatalf("write temp snapshot: %v", err)
+	}
+
+	loaded, err := snap.Load()
+	if err != nil {
+		t.Fatalf("Snapshotter.Load failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected to load stable snapshot")
+	}
+	if loaded.Index != 10 {
+		t.Errorf("loaded Index = %d, want 10", loaded.Index)
 	}
 }
 

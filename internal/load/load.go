@@ -2,13 +2,17 @@ package load
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // Config holds load test configuration.
@@ -144,15 +148,7 @@ func (r *Runner) sendQuery(conn net.Conn) {
 
 	// Send with deadline
 	conn.SetDeadline(queryStart.Add(r.cfg.Timeout))
-	_, err = conn.Write(buf[:n])
-	if err != nil {
-		atomic.AddInt64(&r.timeouts, 1)
-		return
-	}
-
-	// Read response
-	resp := make([]byte, 512)
-	_, err = conn.Read(resp)
+	resp, err := r.exchange(conn, buf[:n])
 	latency := time.Since(queryStart)
 
 	if err != nil {
@@ -172,6 +168,55 @@ func (r *Runner) sendQuery(conn net.Conn) {
 	r.mu.Lock()
 	r.latencies = append(r.latencies, latency)
 	r.mu.Unlock()
+}
+
+func (r *Runner) exchange(conn net.Conn, query []byte) ([]byte, error) {
+	if r.cfg.Protocol == "udp" {
+		if _, err := writePacket(conn, query); err != nil {
+			return nil, err
+		}
+		resp := make([]byte, 4096)
+		n, err := conn.Read(resp)
+		if err != nil {
+			return nil, err
+		}
+		return resp[:n], nil
+	}
+
+	if len(query) > 65535 {
+		return nil, fmt.Errorf("dns-over-tcp query too large: %d", len(query))
+	}
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(query)))
+	if err := util.WriteFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	if err := util.WriteFull(conn, query); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	respLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+	if respLen == 0 {
+		return nil, fmt.Errorf("dns-over-tcp empty response")
+	}
+	resp := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	n, err := conn.Write(data)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 func (r *Runner) computeResult(total time.Duration) *Result {
@@ -197,14 +242,9 @@ func (r *Runner) computeResult(total time.Duration) *Result {
 		}
 	}
 
-	// Sort for percentiles
-	for i := 0; i < len(latencies); i++ {
-		for j := i + 1; j < len(latencies); j++ {
-			if latencies[j] < latencies[i] {
-				latencies[i], latencies[j] = latencies[j], latencies[i]
-			}
-		}
-	}
+	sort.Slice(latencies, func(i, j int) bool {
+		return latencies[i] < latencies[j]
+	})
 
 	var sum time.Duration
 	for _, l := range latencies {

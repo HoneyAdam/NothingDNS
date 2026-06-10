@@ -117,7 +117,7 @@ func (s *RPCServer) acceptLoop() {
 		default:
 		}
 
-		if err := s.listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		if err := setListenerDeadline(s.listener, time.Now().Add(100*time.Millisecond)); err != nil {
 			return
 		}
 
@@ -140,6 +140,20 @@ func (s *RPCServer) acceptLoop() {
 		s.wg.Add(1)
 		go s.handleConn(conn, NodeID(addr))
 	}
+}
+
+type listenerWithDeadline interface {
+	SetDeadline(time.Time) error
+}
+
+func setListenerDeadline(listener net.Listener, deadline time.Time) error {
+	if listener == nil {
+		return nil
+	}
+	if deadlineListener, ok := listener.(listenerWithDeadline); ok {
+		return deadlineListener.SetDeadline(deadline)
+	}
+	return nil
 }
 
 // handleConn handles a single connection.

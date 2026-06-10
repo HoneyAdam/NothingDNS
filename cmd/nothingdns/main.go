@@ -49,6 +49,48 @@ var (
 	validateConfig = flag.Bool("validate-config", false, "Validate configuration file and exit")
 )
 
+func effectiveHTTPConfig(cfg *config.Config) config.HTTPConfig {
+	httpCfg := cfg.Server.HTTP
+	if httpCfg.ODoHKEM == 0 {
+		httpCfg.ODoHKEM = cfg.ODoH.KEM
+	}
+	if httpCfg.ODoHKDF == 0 {
+		httpCfg.ODoHKDF = cfg.ODoH.KDF
+	}
+	if httpCfg.ODoHAEAD == 0 {
+		httpCfg.ODoHAEAD = cfg.ODoH.AEAD
+	}
+	if httpCfg.ODoHPath == "" {
+		httpCfg.ODoHPath = "/odoh"
+	}
+	if cfg.ODoH.Enabled {
+		httpCfg.Enabled = true
+		httpCfg.ODoHEnabled = true
+		if httpCfg.Bind == "" && cfg.ODoH.Bind != "" {
+			httpCfg.Bind = cfg.ODoH.Bind
+		}
+	}
+	return httpCfg
+}
+
+func buildODoHConfig(cfg *config.Config, httpCfg config.HTTPConfig) *odoh.ODoHConfig {
+	odohCfg := &odoh.ODoHConfig{
+		TargetName: httpCfg.Bind,
+		ProxyName:  httpCfg.Bind,
+		HPKEKEM:    httpCfg.ODoHKEM,
+		HPKEKDF:    httpCfg.ODoHKDF,
+		HPKEAEAD:   httpCfg.ODoHAEAD,
+	}
+	if cfg.ODoH.Enabled {
+		odohCfg.HPKEKEM = cfg.ODoH.KEM
+		odohCfg.HPKEKDF = cfg.ODoH.KDF
+		odohCfg.HPKEAEAD = cfg.ODoH.AEAD
+		odohCfg.TargetURL = cfg.ODoH.TargetURL
+		odohCfg.ProxyURL = cfg.ODoH.ProxyURL
+	}
+	return odohCfg
+}
+
 func main() {
 	flag.Parse()
 
@@ -197,8 +239,9 @@ func run() error {
 	if cfg.DSO.Enabled {
 		dsoConfig := dso.Config{
 			Enabled:           cfg.DSO.Enabled,
-			InactivityTimeout: dso.DefaultInactivityTimeout,
-			MaxSessions:       1000,
+			InactivityTimeout: parseDurationOrDefault(cfg.DSO.SessionTimeout, dso.DefaultInactivityTimeout),
+			KeepaliveInterval: parseDurationOrDefault(cfg.DSO.HeartbeatInterval, dso.MinKeepaliveInterval),
+			MaxSessions:       cfg.DSO.MaxSessions,
 			MaxPayloadSize:    dso.DefaultMaxPayloadSize,
 		}
 		dsoManager = dso.NewManager(dsoConfig, logger)
@@ -447,7 +490,8 @@ func run() error {
 	dashboardServer.SetZoneManager(zoneManagerInstance)
 	// Feed per-query events into the dashboard (Query Log page + live stream).
 	handler.dashboardServer = dashboardServer
-	apiServer := api.NewServer(cfg.Server.HTTP, zoneManagerInstance, dnsCache, func() error {
+	httpConfig := effectiveHTTPConfig(cfg)
+	apiServer := api.NewServer(httpConfig, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")
 		cfgMu.RLock()
 		reloadCfg := cfg
@@ -474,12 +518,9 @@ func run() error {
 			zoneManagerInstance.LoadZone(z, zoneFile)
 			logger.Infof("Reloaded zone %s", z.Origin)
 			reloadedZones++
-			// Persist reloaded zone to KV store
-			if kvPersistence != nil {
-				if err := kvPersistence.PersistZone(z.Origin); err != nil {
-					logger.Warnf("Failed to persist reloaded zone %s to KV store: %v", z.Origin, err)
-				}
-			}
+			// Do NOT mirror file-backed zones into the KV store: the zone
+			// file is their durable source, and a KV copy would resurrect
+			// the zone after the operator removes it from the config.
 		}
 		// Reload blocklist
 		if bl != nil {
@@ -541,14 +582,8 @@ func run() error {
 		WithRateLimiter(rateLimiter)
 
 	// Initialize ODoH (RFC 9230) if enabled
-	if cfg.Server.HTTP.ODoHEnabled {
-		odohConfig := &odoh.ODoHConfig{
-			TargetName: cfg.Server.HTTP.Bind,
-			ProxyName:  cfg.Server.HTTP.Bind,
-			HPKEKEM:    cfg.Server.HTTP.ODoHKEM,
-			HPKEKDF:    cfg.Server.HTTP.ODoHKDF,
-			HPKEAEAD:   cfg.Server.HTTP.ODoHAEAD,
-		}
+	if httpConfig.ODoHEnabled {
+		odohConfig := buildODoHConfig(cfg, httpConfig)
 
 		if cfg.ODoH.Enabled && cfg.ODoH.TargetURL != "" {
 			// Running as ODoH proxy forwarding to external target
@@ -568,7 +603,7 @@ func run() error {
 				logger.Warnf("Failed to create ODoH target: %v", err)
 			} else {
 				logger.Infof("ODoH target configured (KEM=%d, KDF=%d, AEAD=%d)",
-					cfg.Server.HTTP.ODoHKEM, cfg.Server.HTTP.ODoHKDF, cfg.Server.HTTP.ODoHAEAD)
+					odohConfig.HPKEKEM, odohConfig.HPKEKDF, odohConfig.HPKEAEAD)
 				apiServer = apiServer.WithODoHTarget(odohTarget)
 			}
 		}
@@ -576,13 +611,13 @@ func run() error {
 
 	if err := apiServer.Start(); err != nil {
 		logger.Warnf("Failed to start API server: %v", err)
-	} else if cfg.Server.HTTP.Enabled {
-		logger.Infof("API server listening on %s", cfg.Server.HTTP.Bind)
-		if cfg.Server.HTTP.DoHEnabled {
-			logger.Infof("DoH endpoint enabled at %s", cfg.Server.HTTP.DoHPath)
+	} else if httpConfig.Enabled {
+		logger.Infof("API server listening on %s", httpConfig.Bind)
+		if httpConfig.DoHEnabled {
+			logger.Infof("DoH endpoint enabled at %s", httpConfig.DoHPath)
 		}
-		if cfg.Server.HTTP.ODoHEnabled {
-			logger.Infof("ODoH endpoint enabled at %s", cfg.Server.HTTP.ODoHPath)
+		if httpConfig.ODoHEnabled {
+			logger.Infof("ODoH endpoint enabled at %s", httpConfig.ODoHPath)
 		}
 	}
 
@@ -943,12 +978,10 @@ func run() error {
 				zoneManagerInstance.LoadZone(z, zoneFile)
 				logger.Infof("Reloaded zone %s", z.Origin)
 				reloadedZones++
-				// Persist reloaded zone to KV store
-				if kvPersistence != nil {
-					if err := kvPersistence.PersistZone(z.Origin); err != nil {
-						logger.Warnf("Failed to persist reloaded zone %s to KV store: %v", z.Origin, err)
-					}
-				}
+				// Do NOT mirror file-backed zones into the KV store: the
+				// zone file is their durable source, and a KV copy would
+				// resurrect the zone after the operator removes it from
+				// the config.
 			}
 			// Rebuild zone radix tree after zone changes
 			handler.RebuildZoneTree()

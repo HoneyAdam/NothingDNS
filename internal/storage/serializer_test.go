@@ -166,6 +166,40 @@ func TestBatchEncoderReset(t *testing.T) {
 	}
 }
 
+func TestBatchEncoderBytesReturnsSnapshot(t *testing.T) {
+	encoder := NewBatchEncoder(256)
+	if err := encoder.Add(TypeRecord, []byte("first")); err != nil {
+		t.Fatalf("Add first failed: %v", err)
+	}
+
+	snapshot := encoder.Bytes()
+	if len(snapshot) == 0 {
+		t.Fatal("expected non-empty snapshot")
+	}
+
+	snapshot[0] = TypeDeletion
+	decoder := NewBatchDecoder(encoder.Bytes())
+	tlv, err := decoder.Next()
+	if err != nil {
+		t.Fatalf("Next after snapshot mutation failed: %v", err)
+	}
+	if tlv.Type != TypeRecord {
+		t.Fatalf("snapshot mutation changed encoder data: got type %d", tlv.Type)
+	}
+
+	encoder.Reset()
+	if err := encoder.Add(TypeZone, []byte("second")); err != nil {
+		t.Fatalf("Add second failed: %v", err)
+	}
+	tlv, _, err = DecodeTLV(snapshot)
+	if err != nil {
+		t.Fatalf("Decode snapshot after encoder reuse failed: %v", err)
+	}
+	if tlv.Type != TypeDeletion || !bytes.Equal(tlv.Value, []byte("first")) {
+		t.Fatalf("snapshot was unexpectedly changed after encoder reuse: type=%d value=%q", tlv.Type, tlv.Value)
+	}
+}
+
 func TestBatchDecoderPosition(t *testing.T) {
 	encoder := NewBatchEncoder(256)
 	encoder.Add(TypeRecord, []byte("test1"))

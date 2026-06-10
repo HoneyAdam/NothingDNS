@@ -320,6 +320,27 @@ func TestOTLPExporter_Batching(t *testing.T) {
 	}
 }
 
+func TestOTLPExporter_NormalizesInvalidBatchConfig(t *testing.T) {
+	exporter := NewOTLPExporter(ExporterConfig{
+		BatchSize:    -1,
+		BatchTimeout: -time.Second,
+	})
+	defer exporter.Close()
+
+	if exporter.config.BatchSize != 100 {
+		t.Fatalf("BatchSize = %d, want 100", exporter.config.BatchSize)
+	}
+	if exporter.config.BatchTimeout != 5*time.Second {
+		t.Fatalf("BatchTimeout = %v, want %v", exporter.config.BatchTimeout, 5*time.Second)
+	}
+
+	span := &Span{Name: "normalized-config"}
+	exporter.Export(span)
+	if got := len(exporter.batch); got != 1 {
+		t.Fatalf("batch length = %d, want 1", got)
+	}
+}
+
 func TestOTLPExporter_Flush(t *testing.T) {
 	received := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -417,10 +438,29 @@ func TestLogSpans(t *testing.T) {
 
 func TestTracerExport(t *testing.T) {
 	tracer := NewTracer(Config{Enabled: true})
-	// Export should return current spans (may be empty since we don't store them)
+	_, span := tracer.StartSpan(context.Background(), "export-test")
+	tracer.EndSpan(span, nil)
+
 	spans := tracer.Export()
-	// Just verify it doesn't panic
-	_ = spans
+	if len(spans) != 1 {
+		t.Fatalf("expected 1 exported span, got %d", len(spans))
+	}
+	if spans[0] != span {
+		t.Fatal("exported span does not match completed span")
+	}
+	if spans[0].EndTime.IsZero() {
+		t.Fatal("exported span should be completed")
+	}
+
+	spans[0] = nil
+	if got := tracer.Export(); len(got) != 1 || got[0] != span {
+		t.Fatal("Export should return a copy of the tracer span slice")
+	}
+
+	tracer.EndSpan(span, nil)
+	if got := tracer.Export(); len(got) != 1 {
+		t.Fatalf("EndSpan should export a completed span once, got %d exports", len(got))
+	}
 }
 
 // --- SampleRate default test ---

@@ -12,6 +12,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/util"
 )
 
+const zoneChangeWaitPollInterval = 5 * time.Millisecond
+
 // ClusterIntegration integrates Raft consensus into the cluster.
 type ClusterIntegration struct {
 	node         *Node
@@ -467,15 +469,31 @@ func (ci *ClusterIntegration) ProposeZoneChangeWait(cmd ZoneCommand, timeout tim
 		if ci.AppliedIndex() >= idx {
 			return nil
 		}
-		if time.Now().After(deadline) {
+		now := time.Now()
+		if zoneChangeWaitTimedOut(now, deadline) {
 			return fmt.Errorf("raft: zone change at index %d not applied within %s", idx, timeout)
 		}
 		select {
 		case <-ci.stopCh:
 			return fmt.Errorf("raft: shutting down before zone change applied")
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(zoneChangeWaitDelay(now, deadline)):
 		}
 	}
+}
+
+func zoneChangeWaitTimedOut(now, deadline time.Time) bool {
+	return !now.Before(deadline)
+}
+
+func zoneChangeWaitDelay(now, deadline time.Time) time.Duration {
+	if zoneChangeWaitTimedOut(now, deadline) {
+		return 0
+	}
+	remaining := deadline.Sub(now)
+	if remaining < zoneChangeWaitPollInterval {
+		return remaining
+	}
+	return zoneChangeWaitPollInterval
 }
 
 // AppliedIndex returns the highest log index applied to the state machine.

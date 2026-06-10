@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // ============================================================================
@@ -189,6 +191,17 @@ func TestFindCNAME_NilAnswers(t *testing.T) {
 	}
 }
 
+func TestFindCNAME_SkipsMalformedRecords(t *testing.T) {
+	answers := []*protocol.ResourceRecord{
+		nil,
+		{Type: protocol.TypeCNAME},
+		{Name: mustName("www.example.com."), Type: protocol.TypeCNAME, Data: &protocol.RDataCNAME{}},
+	}
+	if got := findCNAME(answers, "www.example.com."); got != "" {
+		t.Errorf("findCNAME with malformed records = %q, want empty", got)
+	}
+}
+
 func TestFindCNAME_WithCNAME(t *testing.T) {
 	answers := []*protocol.ResourceRecord{
 		makeCNAMERR("www.example.com.", "example.com."),
@@ -217,6 +230,19 @@ func TestFindDNAME_NilAnswers(t *testing.T) {
 	result := findDNAME(nil, "www.example.com.")
 	if result.found {
 		t.Error("findDNAME should not find anything with nil answers")
+	}
+}
+
+func TestFindDNAME_SkipsMalformedRecords(t *testing.T) {
+	answers := []*protocol.ResourceRecord{
+		nil,
+		{Type: protocol.TypeDNAME, Data: &protocol.RDataDNAME{DName: mustName("example.net.")}},
+		{Name: mustName("example.com."), Type: protocol.TypeDNAME},
+		{Name: mustName("example.com."), Type: protocol.TypeDNAME, Data: &protocol.RDataDNAME{}},
+	}
+	result := findDNAME(answers, "www.example.com.")
+	if result.found {
+		t.Error("findDNAME should skip malformed DNAME records")
 	}
 }
 
@@ -297,6 +323,23 @@ func TestFindDNAME_NotSuffix(t *testing.T) {
 	result := findDNAME(answers, "www.example.org.")
 	if result.found {
 		t.Error("findDNAME should not match when query name is not a suffix of DNAME owner")
+	}
+}
+
+func TestFindDNAME_PartialLabelSuffixDoesNotMatch(t *testing.T) {
+	dnameTarget, _ := protocol.ParseName("example.net.")
+	answers := []*protocol.ResourceRecord{
+		{
+			Name:  mustName("example.com."),
+			Type:  protocol.TypeDNAME,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data:  &protocol.RDataDNAME{DName: dnameTarget},
+		},
+	}
+	result := findDNAME(answers, "notexample.com.")
+	if result.found {
+		t.Error("findDNAME should not match a partial-label suffix")
 	}
 }
 
@@ -575,6 +618,48 @@ func TestExtractDelegation_AdditionalNonMatch(t *testing.T) {
 	}
 }
 
+func TestExtractDelegation_SkipsMalformedRecords(t *testing.T) {
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
+	resp := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeNS},
+			{Name: mustName("example.com."), Type: protocol.TypeNS, Data: &protocol.RDataNS{}},
+			makeNSRR("example.com.", "ns1.example.com."),
+		},
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Name: mustName("ns1.example.com."), Type: protocol.TypeA},
+			{Name: mustName("ns1.example.com."), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+			makeARR("ns1.example.com.", "192.0.2.53"),
+		},
+	}
+	deleg, _ := r.extractDelegation(resp, ".")
+	if len(deleg.nsNames) != 1 {
+		t.Fatalf("nsNames = %d, want 1", len(deleg.nsNames))
+	}
+	if got := deleg.addrs["ns1.example.com."]; len(got) != 1 || got[0] != "192.0.2.53:53" {
+		t.Fatalf("ns1 addrs = %v, want [192.0.2.53:53]", got)
+	}
+}
+
+func TestCollectUpstreamAddrs_SkipsMalformedRecords(t *testing.T) {
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, nil, newMockTransport())
+	addrs := r.collectUpstreamAddrs([]*protocol.ResourceRecord{
+		nil,
+		{Type: protocol.TypeA},
+		{Name: mustName("ns1.example.com."), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+		makeARR("ns1.example.com.", "10.0.0.1"),
+	})
+	if len(addrs) != 1 || addrs[0] != "10.0.0.1:53" {
+		t.Fatalf("collectUpstreamAddrs = %v, want [10.0.0.1:53]", addrs)
+	}
+}
+
 // ============================================================================
 // lookupNSAddresses - 0% coverage
 // ============================================================================
@@ -676,6 +761,27 @@ func TestLookupNSAddresses_CacheNilMessage(t *testing.T) {
 	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
 	if len(addrs) != 0 {
 		t.Errorf("lookupNSAddresses with nil message = %d addrs, want 0", len(addrs))
+	}
+}
+
+func TestLookupNSAddresses_SkipsMalformedCacheRecords(t *testing.T) {
+	cache := newMockCache()
+	aMsg := &protocol.Message{
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{Name: mustName("ns1.example.com."), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+			makeARR("ns1.example.com.", "10.0.0.1"),
+		},
+	}
+	cache.Set("ns1.example.com.:1", aMsg, 300)
+
+	cfgPrivOK := DefaultConfig()
+	cfgPrivOK.AllowPrivateUpstream = true
+	r := NewResolver(cfgPrivOK, cache, newMockTransport())
+	addrs := r.lookupNSAddresses(context.Background(), "ns1.example.com.")
+	if len(addrs) != 1 || addrs[0] != "10.0.0.1:53" {
+		t.Fatalf("lookupNSAddresses = %v, want [10.0.0.1:53]", addrs)
 	}
 }
 
@@ -812,6 +918,35 @@ func TestCacheResponse_SideRecordQuestionRewritten(t *testing.T) {
 	// And the side entry's Answer must contain the ns1 record only.
 	if len(side.Message.Answers) != 1 {
 		t.Errorf("side cache answer count = %d, want 1 (only ns1.example.)", len(side.Message.Answers))
+	}
+}
+
+func TestCacheResponse_SkipsMalformedSideRecords(t *testing.T) {
+	cache := newMockCache()
+	cfg := DefaultConfig()
+	cfg.AllowPrivateUpstream = true
+	r := NewResolver(cfg, cache, newMockTransport())
+	resp := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess}},
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{Name: mustName("ns1.example."), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+			makeARR("ns1.example.", "192.0.2.53"),
+		},
+	}
+
+	r.cacheResponse("www.example.", protocol.TypeA, resp, "example.")
+
+	side := cache.Get(cacheKey("ns1.example.", protocol.TypeA))
+	if side == nil {
+		t.Fatal("missing side cache entry for valid ns1.example. record")
+	}
+	if len(side.Message.Answers) != 1 {
+		t.Fatalf("side answers = %d, want 1", len(side.Message.Answers))
+	}
+	if side.Message.Answers[0] == nil {
+		t.Fatal("side answer must not be nil")
 	}
 }
 
@@ -1157,13 +1292,97 @@ func TestReadFull_EmptyBuffer(t *testing.T) {
 	}
 }
 
+func TestWriteFull_RetriesPartialWrites(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	data := []byte{1, 2, 3, 4, 5}
+
+	if err := util.WriteFull(conn, data); err != nil {
+		t.Fatalf("WriteFull error: %v", err)
+	}
+	if !bytes.Equal(conn.written, data) {
+		t.Fatalf("written bytes = %v, want %v", conn.written, data)
+	}
+	if conn.calls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.calls)
+	}
+}
+
+func TestWriteFull_ZeroByteWrite(t *testing.T) {
+	conn := &partialWriteConn{}
+	err := util.WriteFull(conn, []byte{1, 2, 3})
+	if err != io.ErrNoProgress {
+		t.Fatalf("WriteFull error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+func TestWritePacket_PartialDatagram(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	_, err := writePacket(conn, []byte{1, 2, 3})
+	if err != io.ErrShortWrite {
+		t.Fatalf("writePacket error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if conn.calls != 1 {
+		t.Fatalf("writePacket should not retry datagrams, got %d calls", conn.calls)
+	}
+}
+
+type partialWriteConn struct {
+	maxWrite int
+	written  []byte
+	calls    int
+}
+
+func (c *partialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(p) {
+		n = len(p)
+	}
+	c.written = append(c.written, p[:n]...)
+	return n, nil
+}
+
+func (c *partialWriteConn) Close() error {
+	return nil
+}
+
+func (c *partialWriteConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return nil
+}
+
 // ============================================================================
 // serializeExtended with IPv6 upstreams
 // ============================================================================
 
 func TestSerializeExtended_IPv6Upstream(t *testing.T) {
 	info := ExtendedResolverInfo("test", "1.0", false, true, 0, []string{"2001:db8::1"})
-	data := info.serializeExtended()
+	data, err := info.serializeExtended()
+	if err != nil {
+		t.Fatalf("serializeExtended: %v", err)
+	}
 	if len(data) == 0 {
 		t.Error("serializeExtended should produce data for IPv6 upstream")
 	}
@@ -1171,7 +1390,10 @@ func TestSerializeExtended_IPv6Upstream(t *testing.T) {
 
 func TestSerializeExtended_MixedUpstreams(t *testing.T) {
 	info := ExtendedResolverInfo("test", "1.0", false, true, 5000, []string{"1.2.3.4", "2001:db8::1", "dns.example.com"})
-	data := info.serializeExtended()
+	data, err := info.serializeExtended()
+	if err != nil {
+		t.Fatalf("serializeExtended: %v", err)
+	}
 	if len(data) == 0 {
 		t.Error("serializeExtended should produce data for mixed upstreams")
 	}
@@ -1179,7 +1401,10 @@ func TestSerializeExtended_MixedUpstreams(t *testing.T) {
 
 func TestSerializeExtended_EmptyUpstreams(t *testing.T) {
 	info := ExtendedResolverInfo("test", "1.0", false, false, 100, nil)
-	data := info.serializeExtended()
+	data, err := info.serializeExtended()
+	if err != nil {
+		t.Fatalf("serializeExtended: %v", err)
+	}
 	if len(data) == 0 {
 		t.Error("serializeExtended should produce data with no upstreams")
 	}
@@ -1239,16 +1464,8 @@ func TestParseExtendedRESPInfo_TruncatedUpstreamIPv4(t *testing.T) {
 	for len(data) < 4 {
 		data = append(data, 0)
 	}
-	// Should not crash, just skip the truncated upstream
-	parsed, err := parseExtendedRESPInfo(data)
-	if err != nil {
-		// Error is acceptable for truncated data
-		t.Logf("parseExtendedRESPInfo with truncated IPv4 returned: %v", err)
-	} else {
-		// If no error, upstreams should be empty (truncated was skipped)
-		if parsed == nil {
-			t.Fatal("parsed should not be nil")
-		}
+	if _, err := parseExtendedRESPInfo(data); err == nil {
+		t.Fatal("parseExtendedRESPInfo with truncated IPv4 should fail")
 	}
 }
 
@@ -1267,11 +1484,8 @@ func TestParseExtendedRESPInfo_TruncatedUpstreamIPv6(t *testing.T) {
 	for len(data) < 4 {
 		data = append(data, 0)
 	}
-	parsed, err := parseExtendedRESPInfo(data)
-	if err != nil {
-		t.Logf("parseExtendedRESPInfo with truncated IPv6 returned: %v", err)
-	} else if parsed != nil && len(parsed.Upstreams) != 0 {
-		t.Errorf("Upstreams should be empty for truncated IPv6, got %d", len(parsed.Upstreams))
+	if _, err := parseExtendedRESPInfo(data); err == nil {
+		t.Fatal("parseExtendedRESPInfo with truncated IPv6 should fail")
 	}
 }
 
@@ -1289,11 +1503,8 @@ func TestParseExtendedRESPInfo_TruncatedHostname(t *testing.T) {
 	for len(data) < 4 {
 		data = append(data, 0)
 	}
-	parsed, err := parseExtendedRESPInfo(data)
-	if err != nil {
-		t.Logf("parseExtendedRESPInfo with truncated hostname returned: %v", err)
-	} else if parsed != nil && len(parsed.Upstreams) != 0 {
-		t.Errorf("Upstreams should be empty for truncated hostname, got %d", len(parsed.Upstreams))
+	if _, err := parseExtendedRESPInfo(data); err == nil {
+		t.Fatal("parseExtendedRESPInfo with truncated hostname should fail")
 	}
 }
 
@@ -2049,6 +2260,25 @@ func TestExtractDelegation_AdditionalWithWrongData(t *testing.T) {
 	// Should not crash, just skip the bad data
 	if deleg == nil {
 		t.Error("extractDelegation should not return nil")
+	}
+}
+
+func TestNegativeTTLFromAuthority_SkipsMalformedRecords(t *testing.T) {
+	msg := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeSOA},
+			{Name: mustName("example.com."), Type: protocol.TypeSOA, TTL: 300, Data: (*protocol.RDataSOA)(nil)},
+			{Name: mustName("example.com."), Type: protocol.TypeSOA, TTL: 300, Data: &protocol.RDataSOA{Minimum: 60}},
+		},
+	}
+
+	ttl, ok := negativeTTLFromAuthority(msg)
+	if !ok {
+		t.Fatal("negativeTTLFromAuthority did not find valid SOA")
+	}
+	if ttl != 60 {
+		t.Fatalf("negative TTL = %d, want 60", ttl)
 	}
 }
 
