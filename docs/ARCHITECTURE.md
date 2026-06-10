@@ -100,7 +100,6 @@ graph TB
         DOC[Dashboard]
         MET[Metrics]
         TRC[Tracing]
-        MCP[MCP Server]
     end
 
     UDP --> P1
@@ -135,7 +134,6 @@ graph TB
     CLM -.-> ZM
 
     APIS --> P1
-    MCP --> P1
 ```
 
 ### Package Map

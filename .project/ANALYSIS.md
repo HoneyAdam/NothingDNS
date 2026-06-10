@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-NothingDNS is an ambitious, zero-dependency (mostly) DNS server written in pure Go. It implements a staggering breadth of DNS functionality — authoritative resolution, recursive resolution, DoT/DoH/DoQ, DNSSEC signing and validation, zone transfers (AXFR/IXFR/XoT), Dynamic DNS, clustering (SWIM gossip and Raft consensus), and a full management plane (REST API, MCP server, React dashboard, CLI tool).
+NothingDNS is an ambitious, zero-dependency (mostly) DNS server written in pure Go. It implements a staggering breadth of DNS functionality — authoritative resolution, recursive resolution, DoT/DoH/DoQ, DNSSEC signing and validation, zone transfers (AXFR/IXFR/XoT), Dynamic DNS, clustering (SWIM gossip and Raft consensus), and a full management plane (REST API, React dashboard, CLI tool).
 
 The codebase is large: **303 Go files**, **161 test files**, approximately **164,000 lines of Go code** per `docs/NOTHING.md`. The project builds cleanly (`go build ./...` passes), all short tests pass (`go test ./... -count=1 -short`), and the end-to-end test suite passes in ~18s. There are **zero `TODO`/`FIXME`/`HACK` markers** in production code, which is unusual and commendable.
 
@@ -34,7 +34,7 @@ Cache → Auth Zones → Upstream/Resolver → DNSSEC Validator
          ↓
     Storage (KV + WAL) + Cluster (Gossip/Raft)
          ↓
-    Management Plane (REST API + MCP + Dashboard + CLI)
+    Management Plane (REST API + Dashboard + CLI)
 ```
 
 **The 21-stage pipeline** (`cmd/nothingdns/handler.go:83-1263`) is the beating heart of the system. It processes every query through:
@@ -76,7 +76,7 @@ This pipeline is **well-structured and defensively coded**. Panic recovery wraps
 | `internal/transfer/` | AXFR/IXFR/DDNS/NOTIFY/TSIG/XoT/Slave | ~12,000 | **Good** | Very well-tested (447 tests); XoT IXFR uses journal for incremental transfers |
 | `internal/storage/` | KV store, WAL, TLV serialization | ~8,000 | **Good** | In-memory KV with WAL journaling |
 | `internal/config/` | Custom YAML parser, hot reload | ~5,000 | **Good** | Hand-written parser, no anchors/multiline |
-| `internal/api/` | REST API, OpenAPI, MCP server | ~8,000 | **Good** | Split into 15 domain files; `server.go` reduced to ~1,150 lines |
+| `internal/api/` | REST API, OpenAPI | ~8,000 | **Good** | Split into 15 domain files; `server.go` reduced to ~1,150 lines |
 | `internal/filter/` | ACL, rate limiting, split-horizon | ~6,000 | **Good** | Clean separation of concerns |
 | `internal/quic/` | Hand-written QUIC for DoQ | ~6,000 | **Good** | Only external dep: `quic-go` |
 | `cmd/nothingdns/` | Server entry point | ~2,000 | **Good** | Clean manager constructor pattern |
@@ -305,15 +305,7 @@ BenchmarkSignData_RSA_SHA256-32           1874      669485 ns/op  512 B/op     2
 
 The API is comprehensive: ~60 endpoints covering zones, records, cache, cluster, blocklists, RPZ, DNSSEC, ACL, upstreams, auth, metrics, and query logs. Full OpenAPI 3.0 spec is served at `/api/openapi.json`.
 
-### 7.2 MCP Server
-
-`internal/api/mcp/` implements a custom Model Context Protocol server with:
-- 12 tools (dns_query, zone CRUD, cache ops, server stats)
-- Resources (zones, status, cache stats)
-- 2 prompts (troubleshoot_dns, zone_setup)
-- Optional token-based RBAC
-
-### 7.3 Issues
+### 7.2 Issues
 
 1. **`internal/api/server.go` is ~3,150 lines** — far too large for a single file.
    **✅ FIXED**: Split into 15 domain files; `server.go` reduced to ~1,150 lines.

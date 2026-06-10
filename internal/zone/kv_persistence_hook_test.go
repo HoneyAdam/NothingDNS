@@ -21,7 +21,7 @@ func newHookTestKVP(t *testing.T) (*Manager, *KVPersistence) {
 }
 
 // TestMutationHook_ManagerPathPersistsToKV proves that mutations made
-// directly through the zone.Manager (the path MCP tools and Raft apply use —
+// directly through the zone.Manager (the path Raft apply uses —
 // no explicit persistZoneToKV calls anywhere) are durable in the KV store.
 func TestMutationHook_ManagerPathPersistsToKV(t *testing.T) {
 	m, kvp := newHookTestKVP(t)

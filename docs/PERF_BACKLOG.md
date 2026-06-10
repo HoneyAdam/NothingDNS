@@ -161,7 +161,7 @@ path.
 
 **Risk:** **High.** This is the largest refactor on the list. Every
 caller of `Name.Labels` (zone matcher, RPZ engine, blocklist, audit
-logger, DNSSEC validator/signer, transfer, MCP server, dashboard JSON)
+logger, DNSSEC validator/signer, transfer, dashboard JSON)
 becomes a touch point. CLAUDE.md flags
 `protocol.CanonicalWireName()` as a shared canonical encoder; that
 constraint extends to whatever replaces label-slice access.

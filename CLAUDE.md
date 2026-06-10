@@ -52,7 +52,7 @@ with `_ =` / `_, _ =`.
 ├─────────────────────────────────────────────────────────────────────┤
 │  Cluster Manager (Gossip + Raft) │ Storage (KV + WAL)              │
 ├─────────────────────────────────────────────────────────────────────┤
-│  API Layer (HTTP + WebSocket + MCP) │ Config (Hot Reload)           │
+│  API Layer (HTTP + WebSocket) │ Config (Hot Reload)                 │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -112,7 +112,6 @@ SIGHUP triggers config reload without downtime: zones, blocklists, RPZ rules, sp
 - `internal/dnssec/` — Validation, signing, key rollover (RFC 7583), Ed25519/ECDSA/RSA
 - `internal/storage/` — KV store with WAL, ACID transactions, TLV serialization
 - `internal/zone/` — BIND-format zone file parser with `$GENERATE`, radix tree, WAL journal, ZONEMD
-- `internal/api/mcp/` — MCP server for AI assistant integration
 - `internal/transfer/` — AXFR/IXFR zone transfers, NOTIFY, Dynamic DNS (RFC 2136), XoT (RFC 9103)
 - `internal/dashboard/` — Embedded React 19 SPA served from `static/dist/`
 - `internal/dso/` — DNS Stateful Operations (RFC 8490): TCP/TLS keepalive sessions, max-payload negotiation, TLV stream parser. Body lives in `protocol.Message.RawBody` (opcode 6).
@@ -127,7 +126,6 @@ cmd/
 
 internal/
 ├── api/            # HTTP REST API + OpenAPI/Swagger
-│   └── mcp/        # MCP server for AI integration
 ├── audit/          # Structured query audit logging
 ├── auth/           # JWT-based multi-user authentication with RBAC
 ├── blocklist/      # Domain blocklist engine (hosts-file + URL-based)

@@ -226,7 +226,7 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// KV durability is handled by the zone.Manager mutation hook (installed
-	// by KVPersistence.Enable), so every mutation path — REST, MCP, Raft
+	// by KVPersistence.Enable), so every mutation path — REST, Raft
 	// apply — persists automatically. Persistence is best-effort (logged,
 	// not surfaced): previously these handlers returned 500 on a KV persist
 	// failure even though the mutation had already succeeded in memory.

@@ -12,9 +12,8 @@ NothingDNS is a modern, production-grade DNS server that combines authoritative 
 
 ### 1.2 Philosophy
 - **Zero Dependencies** — Only Go standard library. No external modules. Ever.
-- **Single Binary** — One binary to rule them all: DNS server, CLI tool, web dashboard, MCP server.
+- **Single Binary** — One binary to rule them all: DNS server, CLI tool, web dashboard.
 - **BIND Compatible** — Import existing BIND zone files seamlessly. Familiar zone file syntax.
-- **LLM-Native** — Built-in MCP server for AI-powered DNS management.
 - **Cloud-Native** — Single binary runs everywhere: bare metal, Docker, Kubernetes, edge.
 - **Cluster-First** — Raft consensus for zone replication, leader election, and failover.
 
@@ -67,7 +66,7 @@ NothingDNS is a modern, production-grade DNS server that combines authoritative 
 │  └────────────────────────────────────────────────┘                  │
 │                                                                      │
 │  ┌──────────── Management Layer ─────────────────┐                  │
-│  │  REST API │ gRPC │ MCP │ Web UI │ Prometheus   │                  │
+│  │  REST API │ gRPC │ Web UI │ Prometheus         │                  │
 │  └────────────────────────────────────────────────┘                  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -170,11 +169,6 @@ nothingdns/
 │   │   │   ├── client.go    # gRPC client
 │   │   │   ├── proto.go     # Protocol buffer wire format (manual)
 │   │   │   └── services.go  # Zone sync, health, forwarding services
-│   │   └── mcp/             # MCP Server (LLM-native management)
-│   │       ├── server.go    # MCP protocol handler (JSON-RPC 2.0 over stdio/SSE)
-│   │       ├── tools.go     # MCP tools (zone management, record ops, diagnostics)
-│   │       ├── resources.go # MCP resources (zone data, config, metrics)
-│   │       └── prompts.go   # MCP prompts (DNS troubleshooting, migration)
 │   ├── dashboard/           # Embedded web dashboard
 │   │   ├── server.go        # Static file server
 │   │   ├── embed.go         # go:embed for static assets
@@ -843,50 +837,7 @@ dnsctl server reload
 dnsctl server status
 ```
 
-### 11.3 MCP Server (LLM-Native)
-
-Protocol: JSON-RPC 2.0 over stdio (for Claude Code) and SSE (for web clients)
-
-#### MCP Tools
-| Tool | Description |
-|------|-------------|
-| `dns_zone_list` | List all configured zones |
-| `dns_zone_create` | Create a new zone |
-| `dns_zone_delete` | Delete a zone |
-| `dns_record_list` | List records in a zone |
-| `dns_record_add` | Add a DNS record |
-| `dns_record_update` | Update a DNS record |
-| `dns_record_delete` | Delete a DNS record |
-| `dns_query` | Execute a DNS query (dig-like) |
-| `dns_cache_stats` | Get cache statistics |
-| `dns_cache_flush` | Flush cache |
-| `dns_cluster_status` | Get cluster status |
-| `dns_blocklist_add` | Add domain to blocklist |
-| `dns_blocklist_remove` | Remove domain from blocklist |
-| `dns_stats` | Get server statistics |
-| `dns_health` | Health check |
-| `dns_config_get` | Get current configuration |
-| `dns_config_set` | Update runtime configuration |
-
-#### MCP Resources
-| URI | Description |
-|-----|-------------|
-| `dns://zones` | All zones (live) |
-| `dns://zones/{name}` | Zone detail with records |
-| `dns://config` | Current configuration |
-| `dns://stats` | Real-time statistics |
-| `dns://cluster` | Cluster topology |
-| `dns://blocklist` | Current blocklist |
-
-#### MCP Prompts
-| Prompt | Description |
-|--------|-------------|
-| `troubleshoot_dns` | Diagnose DNS resolution issues |
-| `migrate_from_bind` | Help migrate from BIND to NothingDNS |
-| `optimize_config` | Analyze and suggest config improvements |
-| `setup_dnssec` | Guide through DNSSEC setup |
-
-### 11.4 Web Dashboard
+### 11.3 Web Dashboard
 
 Embedded vanilla JS dashboard (no React/Vue/Angular — zero dependency philosophy extends to frontend).
 
@@ -901,7 +852,7 @@ Embedded vanilla JS dashboard (no React/Vue/Angular — zero dependency philosop
 - **Config Editor** — edit runtime config with validation
 - **DNSSEC Status** — key info, signing status, DS records
 
-### 11.5 Prometheus Metrics
+### 11.4 Prometheus Metrics
 
 Endpoint: `/metrics` (port 9153, Prometheus exposition format)
 
@@ -1035,11 +986,6 @@ metrics:
   enabled: true
   listen: "0.0.0.0:9153"
   path: "/metrics"
-
-mcp:
-  enabled: true
-  mode: stdio                      # stdio | sse
-  sse-listen: "0.0.0.0:8081"
 
 logging:
   level: info                      # debug | info | warn | error
@@ -1293,7 +1239,6 @@ bench:
 | Ad-Blocking | ✅ | ❌ | ✅ (plugin) | ❌ | ❌ |
 | Web Dashboard | ✅ | ❌ | ❌ | ✅ | ❌ |
 | REST API | ✅ | ❌ | ❌ | ✅ | ❌ |
-| MCP Server | ✅ | ❌ | ❌ | ❌ | ❌ |
 | BIND Zone Import | ✅ | Native | ❌ | ❌ | ❌ |
 
 ---

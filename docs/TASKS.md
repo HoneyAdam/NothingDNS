@@ -415,17 +415,8 @@
 | 10.1.12 | internal/api/rest/swagger.go — Embedded Swagger UI + OpenAPI 3.0 spec | 🟡 | 4h | 10.1.1 |
 | 10.1.13 | Tests: API endpoint integration tests | 🔴 | 4h | 10.1.6 |
 
-### P10.2 — MCP Server
-| ID | Task | Priority | ⏱️ | 📦 |
-|----|------|----------|-----|-----|
-| 10.2.1 | internal/api/mcp/server.go — JSON-RPC 2.0 protocol handler | 🔴 | 4h | 1.1.1 |
-| 10.2.2 | internal/api/mcp/server.go — stdio transport (for Claude Code) | 🔴 | 2h | 10.2.1 |
-| 10.2.3 | internal/api/mcp/server.go — SSE transport (for web clients) | 🟡 | 3h | 10.2.1 |
-| 10.2.4 | internal/api/mcp/server.go — Initialize handshake (capabilities, serverInfo) | 🔴 | 2h | 10.2.1 |
-| 10.2.5 | internal/api/mcp/tools.go — All MCP tools (zone, record, query, cache, cluster, blocklist, stats, health, config) | 🔴 | 6h | 10.2.1 |
-| 10.2.6 | internal/api/mcp/resources.go — MCP resources (dns:// URI scheme) | 🟡 | 3h | 10.2.1 |
-| 10.2.7 | internal/api/mcp/prompts.go — MCP prompts (troubleshoot, migrate, optimize, setup) | 🟡 | 3h | 10.2.1 |
-| 10.2.8 | Tests: MCP tool invocations | 🔴 | 3h | 10.2.5 |
+### P10.2 — ~~MCP Server~~ (removed)
+> This feature was removed from the project — tasks 10.2.1–10.2.8 no longer apply.
 
 ### P10.3 — Web Dashboard
 | ID | Task | Priority | ⏱️ | 📦 |

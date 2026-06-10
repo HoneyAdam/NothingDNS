@@ -34,7 +34,7 @@ func NewKVPersistence(manager *Manager, kvStore *storage.KVStore) *KVPersistence
 
 // Enable activates KV store persistence and installs a mutation hook on the
 // underlying Manager, so EVERY zone mutation that goes through the manager —
-// REST API handlers, MCP tools, Raft apply on each cluster node, gossip
+// REST API handlers, Raft apply on each cluster node, gossip
 // replication, or any future caller — is persisted to (or deleted from) the
 // KV store automatically. Callers no longer persist explicitly; paths that
 // mutate a *Zone directly (DDNS via transfer.ApplyUpdate) must call

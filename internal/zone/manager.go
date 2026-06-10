@@ -85,7 +85,7 @@ type Manager struct {
 	// mutation (CreateZone, AddRecord, DeleteRecord, UpdateRecord with
 	// deleted=false; DeleteZone with deleted=true). It centralizes
 	// durability concerns (KV persistence) at the manager layer so that
-	// EVERY mutation path — REST API, MCP tools, Raft apply, gossip —
+	// EVERY mutation path — REST API, Raft apply, gossip —
 	// is covered without each caller persisting explicitly.
 	//
 	// The hook is deliberately NOT fired by Load/LoadZone/Reload/Remove:

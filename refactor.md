@@ -64,7 +64,7 @@ The work breaks into:
 | **P1** | Context propagation | §B3 | 1–2 d | Breaks tracing + cancellation in hot path |
 | **P1** | `ServeDNS` decomposition | §C1 | 3–5 d | Unlocks testability of the entire pipeline |
 | **P2** | `config.go` decomposition | §C2 | 3–5 d | Biggest maintenance tax; drift-prone |
-| **P2** | API service-layer extraction | §C4 | 3–5 d | Kills REST/MCP duplication (~400 LOC) |
+| **P2** | API service-layer extraction | §C4 | 3–5 d | Testable service layer for REST handlers |
 | **P2** | Cluster god-object split + locks | §C3 | 1–2 wk | Correctness-sensitive; do carefully |
 | **P3** | Protocol/cache/resolver polish | §C5 | ongoing | Incremental, low-risk |
 | **P3** | Test coverage + flake removal | §E | ongoing | Raises confidence for all the above |
@@ -133,7 +133,7 @@ Recommendation: **(a)** unless binary size / supply-chain surface is a hard cons
 ### B6. Code duplication (cross-package) · Confidence: Medium
 - ✅ **DONE (2026-05-29)** `cmd/dnsctl/helpers.go` — `apiRequest()` and `apiGetRaw()` duplicated URL-scheme validation + auth-header + do/read/status logic. Extracted `buildAPIRequest(method, path, body)` and `doAPIRequest(req)`; both callers now compose them. Tests green.
 - ✅ **DONE (2026-05-29)** `cmd/nothingdns/main.go` — the 4 identical transport-serve goroutines (UDP/TCP/TLS/DoQ) now go through a `serveBg(name, serveFn)` closure. (Did *not* add WaitGroup/stop-channel lifecycle tracking — that's the separate B4 concern, noted in a code comment.)
-- The big one — REST vs MCP business-logic duplication — is §C4 (still open).
+- ~~The big one — REST vs MCP business-logic duplication — is §C4.~~ Moot: the MCP server has been removed from the codebase; only the REST-side service extraction in §C4 remains open.
 
 ---
 
@@ -215,9 +215,9 @@ Benefits: each stage ~50–100 LOC and individually testable; ordering becomes d
 
 ### C4. `internal/api` — extract a service layer, tame routing (P2) · Confidence: High
 
-**Progress (2026-05-29):** `ZoneService` created (`internal/api/zone_service.go`) — `ListZones()` and `GetZone()` methods now extract the business logic from REST handlers into a single, testable service type. `handleListZones` and `handleGetZone` now delegate to it. The MCP handler (`callZoneList`, `callZoneGet`) still calls `zoneManager` directly — next step is to wire the MCP handler to call `ZoneService` instead, which will also fix the latent security issue of MCP returning raw internal zone objects (all internal fields visible) instead of the sanitized `ZoneDetailResponse`.
+**Progress (2026-05-29):** `ZoneService` created (`internal/api/zone_service.go`) — `ListZones()` and `GetZone()` methods now extract the business logic from REST handlers into a single, testable service type. `handleListZones` and `handleGetZone` now delegate to it. *(Update: the MCP server has since been removed from the codebase, so the MCP-handler wiring and the MCP raw-zone-object exposure previously tracked here are moot.)*
 
-**Remaining:** `CacheService`, `BlocklistService` extraction; MCP handler wiring to `ZoneService`; route helper registration; `decode` helper; `WithOperator` middleware wrapper.
+**Remaining:** `CacheService`, `BlocklistService` extraction; route helper registration; `decode` helper; `WithOperator` middleware wrapper.
 
 **Handler boilerplate (repeated 40–50×):**
 - Method-dispatch (`if r.Method != ... { 405 }`) → a `RegisterRoute(path, map[method]handler)` helper.
@@ -326,7 +326,7 @@ Fuzz tests exist (`dnscookie`, `cache`). **Add** fuzz targets for the two highes
 
 ### Phase 2 — Highest-leverage structure (1–2 weeks)
 - C1 `ServeDNS` → middleware pipeline (start by extracting the 3× RPZ helper + `writeResponse`, then the stages).
-- C4 API service layer (collapse REST/MCP duplication) + decode/auth helpers.
+- C4 API service layer + decode/auth helpers.
 
 ### Phase 3 — Monolith decomposition (1–2 weeks)
 - C2 `config.go` split + ValidationError + centralized defaults/enums; harden the YAML parser (fail loudly on anchors/multiline) or replace it.
@@ -354,7 +354,6 @@ Fuzz tests exist (`dnscookie`, `cache`). **Add** fuzz targets for the two highes
 | `internal/cluster/raft/integration.go` | B1, C3 | Use logger not `log.Printf`; snapshot entries before `Apply` |
 | `internal/api/server.go` | C4, D8 | Route-builder + explicit middleware stack; CSRF token |
 | `internal/api/api_zones.go` | C4 | Move logic to ZoneService; DTOs; decode helper |
-| `internal/api/mcp/tools.go` | C4 | Call shared service layer (kill ~400 LOC dup) |
 | `internal/api/api_auth.go` | A2, D7 | Handle `DeleteUser` error |
 | `internal/api/openapi.go` | C4 | Generate from handlers to stop drift |
 | `internal/protocol/types.go` | C5, D10 | Split by category; allocation caps |
