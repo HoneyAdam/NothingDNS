@@ -57,7 +57,7 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
       } catch (e) {
         if (e instanceof SyntaxError) {
           // Non-JSON error body
-          throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+          throw new Error(`HTTP ${resp.status}: ${resp.statusText}`, { cause: e });
         }
         throw e; // Re-throw if we already have a meaningful Error
       }

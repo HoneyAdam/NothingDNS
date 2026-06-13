@@ -173,10 +173,6 @@ export function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('general');
   const [reloading, setReloading] = useState(false);
 
-  useEffect(() => {
-    loadConfig();
-  }, []);
-
   const loadConfig = async () => {
     setLoading(true);
     setError(null);
@@ -189,6 +185,10 @@ export function SettingsPage() {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
 
   const reloadRuntimeConfig = async () => {
     setReloading(true);
