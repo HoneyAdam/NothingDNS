@@ -152,13 +152,17 @@ func (h *DynamicDNSHandler) GetUpdateChannel() <-chan *UpdateRequest {
 
 // HandleUpdate processes a Dynamic DNS UPDATE request
 func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP) (*protocol.Message, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil UPDATE request")
+	}
+
 	// Verify this is an UPDATE request
 	if req.Header.Flags.Opcode != protocol.OpcodeUpdate {
 		return nil, fmt.Errorf("not an UPDATE request")
 	}
 
 	// Must have exactly one zone section
-	if len(req.Questions) != 1 {
+	if len(req.Questions) != 1 || req.Questions[0] == nil || req.Questions[0].Name == nil {
 		return h.createUpdateResponse(req, protocol.RcodeFormatError), nil
 	}
 
@@ -218,6 +222,9 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 		Prerequisites: h.parsePrerequisites(req.Answers),
 		Updates:       updates,
 	}
+	if err := validateUpdateWithinZone(z, updateReq); err != nil {
+		return h.createUpdateResponse(req, protocol.RcodeNotZone), nil
+	}
 
 	// Get TSIG key name if present
 	if h.keyStore != nil && hasTSIG(req) {
@@ -238,6 +245,9 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 	if err != nil {
 		if errors.Is(err, ErrPrereqFailed) {
 			return h.createUpdateResponse(req, protocol.RcodeNXRRSet), nil
+		}
+		if errors.Is(err, ErrNotZone) {
+			return h.createUpdateResponse(req, protocol.RcodeNotZone), nil
 		}
 		return h.createUpdateResponse(req, protocol.RcodeServerFailure), nil
 	}
@@ -301,6 +311,7 @@ func (h *DynamicDNSHandler) parsePrerequisites(prereqs []*protocol.ResourceRecor
 		name := strings.ToLower(rr.Name.String())
 
 		var condition PreconditionType
+		var rdata string
 		switch rr.Class {
 		case protocol.ClassANY:
 			if rr.Type == protocol.TypeANY {
@@ -316,12 +327,16 @@ func (h *DynamicDNSHandler) parsePrerequisites(prereqs []*protocol.ResourceRecor
 			}
 		default:
 			condition = PrecondExistsValue
+			if rr.Data != nil {
+				rdata = rr.Data.String()
+			}
 		}
 
 		result = append(result, UpdatePrerequisite{
 			Name:      name,
 			Type:      rr.Type,
 			Class:     rr.Class,
+			RData:     rdata,
 			Condition: condition,
 		})
 	}
@@ -339,17 +354,19 @@ func (h *DynamicDNSHandler) parseUpdates(updates []*protocol.ResourceRecord) ([]
 
 		// Determine operation based on Class and TTL
 		switch rr.Class {
-		case protocol.ClassNONE:
-			// Deletion
+		case protocol.ClassANY:
+			// Delete all RRsets at a name or one RRset (RFC 2136 §2.5.2, §2.5.3)
 			if rr.Type == protocol.TypeANY {
 				op = UpdateOpDeleteName
 			} else {
 				op = UpdateOpDeleteRRSet
 			}
-		case protocol.ClassANY:
-			// Delete specific RR (value dependent)
+		case protocol.ClassNONE:
+			// Delete a specific RR (RFC 2136 §2.5.4)
 			op = UpdateOpDelete
-			rdata = rr.Data.String()
+			if rr.Data != nil {
+				rdata = rr.Data.String()
+			}
 		default:
 			// Addition
 			op = UpdateOpAdd
@@ -369,6 +386,11 @@ func (h *DynamicDNSHandler) parseUpdates(updates []*protocol.ResourceRecord) ([]
 
 // createUpdateResponse creates an UPDATE response message
 func (h *DynamicDNSHandler) createUpdateResponse(req *protocol.Message, rcode uint8) *protocol.Message {
+	if req == nil {
+		resp := &protocol.Message{}
+		resp.Header.Flags = protocol.NewResponseFlags(rcode)
+		return resp
+	}
 	return &protocol.Message{
 		Header: protocol.Header{
 			ID:      req.Header.ID,
@@ -381,11 +403,17 @@ func (h *DynamicDNSHandler) createUpdateResponse(req *protocol.Message, rcode ui
 
 // IsUpdateRequest checks if a message is a Dynamic DNS UPDATE request
 func IsUpdateRequest(msg *protocol.Message) bool {
+	if msg == nil {
+		return false
+	}
 	return msg.Header.Flags.Opcode == protocol.OpcodeUpdate && !msg.Header.Flags.QR
 }
 
 // IsUpdateResponse checks if a message is an UPDATE response
 func IsUpdateResponse(msg *protocol.Message) bool {
+	if msg == nil {
+		return false
+	}
 	return msg.Header.Flags.Opcode == protocol.OpcodeUpdate && msg.Header.Flags.QR
 }
 
@@ -396,14 +424,29 @@ func IsUpdateResponse(msg *protocol.Message) bool {
 // other errors.
 var ErrPrereqFailed = errors.New("ddns: prerequisite failed")
 
+// ErrNotZone is returned when an UPDATE prerequisite or operation owner is
+// outside the target zone. RFC 2136 requires the handler to answer NOTZONE.
+var ErrNotZone = errors.New("ddns: name outside zone")
+
 // ApplyUpdate applies an update to a zone. The prerequisite check and
 // the mutating operations run under a single z.Lock() acquisition so
 // concurrent UPDATEs with mutually-exclusive prerequisites can't both
 // pass — fixing the TOCTOU window the handler used to leave open by
 // doing an extra unlocked prereq check before calling here (M-6).
 func ApplyUpdate(z *zone.Zone, update *UpdateRequest) error {
+	if z == nil {
+		return fmt.Errorf("ddns: nil zone")
+	}
+	if update == nil {
+		return fmt.Errorf("ddns: nil update request")
+	}
+
 	z.Lock()
 	defer z.Unlock()
+
+	if err := validateUpdateWithinZone(z, update); err != nil {
+		return err
+	}
 
 	// Check prerequisites under the same lock that protects the apply
 	// loop below. Any failure here is reported as ErrPrereqFailed so
@@ -426,6 +469,39 @@ func ApplyUpdate(z *zone.Zone, update *UpdateRequest) error {
 	zone.IncrementSerial(z)
 
 	return nil
+}
+
+func validateUpdateWithinZone(z *zone.Zone, update *UpdateRequest) error {
+	if z == nil {
+		return fmt.Errorf("ddns: nil zone")
+	}
+	if update == nil {
+		return fmt.Errorf("ddns: nil update request")
+	}
+
+	for _, precond := range update.Prerequisites {
+		if !nameWithinZone(precond.Name, z.Origin) {
+			return fmt.Errorf("%w: %s", ErrNotZone, precond.Name)
+		}
+	}
+	for _, op := range update.Updates {
+		if !nameWithinZone(op.Name, z.Origin) {
+			return fmt.Errorf("%w: %s", ErrNotZone, op.Name)
+		}
+	}
+	return nil
+}
+
+func nameWithinZone(name, origin string) bool {
+	name = strings.ToLower(name)
+	origin = strings.ToLower(origin)
+	if !strings.HasSuffix(origin, ".") {
+		origin += "."
+	}
+	if !strings.HasSuffix(name, ".") {
+		return true
+	}
+	return name == origin || strings.HasSuffix(name, "."+origin)
 }
 
 // checkPrerequisiteOnZone checks a single prerequisite
@@ -464,13 +540,14 @@ func checkPrerequisiteOnZone(z *zone.Zone, precond UpdatePrerequisite) error {
 func applyOperationToZone(z *zone.Zone, op UpdateOperation) error {
 	switch op.Operation {
 	case UpdateOpAdd:
+		name := normalizeZoneOwner(op.Name, z.Origin)
 		record := zone.Record{
-			Name:  op.Name,
+			Name:  name,
 			Type:  protocol.TypeString(op.Type),
 			TTL:   op.TTL,
 			RData: op.RData,
 		}
-		z.Records[op.Name] = append(z.Records[op.Name], record)
+		z.Records[name] = append(z.Records[name], record)
 
 	case UpdateOpDelete:
 		// Delete specific record (name + type + rdata)
@@ -490,12 +567,19 @@ func applyOperationToZone(z *zone.Zone, op UpdateOperation) error {
 
 // Helper functions for zone operations
 
+func normalizeZoneOwner(name, origin string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	origin = strings.ToLower(strings.TrimSpace(origin))
+	if !strings.HasSuffix(name, ".") {
+		name = name + "." + origin
+	}
+	return name
+}
+
 // zoneNameExists checks if any records exist at the given name
 func zoneNameExists(z *zone.Zone, name string) bool {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	records, ok := z.Records[name]
 	return ok && len(records) > 0
 }
@@ -503,9 +587,7 @@ func zoneNameExists(z *zone.Zone, name string) bool {
 // zoneTypeExists checks if any records of the given type exist at the name
 func zoneTypeExists(z *zone.Zone, name string, rrType uint16) bool {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return false
@@ -522,9 +604,7 @@ func zoneTypeExists(z *zone.Zone, name string, rrType uint16) bool {
 // zoneRecordExists checks if a specific record exists
 func zoneRecordExists(z *zone.Zone, name string, rrType uint16, rdata string) bool {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return false
@@ -541,9 +621,7 @@ func zoneRecordExists(z *zone.Zone, name string, rrType uint16, rdata string) bo
 // zoneDeleteRecord deletes a specific record
 func zoneDeleteRecord(z *zone.Zone, name string, rrType uint16, rdata string) {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return
@@ -571,9 +649,7 @@ func zoneDeleteRecord(z *zone.Zone, name string, rrType uint16, rdata string) {
 // zoneDeleteRRSet deletes all records of a specific type at a name
 func zoneDeleteRRSet(z *zone.Zone, name string, rrType uint16) {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
 		return
@@ -596,8 +672,6 @@ func zoneDeleteRRSet(z *zone.Zone, name string, rrType uint16) {
 // zoneDeleteName deletes all records at a name
 func zoneDeleteName(z *zone.Zone, name string) {
 	// Normalize name
-	if !strings.HasSuffix(name, ".") {
-		name = name + "." + z.Origin
-	}
+	name = normalizeZoneOwner(name, z.Origin)
 	delete(z.Records, name)
 }

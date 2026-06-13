@@ -207,6 +207,32 @@ func TestLoggerSetOutput(t *testing.T) {
 	}
 }
 
+func TestLoggerSetOutputNilDefaultsStdout(t *testing.T) {
+	var buf bytes.Buffer
+	logger := NewLogger(INFO, TextFormat, &buf)
+
+	logger.SetOutput(nil)
+
+	if logger.output != os.Stdout {
+		t.Error("Logger output should default to os.Stdout when nil is passed to SetOutput")
+	}
+}
+
+func TestSetDefaultLoggerNilRestoresDefault(t *testing.T) {
+	original := GetDefaultLogger()
+	defer SetDefaultLogger(original)
+
+	SetDefaultLogger(nil)
+
+	logger := GetDefaultLogger()
+	if logger == nil {
+		t.Fatal("SetDefaultLogger(nil) left default logger nil")
+	}
+	if logger.output != os.Stdout {
+		t.Error("SetDefaultLogger(nil) should restore a stdout-backed default logger")
+	}
+}
+
 func TestLoggerWithFieldsNil(t *testing.T) {
 	var buf bytes.Buffer
 	logger := NewLogger(DEBUG, TextFormat, &buf)

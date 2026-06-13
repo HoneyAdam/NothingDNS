@@ -4,9 +4,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
-// RecordService provides record operations for both REST and MCP handlers.
-// It is the single source of truth for record-related business logic,
-// avoiding duplication between the HTTP handler layer and the MCP tool layer.
+// RecordService is the single source of truth for record-related business
+// logic, kept separate from the HTTP handler layer.
 type RecordService struct {
 	zoneManager *zone.Manager
 }

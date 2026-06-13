@@ -2,6 +2,7 @@ package doh
 
 import (
 	"encoding/base64"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,34 @@ func TestWSHandler_ServeHTTP_InvalidUpgrade(t *testing.T) {
 	if rr.Code == http.StatusOK {
 		t.Error("Expected non-200 for non-WebSocket request")
 	}
+}
+
+func TestCloseDoWSConnReturnsCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	conn := &doWSCloseErrorConn{err: closeErr}
+
+	if err := closeDoWSConn(conn); !errors.Is(err, closeErr) {
+		t.Fatalf("closeDoWSConn error = %v, want %v", err, closeErr)
+	}
+	if conn.calls != 1 {
+		t.Fatalf("Close calls = %d, want 1", conn.calls)
+	}
+}
+
+func TestCloseDoWSConnNilSafe(t *testing.T) {
+	if err := closeDoWSConn(nil); err != nil {
+		t.Fatalf("closeDoWSConn(nil) = %v, want nil", err)
+	}
+}
+
+type doWSCloseErrorConn struct {
+	err   error
+	calls int
+}
+
+func (c *doWSCloseErrorConn) Close() error {
+	c.calls++
+	return c.err
 }
 
 func TestWSResponseWriter_ClientInfo_ValidAddr(t *testing.T) {

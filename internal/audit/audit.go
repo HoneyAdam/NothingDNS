@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -84,10 +85,14 @@ type ReloadAuditEntry struct {
 
 // AuditLogger writes structured audit logs for security-sensitive operations.
 type AuditLogger struct {
-	mu      sync.Mutex
-	output  io.Writer
-	file    *os.File
-	enabled bool
+	mu     sync.Mutex
+	output io.Writer
+	file   *os.File
+	// enabled is atomic so every Log* entry point can fast-path out of a
+	// disabled logger without formatting the line or taking the global
+	// mutex. Close() flips it concurrently with in-flight Log* calls.
+	enabled atomic.Bool
+	lastErr error
 }
 
 // NewAuditLogger creates a new audit logger.
@@ -95,100 +100,108 @@ type AuditLogger struct {
 // Otherwise uses stdout.
 func NewAuditLogger(queryLog bool, queryLogFile string) (*AuditLogger, error) {
 	if !queryLog {
-		return &AuditLogger{enabled: false}, nil
+		return &AuditLogger{}, nil // enabled zero value is false
 	}
 
 	var output io.Writer = os.Stdout
 	var file *os.File
 
 	if queryLogFile != "" {
-		f, err := os.OpenFile(queryLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err := os.OpenFile(queryLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			return nil, fmt.Errorf("opening query log file %s: %w", queryLogFile, err)
+		}
+		if err := f.Chmod(0600); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("securing query log file %s: %w", queryLogFile, err)
 		}
 		file = f
 		output = f
 	}
 
-	return &AuditLogger{
-		output:  output,
-		file:    file,
-		enabled: true,
-	}, nil
+	al := &AuditLogger{
+		output: output,
+		file:   file,
+	}
+	al.enabled.Store(true)
+	return al, nil
 }
 
 // LogQuery writes a query audit entry.
 func (a *AuditLogger) LogQuery(entry QueryAuditEntry) {
-	if !a.enabled {
-		return
+	if !a.enabled.Load() {
+		return // fast path: skip formatting and the global mutex
 	}
-
-	line := formatQueryAuditLine(entry)
-
-	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	a.writeLine(formatQueryAuditLine(entry))
 }
 
 // LogAXFR writes an AXFR audit entry.
 func (a *AuditLogger) LogAXFR(entry AXFRAuditEntry) {
-	if !a.enabled {
+	if !a.enabled.Load() {
 		return
 	}
-	line := formatAXFRAuditLine(entry)
-	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	a.writeLine(formatAXFRAuditLine(entry))
 }
 
 // LogIXFR writes an IXFR audit entry.
 func (a *AuditLogger) LogIXFR(entry IXFRAuditEntry) {
-	if !a.enabled {
+	if !a.enabled.Load() {
 		return
 	}
-	line := formatIXFRAuditLine(entry)
-	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	a.writeLine(formatIXFRAuditLine(entry))
 }
 
 // LogNOTIFY writes a NOTIFY audit entry.
 func (a *AuditLogger) LogNOTIFY(entry NOTIFYAuditEntry) {
-	if !a.enabled {
+	if !a.enabled.Load() {
 		return
 	}
-	line := formatNOTIFYAuditLine(entry)
-	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	a.writeLine(formatNOTIFYAuditLine(entry))
 }
 
 // LogUpdate writes a DDNS UPDATE audit entry.
 func (a *AuditLogger) LogUpdate(entry UpdateAuditEntry) {
-	if !a.enabled {
+	if !a.enabled.Load() {
 		return
 	}
-	line := formatUpdateAuditLine(entry)
-	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	a.writeLine(formatUpdateAuditLine(entry))
 }
 
 // LogReload writes a config reload audit entry.
 func (a *AuditLogger) LogReload(entry ReloadAuditEntry) {
-	if !a.enabled {
+	if !a.enabled.Load() {
 		return
 	}
-	line := formatReloadAuditLine(entry)
+	a.writeLine(formatReloadAuditLine(entry))
+}
+
+func (a *AuditLogger) writeLine(line string) {
 	a.mu.Lock()
-	_, _ = a.output.Write([]byte(line))
-	_, _ = a.output.Write([]byte{'\n'})
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	// Backstop re-check under the lock: Close() may have disabled the
+	// logger (and closed the file) after the caller's fast-path check.
+	if !a.enabled.Load() {
+		return
+	}
+	if n, err := io.WriteString(a.output, line); err != nil {
+		a.lastErr = err
+		return
+	} else if n != len(line) {
+		a.lastErr = io.ErrShortWrite
+		return
+	}
+	if n, err := io.WriteString(a.output, "\n"); err != nil {
+		a.lastErr = err
+	} else if n != 1 {
+		a.lastErr = io.ErrShortWrite
+	}
+}
+
+// LastError returns the most recent write or close error observed by the logger.
+func (a *AuditLogger) LastError() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastErr
 }
 
 // Close closes the audit logger and flushes any buffered output.
@@ -198,8 +211,7 @@ func (a *AuditLogger) LogReload(entry ReloadAuditEntry) {
 // calling a.output.Write on the same *os.File. Take a.mu so the
 // final close happens-after every in-flight write, and flip
 // a.enabled to false so subsequent Log* calls fast-path out
-// instead of trying to write into a closed descriptor (which
-// silently drops entries today).
+// instead of trying to write into a closed descriptor.
 //
 // Idempotent: re-entry observes enabled=false and a.file==nil and
 // returns cleanly.
@@ -207,10 +219,12 @@ func (a *AuditLogger) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.file != nil {
-		a.file.Close()
+		if err := a.file.Close(); err != nil {
+			a.lastErr = err
+		}
 		a.file = nil
 	}
-	a.enabled = false
+	a.enabled.Store(false)
 }
 
 func formatQueryAuditLine(e QueryAuditEntry) string {

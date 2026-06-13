@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/api';
 import { useUpdateLoggingConfig, useUpdateRRLConfig, useUpdateCacheConfig } from '@/hooks/useApi';
+import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
@@ -17,7 +18,7 @@ import {
 } from '@/components/ui/select';
 import {
   Server, Network, Database, Shield, Globe, HardDrive, Zap,
-  Lock, Key, Users, FileText, Activity, RefreshCw, AlertCircle, Save
+  Lock, Key, Users, FileText, Activity, RefreshCw, AlertCircle, Save, RotateCcw
 } from 'lucide-react';
 
 // Full config type matching internal/config/config.go JSON output (Go encoding/json uses field names as-is).
@@ -170,10 +171,7 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('general');
-
-  useEffect(() => {
-    loadConfig();
-  }, []);
+  const [reloading, setReloading] = useState(false);
 
   const loadConfig = async () => {
     setLoading(true);
@@ -185,6 +183,23 @@ export function SettingsPage() {
       setError(e instanceof Error ? e.message : 'Failed to load config');
     } finally {
       setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadConfig();
+  }, []);
+
+  const reloadRuntimeConfig = async () => {
+    setReloading(true);
+    try {
+      await api('POST', '/api/v1/config/reload');
+      await loadConfig();
+      toast.success('Configuration reloaded');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to reload configuration');
+    } finally {
+      setReloading(false);
     }
   };
 
@@ -220,9 +235,14 @@ export function SettingsPage() {
           <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
           <p className="text-muted-foreground text-sm">Comprehensive server configuration</p>
         </div>
-        <Button variant="outline" size="sm" onClick={loadConfig}>
-          <RefreshCw className="h-4 w-4 mr-2" /> Refresh
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" size="sm" onClick={loadConfig}>
+            <RefreshCw className="h-4 w-4 mr-2" /> Refresh
+          </Button>
+          <Button size="sm" onClick={reloadRuntimeConfig} disabled={reloading}>
+            <RotateCcw className="h-4 w-4 mr-2" /> {reloading ? 'Reloading...' : 'Reload Config'}
+          </Button>
+        </div>
       </div>
 
       <Tabs value={activeTab} onValueChange={(v: string) => setActiveTab(v as TabId)} className="w-full">
@@ -248,15 +268,15 @@ export function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="cache" className="mt-4 space-y-4">
-          <CacheSettings config={config} />
+          <CacheSettings config={config} onReload={loadConfig} />
         </TabsContent>
 
         <TabsContent value="security" className="mt-4 space-y-4">
-          <SecuritySettings config={config} />
+          <SecuritySettings config={config} onReload={loadConfig} />
         </TabsContent>
 
         <TabsContent value="logging" className="mt-4 space-y-4">
-          <LoggingSettings config={config} />
+          <LoggingSettings config={config} onReload={loadConfig} />
         </TabsContent>
 
         <TabsContent value="cluster" className="mt-4 space-y-4">
@@ -272,17 +292,56 @@ export function SettingsPage() {
 }
 
 // Section header helper
-function SectionHeader({ title, description, icon }: { title: string; description?: string; icon: ReactNode }) {
+function SectionHeader({ title, description, icon, badge }: { title: string; description?: string; icon: ReactNode; badge?: string }) {
   return (
     <CardHeader className="pb-3">
-      <div className="flex items-center gap-2">
-        <div className="p-1.5 rounded-md bg-primary/10 text-primary">{icon}</div>
-        <div>
-          <CardTitle className="text-base">{title}</CardTitle>
-          {description && <CardDescription className="text-xs">{description}</CardDescription>}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <div className="p-1.5 rounded-md bg-primary/10 text-primary">{icon}</div>
+          <div>
+            <CardTitle className="text-base">{title}</CardTitle>
+            {description && <CardDescription className="text-xs">{description}</CardDescription>}
+          </div>
         </div>
+        {badge && <Badge variant="outline">{badge}</Badge>}
       </div>
     </CardHeader>
+  );
+}
+
+function SaveBar({ dirty, saving, onSave, onReset }: { dirty: boolean; saving: boolean; onSave: () => void; onReset: () => void }) {
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex items-center gap-2">
+        <Badge variant={dirty ? 'warning' : 'secondary'}>{dirty ? 'Unsaved changes' : 'Current'}</Badge>
+        <span className="text-xs text-muted-foreground">{dirty ? 'Review and save runtime changes.' : 'No pending runtime changes.'}</span>
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        <Button variant="outline" size="sm" className="min-w-[92px]" onClick={onReset} disabled={!dirty || saving}>
+          <RotateCcw className="h-4 w-4 mr-2" /> Reset
+        </Button>
+        <Button size="sm" className="min-w-[92px]" onClick={onSave} disabled={!dirty || saving}>
+          <Save className="h-4 w-4 mr-2" />
+          {saving ? 'Saving...' : 'Save'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function ReadOnlyNotice({ title }: { title: string }) {
+  return (
+    <Card className="border-dashed bg-muted/20">
+      <CardHeader className="pb-3">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 p-1.5 rounded-md bg-background text-muted-foreground"><Lock className="h-4 w-4" /></div>
+          <div className="min-w-0">
+            <CardTitle className="text-base">{title}</CardTitle>
+            <CardDescription className="text-xs">File-backed settings can be reloaded from disk; runtime editing is available for cache, RRL, and log level.</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+    </Card>
   );
 }
 
@@ -303,6 +362,7 @@ function GeneralSettings({ config }: { config: ServerConfig }) {
   const server = config.Server;
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed server settings" />
       <Card>
         <SectionHeader title="Server Bind" description="DNS server listen addresses" icon={<Server className="h-4 w-4" />} />
         <CardContent className="space-y-1">
@@ -372,6 +432,7 @@ function DNSSettings({ config }: { config: ServerConfig }) {
   const resolution = config.Resolution;
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed DNS settings" />
       <Card>
         <SectionHeader title="Resolution" description="DNS resolution behavior" icon={<Globe className="h-4 w-4" />} />
         <CardContent className="space-y-1">
@@ -433,6 +494,7 @@ function UpstreamSettings({ config }: { config: ServerConfig }) {
   const upstream = config.Upstream;
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed upstream settings" />
       <Card>
         <SectionHeader title="Upstream Servers" description="Recursive resolution upstreams" icon={<Network className="h-4 w-4" />} />
         <CardContent className="space-y-1">
@@ -480,7 +542,7 @@ function UpstreamSettings({ config }: { config: ServerConfig }) {
 }
 
 // CACHE SETTINGS
-function CacheSettings({ config }: { config: ServerConfig }) {
+function CacheSettings({ config, onReload }: { config: ServerConfig; onReload: () => Promise<void> }) {
   const cache = config.Cache;
   const updateCache = useUpdateCacheConfig();
   const [cacheEnabled, setCacheEnabled] = useState(cache?.Enabled ?? true);
@@ -507,25 +569,56 @@ function CacheSettings({ config }: { config: ServerConfig }) {
     setStaleGrace(String(cache?.StaleGraceSecs ?? 86400));
   }, [cache]);
 
+  const resetCacheForm = () => {
+    setCacheEnabled(cache?.Enabled ?? true);
+    setCacheSize(String(cache?.Size ?? 10000));
+    setDefaultTTL(String(cache?.DefaultTTL ?? 300));
+    setMaxTTL(String(cache?.MaxTTL ?? 86400));
+    setMinTTL(String(cache?.MinTTL ?? 5));
+    setNegativeTTL(String(cache?.NegativeTTL ?? 60));
+    setPrefetch(cache?.Prefetch ?? false);
+    setPrefetchThreshold(String(cache?.PrefetchThreshold ?? 60));
+    setServeStale(cache?.ServeStale ?? false);
+    setStaleGrace(String(cache?.StaleGraceSecs ?? 86400));
+  };
+
+  const cacheDirty =
+    cacheEnabled !== (cache?.Enabled ?? true) ||
+    cacheSize !== String(cache?.Size ?? 10000) ||
+    defaultTTL !== String(cache?.DefaultTTL ?? 300) ||
+    maxTTL !== String(cache?.MaxTTL ?? 86400) ||
+    minTTL !== String(cache?.MinTTL ?? 5) ||
+    negativeTTL !== String(cache?.NegativeTTL ?? 60) ||
+    prefetch !== (cache?.Prefetch ?? false) ||
+    prefetchThreshold !== String(cache?.PrefetchThreshold ?? 60) ||
+    serveStale !== (cache?.ServeStale ?? false) ||
+    staleGrace !== String(cache?.StaleGraceSecs ?? 86400);
+
   const handleSave = async () => {
-    await updateCache.mutateAsync({
-      enabled: cacheEnabled,
-      size: parseInt(cacheSize) || 10000,
-      default_ttl: parseInt(defaultTTL) || 300,
-      max_ttl: parseInt(maxTTL) || 86400,
-      min_ttl: parseInt(minTTL) || 5,
-      negative_ttl: parseInt(negativeTTL) || 60,
-      prefetch: prefetch,
-      prefetch_threshold: parseInt(prefetchThreshold) || 60,
-      serve_stale: serveStale,
-      stale_grace_secs: parseInt(staleGrace) || 86400,
-    });
+    try {
+      await updateCache.mutateAsync({
+        enabled: cacheEnabled,
+        size: parseInt(cacheSize) || 10000,
+        default_ttl: parseInt(defaultTTL) || 300,
+        max_ttl: parseInt(maxTTL) || 86400,
+        min_ttl: parseInt(minTTL) || 5,
+        negative_ttl: parseInt(negativeTTL) || 60,
+        prefetch: prefetch,
+        prefetch_threshold: parseInt(prefetchThreshold) || 60,
+        serve_stale: serveStale,
+        stale_grace_secs: parseInt(staleGrace) || 86400,
+      });
+      await onReload();
+      toast.success('Cache settings saved');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save cache settings');
+    }
   };
 
   return (
     <div className="space-y-4">
       <Card>
-        <SectionHeader title="Cache Configuration" description="DNS response caching" icon={<Database className="h-4 w-4" />} />
+        <SectionHeader title="Cache Configuration" description="DNS response caching" icon={<Database className="h-4 w-4" />} badge="Live edit" />
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <Label>Enabled</Label>
@@ -557,7 +650,7 @@ function CacheSettings({ config }: { config: ServerConfig }) {
       </Card>
 
       <Card>
-        <SectionHeader title="Prefetch & Stale" description="Cache optimization features" icon={<Zap className="h-4 w-4" />} />
+        <SectionHeader title="Prefetch & Stale" description="Cache optimization features" icon={<Zap className="h-4 w-4" />} badge="Live edit" />
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <Label>Prefetch</Label>
@@ -575,12 +668,7 @@ function CacheSettings({ config }: { config: ServerConfig }) {
             <Label>Stale Grace Period (seconds)</Label>
             <Input type="number" value={staleGrace} onChange={(e) => setStaleGrace(e.target.value)} disabled={!serveStale} />
           </div>
-          <div className="flex justify-end">
-            <Button size="sm" onClick={handleSave} disabled={updateCache.isPending}>
-              <Save className="h-4 w-4 mr-2" />
-              {updateCache.isPending ? 'Saving...' : 'Save'}
-            </Button>
-          </div>
+          <SaveBar dirty={cacheDirty} saving={updateCache.isPending} onSave={handleSave} onReset={resetCacheForm} />
         </CardContent>
       </Card>
     </div>
@@ -588,7 +676,7 @@ function CacheSettings({ config }: { config: ServerConfig }) {
 }
 
 // SECURITY SETTINGS
-function SecuritySettings({ config }: { config: ServerConfig }) {
+function SecuritySettings({ config, onReload }: { config: ServerConfig; onReload: () => Promise<void> }) {
   const dnssec = config.DNSSEC;
   const acl = config.ACL;
   const rrl = config.RRL;
@@ -603,16 +691,34 @@ function SecuritySettings({ config }: { config: ServerConfig }) {
     setRrlBurst(String(rrl?.Burst ?? 20));
   }, [rrl?.Enabled, rrl?.Rate, rrl?.Burst]);
 
+  const resetRRLForm = () => {
+    setRrlEnabled(rrl?.Enabled ?? false);
+    setRrlRate(String(rrl?.Rate ?? 5));
+    setRrlBurst(String(rrl?.Burst ?? 20));
+  };
+
+  const rrlDirty =
+    rrlEnabled !== (rrl?.Enabled ?? false) ||
+    rrlRate !== String(rrl?.Rate ?? 5) ||
+    rrlBurst !== String(rrl?.Burst ?? 20);
+
   const handleSaveRRL = async () => {
-    await updateRRL.mutateAsync({
-      enabled: rrlEnabled,
-      rate: parseFloat(rrlRate) || 5,
-      burst: parseInt(rrlBurst, 10) || 20,
-    });
+    try {
+      await updateRRL.mutateAsync({
+        enabled: rrlEnabled,
+        rate: parseFloat(rrlRate) || 5,
+        burst: parseInt(rrlBurst, 10) || 20,
+      });
+      await onReload();
+      toast.success('RRL settings saved');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save RRL settings');
+    }
   };
 
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed security settings" />
       <Card>
         <SectionHeader title="DNSSEC" description="DNS Security Extensions" icon={<Shield className="h-4 w-4" />} />
         <CardContent className="space-y-1">
@@ -649,7 +755,7 @@ function SecuritySettings({ config }: { config: ServerConfig }) {
       </Card>
 
       <Card>
-        <SectionHeader title="Rate Limiting (RRL)" description="Response rate limiting" icon={<Activity className="h-4 w-4" />} />
+        <SectionHeader title="Rate Limiting (RRL)" description="Response rate limiting" icon={<Activity className="h-4 w-4" />} badge="Live edit" />
         <CardContent className="space-y-4">
           <div className="flex items-center justify-between">
             <Label>Enabled</Label>
@@ -665,12 +771,7 @@ function SecuritySettings({ config }: { config: ServerConfig }) {
               <Input type="number" value={rrlBurst} onChange={(e) => setRrlBurst(e.target.value)} />
             </div>
           </div>
-          <div className="flex justify-end">
-            <Button size="sm" onClick={handleSaveRRL} disabled={updateRRL.isPending}>
-              <Save className="h-4 w-4 mr-2" />
-              {updateRRL.isPending ? 'Saving...' : 'Save'}
-            </Button>
-          </div>
+          <SaveBar dirty={rrlDirty} saving={updateRRL.isPending} onSave={handleSaveRRL} onReset={resetRRLForm} />
         </CardContent>
       </Card>
 
@@ -689,7 +790,7 @@ function SecuritySettings({ config }: { config: ServerConfig }) {
 }
 
 // LOGGING SETTINGS
-function LoggingSettings({ config }: { config: ServerConfig }) {
+function LoggingSettings({ config, onReload }: { config: ServerConfig; onReload: () => Promise<void> }) {
   const logging = config.Logging;
   const updateLogging = useUpdateLoggingConfig();
   const [level, setLevel] = useState(logging?.Level || 'info');
@@ -698,45 +799,51 @@ function LoggingSettings({ config }: { config: ServerConfig }) {
     setLevel(logging?.Level || 'info');
   }, [logging?.Level]);
 
+  const resetLoggingForm = () => {
+    setLevel(logging?.Level || 'info');
+  };
+
+  const loggingDirty = level !== (logging?.Level || 'info');
+
   const handleSave = async () => {
-    await updateLogging.mutateAsync({ level });
+    try {
+      await updateLogging.mutateAsync({ level });
+      await onReload();
+      toast.success('Log level saved');
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed to save log level');
+    }
   };
 
   return (
     <div className="space-y-4">
       <Card>
-        <SectionHeader title="Logging" description="Server logging configuration" icon={<FileText className="h-4 w-4" />} />
+        <SectionHeader title="Logging" description="Log level can be changed live; output settings are file-backed" icon={<FileText className="h-4 w-4" />} badge="Live edit" />
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label>Level</Label>
-            <div className="flex items-center gap-2">
-              <Select value={level} onValueChange={setLevel}>
-                <SelectTrigger className="w-40">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="debug">debug</SelectItem>
-                  <SelectItem value="info">info</SelectItem>
-                  <SelectItem value="warn">warn</SelectItem>
-                  <SelectItem value="error">error</SelectItem>
-                  <SelectItem value="fatal">fatal</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button size="sm" onClick={handleSave} disabled={updateLogging.isPending}>
-                <Save className="h-4 w-4 mr-2" />
-                {updateLogging.isPending ? 'Saving...' : 'Save'}
-              </Button>
-            </div>
+            <Select value={level} onValueChange={setLevel}>
+              <SelectTrigger className="w-40">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="debug">debug</SelectItem>
+                <SelectItem value="info">info</SelectItem>
+                <SelectItem value="warn">warn</SelectItem>
+                <SelectItem value="error">error</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <KVRow label="Format" value={logging?.Format || 'text'} />
           <KVRow label="Output" value={logging?.Output || 'stdout'} />
           <KVRow label="Query Log" value={logging?.QueryLog ? 'Enabled' : 'Disabled'} />
           <KVRow label="Query Log File" value={logging?.QueryLogFile || '-'} mono />
+          <SaveBar dirty={loggingDirty} saving={updateLogging.isPending} onSave={handleSave} onReset={resetLoggingForm} />
         </CardContent>
       </Card>
 
       <Card>
-        <SectionHeader title="DNSSEC Validation" description="DNS cookie mechanism (RFC 7873)" icon={<Shield className="h-4 w-4" />} />
+        <SectionHeader title="DNS Cookies" description="DNS cookie mechanism (RFC 7873)" icon={<Shield className="h-4 w-4" />} />
         <CardContent className="space-y-1">
           <KVRow label="DNS Cookie" value={config.Cookie?.Enabled ? 'Enabled' : 'Disabled'} />
           <KVRow label="Secret Rotation" value={config.Cookie?.SecretRotation || '1h'} />
@@ -758,6 +865,7 @@ function ClusterSettings({ config }: { config: ServerConfig }) {
   const cluster = config.Cluster;
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed cluster settings" />
       <Card>
         <SectionHeader title="Cluster" description="Gossip-based clustering" icon={<Users className="h-4 w-4" />} />
         <CardContent className="space-y-1">
@@ -789,6 +897,7 @@ function ClusterSettings({ config }: { config: ServerConfig }) {
 function AdvancedSettings({ config }: { config: ServerConfig }) {
   return (
     <div className="space-y-4">
+      <ReadOnlyNotice title="File-backed advanced settings" />
       <Card>
         <SectionHeader title="Blocklist" description="Domain blocking" icon={<Shield className="h-4 w-4" />} />
         <CardContent className="space-y-1">

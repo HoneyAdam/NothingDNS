@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -17,6 +18,11 @@ func TestClientInfoString(t *testing.T) {
 		{
 			name:     "nil client",
 			client:   nil,
+			expected: "<nil>",
+		},
+		{
+			name:     "nil addr",
+			client:   &ClientInfo{},
 			expected: "<nil>",
 		},
 		{
@@ -64,6 +70,93 @@ func TestClientInfoIPMore(t *testing.T) {
 	// Zone suffix causes parse to fail, so IP() returns nil
 	// This is expected behavior
 	_ = ip2 // Just verify it doesn't panic
+}
+
+func TestPopulateEDNS0ClientInfo(t *testing.T) {
+	client := &ClientInfo{Protocol: "udp"}
+	msg := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{
+				Name:  mustParseName("."),
+				Type:  protocol.TypeOPT,
+				Class: 4096,
+				Data: &protocol.RDataOPT{Options: []protocol.EDNS0Option{
+					{
+						Code: protocol.OptionCodeClientSubnet,
+						Data: []byte{0x00, 0x01, 0x18, 0x00, 192, 168, 1},
+					},
+				}},
+			},
+		},
+	}
+
+	populateEDNS0ClientInfo(client, msg)
+
+	if !client.HasEDNS0 {
+		t.Fatal("HasEDNS0 should be true")
+	}
+	if client.EDNS0UDPSize != 4096 {
+		t.Fatalf("EDNS0UDPSize = %d, want 4096", client.EDNS0UDPSize)
+	}
+	if client.ClientSubnet == nil {
+		t.Fatal("ClientSubnet should be populated")
+	}
+	if client.ClientSubnet.Family != 1 || client.ClientSubnet.SourcePrefixLength != 24 {
+		t.Fatalf("ClientSubnet = %+v, want IPv4 /24", client.ClientSubnet)
+	}
+}
+
+func TestPopulateEDNS0ClientInfoMalformedOPT(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  *protocol.Message
+	}{
+		{name: "nil message"},
+		{
+			name: "typed nil opt data",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: (*protocol.RDataOPT)(nil)},
+			}},
+		},
+		{
+			name: "raw opt data",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: &protocol.RDataRaw{Data: []byte{1, 2, 3}}},
+			}},
+		},
+		{
+			name: "malformed ecs option",
+			msg: &protocol.Message{Additionals: []*protocol.ResourceRecord{
+				{Name: mustParseName("."), Type: protocol.TypeOPT, Class: 1232, Data: &protocol.RDataOPT{Options: []protocol.EDNS0Option{
+					{Code: protocol.OptionCodeClientSubnet, Data: []byte{0x00, 0x01, 0x18, 0x00, 192, 168, 1, 1}},
+				}}},
+			}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &ClientInfo{Protocol: "udp"}
+			populateEDNS0ClientInfo(client, tc.msg)
+			if tc.msg == nil {
+				if client.HasEDNS0 {
+					t.Fatal("HasEDNS0 should remain false for nil message")
+				}
+				return
+			}
+			if !client.HasEDNS0 {
+				t.Fatal("HasEDNS0 should be true for OPT record")
+			}
+			if client.EDNS0UDPSize != 1232 {
+				t.Fatalf("EDNS0UDPSize = %d, want 1232", client.EDNS0UDPSize)
+			}
+			if client.ClientSubnet != nil {
+				t.Fatal("ClientSubnet should remain nil for malformed OPT data")
+			}
+		})
+	}
 }
 
 // TestHandlerFunc tests the HandlerFunc adapter.
@@ -123,6 +216,42 @@ func TestBaseResponseWriterWrite(t *testing.T) {
 	_, err := rw.Write(msg)
 	if err == nil {
 		t.Error("baseResponseWriter.Write() should return an error")
+	}
+}
+
+func TestSendSERVFAILHandlesNilWriter(t *testing.T) {
+	req := &protocol.Message{
+		Header: protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{
+			{Name: mustParseName("example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+
+	sendSERVFAIL(nil, req)
+}
+
+func TestSendSERVFAILHandlesWriteError(t *testing.T) {
+	req := &protocol.Message{
+		Header: protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{
+			{Name: mustParseName("example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+	rw := &mockResponseWriter{
+		client:   &ClientInfo{Protocol: "udp"},
+		writeErr: errors.New("write failed"),
+	}
+
+	sendSERVFAIL(rw, req)
+
+	if !rw.written {
+		t.Fatal("expected SERVFAIL write to be attempted")
+	}
+	if rw.msg == nil {
+		t.Fatal("expected SERVFAIL message to be captured")
+	}
+	if rw.msg.Header.Flags.RCODE != protocol.RcodeServerFailure {
+		t.Fatalf("RCODE = %d, want SERVFAIL", rw.msg.Header.Flags.RCODE)
 	}
 }
 
@@ -215,10 +344,11 @@ func TestResponseSizeLimitEdgeCases(t *testing.T) {
 
 // mockResponseWriter is a mock for testing.
 type mockResponseWriter struct {
-	client  *ClientInfo
-	maxSize int
-	written bool
-	msg     *protocol.Message
+	client   *ClientInfo
+	maxSize  int
+	written  bool
+	msg      *protocol.Message
+	writeErr error
 }
 
 func (m *mockResponseWriter) ClientInfo() *ClientInfo {
@@ -235,5 +365,5 @@ func (m *mockResponseWriter) Write(msg *protocol.Message) (int, error) {
 	}
 	m.written = true
 	m.msg = msg
-	return 0, nil
+	return 0, m.writeErr
 }

@@ -37,6 +37,9 @@ func TestMinimizedName(t *testing.T) {
 		{"com.", ".", "com."},
 		// Target not under zone cut
 		{"example.org.", "com.", "example.org."},
+		// DNS names are case-insensitive; mixed-case input must still minimize.
+		{"WWW.Example.COM.", "com.", "example.com."},
+		{"WWW.Example.COM.", "Example.COM.", "www.example.com."},
 	}
 
 	for _, tt := range tests {
@@ -228,6 +231,90 @@ func TestResolverQnameMinimization(t *testing.T) {
 	}
 }
 
+func TestResolverQnameMinimizationNSAnswerRequeriesFullName(t *testing.T) {
+	transport := &mockQminTransport{}
+
+	transport.handler = func(name string, qtype uint16) *protocol.Message {
+		resp := &protocol.Message{
+			Header: protocol.Header{
+				Flags: protocol.Flags{QR: true, AA: true},
+			},
+		}
+		q, _ := protocol.NewQuestion(name, qtype, protocol.ClassIN)
+		resp.Questions = []*protocol.Question{q}
+
+		switch {
+		case name == "com." && qtype == protocol.TypeNS:
+			resp.Authorities = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("com."),
+					Type:  protocol.TypeNS,
+					Class: protocol.ClassIN,
+					TTL:   86400,
+					Data:  &protocol.RDataNS{NSDName: mustParseName("a.gtld-servers.net.")},
+				},
+			}
+			resp.Additionals = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("a.gtld-servers.net."),
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   86400,
+					Data:  &protocol.RDataA{Address: [4]byte{192, 5, 6, 30}},
+				},
+			}
+			return resp
+
+		case name == "example.com." && qtype == protocol.TypeNS:
+			resp.Answers = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("example.com."),
+					Type:  protocol.TypeNS,
+					Class: protocol.ClassIN,
+					TTL:   3600,
+					Data:  &protocol.RDataNS{NSDName: mustParseName("ns1.example.com.")},
+				},
+			}
+			return resp
+
+		case name == "www.example.com." && qtype == protocol.TypeA:
+			resp.Answers = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("www.example.com."),
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{93, 184, 216, 34}},
+				},
+			}
+			return resp
+		}
+
+		resp.Header.Flags.RCODE = protocol.RcodeServerFailure
+		return resp
+	}
+
+	cfg := DefaultConfig()
+	cfg.QnameMinimization = true
+
+	r := NewResolver(cfg, nil, transport)
+	resp, err := r.Resolve(context.Background(), "www.example.com.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+
+	if len(transport.queries) != 3 {
+		t.Fatalf("queries = %+v, want exactly 3 minimized/full queries", transport.queries)
+	}
+	last := transport.queries[2]
+	if last.name != "www.example.com." || last.qtype != protocol.TypeA {
+		t.Fatalf("last query = %s %d, want www.example.com. A", last.name, last.qtype)
+	}
+	if len(resp.Answers) != 1 || resp.Answers[0].Type != protocol.TypeA {
+		t.Fatalf("response answers = %+v, want final A answer not minimized NS answer", resp.Answers)
+	}
+}
+
 func TestResolverWithoutQnameMinimization(t *testing.T) {
 	transport := &mockQminTransport{}
 	transport.handler = func(name string, qtype uint16) *protocol.Message {
@@ -289,5 +376,147 @@ func TestResolverWithoutQnameMinimization(t *testing.T) {
 	}
 	if resp == nil || len(resp.Answers) == 0 {
 		t.Fatal("expected answer")
+	}
+}
+
+// TestResolverQnameMinimizationENTNodata verifies that a NODATA reply to an
+// intermediate minimized NS probe (an empty non-terminal, RFC 7816 §3) does
+// NOT terminate resolution: the resolver must step one label deeper and
+// eventually answer the full query, instead of returning the probe's NODATA
+// and poisoning the negative cache for the full name.
+func TestResolverQnameMinimizationENTNodata(t *testing.T) {
+	transport := &mockQminTransport{}
+
+	referral := func(zone, ns string, ip [4]byte) *protocol.Message {
+		resp := &protocol.Message{
+			Header: protocol.Header{Flags: protocol.Flags{QR: true}},
+		}
+		resp.Authorities = []*protocol.ResourceRecord{
+			{
+				Name:  mustParseName(zone),
+				Type:  protocol.TypeNS,
+				Class: protocol.ClassIN,
+				TTL:   86400,
+				Data:  &protocol.RDataNS{NSDName: mustParseName(ns)},
+			},
+		}
+		resp.Additionals = []*protocol.ResourceRecord{
+			{
+				Name:  mustParseName(ns),
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+				TTL:   86400,
+				Data:  &protocol.RDataA{Address: ip},
+			},
+		}
+		return resp
+	}
+
+	transport.handler = func(name string, qtype uint16) *protocol.Message {
+		switch {
+		case name == "com." && qtype == protocol.TypeNS:
+			return referral("com.", "a.gtld-servers.net.", [4]byte{192, 5, 6, 30})
+		case name == "example.com." && qtype == protocol.TypeNS:
+			return referral("example.com.", "ns1.example.com.", [4]byte{93, 184, 216, 1})
+		case name == "dept.example.com." && qtype == protocol.TypeNS:
+			// Empty non-terminal: the name exists but has no NS RRset.
+			// Authoritative NODATA — NOERROR, zero answers, SOA authority.
+			resp := &protocol.Message{
+				Header: protocol.Header{Flags: protocol.Flags{QR: true, AA: true}},
+			}
+			resp.Authorities = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("example.com."),
+					Type:  protocol.TypeSOA,
+					Class: protocol.ClassIN,
+					TTL:   900,
+					Data: &protocol.RDataSOA{
+						MName: mustParseName("ns1.example.com."),
+						RName: mustParseName("hostmaster.example.com."),
+					},
+				},
+			}
+			return resp
+		case name == "www.dept.example.com." && qtype == protocol.TypeA:
+			resp := &protocol.Message{
+				Header: protocol.Header{Flags: protocol.Flags{QR: true, AA: true}},
+			}
+			resp.Answers = []*protocol.ResourceRecord{
+				{
+					Name:  mustParseName("www.dept.example.com."),
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{93, 184, 216, 34}},
+				},
+			}
+			return resp
+		}
+		return &protocol.Message{
+			Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeServerFailure}},
+		}
+	}
+
+	cfg := DefaultConfig()
+	cfg.QnameMinimization = true
+	r := NewResolver(cfg, nil, transport)
+
+	resp, err := r.Resolve(context.Background(), "www.dept.example.com.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp.Header.Flags.RCODE != protocol.RcodeSuccess {
+		t.Fatalf("RCODE = %d, want NOERROR", resp.Header.Flags.RCODE)
+	}
+	if len(resp.Answers) != 1 {
+		t.Fatalf("answers = %d, want 1 (intermediate NODATA must not terminate resolution)", len(resp.Answers))
+	}
+	a, ok := resp.Answers[0].Data.(*protocol.RDataA)
+	if !ok || a.Address != [4]byte{93, 184, 216, 34} {
+		t.Fatalf("unexpected answer data: %+v", resp.Answers[0].Data)
+	}
+}
+
+// TestResolverQnameMinimizationNXDomainQuestionRewrite verifies that when an
+// intermediate minimized probe gets NXDOMAIN (terminal per RFC 8020), the
+// returned response carries the client's original question, not the probe's.
+func TestResolverQnameMinimizationNXDomainQuestionRewrite(t *testing.T) {
+	transport := &mockQminTransport{}
+	transport.handler = func(name string, qtype uint16) *protocol.Message {
+		resp := &protocol.Message{
+			Header: protocol.Header{
+				Flags: protocol.Flags{QR: true, AA: true, RCODE: protocol.RcodeNameError},
+			},
+		}
+		q, _ := protocol.NewQuestion(name, qtype, protocol.ClassIN)
+		resp.Questions = []*protocol.Question{q}
+		return resp
+	}
+
+	cfg := DefaultConfig()
+	cfg.QnameMinimization = true
+	r := NewResolver(cfg, nil, transport)
+
+	resp, err := r.Resolve(context.Background(), "www.gone.example.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("Resolve error: %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp.Header.Flags.RCODE != protocol.RcodeNameError {
+		t.Fatalf("RCODE = %d, want NXDOMAIN", resp.Header.Flags.RCODE)
+	}
+	if len(resp.Questions) != 1 {
+		t.Fatalf("questions = %d, want 1", len(resp.Questions))
+	}
+	if got := resp.Questions[0].Name.String(); got != "www.gone.example." {
+		t.Fatalf("question name = %q, want client's original %q", got, "www.gone.example.")
+	}
+	if resp.Questions[0].QType != protocol.TypeA {
+		t.Fatalf("question qtype = %d, want A", resp.Questions[0].QType)
 	}
 }

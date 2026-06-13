@@ -42,6 +42,11 @@ const (
 	TSIGErrBadTrunc     = 22
 )
 
+const (
+	maxTSIGWireFieldLen = 0xffff
+	maxTSIGTimeSigned   = 1<<48 - 1
+)
+
 // TSIGError represents a TSIG error
 var tsigErrorMessages = map[uint16]string{
 	TSIGErrNoError:      "NOERROR",
@@ -208,8 +213,7 @@ func (ks *KeyStore) GetPreviousKey(name string) *TSIGKey {
 		return nil
 	}
 
-	// Check if grace period has expired
-	if time.Since(ks.rotatedAt) > ks.gracePeriod {
+	if previousKeyExpiredAt(ks.rotatedAt, time.Now(), ks.gracePeriod) {
 		return nil
 	}
 
@@ -218,6 +222,10 @@ func (ks *KeyStore) GetPreviousKey(name string) *TSIGKey {
 		return ks.previous
 	}
 	return nil
+}
+
+func previousKeyExpiredAt(rotatedAt, now time.Time, gracePeriod time.Duration) bool {
+	return !now.Before(rotatedAt.Add(gracePeriod))
 }
 
 // ClearPreviousKey removes the previous key after rotation grace period
@@ -251,6 +259,19 @@ func ParseTSIGKey(name, algorithm, secretB64 string) (*TSIGKey, error) {
 
 // PackTSIGRecord packs a TSIG record into wire format
 func PackTSIGRecord(tsig *TSIGRecord) ([]byte, error) {
+	if tsig == nil {
+		return nil, fmt.Errorf("nil TSIG record")
+	}
+	if len(tsig.MAC) > maxTSIGWireFieldLen {
+		return nil, fmt.Errorf("TSIG MAC too large: %d bytes", len(tsig.MAC))
+	}
+	if len(tsig.OtherData) > maxTSIGWireFieldLen {
+		return nil, fmt.Errorf("TSIG other data too large: %d bytes", len(tsig.OtherData))
+	}
+	if int(tsig.OtherLen) != len(tsig.OtherData) {
+		return nil, fmt.Errorf("TSIG other length mismatch: field=%d data=%d", tsig.OtherLen, len(tsig.OtherData))
+	}
+
 	buf := make([]byte, 0, 512)
 
 	// Algorithm (domain name)
@@ -266,8 +287,10 @@ func PackTSIGRecord(tsig *TSIGRecord) ([]byte, error) {
 	buf = append(buf, algoBytes[:n]...)
 
 	// Time Signed (48 bits: 6 bytes)
-	// Upper 16 bits are 0, lower 32 bits are Unix timestamp
-	timeSigned := uint64(tsig.TimeSigned.Unix())
+	timeSigned, err := encodeTSIGTimeSigned(tsig.TimeSigned)
+	if err != nil {
+		return nil, err
+	}
 	buf = append(buf, byte(timeSigned>>40))
 	buf = append(buf, byte(timeSigned>>32))
 	buf = append(buf, byte(timeSigned>>24))
@@ -298,6 +321,17 @@ func PackTSIGRecord(tsig *TSIGRecord) ([]byte, error) {
 	buf = append(buf, tsig.OtherData...)
 
 	return buf, nil
+}
+
+func encodeTSIGTimeSigned(t time.Time) (uint64, error) {
+	sec := t.Unix()
+	if sec < 0 {
+		return 0, fmt.Errorf("TSIG time signed %s before Unix epoch", t.UTC().Format(time.RFC3339))
+	}
+	if uint64(sec) > maxTSIGTimeSigned {
+		return 0, fmt.Errorf("TSIG time signed %s exceeds 48-bit Unix time", t.UTC().Format(time.RFC3339))
+	}
+	return uint64(sec), nil
 }
 
 // UnpackTSIGRecord unpacks a TSIG record from wire format
@@ -682,7 +716,10 @@ func buildSignedData(msg *protocol.Message, keyName string, previousMAC []byte, 
 	buf.Write(algoBytes[:algoLen])
 
 	// Time signed (48 bits, big-endian)
-	timeUnix := uint64(timeSigned.Unix())
+	timeUnix, err := encodeTSIGTimeSigned(timeSigned)
+	if err != nil {
+		return nil, err
+	}
 	buf.WriteByte(byte(timeUnix >> 40))
 	buf.WriteByte(byte(timeUnix >> 32))
 	buf.WriteByte(byte(timeUnix >> 24))

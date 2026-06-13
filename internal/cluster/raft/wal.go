@@ -7,6 +7,8 @@ import (
 	"os"
 	"path"
 	"sync"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // maxWALCommandBytes caps the size of any single WAL command entry.
@@ -68,8 +70,7 @@ func (w *WAL) writeLocked(e entry) error {
 
 	buf[offset] = byte(e.Type)
 
-	_, err := w.logFile.Write(buf)
-	return err
+	return util.WriteFull(w.logFile, buf)
 }
 
 // TruncateAfter removes every entry whose Index is greater than keepThrough,

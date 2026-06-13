@@ -80,7 +80,7 @@ config:
 
 For pre-created Kubernetes Secrets, set `auth.existingSecret` to a Secret
 containing `auth-secret`, `admin-password`, and, when enabled,
-`metrics-auth-token` / `cluster-encryption-key`.
+`metrics-auth-token`, `storage-encryption-key`, and `cluster-encryption-key`.
 
 #### Production Configuration with DNSSEC
 
@@ -105,7 +105,7 @@ config:
       - 8.8.8.8:53
   dnssec:
     enabled: true
-    validation: true
+    require_dnssec: false
 ```
 
 #### High Availability Cluster
@@ -146,24 +146,28 @@ config:
 | `config.http.doh_enabled` | Enable DoH on the HTTP bind | `false` |
 | `auth.authSecret` | HTTP session signing secret | required when HTTP is enabled |
 | `auth.adminPassword` | Default admin password when no explicit users are configured | required when HTTP is enabled |
+| `auth.storageEncryptionKey` | Persistent zone DB encryption key | required |
 
 ### Upstream Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `config.upstream.servers` | Upstream DNS servers | `["1.1.1.1:53", "8.8.8.8:53"]` |
-| `config.upstream.timeout` | Query timeout | `5s` |
-| `config.upstream.attempts` | Retry attempts per query | `3` |
-| `config.upstream.health_check_interval` | Upstream health check interval | `30s` |
+| `config.upstream.strategy` | Upstream selection strategy | `round_robin` |
+| `config.upstream.health_check` | Upstream health check interval | `30s` |
+| `config.upstream.failover_timeout` | Upstream failover timeout | `5s` |
 
 ### Cache Parameters
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
 | `config.cache.size` | Maximum cache entries | `10000` |
-| `config.cache.ttl` | Default TTL (seconds) | `300` |
+| `config.cache.default_ttl` | Default TTL (seconds) | `300` |
+| `config.cache.max_ttl` | Maximum TTL (seconds) | `86400` |
+| `config.cache.min_ttl` | Minimum TTL (seconds) | `0` |
 | `config.cache.negative_ttl` | Negative-cache TTL (seconds) | `60` |
-| `config.cache.stale_ttl` | Stale-cache TTL (seconds) | `86400` |
+| `config.cache.serve_stale` | Serve stale cache entries on upstream failure | `true` |
+| `config.cache.stale_grace_secs` | Stale-cache grace period (seconds) | `86400` |
 | `config.cache.prefetch` | Enable prefetch | `true` |
 
 ### Security Parameters
@@ -187,7 +191,7 @@ config:
 
 ## Persistence
 
-The chart mounts a PersistentVolumeClaim at `/data` for:
+The chart mounts a PersistentVolumeClaim at `/var/lib/nothingdns` for:
 - Cache persistence
 - Session storage
 - Zone modifications

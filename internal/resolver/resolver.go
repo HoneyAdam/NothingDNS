@@ -7,6 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"strconv"
@@ -16,18 +17,16 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // nextSecureID returns a cryptographically secure random DNS transaction ID.
-func nextSecureID() uint16 {
+func nextSecureID() (uint16, error) {
 	var b [2]byte
 	if _, err := cryptorand.Read(b[:]); err != nil {
-		// SECURITY: crypto/rand failure indicates a system-level issue.
-		// We panic rather than fall back to math/rand, as predictable
-		// transaction IDs enable DNS cache poisoning attacks.
-		panic("crypto/rand unavailable for DNS transaction ID generation: " + err.Error())
+		return 0, fmt.Errorf("crypto/rand unavailable for DNS transaction ID generation: %w", err)
 	}
-	return binary.BigEndian.Uint16(b[:])
+	return binary.BigEndian.Uint16(b[:]), nil
 }
 
 // Cache is the interface the resolver uses for caching.
@@ -35,6 +34,10 @@ type Cache interface {
 	Get(key string) *CacheEntry
 	Set(key string, msg *protocol.Message, ttl uint32)
 	SetNegative(key string, rcode uint8)
+}
+
+type negativeTTLCache interface {
+	SetNegativeWithTTL(key string, rcode uint8, ttl uint32)
 }
 
 // CacheEntry represents a cached DNS response.
@@ -250,12 +253,32 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 		// referral), it means the server is authoritative for that
 		// zone. Cache the NS records and re-query with the full name + original type.
 		if r.config.QnameMinimization && qTypeToSend == protocol.TypeNS && qName != name {
-			if isAnswer(resp) || isNXDomain(resp) {
+			if isAnswer(resp) {
 				// Cache the response - it contains valid NS records for this zone
 				r.cacheResponse(qName, protocol.TypeNS, resp, currentZoneCut)
 				// Update the zone cut and re-query with full name
 				currentZoneCut = qName
-				// Don't continue - fall through to query with full name
+				continue
+			}
+			if isNODATA(resp) {
+				// RFC 7816 §3: NODATA for an intermediate minimized name only
+				// proves the name exists with no NS RRset (empty non-terminals
+				// are common). It says nothing about the full query name, so
+				// step one label deeper instead of answering NODATA.
+				currentZoneCut = qName
+				continue
+			}
+			if isNXDomain(resp) {
+				// RFC 8020: NXDOMAIN for an ancestor proves nothing exists
+				// below it. Terminate, but answer for the client's question,
+				// not the minimized probe's.
+				r.cacheNegative(name, qtype, resp.Header.Flags.RCODE, resp)
+				if q, qerr := protocol.NewQuestion(name, qtype, protocol.ClassIN); qerr == nil {
+					resp.Questions = nil
+					resp.AddQuestion(q)
+				}
+				resp.Header.Flags.RA = true
+				return resp, nil
 			}
 		}
 
@@ -298,6 +321,9 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 					result.AddAnswer(dname.dnameRR)
 					result.AddAnswer(synthCNAME)
 					for _, rr := range target.Answers {
+						if rr == nil {
+							continue
+						}
 						result.AddAnswer(rr)
 					}
 					return result, nil
@@ -327,8 +353,8 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 			resp.Header.Flags.RA = true
 			return resp, nil
 
-		case isNXDomain(resp):
-			r.cacheNegative(name, qtype, resp.Header.Flags.RCODE)
+		case isNXDomain(resp) || isNODATA(resp):
+			r.cacheNegative(name, qtype, resp.Header.Flags.RCODE, resp)
 			resp.Header.Flags.RA = true
 			return resp, nil
 
@@ -427,9 +453,14 @@ func (r *Resolver) sendQuery(ctx context.Context, name string, qtype uint16, add
 		return nil, err
 	}
 
+	id, err := nextSecureID()
+	if err != nil {
+		return nil, err
+	}
+
 	msg := &protocol.Message{
 		Header: protocol.Header{
-			ID:    nextSecureID(),
+			ID:    id,
 			Flags: protocol.Flags{RD: false}, // Non-recursive — iterative query
 		},
 		Questions: []*protocol.Question{q},
@@ -490,15 +521,18 @@ func (r *Resolver) extractDelegation(resp *protocol.Message, zoneCut string) (*d
 	// .net, and must not be allowed to redirect resolution to an attacker.
 	nsOwners := make(map[string]bool) // the delegated zones we accepted
 	for _, rr := range resp.Authorities {
+		owner, ok := rrOwnerName(rr)
+		if !ok {
+			continue
+		}
 		if rr.Type != protocol.TypeNS {
 			continue
 		}
-		owner := rr.Name.String()
 		if !inBailiwick(owner, zoneCut) {
 			continue
 		}
 		ns, ok := rr.Data.(*protocol.RDataNS)
-		if !ok {
+		if !ok || ns == nil || ns.NSDName == nil {
 			continue
 		}
 		nsName := ns.NSDName.String()
@@ -521,7 +555,10 @@ func (r *Resolver) extractDelegation(resp *protocol.Message, zoneCut string) (*d
 	//   1. In-bailiwick of the querier's current zone cut (server authority bound).
 	//   2. For a name actually listed as an NS target above (no drive-by records).
 	for _, rr := range resp.Additionals {
-		owner := rr.Name.String()
+		owner, ok := rrOwnerName(rr)
+		if !ok {
+			continue
+		}
 		if !inBailiwick(owner, zoneCut) {
 			continue
 		}
@@ -533,6 +570,9 @@ func (r *Resolver) extractDelegation(resp *protocol.Message, zoneCut string) (*d
 		switch rr.Type {
 		case protocol.TypeA:
 			if a, ok := rr.Data.(*protocol.RDataA); ok {
+				if a == nil {
+					continue
+				}
 				ip := net.IP(a.Address[:])
 				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
 					continue
@@ -541,6 +581,9 @@ func (r *Resolver) extractDelegation(resp *protocol.Message, zoneCut string) (*d
 			}
 		case protocol.TypeAAAA:
 			if a, ok := rr.Data.(*protocol.RDataAAAA); ok {
+				if a == nil {
+					continue
+				}
 				ip := net.IP(a.Address[:])
 				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
 					continue
@@ -606,11 +649,20 @@ func nsRecursionDepth(ctx context.Context) int {
 func (r *Resolver) collectUpstreamAddrs(answers []*protocol.ResourceRecord) []string {
 	var addrs []string
 	for _, rr := range answers {
+		if rr == nil {
+			continue
+		}
 		var ip net.IP
 		switch a := rr.Data.(type) {
 		case *protocol.RDataA:
+			if a == nil {
+				continue
+			}
 			ip = net.IP(a.Address[:])
 		case *protocol.RDataAAAA:
+			if a == nil {
+				continue
+			}
 			ip = net.IP(a.Address[:])
 		default:
 			continue
@@ -634,15 +686,18 @@ func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []strin
 	if aKey := cacheKey(nsName, protocol.TypeA); r.cache != nil {
 		if entry := r.cache.Get(aKey); entry != nil && !entry.IsNegative && entry.Message != nil {
 			for _, rr := range entry.Message.Answers {
-				if rr.Type == protocol.TypeA {
-					if a, ok := rr.Data.(*protocol.RDataA); ok {
-						ip := net.IP(a.Address[:])
-						if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
-							continue
-						}
-						addrs = append(addrs, withPort(ip.String(), "53"))
-					}
+				if rr == nil || rr.Type != protocol.TypeA {
+					continue
 				}
+				a, ok := rr.Data.(*protocol.RDataA)
+				if !ok || a == nil {
+					continue
+				}
+				ip := net.IP(a.Address[:])
+				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+					continue
+				}
+				addrs = append(addrs, withPort(ip.String(), "53"))
 			}
 		}
 	}
@@ -651,15 +706,18 @@ func (r *Resolver) lookupNSAddresses(ctx context.Context, nsName string) []strin
 	if aaaaKey := cacheKey(nsName, protocol.TypeAAAA); r.cache != nil {
 		if entry := r.cache.Get(aaaaKey); entry != nil && !entry.IsNegative && entry.Message != nil {
 			for _, rr := range entry.Message.Answers {
-				if rr.Type == protocol.TypeAAAA {
-					if a, ok := rr.Data.(*protocol.RDataAAAA); ok {
-						ip := net.IP(a.Address[:])
-						if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
-							continue
-						}
-						addrs = append(addrs, withPort(ip.String(), "53"))
-					}
+				if rr == nil || rr.Type != protocol.TypeAAAA {
+					continue
 				}
+				a, ok := rr.Data.(*protocol.RDataAAAA)
+				if !ok || a == nil {
+					continue
+				}
+				ip := net.IP(a.Address[:])
+				if !r.config.AllowPrivateUpstream && isDisallowedUpstreamIP(ip) {
+					continue
+				}
+				addrs = append(addrs, withPort(ip.String(), "53"))
 			}
 		}
 	}
@@ -698,6 +756,9 @@ func (r *Resolver) cacheResponse(name string, qtype uint16, msg *protocol.Messag
 	// Use minimum TTL from answer section
 	ttl := uint32(0)
 	for _, rr := range msg.Answers {
+		if rr == nil {
+			continue
+		}
 		if ttl == 0 || rr.TTL < ttl {
 			ttl = rr.TTL
 		}
@@ -722,24 +783,27 @@ func (r *Resolver) cacheResponse(name string, qtype uint16, msg *protocol.Messag
 	// synthesized per-owner message instead, containing just the matching
 	// answer records and a correct question section.
 	for _, rr := range msg.Answers {
+		owner, ok := rrOwnerName(rr)
+		if !ok {
+			continue
+		}
 		switch rr.Type {
 		case protocol.TypeA, protocol.TypeAAAA:
 		default:
 			continue
 		}
-		owner := rr.Name.String()
 		if !inBailiwick(owner, zoneCut) {
 			continue
 		}
 		switch rr.Type {
 		case protocol.TypeA:
-			if _, ok := rr.Data.(*protocol.RDataA); ok {
+			if a, ok := rr.Data.(*protocol.RDataA); ok && a != nil {
 				if synth := synthesizeSideRecord(owner, protocol.TypeA, msg); synth != nil {
 					r.cache.Set(cacheKey(owner, protocol.TypeA), synth, rr.TTL)
 				}
 			}
 		case protocol.TypeAAAA:
-			if _, ok := rr.Data.(*protocol.RDataAAAA); ok {
+			if a, ok := rr.Data.(*protocol.RDataAAAA); ok && a != nil {
 				if synth := synthesizeSideRecord(owner, protocol.TypeAAAA, msg); synth != nil {
 					r.cache.Set(cacheKey(owner, protocol.TypeAAAA), synth, rr.TTL)
 				}
@@ -770,10 +834,28 @@ func synthesizeSideRecord(owner string, qtype uint16, src *protocol.Message) *pr
 	resp.Header.Flags.QR = true
 	resp.Header.Flags.RA = true
 	for _, rr := range src.Answers {
+		ownerName, ok := rrOwnerName(rr)
+		if !ok {
+			continue
+		}
 		if rr.Type != qtype {
 			continue
 		}
-		if !strings.EqualFold(rr.Name.String(), owner) {
+		if !strings.EqualFold(ownerName, owner) {
+			continue
+		}
+		switch qtype {
+		case protocol.TypeA:
+			a, ok := rr.Data.(*protocol.RDataA)
+			if !ok || a == nil {
+				continue
+			}
+		case protocol.TypeAAAA:
+			a, ok := rr.Data.(*protocol.RDataAAAA)
+			if !ok || a == nil {
+				continue
+			}
+		default:
 			continue
 		}
 		resp.Answers = append(resp.Answers, rr)
@@ -786,13 +868,51 @@ func synthesizeSideRecord(owner string, qtype uint16, src *protocol.Message) *pr
 	return resp
 }
 
+func rrOwnerName(rr *protocol.ResourceRecord) (string, bool) {
+	if rr == nil || rr.Name == nil {
+		return "", false
+	}
+	return rr.Name.String(), true
+}
+
 // cacheNegative stores a negative (NXDOMAIN/NODATA) cache entry.
-func (r *Resolver) cacheNegative(name string, qtype uint16, rcode uint8) {
+func (r *Resolver) cacheNegative(name string, qtype uint16, rcode uint8, msgs ...*protocol.Message) {
 	if r.cache == nil {
 		return
 	}
 	key := cacheKey(name, qtype)
+	var msg *protocol.Message
+	if len(msgs) > 0 {
+		msg = msgs[0]
+	}
+	if ttl, ok := negativeTTLFromAuthority(msg); ok {
+		if c, ok := r.cache.(negativeTTLCache); ok {
+			c.SetNegativeWithTTL(key, rcode, ttl)
+			return
+		}
+	}
 	r.cache.SetNegative(key, rcode)
+}
+
+func negativeTTLFromAuthority(msg *protocol.Message) (uint32, bool) {
+	if msg == nil {
+		return 0, false
+	}
+	for _, rr := range msg.Authorities {
+		if rr == nil {
+			continue
+		}
+		soa, ok := rr.Data.(*protocol.RDataSOA)
+		if !ok || soa == nil {
+			continue
+		}
+		ttl := rr.TTL
+		if soa.Minimum < ttl {
+			ttl = soa.Minimum
+		}
+		return ttl, true
+	}
+	return 0, false
 }
 
 // --- Response classification helpers ---
@@ -807,6 +927,23 @@ func isNXDomain(msg *protocol.Message) bool {
 	return msg.Header.Flags.RCODE == protocol.RcodeNameError
 }
 
+// isNODATA returns true for authoritative NOERROR responses proving that the
+// queried name exists but has no records of the requested type.
+func isNODATA(msg *protocol.Message) bool {
+	if msg.Header.Flags.RCODE != protocol.RcodeSuccess || len(msg.Answers) > 0 {
+		return false
+	}
+	for _, rr := range msg.Authorities {
+		if rr == nil {
+			continue
+		}
+		if rr.Type == protocol.TypeSOA {
+			return true
+		}
+	}
+	return false
+}
+
 // isReferral returns true if the response is a referral (NS in Authority, AA=0, no answers).
 func isReferral(msg *protocol.Message) bool {
 	if len(msg.Answers) > 0 {
@@ -814,6 +951,9 @@ func isReferral(msg *protocol.Message) bool {
 	}
 	// A referral typically has NS in Authority section and no AA bit
 	for _, rr := range msg.Authorities {
+		if rr == nil {
+			continue
+		}
 		if rr.Type == protocol.TypeNS {
 			return true
 		}
@@ -829,8 +969,11 @@ func isReferral(msg *protocol.Message) bool {
 // for the given name.
 func findCNAME(answers []*protocol.ResourceRecord, name string) string {
 	for _, rr := range answers {
+		if rr == nil {
+			continue
+		}
 		if rr.Type == protocol.TypeCNAME {
-			if cname, ok := rr.Data.(*protocol.RDataCNAME); ok {
+			if cname, ok := rr.Data.(*protocol.RDataCNAME); ok && cname != nil && cname.CName != nil {
 				return cname.CName.String()
 			}
 		}
@@ -857,17 +1000,22 @@ func findDNAME(answers []*protocol.ResourceRecord, name string) dnameResult {
 	nameLower := strings.ToLower(name)
 
 	for _, rr := range answers {
+		dnameOwner, ok := rrOwnerName(rr)
+		if !ok {
+			continue
+		}
 		if rr.Type != protocol.TypeDNAME {
 			continue
 		}
 		dnameData, ok := rr.Data.(*protocol.RDataDNAME)
-		if !ok {
+		if !ok || dnameData == nil || dnameData.DName == nil {
 			continue
 		}
 
-		// The DNAME owner must be a suffix of the query name
-		dnameOwner := strings.ToLower(rr.Name.String())
-		if !strings.HasSuffix(nameLower, dnameOwner) || nameLower == dnameOwner {
+		// The DNAME owner must be an ancestor of the query name, not just a
+		// byte suffix: "notexample.com." must not match "example.com.".
+		dnameOwner = strings.ToLower(dnameOwner)
+		if nameLower == dnameOwner || !inBailiwick(nameLower, dnameOwner) {
 			continue
 		}
 
@@ -908,6 +1056,7 @@ func servfail(name string, qtype uint16) *protocol.Message {
 // cacheKey produces a cache key for name+qtype.
 // Uses strings.Builder instead of fmt.Sprintf for efficiency.
 func cacheKey(name string, qtype uint16) string {
+	name = strings.ToLower(name)
 	var b strings.Builder
 	b.Grow(len(name) + 1 + 10)
 	b.WriteString(name)
@@ -1028,7 +1177,7 @@ func (t *StdioTransport) queryUDP(ctx context.Context, msg *protocol.Message, ad
 		return nil, err
 	}
 
-	if _, err := conn.Write(buf[:n]); err != nil {
+	if _, err := writePacket(conn, buf[:n]); err != nil {
 		return nil, fmt.Errorf("resolver: UDP write: %w", err)
 	}
 
@@ -1093,7 +1242,10 @@ func (t *StdioTransport) queryTCP(ctx context.Context, msg *protocol.Message, ad
 	// 2-byte length prefix
 	lenBuf := make([]byte, 2)
 	protocol.PutUint16(lenBuf, uint16(n))
-	if _, err := conn.Write(append(lenBuf, buf[:n]...)); err != nil {
+	frame := make([]byte, 2+n)
+	copy(frame, lenBuf)
+	copy(frame[2:], buf[:n])
+	if err := util.WriteFull(conn, frame); err != nil {
 		return nil, fmt.Errorf("resolver: TCP write: %w", err)
 	}
 
@@ -1127,10 +1279,13 @@ func (t *StdioTransport) queryTCP(ctx context.Context, msg *protocol.Message, ad
 // (name case-insensitively per RFC 4343, type and class exactly). A response
 // that doesn't answer the asked question must be dropped — see the call sites.
 func questionMatches(query, resp *protocol.Message) bool {
-	if len(query.Questions) == 0 || len(resp.Questions) == 0 {
+	if query == nil || resp == nil || len(query.Questions) == 0 || len(resp.Questions) == 0 {
 		return false
 	}
 	q, a := query.Questions[0], resp.Questions[0]
+	if q == nil || a == nil || q.Name == nil || a.Name == nil {
+		return false
+	}
 	if q.QType != a.QType || q.QClass != a.QClass {
 		return false
 	}
@@ -1151,6 +1306,17 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 		}
 	}
 	return got, nil
+}
+
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	n, err := conn.Write(data)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 // LogTransport wraps a Transport and logs queries.

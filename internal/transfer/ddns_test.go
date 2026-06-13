@@ -323,6 +323,10 @@ func TestDynamicDNSHandler_HandleUpdate_NoTSIG(t *testing.T) {
 }
 
 func TestIsUpdateRequest(t *testing.T) {
+	if IsUpdateRequest(nil) {
+		t.Fatal("IsUpdateRequest(nil) = true, want false")
+	}
+
 	tests := []struct {
 		name     string
 		opcode   uint8
@@ -354,6 +358,10 @@ func TestIsUpdateRequest(t *testing.T) {
 }
 
 func TestIsUpdateResponse(t *testing.T) {
+	if IsUpdateResponse(nil) {
+		t.Fatal("IsUpdateResponse(nil) = true, want false")
+	}
+
 	tests := []struct {
 		name     string
 		opcode   uint8
@@ -408,6 +416,42 @@ func TestApplyUpdate_AddRecord(t *testing.T) {
 	records := z.Records["www.example.com."]
 	if len(records) != 1 {
 		t.Errorf("Expected 1 record, got %d", len(records))
+	}
+}
+
+func TestApplyUpdate_RejectsNilInputs(t *testing.T) {
+	if err := ApplyUpdate(nil, &UpdateRequest{}); err == nil {
+		t.Fatal("ApplyUpdate(nil, update) error = nil, want error")
+	}
+
+	z := zone.NewZone("example.com.")
+	if err := ApplyUpdate(z, nil); err == nil {
+		t.Fatal("ApplyUpdate(zone, nil) error = nil, want error")
+	}
+}
+
+func TestApplyUpdate_RejectsUpdateOutsideZone(t *testing.T) {
+	z := zone.NewZone("example.com.")
+
+	update := &UpdateRequest{
+		ZoneName: "example.com.",
+		Updates: []UpdateOperation{
+			{
+				Name:      "www.example.net.",
+				Type:      protocol.TypeA,
+				TTL:       3600,
+				RData:     "192.0.2.1",
+				Operation: UpdateOpAdd,
+			},
+		},
+	}
+
+	err := ApplyUpdate(z, update)
+	if !errors.Is(err, ErrNotZone) {
+		t.Fatalf("ApplyUpdate() error = %v, want ErrNotZone", err)
+	}
+	if _, ok := z.Records["www.example.net."]; ok {
+		t.Fatal("ApplyUpdate stored an out-of-zone record")
 	}
 }
 
@@ -778,6 +822,73 @@ func TestDynamicDNSHandler_HandleUpdate_WithUpdates(t *testing.T) {
 
 	if resp == nil {
 		t.Fatal("HandleUpdate() returned nil response")
+	}
+}
+
+func TestDynamicDNSHandler_HandleUpdate_RejectsUpdateOutsideZone(t *testing.T) {
+	zones := make(map[string]*zone.Zone)
+	z := zone.NewZone("example.com.")
+	z.SOA = &zone.SOARecord{
+		MName:  "ns1.example.com.",
+		RName:  "admin.example.com.",
+		Serial: 2024010101,
+	}
+	zones["example.com."] = z
+
+	handler := NewDynamicDNSHandler(zones)
+	key := &TSIGKey{
+		Name:      "key.example.com.",
+		Algorithm: HmacSHA256,
+		Secret:    []byte("test-secret-key-12345678901234"),
+	}
+	ks := NewKeyStore()
+	ks.AddKey(key)
+	handler.SetKeyStore(ks)
+
+	name, _ := protocol.ParseName("example.com.")
+	updateName, _ := protocol.ParseName("www.example.net.")
+	req := &protocol.Message{
+		Header: protocol.Header{
+			ID:      1234,
+			QDCount: 1,
+			NSCount: 1,
+			Flags: protocol.Flags{
+				Opcode: protocol.OpcodeUpdate,
+			},
+		},
+		Questions: []*protocol.Question{
+			{
+				Name:   name,
+				QType:  protocol.TypeSOA,
+				QClass: protocol.ClassIN,
+			},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			{
+				Name:  updateName,
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+				TTL:   3600,
+				Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}},
+			},
+		},
+	}
+
+	tsigRR, _ := SignMessage(req, key, 300)
+	req.Additionals = append(req.Additionals, tsigRR)
+
+	resp, err := handler.HandleUpdate(req, net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("HandleUpdate() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("HandleUpdate() returned nil response")
+	}
+	if resp.Header.Flags.RCODE != protocol.RcodeNotZone {
+		t.Fatalf("HandleUpdate() RCODE = %d, want NOTZONE", resp.Header.Flags.RCODE)
+	}
+	if _, ok := z.Records["www.example.net."]; ok {
+		t.Fatal("HandleUpdate stored an out-of-zone record")
 	}
 }
 

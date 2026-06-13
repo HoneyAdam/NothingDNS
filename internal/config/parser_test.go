@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,70 @@ func TestParserFlowMapping(t *testing.T) {
 
 	if value := node.GetString("key2"); value != "value2" {
 		t.Errorf("expected 'value2', got %q", value)
+	}
+}
+
+func TestParserRejectsDuplicateMappingKey(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "top-level block mapping",
+			input: `port: 53
+port: 54`,
+		},
+		{
+			name: "nested block mapping",
+			input: `server:
+  port: 53
+  port: 54`,
+		},
+		{
+			name:  "flow mapping",
+			input: `{port: 53, port: 54}`,
+		},
+		{
+			name: "sequence item mapping",
+			input: `items:
+  - name: first
+    name: second`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewParser(tt.input)
+			_, err := parser.ParseMapping()
+			if err == nil {
+				t.Fatal("expected duplicate mapping key error")
+			}
+			if !strings.Contains(err.Error(), "duplicate mapping key") {
+				t.Fatalf("expected duplicate mapping key error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestParserAllowsSameKeyInDifferentMappings(t *testing.T) {
+	input := `primary:
+  port: 53
+secondary:
+  port: 54
+items:
+  - name: first
+  - name: second`
+
+	parser := NewParser(input)
+	node, err := parser.ParseMapping()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := node.Get("primary").GetString("port"); got != "53" {
+		t.Fatalf("primary port = %q, want 53", got)
+	}
+	if got := node.Get("secondary").GetString("port"); got != "54" {
+		t.Fatalf("secondary port = %q, want 54", got)
 	}
 }
 

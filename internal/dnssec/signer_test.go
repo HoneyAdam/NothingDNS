@@ -1,6 +1,7 @@
 package dnssec
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,48 @@ func TestDefaultSignerConfig(t *testing.T) {
 	}
 }
 
+func TestSignerUnixTimeBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		t    time.Time
+		want uint32
+	}{
+		{
+			name: "before epoch",
+			t:    time.Unix(-1, 0),
+			want: 0,
+		},
+		{
+			name: "epoch",
+			t:    time.Unix(0, 0),
+			want: 0,
+		},
+		{
+			name: "normal",
+			t:    time.Unix(1234567890, 0),
+			want: 1234567890,
+		},
+		{
+			name: "max uint32",
+			t:    time.Unix(int64(^uint32(0)), 0),
+			want: ^uint32(0),
+		},
+		{
+			name: "above max uint32",
+			t:    time.Unix(int64(^uint32(0))+1, 0),
+			want: ^uint32(0),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := signerUnixTime(tt.t); got != tt.want {
+				t.Fatalf("signerUnixTime(%s) = %d, want %d", tt.t.Format(time.RFC3339), got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNewSigner(t *testing.T) {
 	cfg := DefaultSignerConfig()
 	s := NewSigner("example.com.", cfg)
@@ -43,9 +86,18 @@ func TestSignerAddRemoveKey(t *testing.T) {
 	s := NewSigner("example.com.", DefaultSignerConfig())
 
 	key := &SigningKey{
+		PrivateKey: &PrivateKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: "private-key"},
+		DNSKEY: &protocol.RDataDNSKEY{
+			Flags:     257,
+			Protocol:  3,
+			Algorithm: protocol.AlgorithmECDSAP256SHA256,
+			PublicKey: []byte{1, 2, 3},
+		},
 		KeyTag: 12345,
 		IsKSK:  true,
 		IsZSK:  false,
+		State:  KeyStateActive,
+		Timing: &KeyTiming{Active: time.Now()},
 	}
 
 	s.AddKey(key)
@@ -57,6 +109,25 @@ func TestSignerAddRemoveKey(t *testing.T) {
 	retrieved := s.GetKeys()
 	if len(retrieved) != 1 {
 		t.Errorf("Expected 1 key from GetKeys, got %d", len(retrieved))
+	}
+	retrieved[0].KeyTag = 999
+	retrieved[0].IsKSK = false
+	retrieved[0].DNSKEY.PublicKey[0] = 9
+	retrieved[0].Timing.Active = retrieved[0].Timing.Active.Add(time.Hour)
+	retrieved[0].PrivateKey.Algorithm = 0
+
+	stored := s.keys[12345]
+	if stored.KeyTag != 12345 || !stored.IsKSK {
+		t.Fatal("GetKeys returned internal SigningKey pointer")
+	}
+	if stored.DNSKEY.PublicKey[0] != 1 {
+		t.Fatal("GetKeys returned internal DNSKEY pointer")
+	}
+	if stored.Timing.Active.Equal(retrieved[0].Timing.Active) {
+		t.Fatal("GetKeys returned internal KeyTiming pointer")
+	}
+	if stored.PrivateKey.Algorithm != protocol.AlgorithmECDSAP256SHA256 {
+		t.Fatal("GetKeys returned internal PrivateKey wrapper")
 	}
 
 	s.RemoveKey(12345)
@@ -81,10 +152,18 @@ func TestSignerGetKSKsAndZSKs(t *testing.T) {
 	if len(ksks) != 2 {
 		t.Errorf("Expected 2 KSKs, got %d", len(ksks))
 	}
+	ksks[0].IsKSK = false
+	if !s.keys[ksks[0].KeyTag].IsKSK {
+		t.Fatal("GetKSKs returned internal SigningKey pointer")
+	}
 
 	zsks := s.GetZSKs()
 	if len(zsks) != 2 {
 		t.Errorf("Expected 2 ZSKs, got %d", len(zsks))
+	}
+	zsks[0].IsZSK = false
+	if !s.keys[zsks[0].KeyTag].IsZSK {
+		t.Fatal("GetZSKs returned internal SigningKey pointer")
 	}
 }
 
@@ -524,6 +603,103 @@ func TestSignRRSetEmpty(t *testing.T) {
 	_, err := s.SignRRSet(nil, zsk, 0, 0)
 	if err == nil {
 		t.Error("Expected error for empty RRSet")
+	}
+}
+
+func TestSignRRSetRejectsInvalidInputs(t *testing.T) {
+	s := NewSigner("example.com.", DefaultSignerConfig())
+	zsk, err := s.GenerateKeyPair(protocol.AlgorithmECDSAP256SHA256, false)
+	if err != nil {
+		t.Fatalf("GenerateKeyPair failed: %v", err)
+	}
+
+	name, _ := protocol.ParseName("www.example.com.")
+	otherName, _ := protocol.ParseName("api.example.com.")
+	validRR := &protocol.ResourceRecord{
+		Name:  name,
+		Type:  protocol.TypeA,
+		Class: protocol.ClassIN,
+		TTL:   300,
+		Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}},
+	}
+
+	tests := []struct {
+		name    string
+		rrSet   []*protocol.ResourceRecord
+		key     *SigningKey
+		wantErr string
+	}{
+		{
+			name:    "nil signing key",
+			rrSet:   []*protocol.ResourceRecord{validRR},
+			key:     nil,
+			wantErr: "nil signing key",
+		},
+		{
+			name:    "nil DNSKEY",
+			rrSet:   []*protocol.ResourceRecord{validRR},
+			key:     &SigningKey{PrivateKey: zsk.PrivateKey},
+			wantErr: "nil DNSKEY in signing key",
+		},
+		{
+			name:    "nil private key",
+			rrSet:   []*protocol.ResourceRecord{validRR},
+			key:     &SigningKey{DNSKEY: zsk.DNSKEY},
+			wantErr: "nil private key in signing key",
+		},
+		{
+			name:    "nil RR",
+			rrSet:   []*protocol.ResourceRecord{nil},
+			key:     zsk,
+			wantErr: "nil RR in RRSet",
+		},
+		{
+			name: "nil owner",
+			rrSet: []*protocol.ResourceRecord{{
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+				Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}},
+			}},
+			key:     zsk,
+			wantErr: "nil RR owner name",
+		},
+		{
+			name: "nil rdata",
+			rrSet: []*protocol.ResourceRecord{{
+				Name:  name,
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+			}},
+			key:     zsk,
+			wantErr: "nil RDATA",
+		},
+		{
+			name: "mixed RRSet",
+			rrSet: []*protocol.ResourceRecord{
+				validRR,
+				{
+					Name:  otherName,
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 2}},
+				},
+			},
+			key:     zsk,
+			wantErr: "does not belong to RRSet",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := s.SignRRSet(tt.rrSet, tt.key, 0, 0)
+			if err == nil {
+				t.Fatal("SignRRSet accepted invalid input")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("SignRRSet error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -67,6 +67,32 @@ func TestNewClient(t *testing.T) {
 	}
 }
 
+func TestNewClientNormalizesInvalidDurations(t *testing.T) {
+	config := Config{
+		Servers:     []string{"8.8.8.8:53"},
+		Timeout:     -time.Second,
+		HealthCheck: -time.Second,
+	}
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	if client.timeout != 5*time.Second {
+		t.Fatalf("timeout = %v, want 5s", client.timeout)
+	}
+	if len(client.servers) != 1 {
+		t.Fatalf("server count = %d, want 1", len(client.servers))
+	}
+	if client.servers[0].Timeout != 5*time.Second {
+		t.Fatalf("server timeout = %v, want 5s", client.servers[0].Timeout)
+	}
+	if client.servers[0].HealthCheck != 30*time.Second {
+		t.Fatalf("server health check = %v, want 30s", client.servers[0].HealthCheck)
+	}
+}
+
 func TestNewClientNoServers(t *testing.T) {
 	config := Config{
 		Servers: []string{},
@@ -254,6 +280,21 @@ func TestClientServers(t *testing.T) {
 		if !expectedServers[s.Address] {
 			t.Errorf("unexpected server address: %s", s.Address)
 		}
+	}
+
+	servers[0].Address = "203.0.113.1:53"
+	servers[0].healthy = false
+	servers[0] = nil
+
+	current := client.Servers()
+	if current[0] == nil {
+		t.Fatal("Servers() returned internal server slice")
+	}
+	if current[0].Address == "203.0.113.1:53" {
+		t.Fatal("Servers() returned internal server pointer")
+	}
+	if !current[0].IsHealthy() {
+		t.Fatal("Servers() mutation changed internal server health")
 	}
 }
 
@@ -573,6 +614,62 @@ func TestHealthCheckLoop(t *testing.T) {
 	// Close should stop the loop
 	if err := client.Close(); err != nil {
 		t.Errorf("close failed: %v", err)
+	}
+}
+
+func TestHealthCheckLoopUsesConfiguredInterval(t *testing.T) {
+	addr, err := net.ResolveUDPAddr("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to resolve UDP addr: %v", err)
+	}
+	conn, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		t.Fatalf("failed to listen UDP: %v", err)
+	}
+	defer conn.Close()
+
+	seen := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			if err := conn.SetReadDeadline(time.Now().Add(20 * time.Millisecond)); err != nil {
+				return
+			}
+			n, remote, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				select {
+				case <-done:
+					return
+				default:
+					continue
+				}
+			}
+			select {
+			case seen <- struct{}{}:
+			default:
+			}
+			// The test only needs to observe the health-check packet.
+			_, _ = conn.WriteToUDP(buf[:n], remote)
+		}
+	}()
+	defer close(done)
+
+	client, err := NewClient(Config{
+		Servers:     []string{conn.LocalAddr().String()},
+		Strategy:    "random",
+		Timeout:     50 * time.Millisecond,
+		HealthCheck: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case <-seen:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("health check loop did not use configured 10ms interval")
 	}
 }
 
@@ -1009,6 +1106,94 @@ func TestSelectServerNoServers(t *testing.T) {
 	server := client.selectServer()
 	if server != nil {
 		t.Error("expected nil when no servers available")
+	}
+}
+
+func TestSelectServerSkipsNilServers(t *testing.T) {
+	config := Config{
+		Servers:  []string{"127.0.0.1:53"},
+		Strategy: "random",
+		Timeout:  5 * time.Second,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	server := &Server{Address: "127.0.0.2:53", healthy: true, latency: time.Millisecond}
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		client.mu.Lock()
+		client.strategy = strategy
+		client.servers = []*Server{nil, server}
+		client.mu.Unlock()
+
+		selected := client.selectServer()
+		if selected != server {
+			t.Fatalf("strategy %v selected %#v, want %#v", strategy, selected, server)
+		}
+	}
+}
+
+func TestSelectServerNilOnlyReturnsNil(t *testing.T) {
+	config := Config{
+		Servers:  []string{"127.0.0.1:53"},
+		Strategy: "random",
+		Timeout:  5 * time.Second,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		client.mu.Lock()
+		client.strategy = strategy
+		client.servers = []*Server{nil, nil}
+		client.mu.Unlock()
+
+		if selected := client.selectServer(); selected != nil {
+			t.Fatalf("strategy %v selected %#v with nil-only servers", strategy, selected)
+		}
+	}
+}
+
+func TestClientHealthAndMutationSkipNilServers(t *testing.T) {
+	config := Config{
+		Servers: []string{"127.0.0.1:53"},
+		Timeout: 100 * time.Millisecond,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	server := &Server{Address: "127.0.0.2:53", healthy: true, Timeout: 100 * time.Millisecond}
+	client.mu.Lock()
+	client.servers = []*Server{nil, server}
+	client.mu.Unlock()
+
+	if !client.IsHealthy() {
+		t.Fatal("expected healthy due to non-nil healthy server")
+	}
+
+	client.checkHealth()
+
+	if err := client.AddServer("127.0.0.3:53"); err != nil {
+		t.Fatalf("AddServer returned error with nil server slot: %v", err)
+	}
+	if err := client.RemoveServer(server.Address); err != nil {
+		t.Fatalf("RemoveServer returned error with nil server slot: %v", err)
+	}
+	for _, s := range client.servers {
+		if s == nil {
+			t.Fatal("RemoveServer should discard nil server slots")
+		}
 	}
 }
 

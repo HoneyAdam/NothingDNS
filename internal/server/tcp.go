@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // TCP Constants.
@@ -37,6 +38,12 @@ const (
 
 	// TCPMaxPipelineQueries is the maximum number of concurrent in-flight queries per TCP connection.
 	TCPMaxPipelineQueries = 16
+
+	// defaultFrameBufSize is the pooled frame buffer size for stream
+	// transports (TCP/TLS): 2-byte length prefix + payload. It covers the
+	// overwhelming majority of responses; larger ones take the exact-size
+	// fallback in packFramedDNSPayload.
+	defaultFrameBufSize = 4096
 )
 
 // TCPConn is a wrapper around net.Conn for testing/mocking.
@@ -100,7 +107,7 @@ func NewTCPServerWithWorkers(addr string, handler Handler, workers int) *TCPServ
 		responsePool: sync.Pool{
 			New: func() interface{} {
 				// Pre-allocate a commonly-used size; larger responses allocate fresh
-				return make([]byte, 4096)
+				return make([]byte, defaultFrameBufSize)
 			},
 		},
 	}
@@ -187,9 +194,7 @@ func (s *TCPServer) Serve() error {
 		select {
 		case connChan <- conn:
 		case <-s.ctx.Done():
-			s.ipConnMu.Lock()
-			s.ipConnCount[ip]--
-			s.ipConnMu.Unlock()
+			s.decrementIPConn(ip)
 			conn.Close()
 			<-s.connSem
 		}
@@ -203,11 +208,20 @@ func (s *TCPServer) worker(connChan <-chan net.Conn) {
 	for conn := range connChan {
 		ip := getIP(conn.RemoteAddr())
 		s.handleConnection(conn)
-		s.ipConnMu.Lock()
-		s.ipConnCount[ip]--
-		s.ipConnMu.Unlock()
+		s.decrementIPConn(ip)
 		<-s.connSem // Release slot
 	}
+}
+
+func (s *TCPServer) decrementIPConn(ip string) {
+	s.ipConnMu.Lock()
+	defer s.ipConnMu.Unlock()
+
+	if s.ipConnCount[ip] <= 1 {
+		delete(s.ipConnCount, ip)
+		return
+	}
+	s.ipConnCount[ip]--
 }
 
 // handleConnection processes a single TCP connection.
@@ -297,26 +311,7 @@ func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mute
 		Addr:     conn.RemoteAddr(),
 		Protocol: "tcp",
 	}
-
-	// Check for EDNS0 in additional section
-	for _, rr := range msg.Additionals {
-		if rr != nil && rr.Type == protocol.TypeOPT {
-			client.HasEDNS0 = true
-			client.EDNS0UDPSize = rr.Class
-
-			if optData, ok := rr.Data.(*protocol.RDataOPT); ok {
-				for _, opt := range optData.Options {
-					if opt.Code == protocol.OptionCodeClientSubnet {
-						if ecs, err := protocol.UnpackEDNS0ClientSubnet(opt.Data); err == nil {
-							client.ClientSubnet = ecs
-						}
-						break
-					}
-				}
-			}
-			break
-		}
-	}
+	populateEDNS0ClientInfo(client, msg)
 
 	// Create response writer
 	rw := &tcpResponseWriter{
@@ -350,16 +345,9 @@ func (w *tcpResponseWriter) MaxSize() int {
 }
 
 func (w *tcpResponseWriter) Write(msg *protocol.Message) (int, error) {
-	// Estimate buffer size from wire length (+2 for length prefix)
-	estimated := msg.WireLength() + 2
-	if estimated < 512 {
-		estimated = 512
-	}
-	if estimated > TCPMaxMessageSize {
-		estimated = TCPMaxMessageSize
-	}
-
-	// Try to get a buffer from the pool; fall back to allocation if too small
+	// Get a frame buffer from the pool (zero-alloc hot path). Responses
+	// that don't fit take the exact-size fallback inside
+	// packFramedDNSPayload — no per-response WireLength traversal here.
 	var buf []byte
 	if w.server != nil {
 		if pooled := w.server.responsePool.Get(); pooled != nil {
@@ -372,46 +360,38 @@ func (w *tcpResponseWriter) Write(msg *protocol.Message) (int, error) {
 				}
 			}
 		}
-		if buf == nil {
-			buf = make([]byte, estimated)
-		}
-		if cap(buf) < estimated {
-			// Pool buffer too small — allocate fresh and don't return to pool
-			buf = make([]byte, estimated)
+		if cap(buf) < defaultFrameBufSize {
+			buf = make([]byte, defaultFrameBufSize)
 		} else {
-			defer w.server.responsePool.Put(&buf)
+			buf = buf[:cap(buf)]
 		}
+		defer w.server.responsePool.Put(&buf)
 	} else {
-		buf = make([]byte, estimated)
+		buf = make([]byte, defaultFrameBufSize)
 	}
 
-	// Pack the response (done outside the lock — CPU work, no I/O)
-	n, err := msg.Pack(buf[2:]) // Leave room for length prefix
+	// Pack the response (done outside the lock - CPU work, no I/O).
+	// frame is buf on the common path, or a fresh exact-size buffer when
+	// the response was too large for the pooled one.
+	frame, n, err := packFramedDNSPayload(msg, buf, w.maxSize, "TCP")
 	if err != nil {
 		return 0, err
 	}
 
-	if n > w.maxSize-2 {
-		msg.Header.Flags.TC = true
-		msg.Truncate(w.maxSize - 2)
-		n, err = msg.Pack(buf[2:])
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	// Write length prefix
-	binary.BigEndian.PutUint16(buf[0:], uint16(n))
+	binary.BigEndian.PutUint16(frame[0:], uint16(n))
 
 	// Serialize writes on the connection to prevent interleaving
 	w.writeMu.Lock()
 	defer w.writeMu.Unlock()
 
 	// Set write timeout
-	w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout))
+	if err := w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
 
 	// Write response
-	sent, err := w.conn.Write(buf[:n+2])
+	sent, err := writeFullDNSFrame(w.conn, frame[:n+2])
 	if err == nil && sent > 0 {
 		if w.server != nil {
 			atomic.AddUint64(&w.server.messagesSent, 1)
@@ -422,13 +402,61 @@ func (w *tcpResponseWriter) Write(msg *protocol.Message) (int, error) {
 	return sent, err
 }
 
+// writeFullDNSFrame writes a length-prefixed DNS frame in full, returning
+// len(frame) on success so callers can report the bytes sent.
+func writeFullDNSFrame(conn net.Conn, frame []byte) (int, error) {
+	if err := util.WriteFull(conn, frame); err != nil {
+		return 0, err
+	}
+	return len(frame), nil
+}
+
+// packFramedDNSPayload packs msg into frameBuf[2:], leaving room for the
+// 2-byte length prefix. The common path is a single pack attempt into the
+// caller's (pooled) buffer; only when Pack reports ErrBufferTooSmall does it
+// compute the wire length, allocate an exact-size frame, and repack. It
+// returns the frame actually used — frameBuf, or the fallback allocation —
+// and the payload length; the caller must write the prefix into and send
+// from the returned frame.
+func packFramedDNSPayload(msg *protocol.Message, frameBuf []byte, maxSize int, transport string) ([]byte, int, error) {
+	n, err := msg.Pack(frameBuf[2:])
+	if errors.Is(err, protocol.ErrBufferTooSmall) {
+		// Rare path: response exceeds the supplied buffer. Size exactly
+		// (one WireLength traversal) and repack.
+		frameBuf = make([]byte, msg.WireLength()+2)
+		n, err = msg.Pack(frameBuf[2:])
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if n > maxSize {
+		// Record-boundary-aware truncation (sets TC, drops whole RRs).
+		// The truncated message can only shrink, so it fits in the frame
+		// that just held the full response.
+		msg.Header.Flags.TC = true
+		msg.Truncate(maxSize)
+		n, err = msg.Pack(frameBuf[2:])
+		if err != nil {
+			return nil, 0, err
+		}
+		if n > maxSize {
+			return nil, 0, fmt.Errorf("packed %s response length %d exceeds max payload size %d", transport, n, maxSize)
+		}
+	}
+
+	return frameBuf, n, nil
+}
+
 // Stop gracefully shuts down the server.
 func (s *TCPServer) Stop() error {
 	s.cancel()
 
 	listener, ok := s.listener.Load().(net.Listener)
 	if ok && listener != nil {
-		return listener.Close()
+		if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }

@@ -125,8 +125,8 @@ func TestEvictOldest_NilElement(t *testing.T) {
 	}
 }
 
-// TestExtractQueryInfo_InvalidType covers the Sscanf error branch
-// in ExtractQueryInfo where the part between separators is not a number.
+// TestExtractQueryInfo_InvalidType covers invalid qtype parsing in
+// ExtractQueryInfo where the part between separators is not a uint16.
 func TestExtractQueryInfo_InvalidType(t *testing.T) {
 	// Key with non-numeric type portion.
 	name, qtype := ExtractQueryInfo("example.com|abc|0")
@@ -138,6 +138,18 @@ func TestExtractQueryInfo_InvalidType(t *testing.T) {
 	name, qtype = ExtractQueryInfo("example.com||0")
 	if name != "" || qtype != 0 {
 		t.Errorf("expected ('', 0) for empty type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with a partially numeric type must not be accepted as its prefix.
+	name, qtype = ExtractQueryInfo("example.com|1abc|0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for partially numeric type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with a type outside the uint16 DNS RRType range must be rejected.
+	name, qtype = ExtractQueryInfo("example.com|65536|0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for overflow type, got (%q, %d)", name, qtype)
 	}
 
 	// Key with valid type still works.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
@@ -113,7 +114,11 @@ func collectZoneRRsets(z *Zone) ([][]byte, error) {
 		if soaTTL == 0 {
 			soaTTL = z.DefaultTTL
 		}
-		rrsets = append(rrsets, buildCanonicalRRset(z.Origin, typeSOA, soaTTL, [][]byte{soaRdata}))
+		rrset, err := buildCanonicalRRset(z.Origin, typeSOA, soaTTL, [][]byte{soaRdata})
+		if err != nil {
+			return nil, err
+		}
+		rrsets = append(rrsets, rrset)
 	}
 
 	// Collect every other RR in the zone, grouped into RRsets by (name,type).
@@ -161,7 +166,10 @@ func collectZoneRRsets(z *Zone) ([][]byte, error) {
 
 		// Emit each RRset in canonical RR-by-RR form.
 		for rtype, rdataList := range rrsetMap {
-			rrset := buildCanonicalRRset(name, rtype, rrsetTTL[rtype], rdataList)
+			rrset, err := buildCanonicalRRset(name, rtype, rrsetTTL[rtype], rdataList)
+			if err != nil {
+				return nil, err
+			}
 			rrsets = append(rrsets, rrset)
 		}
 	}
@@ -187,7 +195,7 @@ func sortRRsets(rrsets [][]byte) {
 // and the RRs are concatenated in canonical-order. All zones served by this
 // implementation use class IN; if multi-class zones become supported, this
 // helper will need a class parameter as well.
-func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]byte) []byte {
+func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]byte) ([]byte, error) {
 	const classIN uint16 = 1
 
 	nameWire := canonicalName(name)
@@ -200,6 +208,9 @@ func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]by
 
 	var result []byte
 	for _, rdata := range sorted {
+		if len(rdata) > 0xffff {
+			return nil, fmt.Errorf("record %s type %d rdata too large: %d bytes (max 65535)", name, rtype, len(rdata))
+		}
 		result = append(result, nameWire...)
 		result = append(result, byte(rtype>>8), byte(rtype&0xff))
 		result = append(result, byte(classIN>>8), byte(classIN&0xff))
@@ -208,7 +219,7 @@ func buildCanonicalRRset(name string, rtype uint16, ttl uint32, rdataList [][]by
 		result = append(result, byte(rdlen>>8), byte(rdlen&0xff))
 		result = append(result, rdata...)
 	}
-	return result
+	return result, nil
 }
 
 // canonicalName returns the canonical (owner-first, length-prefixed, lowercased)
@@ -283,8 +294,10 @@ func serializeRecordData(rec Record) []byte {
 		// Format: priority | target
 		parts := strings.Fields(rec.RData)
 		if len(parts) >= 2 {
-			var priority uint16
-			_, _ = fmt.Sscanf(parts[0], "%d", &priority)
+			priority, err := strconv.ParseUint(parts[0], 10, 16)
+			if err != nil {
+				return []byte(rec.RData)
+			}
 			result = append(result, byte(priority>>8), byte(priority&0xff))
 			result = append(result, canonicalName(parts[1])...)
 		}
@@ -292,19 +305,10 @@ func serializeRecordData(rec Record) []byte {
 		// TXT records are stored as length-prefixed character strings.
 		// Per RFC 1035, each string is max 255 bytes. Longer content
 		// must be split into multiple strings.
-		txtData := []byte(rec.RData)
-		for len(txtData) > 0 {
-			chunk := txtData
-			if len(chunk) > 255 {
-				chunk = chunk[:255]
-			}
-			result = append(result, byte(len(chunk)))
-			result = append(result, chunk...)
-			txtData = txtData[len(chunk):]
-		}
+		result = appendCharacterStrings(result, []byte(rec.RData))
 	case "SPF":
-		result = append(result, byte(len(rec.RData)))
-		result = append(result, rec.RData...)
+		// SPF uses the same <character-string> wire encoding as TXT.
+		result = appendCharacterStrings(result, []byte(rec.RData))
 	default:
 		// For unknown types, just use raw data
 		result = []byte(rec.RData)
@@ -313,50 +317,28 @@ func serializeRecordData(rec Record) []byte {
 	return result
 }
 
-// parseRecordType converts a record type string to uint16.
-func parseRecordType(typeStr string) (uint16, error) {
-	switch strings.ToUpper(typeStr) {
-	case "A":
-		return 1, nil
-	case "NS":
-		return 2, nil
-	case "CNAME":
-		return 5, nil
-	case "SOA":
-		return 6, nil
-	case "PTR":
-		return 12, nil
-	case "MX":
-		return 15, nil
-	case "TXT":
-		return 16, nil
-	case "AAAA":
-		return 28, nil
-	case "SRV":
-		return 33, nil
-	case "NAPTR":
-		return 35, nil
-	case "DNSKEY":
-		return 48, nil
-	case "RRSIG":
-		return 46, nil
-	case "NSEC":
-		return 47, nil
-	case "DS":
-		return 43, nil
-	case "NSEC3":
-		return 50, nil
-	case "NSEC3PARAM":
-		return 51, nil
-	case "TLSA":
-		return 52, nil
-	case "ZONEMD":
-		return 63, nil
-	case "TYPE63":
-		return 63, nil
-	default:
-		return 0, fmt.Errorf("unknown record type: %s", typeStr)
+func appendCharacterStrings(dst []byte, data []byte) []byte {
+	for len(data) > 0 {
+		chunk := data
+		if len(chunk) > 255 {
+			chunk = chunk[:255]
+		}
+		dst = append(dst, byte(len(chunk)))
+		dst = append(dst, chunk...)
+		data = data[len(chunk):]
 	}
+	return dst
+}
+
+// parseRecordType converts a record type string to uint16.
+// It delegates to protocol.RecordTypeFromText (mnemonics, the DKIM→TXT
+// alias, and RFC 3597 TYPE### names) and maps the unknown-type sentinel
+// (0) to an error.
+func parseRecordType(typeStr string) (uint16, error) {
+	if rtype := protocol.RecordTypeFromText(typeStr); rtype != 0 {
+		return rtype, nil
+	}
+	return 0, fmt.Errorf("unknown record type: %s", typeStr)
 }
 
 // String returns a string representation of the ZONEMD.
@@ -373,6 +355,9 @@ func (z *ZONEMD) String() string {
 
 // Verify checks if the computed ZONEMD matches an expected value.
 func (z *ZONEMD) Verify(expected *ZONEMD) bool {
+	if z == nil || expected == nil {
+		return false
+	}
 	if z.ZoneName != expected.ZoneName {
 		return false
 	}

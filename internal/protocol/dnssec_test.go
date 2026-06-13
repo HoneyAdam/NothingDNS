@@ -546,3 +546,42 @@ func TestNSECAddRemoveType(t *testing.T) {
 		t.Error("Expected type to be removed")
 	}
 }
+
+func TestSerialAfter(t *testing.T) {
+	const half = uint32(1) << 31 // 2^31
+
+	tests := []struct {
+		name string
+		a, b uint32
+		want bool
+	}{
+		// Equal values: a serial is never after itself (RFC 1982 §3.2).
+		{name: "equal zero", a: 0, b: 0, want: false},
+		{name: "equal max", a: ^uint32(0), b: ^uint32(0), want: false},
+		// Simple ordering, no wrap.
+		{name: "one after zero", a: 1, b: 0, want: true},
+		{name: "zero not after one", a: 0, b: 1, want: false},
+		{name: "large gap below half", a: half - 1, b: 0, want: true},
+		// Wraparound: max+1 == 0, so 0 is after max.
+		{name: "zero after max (wrap)", a: 0, b: ^uint32(0), want: true},
+		{name: "max not after zero (wrap)", a: ^uint32(0), b: 0, want: false},
+		{name: "small after large (wrap)", a: 5, b: ^uint32(0) - 1, want: true},
+		// Ambiguous case: values exactly 2^31 apart are unordered —
+		// SerialAfter must be false in both directions.
+		{name: "exactly 2^31 apart forward", a: half, b: 0, want: false},
+		{name: "exactly 2^31 apart reverse", a: 0, b: half, want: false},
+		{name: "exactly 2^31 apart offset forward", a: half + 100, b: 100, want: false},
+		{name: "exactly 2^31 apart offset reverse", a: 100, b: half + 100, want: false},
+		// Just inside / just past the 2^31 boundary.
+		{name: "2^31-1 apart is after", a: half - 1, b: 0, want: true},
+		{name: "2^31+1 apart is before", a: half + 1, b: 0, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SerialAfter(tt.a, tt.b); got != tt.want {
+				t.Fatalf("SerialAfter(%d, %d) = %v, want %v", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}

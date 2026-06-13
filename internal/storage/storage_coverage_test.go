@@ -298,6 +298,28 @@ func TestBatchDecoderNextErrorPaths(t *testing.T) {
 // ==================== TLVEncoder.Encode (66.7%) ====================
 
 func TestTLVEncoderEncodeErrorPaths(t *testing.T) {
+	t.Run("completes partial writes", func(t *testing.T) {
+		chunked := &chunkedWriter{maxWrite: 2}
+		encoder := NewTLVEncoder(chunked)
+		want := []byte("test-value")
+
+		if err := encoder.Encode(&TLV{Type: TypeRecord, Value: want}); err != nil {
+			t.Fatalf("Encode failed: %v", err)
+		}
+		if chunked.calls < 2 {
+			t.Fatalf("chunked writer should require multiple writes, got %d", chunked.calls)
+		}
+
+		decoder := NewTLVDecoder(bytes.NewReader(chunked.buf.Bytes()))
+		got, err := decoder.Decode()
+		if err != nil {
+			t.Fatalf("Decode failed: %v", err)
+		}
+		if got.Type != TypeRecord || !bytes.Equal(got.Value, want) {
+			t.Fatalf("decoded TLV = {%d %q}, want {%d %q}", got.Type, got.Value, TypeRecord, want)
+		}
+	})
+
 	t.Run("write type error", func(t *testing.T) {
 		failWriter := &failWriter{failAfter: 0}
 		encoder := NewTLVEncoder(failWriter)
@@ -372,6 +394,20 @@ func (fw *failWriter) Write(p []byte) (int, error) {
 		return 0, fmt.Errorf("write failed (call %d)", fw.calls)
 	}
 	return len(p), nil
+}
+
+type chunkedWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (cw *chunkedWriter) Write(p []byte) (int, error) {
+	cw.calls++
+	if cw.maxWrite <= 0 || len(p) <= cw.maxWrite {
+		return cw.buf.Write(p)
+	}
+	return cw.buf.Write(p[:cw.maxWrite])
 }
 
 // ==================== TLVDecoder.Decode (75.0%) ====================
@@ -816,8 +852,11 @@ func TestOpenWALErrorPaths(t *testing.T) {
 				t.Fatalf("WriteFile failed: %v", err)
 			}
 		}
+		if err := os.Mkdir(filepath.Join(dir, "wal-999.log"), 0755); err != nil {
+			t.Fatalf("Mkdir failed: %v", err)
+		}
 
-		// Reopen should succeed, ignoring invalid files
+		// Reopen should succeed, ignoring invalid files and WAL-shaped directories.
 		wal2, err := OpenWAL(dir, opts)
 		if err != nil {
 			t.Fatalf("OpenWAL with invalid files failed: %v", err)

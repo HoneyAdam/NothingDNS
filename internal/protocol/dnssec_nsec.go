@@ -20,6 +20,10 @@ func (r *RDataNSEC) Type() uint16 { return TypeNSEC }
 
 // Pack serializes the NSEC record to wire format.
 func (r *RDataNSEC) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC record")
+	}
+
 	startOffset := offset
 
 	// Next Domain Name
@@ -95,6 +99,10 @@ func (r *RDataNSEC) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the NSEC record from wire format.
 func (r *RDataNSEC) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -106,6 +114,9 @@ func (r *RDataNSEC) Unpack(buf []byte, offset int, rdlength uint16) (int, error)
 	nextDomain, n, err := UnpackName(buf, offset)
 	if err != nil {
 		return 0, fmt.Errorf("unpacking next domain: %w", err)
+	}
+	if offset+n > endOffset {
+		return 0, ErrBufferTooSmall
 	}
 	r.NextDomain = nextDomain
 	offset += n
@@ -149,6 +160,10 @@ func (r *RDataNSEC) Unpack(buf []byte, offset int, rdlength uint16) (int, error)
 
 // String returns the NSEC record in presentation format.
 func (r *RDataNSEC) String() string {
+	if r == nil {
+		return ""
+	}
+
 	nextStr := "."
 	if r.NextDomain != nil {
 		nextStr = r.NextDomain.String()
@@ -171,6 +186,10 @@ func (r *RDataNSEC) String() string {
 
 // Len returns the wire length of the NSEC record.
 func (r *RDataNSEC) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	nextLen := 1
 	if r.NextDomain != nil {
 		nextLen = r.NextDomain.WireLength()
@@ -201,6 +220,10 @@ func (r *RDataNSEC) Len() int {
 
 // Copy creates a deep copy of the NSEC record.
 func (r *RDataNSEC) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	var nextDomain *Name
 	if r.NextDomain != nil {
 		nextDomain = NewName(r.NextDomain.Labels, r.NextDomain.FQDN)
@@ -217,6 +240,10 @@ func (r *RDataNSEC) Copy() RData {
 
 // HasType returns true if the given type is in the type bitmap.
 func (r *RDataNSEC) HasType(rrtype uint16) bool {
+	if r == nil {
+		return false
+	}
+
 	for _, t := range r.TypeBitMap {
 		if t == rrtype {
 			return true
@@ -227,6 +254,10 @@ func (r *RDataNSEC) HasType(rrtype uint16) bool {
 
 // AddType adds a type to the type bitmap.
 func (r *RDataNSEC) AddType(rrtype uint16) {
+	if r == nil {
+		return
+	}
+
 	if !r.HasType(rrtype) {
 		r.TypeBitMap = append(r.TypeBitMap, rrtype)
 	}
@@ -234,6 +265,10 @@ func (r *RDataNSEC) AddType(rrtype uint16) {
 
 // RemoveType removes a type from the type bitmap.
 func (r *RDataNSEC) RemoveType(rrtype uint16) {
+	if r == nil {
+		return
+	}
+
 	for i, t := range r.TypeBitMap {
 		if t == rrtype {
 			r.TypeBitMap = append(r.TypeBitMap[:i], r.TypeBitMap[i+1:]...)
@@ -244,6 +279,10 @@ func (r *RDataNSEC) RemoveType(rrtype uint16) {
 
 // TypeList returns the list of types as strings.
 func (r *RDataNSEC) TypeList() []string {
+	if r == nil {
+		return nil
+	}
+
 	var result []string
 	for _, t := range r.TypeBitMap {
 		result = append(result, TypeString(t))

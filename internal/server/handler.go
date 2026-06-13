@@ -27,9 +27,38 @@ type ClientInfo struct {
 	ClientSubnet *protocol.EDNS0ClientSubnet
 }
 
+func populateEDNS0ClientInfo(client *ClientInfo, msg *protocol.Message) {
+	if client == nil || msg == nil {
+		return
+	}
+
+	for _, rr := range msg.Additionals {
+		if rr == nil || rr.Type != protocol.TypeOPT {
+			continue
+		}
+
+		client.HasEDNS0 = true
+		client.EDNS0UDPSize = rr.Class
+
+		optData, ok := rr.Data.(*protocol.RDataOPT)
+		if !ok || optData == nil {
+			break
+		}
+		for _, opt := range optData.Options {
+			if opt.Code == protocol.OptionCodeClientSubnet {
+				if ecs, err := protocol.UnpackEDNS0ClientSubnet(opt.Data); err == nil {
+					client.ClientSubnet = ecs
+				}
+				break
+			}
+		}
+		break
+	}
+}
+
 // String returns the client's address as a string.
 func (c *ClientInfo) String() string {
-	if c == nil {
+	if c == nil || c.Addr == nil {
 		return "<nil>"
 	}
 	return c.Addr.String()
@@ -100,7 +129,7 @@ func (h *ServeDNSWithRecovery) ServeDNS(w ResponseWriter, req *protocol.Message)
 
 // sendSERVFAIL sends a minimal SERVFAIL response.
 func sendSERVFAIL(w ResponseWriter, req *protocol.Message) {
-	if req == nil || len(req.Questions) == 0 {
+	if w == nil || req == nil || len(req.Questions) == 0 {
 		return
 	}
 	resp := &protocol.Message{
@@ -110,7 +139,9 @@ func sendSERVFAIL(w ResponseWriter, req *protocol.Message) {
 		},
 		Questions: req.Questions,
 	}
-	_, _ = w.Write(resp)
+	if _, err := w.Write(resp); err != nil {
+		util.Warnf("failed to write SERVFAIL response: %v", err)
+	}
 }
 
 // ServeDNS calls f(w, req).

@@ -2,7 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -146,17 +150,37 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "seed_address is required")
 		return
 	}
+	seedAddress := strings.TrimSpace(req.SeedAddress)
+	if err := validateClusterSeedAddress(seedAddress); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Dynamic node joining is only supported in SWIM (gossip) mode.
 	// Raft consensus does not support runtime node addition.
-	if err := s.cluster.JoinSeed(req.SeedAddress); err != nil {
+	if err := s.cluster.JoinSeed(seedAddress); err != nil {
 		s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to join cluster"))
 		return
 	}
 
 	s.writeJSON(w, http.StatusOK, &MessageResponse{
-		Message: "Joined cluster via " + req.SeedAddress,
+		Message: "Joined cluster via " + seedAddress,
 	})
+}
+
+func validateClusterSeedAddress(seed string) error {
+	host, port, err := net.SplitHostPort(seed)
+	if err != nil {
+		return fmt.Errorf("seed_address must be host:port")
+	}
+	if host == "" {
+		return fmt.Errorf("seed_address host is required")
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("seed_address port must be between 1 and 65535")
+	}
+	return nil
 }
 
 // handleClusterLeave removes the local node from the cluster gracefully.

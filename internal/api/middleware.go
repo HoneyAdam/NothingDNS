@@ -1,8 +1,10 @@
 package api
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,7 +23,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			ip := getClientIP(r)
 			if s.apiRateLimiter.checkRateLimit(ip) {
 				resetTime := s.apiRateLimiter.getResetTime(ip)
-				w.Header().Set("Retry-After", strconv.Itoa(int(resetTime.Seconds())+1))
+				w.Header().Set("Retry-After", retryAfterSeconds(resetTime))
 				writeErrorJSON(w, http.StatusTooManyRequests, "rate limit exceeded")
 				return
 			}
@@ -66,4 +68,12 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 		r.WriteHeader(http.StatusOK)
 	}
 	return r.ResponseWriter.Write(b)
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("response writer does not support hijacking")
+	}
+	return hijacker.Hijack()
 }

@@ -26,6 +26,10 @@ func (r *RDataRRSIG) Type() uint16 { return TypeRRSIG }
 
 // Pack serializes the RRSIG record to wire format.
 func (r *RDataRRSIG) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil RRSIG record")
+	}
+
 	startOffset := offset
 
 	// Type Covered (2 bytes)
@@ -97,6 +101,10 @@ func (r *RDataRRSIG) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the RRSIG record from wire format.
 func (r *RDataRRSIG) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil RRSIG record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -105,7 +113,7 @@ func (r *RDataRRSIG) Unpack(buf []byte, offset int, rdlength uint16) (int, error
 	}
 
 	// Need at least 18 bytes for fixed fields before signer name
-	if offset+18 > len(buf) {
+	if offset+18 > endOffset {
 		return 0, ErrBufferTooSmall
 	}
 
@@ -159,6 +167,10 @@ func (r *RDataRRSIG) Unpack(buf []byte, offset int, rdlength uint16) (int, error
 
 // String returns the RRSIG record in presentation format.
 func (r *RDataRRSIG) String() string {
+	if r == nil {
+		return ""
+	}
+
 	typeStr := TypeString(r.TypeCovered)
 	signerStr := "."
 	if r.SignerName != nil {
@@ -180,6 +192,10 @@ func (r *RDataRRSIG) String() string {
 
 // Len returns the wire length of the RRSIG record.
 func (r *RDataRRSIG) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	signerLen := 1
 	if r.SignerName != nil {
 		signerLen = r.SignerName.WireLength()
@@ -189,6 +205,10 @@ func (r *RDataRRSIG) Len() int {
 
 // Copy creates a deep copy of the RRSIG record.
 func (r *RDataRRSIG) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	var signerName *Name
 	if r.SignerName != nil {
 		signerName = NewName(r.SignerName.Labels, r.SignerName.FQDN)
@@ -212,16 +232,46 @@ func (r *RDataRRSIG) Copy() RData {
 
 // IsExpired returns true if the signature has expired.
 func (r *RDataRRSIG) IsExpired() bool {
-	return time.Now().Unix() > int64(r.Expiration)
+	if r == nil {
+		return false
+	}
+
+	return r.IsExpiredAt(uint32(time.Now().Unix()))
+}
+
+// IsExpiredAt returns true if the signature has expired at now.
+func (r *RDataRRSIG) IsExpiredAt(now uint32) bool {
+	if r == nil {
+		return false
+	}
+
+	return SerialAfter(now, r.Expiration)
 }
 
 // IsInceptionValid returns true if the signature inception time has passed.
 func (r *RDataRRSIG) IsInceptionValid() bool {
-	return time.Now().Unix() >= int64(r.Inception)
+	if r == nil {
+		return false
+	}
+
+	return r.IsInceptionValidAt(uint32(time.Now().Unix()))
+}
+
+// IsInceptionValidAt returns true if the signature inception time has passed at now.
+func (r *RDataRRSIG) IsInceptionValidAt(now uint32) bool {
+	if r == nil {
+		return false
+	}
+
+	return !SerialAfter(r.Inception, now)
 }
 
 // ValidityPeriod returns the time range during which the signature is valid.
 func (r *RDataRRSIG) ValidityPeriod() (inception, expiration time.Time) {
+	if r == nil {
+		return time.Time{}, time.Time{}
+	}
+
 	return time.Unix(int64(r.Inception), 0), time.Unix(int64(r.Expiration), 0)
 }
 
@@ -231,8 +281,22 @@ func formatDNSTime(timestamp uint32) string {
 	return t.Format("20060102150405")
 }
 
+// SerialAfter reports whether serial a is "after" serial b in RFC 1982 §3.2
+// serial-number arithmetic (SERIAL=32): a > b iff a != b and (a - b) mod 2^32
+// is less than 2^31. DNSSEC uses this comparison for RRSIG inception and
+// expiration timestamps (RFC 4034 §3.1.5), so signature validity survives the
+// uint32 wraparound in 2106. Note the comparison is undefined (false both
+// ways) when the two values are exactly 2^31 apart.
+func SerialAfter(a, b uint32) bool {
+	return a != b && a-b < 1<<31
+}
+
 // SignerNameString returns the signer name as a string.
 func (r *RDataRRSIG) SignerNameString() string {
+	if r == nil {
+		return "."
+	}
+
 	if r.SignerName == nil {
 		return "."
 	}

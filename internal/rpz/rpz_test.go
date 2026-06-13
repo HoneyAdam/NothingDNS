@@ -53,8 +53,11 @@ func TestParseAction(t *testing.T) {
 		wantAction   PolicyAction
 		wantOverride string
 	}{
-		{"CNAME", ".", ActionNODATA, ""},
-		{"CNAME", "*", ActionNXDOMAIN, ""},
+		{"CNAME", ".", ActionNXDOMAIN, ""},
+		{"CNAME", "*", ActionNODATA, ""},
+		{"CNAME", "rpz-passthru.", ActionPassThrough, ""},
+		{"CNAME", "rpz-drop.", ActionDrop, ""},
+		{"CNAME", "rpz-tcp-only.", ActionTCPOnly, ""},
 		{"CNAME", "garden.example.com.", ActionCNAME, "garden.example.com"},
 		{"A", "192.168.1.1", ActionOverride, "192.168.1.1"},
 		{"AAAA", "::1", ActionOverride, "::1"},
@@ -109,10 +112,10 @@ func TestLoadRPZFile(t *testing.T) {
         2024010101 3600 600 86400 60 )
     IN  NS  localhost.
 
-; NODATA policy - block exact domain
+; NXDOMAIN policy - block exact domain
 bad.example.com.rpz-zone.   IN  CNAME  .
 
-; NXDOMAIN policy
+; NODATA policy
 nodata.example.com.rpz-zone.  IN  CNAME  *.
 
 ; CNAME redirect to walled garden
@@ -158,7 +161,7 @@ func TestQNAMEPolicyExact(t *testing.T) {
 	dir := t.TempDir()
 	rpzFile := filepath.Join(dir, "rpz-zone")
 
-	content := `bad.example.com.rpz-zone.  IN  CNAME  *.
+	content := `bad.example.com.rpz-zone.  IN  CNAME  .
 safe.example.com.rpz-zone.  IN  TXT  "passthru"
 redirect.example.com.rpz-zone.  IN  CNAME  garden.example.com.
 `
@@ -171,7 +174,7 @@ redirect.example.com.rpz-zone.  IN  CNAME  garden.example.com.
 		t.Fatalf("Load: %v", err)
 	}
 
-	// Exact NXDOMAIN match (CNAME *)
+	// Exact NXDOMAIN match (CNAME .)
 	rule := e.QNAMEPolicy("bad.example.com.")
 	if rule == nil {
 		t.Fatal("expected rule match for bad.example.com")
@@ -212,7 +215,7 @@ func TestQNAMEPolicyWildcard(t *testing.T) {
 	dir := t.TempDir()
 	rpzFile := filepath.Join(dir, "rpz-zone")
 
-	content := `*.ads.example.com.rpz-zone.  IN  CNAME  .
+	content := `*.ads.example.com.rpz-zone.  IN  CNAME  *.
 `
 	if err := os.WriteFile(rpzFile, []byte(content), 0644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -223,7 +226,7 @@ func TestQNAMEPolicyWildcard(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 
-	// Should match subdomains (CNAME . = NODATA)
+	// Should match subdomains (CNAME *. = NODATA)
 	rule := e.QNAMEPolicy("tracker.ads.example.com.")
 	if rule == nil {
 		t.Fatal("expected wildcard match for tracker.ads.example.com")
@@ -991,10 +994,13 @@ func TestActionStringValidation(t *testing.T) {
 		rdata string
 		want  PolicyAction
 	}{
-		{"CNAME", ".", ActionNODATA},
-		{"CNAME", "*", ActionNXDOMAIN},
+		{"CNAME", ".", ActionNXDOMAIN},
+		{"CNAME", "*", ActionNODATA},
 		{"CNAME", "redirect.example.com.", ActionCNAME},
 		{"CNAME", "", ActionNODATA}, // Empty CNAME target = NODATA
+		{"CNAME", "rpz-passthru.", ActionPassThrough},
+		{"CNAME", "rpz-drop.", ActionDrop},
+		{"CNAME", "rpz-tcp-only.", ActionTCPOnly},
 		{"A", "192.168.1.1", ActionOverride},
 		{"AAAA", "2001:db8::1", ActionOverride},
 		{"TXT", `"passthru"`, ActionPassThrough},
@@ -1119,6 +1125,22 @@ another.bad.example.com.rpz-zone.  3600  IN  A  127.0.0.1
 	}
 }
 
+func TestParseLineRejectsMalformedNumericTTL(t *testing.T) {
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true})
+	for _, line := range []string{
+		"bad.example.com.rpz-zone. 123abc IN CNAME .",
+		"bad.example.com.rpz-zone. 4294967296 IN CNAME .",
+	} {
+		rule, err := e.parseLine(line, "rpz-zone")
+		if err == nil {
+			t.Errorf("parseLine(%q) expected error, got rule %#v", line, rule)
+		}
+		if rule != nil {
+			t.Errorf("parseLine(%q) returned unexpected rule %#v", line, rule)
+		}
+	}
+}
+
 // TestRPZPriorityOrdering tests priority handling
 func TestRPZPriorityOrdering(t *testing.T) {
 	dir := t.TempDir()
@@ -1126,11 +1148,11 @@ func TestRPZPriorityOrdering(t *testing.T) {
 	file2 := filepath.Join(dir, "rpz-low-priority")
 
 	// High priority zone with NXDOMAIN
-	if err := os.WriteFile(file1, []byte("test.example.com.file1.  IN  CNAME  *\n"), 0644); err != nil {
+	if err := os.WriteFile(file1, []byte("test.example.com.file1.  IN  CNAME  .\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	// Low priority zone with NODATA
-	if err := os.WriteFile(file2, []byte("test.example.com.file2.  IN  CNAME  .\n"), 0644); err != nil {
+	if err := os.WriteFile(file2, []byte("test.example.com.file2.  IN  CNAME  *.\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1237,5 +1259,101 @@ func TestCommentOnlyRPZFile(t *testing.T) {
 	stats := e.Stats()
 	if stats.TotalRules != 0 {
 		t.Errorf("expected 0 rules from comment-only file, got %d", stats.TotalRules)
+	}
+}
+
+func TestParseTTLField(t *testing.T) {
+	tests := []struct {
+		field   string
+		want    uint32
+		isTTL   bool
+		wantErr bool
+	}{
+		{"300", 300, true, false},
+		{"30s", 30, true, false},
+		{"30m", 1800, true, false},
+		{"1h", 3600, true, false},
+		{"1d", 86400, true, false},
+		{"2w", 1209600, true, false},
+		{"1H", 3600, true, false},
+		{"1h30m", 5400, true, false},
+		{"1w2d3h4m5s", 788645, true, false},
+		{"", 0, false, false},
+		{"IN", 0, false, false},
+		{"CNAME", 0, false, false},
+		{"12x", 0, false, true},
+		{"1h30", 3630, true, false},
+		{"4294967295", 4294967295, true, false},
+		{"4294967296", 0, false, true},
+		{"5000000000h", 0, false, true},
+		{"4294967295s1s", 0, false, true},
+	}
+
+	for _, tt := range tests {
+		got, isTTL, err := parseTTLField(tt.field)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("parseTTLField(%q): expected error, got %d, %v", tt.field, got, isTTL)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("parseTTLField(%q): unexpected error: %v", tt.field, err)
+			continue
+		}
+		if isTTL != tt.isTTL {
+			t.Errorf("parseTTLField(%q): isTTL = %v, want %v", tt.field, isTTL, tt.isTTL)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("parseTTLField(%q) = %d, want %d", tt.field, got, tt.want)
+		}
+	}
+}
+
+func TestLoadRuleWithUnitTTL(t *testing.T) {
+	dir := t.TempDir()
+	rpzFile := filepath.Join(dir, "rpz-zone")
+
+	content := `bad.example.com.rpz-zone.  1h  IN  CNAME  .
+slow.example.com.rpz-zone.  1h30m  IN  CNAME  garden.example.com.
+`
+	if err := os.WriteFile(rpzFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	e := NewEngine(Config{Logger: testLogger(), Enabled: true, Files: []string{rpzFile}})
+	if err := e.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	stats := e.Stats()
+	if stats.TotalRules != 2 {
+		t.Fatalf("expected 2 rules loaded, got %d", stats.TotalRules)
+	}
+	if stats.ParseErrors != 0 {
+		t.Fatalf("expected 0 parse errors, got %d", stats.ParseErrors)
+	}
+
+	rule := e.QNAMEPolicy("bad.example.com.")
+	if rule == nil {
+		t.Fatal("expected rule match for bad.example.com")
+	}
+	if rule.Action != ActionNXDOMAIN {
+		t.Errorf("action = %v, want NXDOMAIN", rule.Action)
+	}
+	if rule.TTL != 3600 {
+		t.Errorf("TTL = %d, want 3600", rule.TTL)
+	}
+
+	rule = e.QNAMEPolicy("slow.example.com.")
+	if rule == nil {
+		t.Fatal("expected rule match for slow.example.com")
+	}
+	if rule.Action != ActionCNAME {
+		t.Errorf("action = %v, want CNAME", rule.Action)
+	}
+	if rule.TTL != 5400 {
+		t.Errorf("TTL = %d, want 5400", rule.TTL)
 	}
 }

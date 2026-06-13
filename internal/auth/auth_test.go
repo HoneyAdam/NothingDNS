@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 func TestHashPassword(t *testing.T) {
@@ -161,6 +163,36 @@ func TestValidateToken(t *testing.T) {
 	}
 }
 
+func TestValidateTokenReturnsPublicUserCopy(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret-key-32-bytes-long!!!",
+		Users:       []User{{Username: "operator", Password: "operatorpassword", Role: RoleOperator}},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+
+	token, err := store.GenerateToken("operator", time.Hour)
+	if err != nil {
+		t.Fatalf("GenerateToken() returned error: %v", err)
+	}
+
+	user, err := store.ValidateToken(token.Token)
+	if err != nil {
+		t.Fatalf("ValidateToken() returned error: %v", err)
+	}
+	if user.Hash != nil || user.Password != "" {
+		t.Fatalf("ValidateToken() exposed credential fields: hash=%v password=%q", user.Hash, user.Password)
+	}
+
+	user.Role = RoleAdmin
+	stored, err := store.GetUser("operator")
+	if err != nil {
+		t.Fatalf("GetUser() returned error: %v", err)
+	}
+	if stored.Role != RoleOperator {
+		t.Fatalf("mutating ValidateToken result changed stored role to %q", stored.Role)
+	}
+}
+
 func TestRevokeToken(t *testing.T) {
 	store, _ := NewStore(&Config{
 		Secret:      "test-secret",
@@ -264,7 +296,8 @@ func TestCreateUser(t *testing.T) {
 	}{
 		{"new user", "newuser", "password", RoleViewer, false},
 		{"duplicate user", "admin", "password", RoleAdmin, true},
-		{"empty username", "", "password", RoleViewer, false}, // Empty username is technically allowed by store
+		{"empty username", "", "password", RoleViewer, true},
+		{"invalid role", "badrole", "password", Role("owner"), true},
 	}
 
 	for _, tc := range tests {
@@ -283,6 +316,9 @@ func TestCreateUser(t *testing.T) {
 				}
 				if user != nil && user.Role != tc.role {
 					t.Errorf("CreateUser().Role = %v, want %v", user.Role, tc.role)
+				}
+				if user != nil && (user.Hash != nil || user.Password != "") {
+					t.Errorf("CreateUser() should not expose credential fields")
 				}
 			}
 		})
@@ -306,27 +342,88 @@ func TestUpdateUser(t *testing.T) {
 	}
 
 	// Verify new password works
-	if !VerifyPassword("newpassword", user.Hash) {
+	if !store.VerifyUserPassword("admin", "newpassword") {
 		t.Errorf("Password was not updated correctly")
 	}
 	// Old password should not work
-	if VerifyPassword("adminpassword", user.Hash) {
+	if store.VerifyUserPassword("admin", "adminpassword") {
 		t.Errorf("Old password should not work after update")
 	}
-
-	// Update role only
-	user, err = store.UpdateUser("admin", "", RoleOperator)
-	if err != nil {
-		t.Errorf("UpdateUser() for role returned error: %v", err)
+	if user.Hash != nil || user.Password != "" {
+		t.Errorf("UpdateUser() should not expose credential fields")
 	}
-	if user != nil && user.Role != RoleOperator {
-		t.Errorf("Role was not updated correctly")
+
+	// Last admin cannot be demoted.
+	user, err = store.UpdateUser("admin", "", RoleOperator)
+	if !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("UpdateUser() for last admin role = %v, want ErrLastAdmin", err)
+	}
+	if user != nil {
+		t.Errorf("UpdateUser() for last admin demotion returned user: %#v", user)
+	}
+	stored, err := store.GetUser("admin")
+	if err != nil {
+		t.Fatalf("GetUser() after rejected demotion: %v", err)
+	}
+	if stored.Role != RoleAdmin {
+		t.Errorf("last admin role = %v, want %v", stored.Role, RoleAdmin)
 	}
 
 	// Nonexistent user
 	_, err = store.UpdateUser("nobody", "pass", RoleViewer)
 	if err == nil {
 		t.Errorf("UpdateUser() should return error for nonexistent user")
+	}
+}
+
+func TestUpdateUserAllowsAdminDemotionWhenAnotherAdminRemains(t *testing.T) {
+	store, err := NewStore(&Config{
+		Secret: "test-secret",
+		Users: []User{
+			{Username: "admin", Password: "adminpassword", Role: RoleAdmin},
+			{Username: "otheradmin", Password: "otheradminpassword", Role: RoleAdmin},
+		},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	user, err := store.UpdateUser("otheradmin", "", RoleOperator)
+	if err != nil {
+		t.Fatalf("UpdateUser() for role returned error: %v", err)
+	}
+	if user.Role != RoleOperator {
+		t.Errorf("Role = %v, want %v", user.Role, RoleOperator)
+	}
+	stored, err := store.GetUser("admin")
+	if err != nil {
+		t.Fatalf("GetUser(admin): %v", err)
+	}
+	if stored.Role != RoleAdmin {
+		t.Errorf("remaining admin role = %v, want %v", stored.Role, RoleAdmin)
+	}
+}
+
+func TestUpdateUserRejectsInvalidRole(t *testing.T) {
+	store, err := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "adminpassword", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if _, err := store.UpdateUser("admin", "", Role("owner")); err == nil {
+		t.Fatal("UpdateUser() should reject invalid role")
+	}
+	user, err := store.GetUser("admin")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if user.Role != RoleAdmin {
+		t.Errorf("role changed after invalid update: %v", user.Role)
 	}
 }
 
@@ -356,6 +453,52 @@ func TestDeleteUser(t *testing.T) {
 	err = store.DeleteUser("nobody")
 	if err == nil {
 		t.Errorf("DeleteUser() should return error for nonexistent user")
+	}
+}
+
+func TestDeleteUserPreservingLastAdminRejectsLastAdmin(t *testing.T) {
+	store, err := NewStore(&Config{
+		Secret: "test-secret",
+		Users: []User{
+			{Username: "admin", Password: "password", Role: RoleAdmin},
+			{Username: "viewer", Password: "password", Role: RoleViewer},
+		},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	err = store.DeleteUserPreservingLastAdmin("admin")
+	if !errors.Is(err, ErrLastAdmin) {
+		t.Fatalf("expected ErrLastAdmin, got %v", err)
+	}
+	if _, err := store.GetUser("admin"); err != nil {
+		t.Fatal("last admin should remain")
+	}
+}
+
+func TestDeleteUserPreservingLastAdminAllowsAdminWhenAnotherRemains(t *testing.T) {
+	store, err := NewStore(&Config{
+		Secret: "test-secret",
+		Users: []User{
+			{Username: "admin", Password: "password", Role: RoleAdmin},
+			{Username: "otheradmin", Password: "password", Role: RoleAdmin},
+		},
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	if err := store.DeleteUserPreservingLastAdmin("otheradmin"); err != nil {
+		t.Fatalf("DeleteUserPreservingLastAdmin: %v", err)
+	}
+	if _, err := store.GetUser("otheradmin"); err == nil {
+		t.Fatal("deleted admin should not be retrievable")
+	}
+	if _, err := store.GetUser("admin"); err != nil {
+		t.Fatal("remaining admin should stay available")
 	}
 }
 
@@ -552,6 +695,35 @@ func TestSave_AtomicReplaceLeavesNoPartialFile(t *testing.T) {
 	}
 }
 
+func TestAtomicWriteFileCompletesPartialWrites(t *testing.T) {
+	writer := &chunkedAuthWriter{maxWrite: 3}
+	data := []byte("complete auth file payload")
+
+	if err := util.WriteFull(writer, data); err != nil {
+		t.Fatalf("WriteFull: %v", err)
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+	if !bytes.Equal(writer.buf.Bytes(), data) {
+		t.Fatalf("written data = %q, want %q", writer.buf.Bytes(), data)
+	}
+}
+
+type chunkedAuthWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (w *chunkedAuthWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.maxWrite > 0 && w.maxWrite < len(p) {
+		p = p[:w.maxWrite]
+	}
+	return w.buf.Write(p)
+}
+
 func TestSave_ReturnsParentDirFsyncError(t *testing.T) {
 	store, _ := NewStore(&Config{Secret: "test-secret-12345"})
 
@@ -698,6 +870,17 @@ func TestTokenExpiry(t *testing.T) {
 	_, err = store.ValidateToken(token.Token)
 	if err == nil {
 		t.Errorf("Token should be expired after waiting")
+	}
+
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	if !tokenExpiredAt(&Token{ExpiresAt: now}, now) {
+		t.Error("token should be expired exactly at ExpiresAt")
+	}
+	if tokenExpiredAt(&Token{ExpiresAt: now.Add(time.Nanosecond)}, now) {
+		t.Error("token should remain valid before ExpiresAt")
+	}
+	if !tokenExpiredAt(nil, now) {
+		t.Error("nil token should be treated as expired")
 	}
 }
 
@@ -1153,7 +1336,7 @@ func TestUsernameEdgeCases(t *testing.T) {
 		wantErr  bool
 	}{
 		{"normal", "user", false},
-		{"empty", "", false}, // Empty is allowed by current implementation
+		{"empty", "", true},
 		{"single_char", "a", false},
 		{"long_name", strings.Repeat("a", 100), false},
 		{"with_numbers", "user123", false},
@@ -1165,11 +1348,11 @@ func TestUsernameEdgeCases(t *testing.T) {
 		{"emoji", "user🔐", false},
 		{"spaces", "user name", false},
 		{"special_chars", "user!@#$%", false},
-		{"null_byte", "user\x00name", false},
-		{"newline", "user\nname", false},
-		{"tab", "user\tname", false},
-		{"carriage_return", "user\rname", false},
-		{"backspace", "user\bname", false},
+		{"null_byte", "user\x00name", true},
+		{"newline", "user\nname", true},
+		{"tab", "user\tname", true},
+		{"carriage_return", "user\rname", true},
+		{"backspace", "user\bname", true},
 	}
 
 	for _, tc := range tests {
@@ -1220,14 +1403,17 @@ func TestPasswordEdgeCases(t *testing.T) {
 			if err != nil {
 				t.Fatalf("UpdateUser failed: %v", err)
 			}
+			if user.Hash != nil || user.Password != "" {
+				t.Fatalf("UpdateUser exposed credential fields")
+			}
 
 			// Verify the new password works
-			if !VerifyPassword(tc.password, user.Hash) {
+			if !store.VerifyUserPassword("testuser", tc.password) {
 				t.Errorf("Password %q should verify after update", tc.password)
 			}
 
 			// Verify wrong password doesn't work
-			if VerifyPassword("wrong-password", user.Hash) {
+			if store.VerifyUserPassword("testuser", "wrong-password") {
 				t.Errorf("Wrong password should not verify")
 			}
 		})
@@ -1469,8 +1655,8 @@ func TestStorePersistenceEdgeCases(t *testing.T) {
 		store1, _ := NewStore(&Config{
 			Secret: "test-secret",
 			Users: []User{
-				{Username: "用户", Password: "密码", Role: RoleAdmin},
-				{Username: "ユーザー", Password: "パスワード", Role: RoleViewer},
+				{Username: "用户", Password: "密码密码密码", Role: RoleAdmin},
+				{Username: "ユーザー", Password: "パスワード長い", Role: RoleViewer},
 				{Username: "🔐emoji🔑", Password: "🔒secure🔓", Role: RoleOperator},
 			},
 			TokenExpiry: Duration{Duration: 24 * time.Hour},
@@ -1495,10 +1681,83 @@ func TestStorePersistenceEdgeCases(t *testing.T) {
 		}
 
 		// Verify passwords work
-		if !store2.VerifyUserPassword("用户", "密码") {
+		if !store2.VerifyUserPassword("用户", "密码密码密码") {
 			t.Errorf("Unicode password should work after reload")
 		}
 	})
+}
+
+func TestLoadRejectsInvalidUserDatabaseWithoutReplacingExistingUsers(t *testing.T) {
+	validHash := HashPassword("password", []byte("12345678901234567890123456789012"))
+
+	tests := []struct {
+		name  string
+		users map[string]*User
+	}{
+		{
+			name:  "empty_database",
+			users: map[string]*User{},
+		},
+		{
+			name:  "empty_username_key",
+			users: map[string]*User{"": {Username: "", Hash: validHash, Role: RoleAdmin}},
+		},
+		{
+			name:  "nil_user",
+			users: map[string]*User{"admin": nil},
+		},
+		{
+			name:  "mismatched_username",
+			users: map[string]*User{"admin": {Username: "root", Hash: validHash, Role: RoleAdmin}},
+		},
+		{
+			name:  "control_character_username",
+			users: map[string]*User{"admin\nroot": {Username: "admin\nroot", Hash: validHash, Role: RoleAdmin}},
+		},
+		{
+			name:  "invalid_role",
+			users: map[string]*User{"admin": {Username: "admin", Hash: validHash, Role: Role("owner")}},
+		},
+		{
+			name:  "missing_hash",
+			users: map[string]*User{"admin": {Username: "admin", Role: RoleAdmin}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "users.json")
+			data, err := json.Marshal(tc.users)
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			store, err := NewStore(&Config{
+				Secret:      "test-secret",
+				Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+				TokenExpiry: Duration{Duration: 24 * time.Hour},
+			})
+			if err != nil {
+				t.Fatalf("NewStore: %v", err)
+			}
+			if err := store.Load(path); err == nil {
+				t.Fatal("Load() should reject invalid users database")
+			}
+			admin, err := store.GetUser("admin")
+			if err != nil {
+				t.Fatalf("existing admin should remain after rejected load: %v", err)
+			}
+			if admin.Role != RoleAdmin {
+				t.Fatalf("existing admin role = %v, want %v", admin.Role, RoleAdmin)
+			}
+			if !store.VerifyUserPassword("admin", "password") {
+				t.Fatal("existing admin password should remain valid after rejected load")
+			}
+		})
+	}
 }
 
 // TestTokenFormat tests token format validation
@@ -1631,11 +1890,87 @@ func TestNewStoreVariations(t *testing.T) {
 			t.Fatalf("GenerateToken with 0 expiry should work: %v", err)
 		}
 
-		// Should be immediately expired or valid depending on implementation
 		_, err = store.ValidateToken(token.Token)
-		// Just ensure no panic
-		_ = err
+		if err == nil {
+			t.Fatal("zero-expiry token should be immediately expired")
+		}
 	})
+
+	t.Run("negative_max_sessions_per_user", func(t *testing.T) {
+		store, err := NewStore(&Config{
+			Secret:             "test-secret",
+			Users:              []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+			MaxSessionsPerUser: -1,
+		})
+		if err == nil {
+			t.Fatalf("NewStore() should reject negative max sessions, got store %#v", store)
+		}
+	})
+}
+
+func TestNewStoreRejectsInvalidConfiguredUsers(t *testing.T) {
+	validHash, err := HashPasswordWithError("password", []byte("12345678901234567890123456789012"))
+	if err != nil {
+		t.Fatalf("HashPasswordWithError: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		users []User
+		valid bool
+	}{
+		{
+			name:  "empty_username",
+			users: []User{{Username: "", Password: "password", Role: RoleAdmin}},
+		},
+		{
+			name:  "control_character_username",
+			users: []User{{Username: "admin\nroot", Password: "password", Role: RoleAdmin}},
+		},
+		{
+			name:  "duplicate_username",
+			users: []User{{Username: "admin", Password: "password", Role: RoleAdmin}, {Username: "admin", Password: "password2", Role: RoleViewer}},
+		},
+		{
+			name:  "invalid_role",
+			users: []User{{Username: "admin", Password: "password", Role: Role("owner")}},
+		},
+		{
+			name:  "missing_credentials",
+			users: []User{{Username: "admin", Role: RoleAdmin}},
+		},
+		{
+			name:  "short_plaintext_password",
+			users: []User{{Username: "admin", Password: "short", Role: RoleAdmin}},
+		},
+		{
+			name:  "valid_hash_with_empty_password",
+			users: []User{{Username: "admin", Hash: validHash, Role: RoleAdmin}},
+			valid: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := NewStore(&Config{
+				Secret:      "test-secret",
+				Users:       tc.users,
+				TokenExpiry: Duration{Duration: 24 * time.Hour},
+			})
+			if tc.valid {
+				if err != nil {
+					t.Fatalf("NewStore() returned error: %v", err)
+				}
+				if store == nil {
+					t.Fatal("NewStore() returned nil store")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("NewStore() should reject %s", tc.name)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1867,6 +2202,150 @@ func TestLoadTokensSigned_ExpiredTokensFiltered(t *testing.T) {
 	_, err := store2.ValidateToken(tok.Token)
 	if err == nil {
 		t.Error("Expired token should not validate after load")
+	}
+}
+
+func TestLoadTokensSigned_InvalidTokenDatabaseDoesNotReplaceExistingTokens(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	existing, _ := store.GenerateToken("admin", time.Hour)
+
+	badStore, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	badToken, _ := badStore.GenerateToken("admin", time.Hour)
+	badStore.mu.Lock()
+	badStore.tokens[badToken.Token].Role = Role("owner")
+	badStore.mu.Unlock()
+
+	path := filepath.Join(t.TempDir(), "bad-tokens.enc")
+	if err := badStore.SaveTokensSigned(path); err != nil {
+		t.Fatalf("SaveTokensSigned: %v", err)
+	}
+	if err := store.LoadTokensSigned(path); err == nil {
+		t.Fatal("LoadTokensSigned should reject invalid token role")
+	}
+	if _, err := store.ValidateToken(existing.Token); err != nil {
+		t.Fatalf("existing token should remain valid after rejected load: %v", err)
+	}
+	if _, err := store.ValidateToken(badToken.Token); err == nil {
+		t.Fatal("invalid token database should not replace existing tokens")
+	}
+}
+
+func TestLoadTokensSigned_RepeatedLoadRebuildsActiveSessions(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:             "test-secret",
+		Users:              []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry:        Duration{Duration: 1 * time.Hour},
+		MaxSessionsPerUser: 2,
+	})
+	tok, _ := store.GenerateToken("admin", time.Hour)
+
+	path := filepath.Join(t.TempDir(), "tokens.enc")
+	if err := store.SaveTokensSigned(path); err != nil {
+		t.Fatalf("SaveTokensSigned: %v", err)
+	}
+
+	store2, _ := NewStore(&Config{
+		Secret:             "test-secret",
+		Users:              []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry:        Duration{Duration: 1 * time.Hour},
+		MaxSessionsPerUser: 2,
+	})
+	if err := store2.LoadTokensSigned(path); err != nil {
+		t.Fatalf("first LoadTokensSigned: %v", err)
+	}
+	if err := store2.LoadTokensSigned(path); err != nil {
+		t.Fatalf("second LoadTokensSigned: %v", err)
+	}
+
+	store2.mu.RLock()
+	active := store2.activeSessions["admin"]
+	tokenCount := len(store2.tokens)
+	store2.mu.RUnlock()
+	if active != 1 || tokenCount != 1 {
+		t.Fatalf("active sessions/token count = %d/%d, want 1/1", active, tokenCount)
+	}
+	if _, err := store2.ValidateToken(tok.Token); err != nil {
+		t.Fatalf("loaded token should remain valid: %v", err)
+	}
+}
+
+func TestLoadTokensSigned_FiltersTokensForMissingUsers(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret: "test-secret",
+		Users: []User{
+			{Username: "admin", Password: "password", Role: RoleAdmin},
+			{Username: "deleted", Password: "password", Role: RoleViewer},
+		},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	tok, _ := store.GenerateToken("deleted", time.Hour)
+
+	path := filepath.Join(t.TempDir(), "tokens.enc")
+	if err := store.SaveTokensSigned(path); err != nil {
+		t.Fatalf("SaveTokensSigned: %v", err)
+	}
+
+	store2, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	if err := store2.LoadTokensSigned(path); err != nil {
+		t.Fatalf("LoadTokensSigned: %v", err)
+	}
+	if _, err := store2.ValidateToken(tok.Token); err == nil {
+		t.Fatal("token for missing user should not be loaded")
+	}
+	store2.mu.RLock()
+	active := store2.activeSessions["deleted"]
+	store2.mu.RUnlock()
+	if active != 0 {
+		t.Fatalf("missing user active sessions = %d, want 0", active)
+	}
+}
+
+func TestLoadTokensSigned_FiltersTokensOlderThanUserUpdate(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	tok, _ := store.GenerateToken("admin", time.Hour)
+
+	path := filepath.Join(t.TempDir(), "tokens.enc")
+	if err := store.SaveTokensSigned(path); err != nil {
+		t.Fatalf("SaveTokensSigned: %v", err)
+	}
+
+	store2, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		Users:       []User{{Username: "admin", Password: "password", Role: RoleAdmin}},
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+	store2.mu.Lock()
+	store2.users["admin"].UpdatedAt = tok.CreatedAt.Add(time.Second).UTC().Format(time.RFC3339)
+	store2.mu.Unlock()
+
+	if err := store2.LoadTokensSigned(path); err != nil {
+		t.Fatalf("LoadTokensSigned: %v", err)
+	}
+	if _, err := store2.ValidateToken(tok.Token); err == nil {
+		t.Fatal("token older than user update should not be loaded")
+	}
+	store2.mu.RLock()
+	active := store2.activeSessions["admin"]
+	tokenCount := len(store2.tokens)
+	store2.mu.RUnlock()
+	if active != 0 || tokenCount != 0 {
+		t.Fatalf("active sessions/token count = %d/%d, want 0/0", active, tokenCount)
 	}
 }
 

@@ -783,7 +783,10 @@ func TestCanonicalizeRR_RootNameEmptyLabel(t *testing.T) {
 		Data:  &protocol.RDataA{Address: [4]byte{127, 0, 0, 1}},
 	}
 
-	result := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600)
+	if err != nil {
+		t.Fatalf("canonicalizeRR: %v", err)
+	}
 	if len(result) == 0 {
 		t.Error("canonicalizeRR should return non-empty result for root name")
 	}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
@@ -21,8 +22,12 @@ import (
 // This is always the first stage.
 func setupStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
-		q.reqID = util.GenerateRequestID()
-		q.start = time.Now()
+		if q.reqID == "" {
+			q.reqID = util.GenerateRequestID()
+		}
+		if q.start.IsZero() {
+			q.start = time.Now()
+		}
 
 		// Defer latency recording and audit logging
 		// (defer is handled at the ServeDNS wrapper level to keep stages simple)
@@ -33,8 +38,13 @@ func setupStage(h *integratedHandler) Stage {
 // validationStage checks for empty questions and validates IDNA.
 func validationStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
-		if len(q.msg.Questions) == 0 {
-			h.logger.Debug("Query with no questions")
+		if q.msg == nil {
+			h.logger.Debug("Nil DNS query")
+			sendError(q.currentWriter, nil, protocol.RcodeFormatError)
+			return true, nil
+		}
+		if len(q.msg.Questions) == 0 || q.msg.Questions[0] == nil || q.msg.Questions[0].Name == nil {
+			h.logger.Debug("Query with invalid questions")
 			sendError(q.currentWriter, q.msg, protocol.RcodeFormatError)
 			return true, nil
 		}
@@ -107,8 +117,9 @@ func rpzClientStage(h *integratedHandler) Stage {
 				// no response — the query must then CONTINUE through the pipeline.
 				// The previous unconditional `return true` turned a client-IP
 				// passthru rule into a silent drop. Mirror rpzQnameStage.
-				if h.applyRPZRule(w, q.msg, q.q, rule) {
-					return true, nil
+				handled, err := h.applyRPZRuleWithError(w, q.msg, q.q, rule)
+				if handled || err != nil {
+					return handled, err
 				}
 			}
 		}
@@ -222,8 +233,9 @@ func rpzQnameStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if h.rpzEngine != nil {
 			if rule := h.rpzEngine.QNAMEPolicy(q.qname); rule != nil {
-				if h.applyRPZRule(w, q.msg, q.q, rule) {
-					return true, nil
+				handled, err := h.applyRPZRuleWithError(w, q.msg, q.q, rule)
+				if handled || err != nil {
+					return handled, err
 				}
 			}
 		}
@@ -311,8 +323,9 @@ func cnameStage(h *integratedHandler) Stage {
 			targetAnswers := h.resolveCNAMETarget(w, q.msg, q.q, result.targetName, q.qtype)
 			resp := h.buildCNAMEResponse(q.msg, result.cnameRecords, targetAnswers)
 
-			if h.applyRPZResponsePolicy(w, q.msg, q.q, resp, result.targetName) {
-				return true, nil
+			handled, err := h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, result.targetName)
+			if handled || err != nil {
+				return handled, err
 			}
 
 			if h.metrics != nil {
@@ -361,8 +374,8 @@ func resolverStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				// Copy: stale.Message aliases the shared cached object (see cacheStage).
-				reply(q.currentWriter, q.msg, stale.Message.Copy())
+				// GetStale returns a private copy, safe for reply to mutate.
+				reply(q.currentWriter, q.msg, stale.Message)
 				return true, nil
 			}
 			if h.metrics != nil {
@@ -371,11 +384,21 @@ func resolverStage(h *integratedHandler) Stage {
 			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "iterative resolution failed")
 			return true, nil
 		}
+		if resp == nil {
+			h.logger.Warnf("Iterative resolution returned nil response for %s", q.qname)
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "iterative resolution failed")
+			return true, nil
+		}
+		sanitizePipelineResponse(resp)
 
 		resp.Header.ID = q.msg.Header.ID
 
-		if h.applyRPZResponsePolicy(w, q.msg, q.q, resp, q.qname) {
-			return true, nil
+		handled, err := h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, q.qname)
+		if handled || err != nil {
+			return handled, err
 		}
 
 		if h.tryDNS64Synthesis(w, q.msg, q.q, resp) {
@@ -427,8 +450,8 @@ func upstreamStage(h *integratedHandler) Stage {
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				// Copy: stale.Message aliases the shared cached object (see cacheStage).
-				reply(q.currentWriter, q.msg, stale.Message.Copy())
+				// GetStale returns a private copy, safe for reply to mutate.
+				reply(q.currentWriter, q.msg, stale.Message)
 				return true, nil
 			}
 			if h.metrics != nil {
@@ -437,6 +460,16 @@ func upstreamStage(h *integratedHandler) Stage {
 			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "upstream unavailable")
 			return true, nil
 		}
+		if resp == nil {
+			q.msg.Header.ID = origID
+			h.logger.Warnf("Upstream returned nil response for %s", q.qname)
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
+			return true, nil
+		}
+		sanitizePipelineResponse(resp)
 
 		if resp.Header.ID != q.msg.Header.ID {
 			q.msg.Header.ID = origID
@@ -484,8 +517,9 @@ func upstreamStage(h *integratedHandler) Stage {
 			}
 		}
 
-		if h.applyRPZResponsePolicy(w, q.msg, q.q, resp, q.qname) {
-			return true, nil
+		handled, err := h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, q.qname)
+		if handled || err != nil {
+			return handled, err
 		}
 
 		if h.tryDNS64Synthesis(w, q.msg, q.q, resp) {
@@ -495,22 +529,18 @@ func upstreamStage(h *integratedHandler) Stage {
 			return true, nil
 		}
 
-		// Cache the response
+		// Cache the response (Set deep-copies internally)
 		if resp.Header.Flags.RCODE == protocol.RcodeSuccess && len(resp.Answers) > 0 {
 			ttl := extractTTL(resp)
 			h.cache.Set(q.cacheKey, resp, ttl)
 		} else if resp.Header.Flags.RCODE == protocol.RcodeNameError ||
 			(resp.Header.Flags.RCODE == protocol.RcodeSuccess && len(resp.Answers) == 0) {
-			negTTL := uint32(300)
-			for _, rr := range resp.Authorities {
-				if soa, ok := rr.Data.(*protocol.RDataSOA); ok {
-					if soa.Minimum > 0 {
-						negTTL = soa.Minimum
-					}
-					break
-				}
+			negTTL, hasNegTTL := negativeCacheTTL(resp)
+			if hasNegTTL {
+				h.cache.SetNegativeWithTTL(q.cacheKey, resp.Header.Flags.RCODE, negTTL)
+			} else {
+				h.cache.SetNegative(q.cacheKey, resp.Header.Flags.RCODE)
 			}
-			h.cache.SetNegative(q.cacheKey, resp.Header.Flags.RCODE)
 			h.logger.Debugf("Cached negative response for %s (rcode=%d, negTTL=%d)", q.qname, resp.Header.Flags.RCODE, negTTL)
 
 			if h.nsecCache != nil && resp.Header.Flags.RCODE == protocol.RcodeNameError {
@@ -544,6 +574,78 @@ func upstreamStage(h *integratedHandler) Stage {
 
 		reply(q.currentWriter, q.msg, resp)
 		return true, nil
+	}
+}
+
+func negativeCacheTTL(resp *protocol.Message) (uint32, bool) {
+	if resp == nil {
+		return 0, false
+	}
+	for _, rr := range resp.Authorities {
+		if rr == nil {
+			continue
+		}
+		soa, ok := rr.Data.(*protocol.RDataSOA)
+		if !ok || soa == nil {
+			continue
+		}
+		negTTL := rr.TTL
+		if soa.Minimum < negTTL {
+			negTTL = soa.Minimum
+		}
+		return negTTL, true
+	}
+	return 0, false
+}
+
+func sanitizePipelineResponse(resp *protocol.Message) {
+	if resp == nil {
+		return
+	}
+	resp.Questions = filterValidQuestions(resp.Questions)
+	resp.Answers = filterValidResourceRecords(resp.Answers)
+	resp.Authorities = filterValidResourceRecords(resp.Authorities)
+	resp.Additionals = filterValidResourceRecords(resp.Additionals)
+}
+
+func filterValidQuestions(questions []*protocol.Question) []*protocol.Question {
+	if len(questions) == 0 {
+		return questions
+	}
+	out := questions[:0]
+	for _, q := range questions {
+		if q == nil || q.Name == nil {
+			continue
+		}
+		out = append(out, q)
+	}
+	return out
+}
+
+func filterValidResourceRecords(records []*protocol.ResourceRecord) []*protocol.ResourceRecord {
+	if len(records) == 0 {
+		return records
+	}
+	out := records[:0]
+	for _, rr := range records {
+		if rr == nil || rr.Name == nil || isNilPipelineRData(rr.Data) {
+			continue
+		}
+		out = append(out, rr)
+	}
+	return out
+}
+
+func isNilPipelineRData(data protocol.RData) bool {
+	if data == nil {
+		return true
+	}
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
 
@@ -586,7 +688,9 @@ func cookieStage(h *integratedHandler) Stage {
 					optData.AddOption(protocol.OptionCodeCookie, cookieData)
 				}
 			}
-			_, _ = q.currentWriter.Write(resp)
+			if _, err := q.currentWriter.Write(resp); err != nil {
+				return true, err
+			}
 			return true, nil
 		}
 		if cookieData != nil {

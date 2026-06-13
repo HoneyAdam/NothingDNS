@@ -4,22 +4,16 @@ import (
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
-// ZoneService provides zone operations for both REST and MCP handlers.
-// It is the single source of truth for zone-related business logic,
-// avoiding duplication between the HTTP handler layer and the MCP tool layer.
+// ZoneService is the single source of truth for zone-related business
+// logic, kept separate from the HTTP handler layer.
 //
 // The service layer is intentionally transport-agnostic: it returns typed
-// DTOs (ZoneListResponse, ZoneDetailResponse) that each transport
-// layer formats for its own protocol (JSON HTTP vs MCP tool result).
+// DTOs (ZoneListResponse, ZoneDetailResponse) that the transport layer
+// formats for its own protocol.
 //
 // To add a new zone operation:
 //   - Add the business logic here (input validation, computation, error mapping)
 //   - REST handler calls the service method, formats the HTTP response
-//   - MCP handler calls the same service method, formats the tool result
-//
-// ✅ Wired: DNSToolsHandler.callZoneList/callZoneGet (MCP) now use
-// ZoneService. All zone read operations (ListZones, GetZone) go through
-// this service layer — no raw zone objects leak via MCP.
 type ZoneService struct {
 	zoneManager *zone.Manager
 }

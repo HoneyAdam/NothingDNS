@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/config"
@@ -32,6 +33,7 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 		lbConfig := upstream.LoadBalancerConfig{
 			Servers:         cfg.Upstream.Servers,
 			Strategy:        cfg.Upstream.Strategy,
+			Timeout:         parseDurationOrDefault(cfg.Resolution.Timeout, 5*time.Second),
 			HealthCheck:     parseDurationOrDefault(cfg.Upstream.HealthCheck, 30*time.Second),
 			FailoverTimeout: parseDurationOrDefault(cfg.Upstream.FailoverTimeout, 5*time.Second),
 			Region:          cfg.Upstream.Topology.Region,
@@ -60,18 +62,17 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 		var err error
 		mgr.LoadBalancer, err = upstream.NewLoadBalancer(lbConfig)
 		if err != nil {
-			logger.Warnf("Failed to initialize load balancer: %v", err)
-		} else {
-			totalBackends := 0
-			for _, group := range mgr.LoadBalancer.GetAnycastGroups() {
-				total, _ := group.Stats()
-				totalBackends += total
-			}
-			logger.Infof("Load balancer initialized with %d anycast groups (%d total backends)",
-				len(lbConfig.AnycastGroups), totalBackends)
-			if len(cfg.Upstream.Servers) > 0 {
-				logger.Infof("Load balancer also has %d standalone servers", len(cfg.Upstream.Servers))
-			}
+			return nil, fmt.Errorf("initializing upstream load balancer: %w", err)
+		}
+		totalBackends := 0
+		for _, group := range mgr.LoadBalancer.GetAnycastGroups() {
+			total, _ := group.Stats()
+			totalBackends += total
+		}
+		logger.Infof("Load balancer initialized with %d anycast groups (%d total backends)",
+			len(lbConfig.AnycastGroups), totalBackends)
+		if len(cfg.Upstream.Servers) > 0 {
+			logger.Infof("Load balancer also has %d standalone servers", len(cfg.Upstream.Servers))
 		}
 	} else {
 		// Use standard upstream client
@@ -84,10 +85,9 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 		var err error
 		mgr.Client, err = upstream.NewClient(upstreamConfig)
 		if err != nil {
-			logger.Warnf("Failed to initialize upstream client: %v", err)
-		} else {
-			logger.Infof("Upstream client initialized with %d servers", len(cfg.Upstream.Servers))
+			return nil, fmt.Errorf("initializing upstream client: %w", err)
 		}
+		logger.Infof("Upstream client initialized with %d servers", len(cfg.Upstream.Servers))
 	}
 
 	return mgr, nil
@@ -95,12 +95,26 @@ func NewUpstreamManager(cfg *config.Config, logger *util.Logger) (*UpstreamManag
 
 // Stop stops the upstream manager and its components.
 func (m *UpstreamManager) Stop() {
+	if m == nil {
+		return
+	}
 	if m.Client != nil {
-		_ = m.Client.Close()
+		logManagerStopError(m.logger, "upstream client", m.Client.Close())
 	}
 	if m.LoadBalancer != nil {
-		_ = m.LoadBalancer.Close()
+		logManagerStopError(m.logger, "upstream load balancer", m.LoadBalancer.Close())
 	}
+}
+
+func logManagerStopError(logger *util.Logger, component string, err error) {
+	if err == nil {
+		return
+	}
+	if logger != nil {
+		logger.Warnf("Failed to stop %s: %v", component, err)
+		return
+	}
+	util.Warnf("Failed to stop %s: %v", component, err)
 }
 
 // Resolver returns an adapter that implements the dnssec.Resolver interface.

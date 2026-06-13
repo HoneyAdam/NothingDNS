@@ -118,7 +118,7 @@ func TestServer_SetAuthStore(t *testing.T) {
 
 	cfg := &auth.Config{
 		Secret: "test-secret-that-is-long-enough",
-		Users:  []auth.User{{Username: "admin", Password: "pass", Role: auth.RoleAdmin}},
+		Users:  []auth.User{{Username: "admin", Password: "password", Role: auth.RoleAdmin}},
 	}
 	store, err := auth.NewStore(cfg)
 	if err != nil {

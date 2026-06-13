@@ -26,8 +26,11 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 	// Real server-wide counters (uptime, total/blocked queries, query rate,
 	// upstream latency) come from the metrics collector. Previously these
 	// fields were never set, so the dashboard showed permanent zeros.
-	if s.metrics != nil {
-		snap := s.metrics.Snapshot()
+	s.runtimeMu.RLock()
+	metricsCollector := s.metrics
+	s.runtimeMu.RUnlock()
+	if metricsCollector != nil {
+		snap := metricsCollector.Snapshot()
 		resp.Uptime = int(snap.UptimeSeconds)
 		resp.QueriesTotal = snap.QueriesTotal
 		resp.QueriesPerSec = snap.QueriesPerSec
@@ -66,12 +69,15 @@ func (s *Server) handleDashboardQueries(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if s.dashboardServer == nil {
+	s.runtimeMu.RLock()
+	dashboardServer := s.dashboardServer
+	s.runtimeMu.RUnlock()
+	if dashboardServer == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Dashboard not available")
 		return
 	}
 
-	stats := s.dashboardServer.GetStats()
+	stats := dashboardServer.GetStats()
 	queries, _ := stats.GetRecentQueries(0, 100)
 	s.writeJSON(w, http.StatusOK, queries)
 }
@@ -87,13 +93,16 @@ func (s *Server) handleDashboardZones(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.dashboardServer == nil {
+	s.runtimeMu.RLock()
+	dashboardServer := s.dashboardServer
+	s.runtimeMu.RUnlock()
+	if dashboardServer == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Dashboard not available")
 		return
 	}
 
 	// Proxy to dashboard server's handleZones
-	s.dashboardServer.ServeHTTP(w, r)
+	dashboardServer.ServeHTTP(w, r)
 }
 
 // handleQueryLog returns a paginated query log.
@@ -106,7 +115,10 @@ func (s *Server) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.dashboardServer == nil {
+	s.runtimeMu.RLock()
+	dashboardServer := s.dashboardServer
+	s.runtimeMu.RUnlock()
+	if dashboardServer == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Dashboard not available")
 		return
 	}
@@ -132,7 +144,7 @@ func (s *Server) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 		filter = filter[:maxFilterLen]
 	}
 
-	stats := s.dashboardServer.GetStats()
+	stats := dashboardServer.GetStats()
 	queries, total := stats.GetRecentQueriesFiltered(offset, limit, filter)
 
 	// Redact client IPs for non-admin operators (LOW-010)
@@ -140,6 +152,9 @@ func (s *Server) handleQueryLog(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]QueryLogEntry, 0, len(queries))
 	for _, q := range queries {
+		if q == nil {
+			continue
+		}
 		clientIP := q.ClientIP
 		if !isAdmin {
 			clientIP = redactIP(clientIP)
@@ -186,7 +201,10 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.dashboardServer == nil {
+	s.runtimeMu.RLock()
+	dashboardServer := s.dashboardServer
+	s.runtimeMu.RUnlock()
+	if dashboardServer == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Dashboard not available")
 		return
 	}
@@ -198,7 +216,7 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	stats := s.dashboardServer.GetStats()
+	stats := dashboardServer.GetStats()
 	domains := stats.GetTopDomains(limit)
 
 	s.writeJSON(w, http.StatusOK, &TopDomainsResponse{
@@ -217,12 +235,15 @@ func (s *Server) handleMetricsHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.metrics == nil {
+	s.runtimeMu.RLock()
+	metricsCollector := s.metrics
+	s.runtimeMu.RUnlock()
+	if metricsCollector == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Metrics not available")
 		return
 	}
 
-	history := s.metrics.GetHistory()
+	history := metricsCollector.GetHistory()
 	s.writeJSON(w, http.StatusOK, history)
 }
 

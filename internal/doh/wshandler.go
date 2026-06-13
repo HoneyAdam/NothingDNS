@@ -58,7 +58,11 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Handshake already wrote an HTTP error response.
 		return
 	}
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		if err := closeDoWSConn(conn); err != nil {
+			util.Warnf("dows: failed to close WebSocket connection: %v", err)
+		}
+	}()
 
 	// Per-connection rate limit (M-7). Without this, a single
 	// unauthenticated DoWS connection can flood the resolver — the
@@ -104,6 +108,17 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.dnsHandler.ServeDNS(rw, query)
 	}
+}
+
+type doWSCloser interface {
+	Close() error
+}
+
+func closeDoWSConn(conn doWSCloser) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
 }
 
 // wsResponseWriter implements server.ResponseWriter for DNS-over-WebSocket.

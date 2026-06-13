@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"embed"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"strings"
@@ -12,18 +13,49 @@ import (
 //go:embed all:static/dist
 var staticFS embed.FS
 
-// distFS is the embedded React SPA filesystem rooted at "static/dist".
-var distFS, _ = fs.Sub(staticFS, "static/dist")
+var (
+	distFS        fs.FS = emptyFS{}
+	indexHTML     []byte
+	staticInitErr error
 
-// DistFS exposes the embedded filesystem for use by the API server.
-var DistFS = distFS
+	// DistFS exposes the embedded filesystem for use by the API server.
+	DistFS fs.FS = distFS
+)
+
+func init() {
+	sub, err := fs.Sub(staticFS, "static/dist")
+	if err != nil {
+		staticInitErr = fmt.Errorf("dashboard: embedded static filesystem static/dist: %w", err)
+		return
+	}
+	distFS = sub
+	DistFS = distFS
+
+	data, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		staticInitErr = fmt.Errorf("dashboard: embedded static file index.html: %w", err)
+		return
+	}
+	indexHTML = data
+}
+
+type emptyFS struct{}
+
+func (emptyFS) Open(string) (fs.File, error) {
+	return nil, fs.ErrNotExist
+}
 
 // SPAHandler returns an http.Handler that serves the React SPA.
 // Static assets are served from /assets/. All other non-API, non-WebSocket
 // routes return index.html for client-side routing.
 func SPAHandler() http.Handler {
+	if staticInitErr != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "dashboard static assets unavailable", http.StatusInternalServerError)
+		})
+	}
+
 	fileServer := http.FileServer(http.FS(distFS))
-	indexHTML, _ := fs.ReadFile(distFS, "index.html")
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -44,7 +76,9 @@ func SPAHandler() http.Handler {
 
 		// All other routes: serve index.html for SPA client-side routing
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(indexHTML)
+		if _, err := w.Write(indexHTML); err != nil {
+			return
+		}
 	})
 }
 

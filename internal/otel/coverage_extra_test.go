@@ -106,8 +106,10 @@ func TestJaegerExporter_FlushServerError(t *testing.T) {
 	}
 	e.Export(span)
 
-	// Should not panic on server error
 	e.Flush()
+	if len(e.batch) != 1 {
+		t.Fatalf("server error should keep span batch for retry, got %d", len(e.batch))
+	}
 }
 
 func TestJaegerExporter_ExportMultipleSpans(t *testing.T) {

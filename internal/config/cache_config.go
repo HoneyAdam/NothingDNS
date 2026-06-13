@@ -41,15 +41,30 @@ func unmarshalCache(node *Node, cfg *CacheConfig) error {
 	}
 
 	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
-	cfg.Size = getInt(node, "size", cfg.Size)
-	cfg.DefaultTTL = getInt(node, "default_ttl", cfg.DefaultTTL)
-	cfg.MaxTTL = getInt(node, "max_ttl", cfg.MaxTTL)
-	cfg.MinTTL = getInt(node, "min_ttl", cfg.MinTTL)
-	cfg.NegativeTTL = getInt(node, "negative_ttl", cfg.NegativeTTL)
+	var err error
+	if cfg.Size, err = getRequiredInt(node, "size", cfg.Size); err != nil {
+		return err
+	}
+	if cfg.DefaultTTL, err = getRequiredInt(node, "default_ttl", cfg.DefaultTTL); err != nil {
+		return err
+	}
+	if cfg.MaxTTL, err = getRequiredInt(node, "max_ttl", cfg.MaxTTL); err != nil {
+		return err
+	}
+	if cfg.MinTTL, err = getRequiredInt(node, "min_ttl", cfg.MinTTL); err != nil {
+		return err
+	}
+	if cfg.NegativeTTL, err = getRequiredInt(node, "negative_ttl", cfg.NegativeTTL); err != nil {
+		return err
+	}
 	cfg.Prefetch = getBool(node, "prefetch", cfg.Prefetch)
-	cfg.PrefetchThreshold = getInt(node, "prefetch_threshold", cfg.PrefetchThreshold)
+	if cfg.PrefetchThreshold, err = getRequiredInt(node, "prefetch_threshold", cfg.PrefetchThreshold); err != nil {
+		return err
+	}
 	cfg.ServeStale = getBool(node, "serve_stale", cfg.ServeStale)
-	cfg.StaleGraceSecs = getInt(node, "stale_grace_secs", cfg.StaleGraceSecs)
+	if cfg.StaleGraceSecs, err = getRequiredInt(node, "stale_grace_secs", cfg.StaleGraceSecs); err != nil {
+		return err
+	}
 
 	return nil
 }

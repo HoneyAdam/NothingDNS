@@ -34,6 +34,10 @@ type nsecEntry struct {
 	SOA        *protocol.ResourceRecord // SOA from the NXDOMAIN response
 }
 
+func nsecEntryExpiredAt(entry *nsecEntry, now time.Time) bool {
+	return entry == nil || !now.Before(entry.ExpireTime)
+}
+
 // NewNSECCache creates a new aggressive NSEC cache.
 func NewNSECCache(maxSize int) *NSECCache {
 	if maxSize <= 0 {
@@ -65,26 +69,31 @@ func (nc *NSECCache) AddFromResponse(resp *protocol.Message, validated bool) {
 	// Extract SOA from authority section
 	var soa *protocol.ResourceRecord
 	for _, rr := range resp.Authorities {
-		if rr.Type == protocol.TypeSOA {
-			soa = rr.Copy()
-			break
+		if rr == nil || rr.Name == nil || rr.Type != protocol.TypeSOA {
+			continue
 		}
+		soaData, ok := rr.Data.(*protocol.RDataSOA)
+		if !ok || soaData == nil {
+			continue
+		}
+		soa = rr.Copy()
+		break
 	}
 
 	// Extract NSEC records from authority section
 	for _, rr := range resp.Authorities {
-		if rr.Type != protocol.TypeNSEC {
+		if rr == nil || rr.Name == nil || rr.Type != protocol.TypeNSEC {
 			continue
 		}
 		nsec, ok := rr.Data.(*protocol.RDataNSEC)
-		if !ok || nsec.NextDomain == nil {
+		if !ok || nsec == nil || nsec.NextDomain == nil {
 			continue
 		}
 
 		// Use the SOA minimum TTL or the NSEC TTL, whichever is smaller
 		ttl := rr.TTL
 		if soa != nil {
-			if soaData, ok := soa.Data.(*protocol.RDataSOA); ok {
+			if soaData, ok := soa.Data.(*protocol.RDataSOA); ok && soaData != nil {
 				if soaData.Minimum < ttl {
 					ttl = soaData.Minimum
 				}
@@ -103,9 +112,10 @@ func (nc *NSECCache) AddFromResponse(resp *protocol.Message, validated bool) {
 		key := strings.ToLower(rr.Name.String())
 		nc.entries[key] = entry
 
-		// Evict expired entries if at capacity
+		// Evict expired entries first, then live entries if needed so
+		// validated NSEC floods cannot grow the cache past maxSize.
 		if len(nc.entries) > nc.maxSize {
-			nc.evictExpired()
+			nc.evictToMaxSize()
 		}
 		nc.mu.Unlock()
 	}
@@ -114,17 +124,23 @@ func (nc *NSECCache) AddFromResponse(resp *protocol.Message, validated bool) {
 // Lookup checks if the queried name is provably non-existent based on
 // cached NSEC records. Returns a synthesized NXDOMAIN response if so.
 func (nc *NSECCache) Lookup(qname string, qtype uint16) *protocol.Message {
+	return nc.lookupAt(qname, qtype, time.Now())
+}
+
+func (nc *NSECCache) lookupAt(qname string, qtype uint16, now time.Time) *protocol.Message {
 	nc.mu.RLock()
 	defer nc.mu.RUnlock()
 
-	now := time.Now()
 	qnameParsed, err := protocol.ParseName(qname)
 	if err != nil {
 		return nil
 	}
 
 	for _, entry := range nc.entries {
-		if now.After(entry.ExpireTime) {
+		if entry == nil || entry.Owner == nil || entry.NextDomain == nil {
+			continue
+		}
+		if nsecEntryExpiredAt(entry, now) {
 			continue
 		}
 
@@ -193,16 +209,15 @@ func (nc *NSECCache) synthesizeNXDOMAIN(qname string, qtype uint16, entry *nsecE
 	resp.Header.Flags.AD = true // This was validated
 
 	// Add SOA to authority section
-	if entry.SOA != nil {
-		resp.Authorities = append(resp.Authorities, entry.SOA.Copy())
-	}
+	ttl := remainingNSECTTL(entry)
+	resp.Authorities = appendSOAWithTTL(resp.Authorities, entry, ttl)
 
 	// Add the proving NSEC record
 	nsecRR := &protocol.ResourceRecord{
 		Name:  entry.Owner,
 		Type:  protocol.TypeNSEC,
 		Class: protocol.ClassIN,
-		TTL:   uint32(time.Until(entry.ExpireTime).Seconds()),
+		TTL:   ttl,
 		Data: &protocol.RDataNSEC{
 			NextDomain: entry.NextDomain,
 			TypeBitMap: entry.TypeBitMap,
@@ -226,16 +241,15 @@ func (nc *NSECCache) synthesizeNODATA(qname string, qtype uint16, entry *nsecEnt
 	resp.Header.Flags.AD = true
 
 	// Add SOA to authority section
-	if entry.SOA != nil {
-		resp.Authorities = append(resp.Authorities, entry.SOA.Copy())
-	}
+	ttl := remainingNSECTTL(entry)
+	resp.Authorities = appendSOAWithTTL(resp.Authorities, entry, ttl)
 
 	// Add the NSEC proving the type doesn't exist
 	nsecRR := &protocol.ResourceRecord{
 		Name:  entry.Owner,
 		Type:  protocol.TypeNSEC,
 		Class: protocol.ClassIN,
-		TTL:   uint32(time.Until(entry.ExpireTime).Seconds()),
+		TTL:   ttl,
 		Data: &protocol.RDataNSEC{
 			NextDomain: entry.NextDomain,
 			TypeBitMap: entry.TypeBitMap,
@@ -246,11 +260,51 @@ func (nc *NSECCache) synthesizeNODATA(qname string, qtype uint16, entry *nsecEnt
 	return resp
 }
 
+func remainingNSECTTL(entry *nsecEntry) uint32 {
+	if entry == nil {
+		return 0
+	}
+	return remainingSecondsUint32(time.Until(entry.ExpireTime))
+}
+
+func appendSOAWithTTL(authorities []*protocol.ResourceRecord, entry *nsecEntry, ttl uint32) []*protocol.ResourceRecord {
+	if entry == nil || entry.SOA == nil {
+		return authorities
+	}
+	soa := entry.SOA.Copy()
+	if soa.TTL > ttl {
+		soa.TTL = ttl
+	}
+	return append(authorities, soa)
+}
+
 func (nc *NSECCache) evictExpired() {
-	now := time.Now()
+	nc.evictExpiredAt(time.Now())
+}
+
+func (nc *NSECCache) evictExpiredAt(now time.Time) {
 	for key, entry := range nc.entries {
-		if now.After(entry.ExpireTime) {
+		if nsecEntryExpiredAt(entry, now) {
 			delete(nc.entries, key)
 		}
+	}
+}
+
+func (nc *NSECCache) evictToMaxSize() {
+	nc.evictExpired()
+
+	for len(nc.entries) > nc.maxSize {
+		var oldestKey string
+		var oldestExpire time.Time
+		for key, entry := range nc.entries {
+			if oldestKey == "" || entry.ExpireTime.Before(oldestExpire) {
+				oldestKey = key
+				oldestExpire = entry.ExpireTime
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(nc.entries, oldestKey)
 	}
 }

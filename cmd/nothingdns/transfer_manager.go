@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -50,12 +51,21 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 	mgr.result.IXFRServer = transfer.NewIXFRServer(mgr.result.AXFRServer)
 	logger.Infof("IXFR server initialized for incremental transfers")
 
-	// Wire KV journal store for persistent IXFR journals
-	journalDataDir := cfg.ZoneDir
+	// Wire KV journal store for persistent IXFR journals. Prefer the same
+	// explicit data directory used by the embedded zone DB so production does
+	// not depend on the daemon's working directory when zone_dir is unset.
+	journalDataDir := cfg.Storage.DataDir
+	if journalDataDir == "" {
+		journalDataDir = cfg.ZoneDir
+	}
 	if journalDataDir == "" {
 		journalDataDir = "."
 	}
-	mgr.result.JournalStore = transfer.NewKVJournalStore(journalDataDir)
+	journalStore, err := transfer.OpenKVJournalStore(journalDataDir)
+	if err != nil {
+		return nil, fmt.Errorf("initializing IXFR journal store: %w", err)
+	}
+	mgr.result.JournalStore = journalStore
 	mgr.result.IXFRServer.SetJournalStore(mgr.result.JournalStore)
 	logger.Infof("IXFR journal store initialized at %s", journalDataDir)
 
@@ -103,6 +113,9 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 func (m *TransferManager) SetZonesMu(zonesMu *sync.RWMutex) {
 	if m.result.AXFRServer != nil {
 		m.result.AXFRServer.SetZonesMu(zonesMu)
+	}
+	if m.result.NotifyHandler != nil {
+		m.result.NotifyHandler.SetZonesMu(zonesMu)
 	}
 	if m.result.DDNSHandler != nil {
 		m.result.DDNSHandler.SetZonesMu(zonesMu)

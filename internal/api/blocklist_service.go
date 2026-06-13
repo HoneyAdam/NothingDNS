@@ -4,9 +4,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/blocklist"
 )
 
-// BlocklistService provides blocklist operations for both REST and MCP handlers.
-// It is the single source of truth for blocklist-related business logic,
-// avoiding duplication between the HTTP handler layer and the MCP tool layer.
+// BlocklistService is the single source of truth for blocklist-related
+// business logic, kept separate from the HTTP handler layer.
 type BlocklistService struct {
 	bl *blocklist.Blocklist
 }

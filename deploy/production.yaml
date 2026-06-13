@@ -26,7 +26,6 @@ server:
     bind: "127.0.0.1:8080"                       # Local only; reverse proxy may terminate public TLS
     tls_cert_file: /etc/nothingdns/tls/prod.crt  # Required when serving DoH from this listener
     tls_key_file: /etc/nothingdns/tls/prod.key
-    auth_required: true                           # Refuse unauthenticated API access (VULN-035)
     # Multi-user RBAC auth — replace placeholders below before deploying.
     # auth_secret must be a 256-bit (32-byte) random string; auth_token
     # is intentionally disabled in favor of per-user credentials.
@@ -89,6 +88,10 @@ dnssec:
   ignore_time: false
   require_dnssec: false                     # Enforce if all zones are signed
 
+storage:
+  data_dir: /var/lib/nothingdns             # Persistent API-created zones and IXFR journals
+  encryption_key: "${NOTHINGDNS_STORAGE_ENCRYPTION_KEY}"
+
 cluster:
   enabled: true
   node_id: ""                               # Set via env: NOTHINGDNS_NODE_ID
@@ -99,6 +102,10 @@ cluster:
   weight: 100
   seed_nodes: []                            # Set via env: NOTHINGDNS_SEED_NODES
   cache_sync: true
+  consensus_mode: raft
+  data_dir: /var/lib/nothingdns/cluster
+  encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
+  snapshot_encryption_key: "${NOTHINGDNS_CLUSTER_SNAPSHOT_ENCRYPTION_KEY}"
 
 # Production zones
 zones:

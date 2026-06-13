@@ -24,6 +24,9 @@ func (r *RDataSOA) Type() uint16 { return TypeSOA }
 
 // Pack serializes the SOA record.
 func (r *RDataSOA) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SOA record")
+	}
 	startOffset := offset
 
 	// MName
@@ -70,6 +73,9 @@ func (r *RDataSOA) Pack(buf []byte, offset int) (int, error) {
 // UnpackResourceRecord — corrupting every subsequent record's
 // offset. Same class as the TXT rdlength-bypass fix.
 func (r *RDataSOA) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SOA record")
+	}
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 	if endOffset > len(buf) {
@@ -121,6 +127,9 @@ func (r *RDataSOA) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 
 // String returns the SOA record data.
 func (r *RDataSOA) String() string {
+	if r == nil {
+		return ""
+	}
 	mname := "."
 	rname := "."
 	if r.MName != nil {
@@ -136,6 +145,9 @@ func (r *RDataSOA) String() string {
 
 // Len returns the wire length.
 func (r *RDataSOA) Len() int {
+	if r == nil {
+		return 0
+	}
 	mnameLen := 1
 	rnameLen := 1
 	if r.MName != nil {
@@ -149,6 +161,9 @@ func (r *RDataSOA) Len() int {
 
 // Copy creates a copy.
 func (r *RDataSOA) Copy() RData {
+	if r == nil {
+		return nil
+	}
 	var mname, rname *Name
 	if r.MName != nil {
 		mname = NewName(r.MName.Labels, r.MName.FQDN)
@@ -184,6 +199,9 @@ func (r *RDataSRV) Type() uint16 { return TypeSRV }
 
 // Pack serializes the SRV record.
 func (r *RDataSRV) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SRV record")
+	}
 	startOffset := offset
 
 	// Priority, Weight, Port
@@ -214,6 +232,9 @@ func (r *RDataSRV) Pack(buf []byte, offset int) (int, error) {
 // next RR's start while consuming the Target's name + compression
 // pointer bytes. Same rdlength-bypass class as the TXT / SOA fixes.
 func (r *RDataSRV) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil SRV record")
+	}
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 	if endOffset > len(buf) {
@@ -247,6 +268,9 @@ func (r *RDataSRV) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 
 // String returns the SRV record data.
 func (r *RDataSRV) String() string {
+	if r == nil {
+		return ""
+	}
 	target := "."
 	if r.Target != nil {
 		target = r.Target.String()
@@ -256,6 +280,9 @@ func (r *RDataSRV) String() string {
 
 // Len returns the wire length.
 func (r *RDataSRV) Len() int {
+	if r == nil {
+		return 0
+	}
 	if r.Target == nil {
 		return 7
 	}
@@ -264,6 +291,9 @@ func (r *RDataSRV) Len() int {
 
 // Copy creates a copy.
 func (r *RDataSRV) Copy() RData {
+	if r == nil {
+		return nil
+	}
 	var target *Name
 	if r.Target != nil {
 		target = NewName(r.Target.Labels, r.Target.FQDN)

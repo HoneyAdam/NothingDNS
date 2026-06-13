@@ -1,8 +1,12 @@
 package mdns
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,6 +126,51 @@ func TestResponder_Start_Disabled(t *testing.T) {
 	}
 	// Stop should be safe even if never truly started
 	r.Stop()
+}
+
+func TestResponder_RestartStopClosesNewConnection(t *testing.T) {
+	port := freeUDPPort(t)
+	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
+	cfg := Config{
+		Enabled:     true,
+		MulticastIP: DefaultMulticastIP,
+		Port:        port,
+	}
+	r := NewResponder(cfg, logger)
+
+	if err := r.Start(); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	r.Stop()
+
+	if err := r.Start(); err != nil {
+		t.Fatalf("second Start failed: %v", err)
+	}
+	secondConn := r.conn
+	if secondConn == nil {
+		t.Fatal("second Start did not create a UDP connection")
+	}
+	r.Stop()
+
+	if err := secondConn.SetReadDeadline(time.Now()); err == nil {
+		t.Fatal("second Stop left the restarted UDP connection open")
+	}
+}
+
+func freeUDPPort(t *testing.T) int {
+	t.Helper()
+
+	addr, err := net.ResolveUDPAddr("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("ResolveUDPAddr failed: %v", err)
+	}
+	conn, err := net.ListenUDP("udp4", addr)
+	if err != nil {
+		t.Fatalf("ListenUDP failed: %v", err)
+	}
+	defer conn.Close()
+
+	return conn.LocalAddr().(*net.UDPAddr).Port
 }
 
 // ---------------------------------------------------------------------------
@@ -902,6 +951,61 @@ func TestResponder_SendQuery(t *testing.T) {
 	r.sendQuery("host.local.", protocol.TypeANY)
 }
 
+func TestResponderSetReceiveDeadlineReportsError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := util.NewLogger(util.DEBUG, util.TextFormat, &buf)
+	r := NewResponder(DefaultConfig(), logger)
+	deadlineErr := errors.New("deadline failed")
+	conn := &deadlineErrorConn{err: deadlineErr}
+
+	if r.setReceiveDeadline(conn, time.Now()) {
+		t.Fatal("setReceiveDeadline should return false on error")
+	}
+	if conn.calls != 1 {
+		t.Fatalf("SetReadDeadline calls = %d, want 1", conn.calls)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mDNS receive deadline error: deadline failed") {
+		t.Fatalf("log output missing deadline error: %q", logged)
+	}
+}
+
+func TestResponderCloseUDPConnReportsError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := util.NewLogger(util.WARN, util.TextFormat, &buf)
+	r := NewResponder(DefaultConfig(), logger)
+	closeErr := errors.New("close failed")
+	conn := &closeErrorConn{err: closeErr}
+
+	r.closeUDPConn(conn)
+
+	if conn.calls != 1 {
+		t.Fatalf("Close calls = %d, want 1", conn.calls)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mDNS UDP close error: close failed") {
+		t.Fatalf("log output missing close error: %q", logged)
+	}
+}
+
+type deadlineErrorConn struct {
+	err   error
+	calls int
+}
+
+func (c *deadlineErrorConn) SetReadDeadline(_ time.Time) error {
+	c.calls++
+	return c.err
+}
+
+type closeErrorConn struct {
+	err   error
+	calls int
+}
+
+func (c *closeErrorConn) Close() error {
+	c.calls++
+	return c.err
+}
+
 // ---------------------------------------------------------------------------
 // sendGoodbye (no-op stub)
 // ---------------------------------------------------------------------------
@@ -912,6 +1016,35 @@ func TestResponder_SendGoodbye(t *testing.T) {
 
 	r.sendGoodbye("service._http._tcp.local.")
 	// No panic = pass
+}
+
+func TestWriteUDPPacketRejectsPartialDatagram(t *testing.T) {
+	conn := &partialUDPWriter{maxWrite: 2}
+	dst := &net.UDPAddr{IP: net.ParseIP("224.0.0.251"), Port: 5353}
+
+	_, err := writeUDPPacket(conn, []byte{1, 2, 3}, dst)
+	if err != io.ErrShortWrite {
+		t.Fatalf("writeUDPPacket error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if conn.calls != 1 {
+		t.Fatalf("writeUDPPacket should not retry datagrams, got %d calls", conn.calls)
+	}
+}
+
+type partialUDPWriter struct {
+	maxWrite int
+	calls    int
+}
+
+func (w *partialUDPWriter) WriteToUDP(p []byte, _ *net.UDPAddr) (int, error) {
+	w.calls++
+	if w.maxWrite <= 0 {
+		return 0, nil
+	}
+	if w.maxWrite < len(p) {
+		return w.maxWrite, nil
+	}
+	return len(p), nil
 }
 
 // ---------------------------------------------------------------------------

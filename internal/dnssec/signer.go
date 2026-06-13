@@ -30,6 +30,27 @@ type SigningKey struct {
 	Timing *KeyTiming // Scheduled timing for state transitions (nil = always active)
 }
 
+func cloneSigningKey(key *SigningKey) *SigningKey {
+	if key == nil {
+		return nil
+	}
+	clone := *key
+	if key.PrivateKey != nil {
+		privateKey := *key.PrivateKey
+		clone.PrivateKey = &privateKey
+	}
+	if key.DNSKEY != nil {
+		if dnskey, ok := key.DNSKEY.Copy().(*protocol.RDataDNSKEY); ok {
+			clone.DNSKEY = dnskey
+		}
+	}
+	if key.Timing != nil {
+		timing := *key.Timing
+		clone.Timing = &timing
+	}
+	return &clone
+}
+
 // SignerConfig holds signing parameters.
 type SignerConfig struct {
 	NSEC3Enabled      bool
@@ -82,7 +103,7 @@ func (s *Signer) GetKeys() []*SigningKey {
 	defer s.mu.RUnlock()
 	result := make([]*SigningKey, 0, len(s.keys))
 	for _, key := range s.keys {
-		result = append(result, key)
+		result = append(result, cloneSigningKey(key))
 	}
 	return result
 }
@@ -94,7 +115,7 @@ func (s *Signer) GetKSKs() []*SigningKey {
 	var result []*SigningKey
 	for _, key := range s.keys {
 		if key.IsKSK {
-			result = append(result, key)
+			result = append(result, cloneSigningKey(key))
 		}
 	}
 	return result
@@ -107,7 +128,7 @@ func (s *Signer) GetZSKs() []*SigningKey {
 	var result []*SigningKey
 	for _, key := range s.keys {
 		if key.IsZSK {
-			result = append(result, key)
+			result = append(result, cloneSigningKey(key))
 		}
 	}
 	return result
@@ -121,7 +142,7 @@ func (s *Signer) GetActiveKSKs() []*SigningKey {
 	var result []*SigningKey
 	for _, key := range s.keys {
 		if key.IsKSK && isActive(key) {
-			result = append(result, key)
+			result = append(result, cloneSigningKey(key))
 		}
 	}
 	return result
@@ -135,7 +156,7 @@ func (s *Signer) GetActiveZSKs() []*SigningKey {
 	var result []*SigningKey
 	for _, key := range s.keys {
 		if key.IsZSK && isActive(key) {
-			result = append(result, key)
+			result = append(result, cloneSigningKey(key))
 		}
 	}
 	return result
@@ -170,6 +191,23 @@ func (s *Signer) SetKeyTiming(keyTag uint16, timing *KeyTiming) {
 
 // GenerateKeyPair generates a new key pair for the zone.
 func (s *Signer) GenerateKeyPair(algorithm uint8, isKSK bool) (*SigningKey, error) {
+	const maxKeyTagAttempts = 16
+
+	for attempt := 0; attempt < maxKeyTagAttempts; attempt++ {
+		key, err := s.generateKeyPairOnce(algorithm, isKSK)
+		if err != nil {
+			return nil, err
+		}
+		if key.KeyTag != 0 {
+			s.AddKey(key)
+			return key, nil
+		}
+	}
+
+	return nil, fmt.Errorf("generated DNSSEC key tag was zero after %d attempts", maxKeyTagAttempts)
+}
+
+func (s *Signer) generateKeyPairOnce(algorithm uint8, isKSK bool) (*SigningKey, error) {
 	priv, pub, err := GenerateKeyPair(algorithm, isKSK)
 	if err != nil {
 		return nil, err
@@ -203,7 +241,6 @@ func (s *Signer) GenerateKeyPair(algorithm uint8, isKSK bool) (*SigningKey, erro
 		IsZSK:      !isKSK,
 	}
 
-	s.AddKey(signingKey)
 	return signingKey, nil
 }
 
@@ -255,8 +292,8 @@ func (s *Signer) SignZone(records []*protocol.ResourceRecord) ([]*protocol.Resou
 
 	// Calculate signature validity
 	now := time.Now()
-	inception := uint32(now.Add(-s.config.InceptionOffset).Unix())
-	expiration := uint32(now.Add(s.config.SignatureValidity).Unix())
+	inception := signerUnixTime(now.Add(-s.config.InceptionOffset))
+	expiration := signerUnixTime(now.Add(s.config.SignatureValidity))
 
 	// Sign DNSKEY RRSet with active KSKs only.
 	//
@@ -345,8 +382,12 @@ func (s *Signer) SignZone(records []*protocol.ResourceRecord) ([]*protocol.Resou
 
 // SignRRSet creates an RRSIG record for an RRSet.
 func (s *Signer) SignRRSet(rrSet []*protocol.ResourceRecord, key *SigningKey, inception, expiration uint32) (*protocol.ResourceRecord, error) {
-	if len(rrSet) == 0 {
-		return nil, fmt.Errorf("cannot sign empty RRSet")
+	ownerName, rrtype, ttl, err := validateRRSetForSigning(rrSet)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateSigningKey(key); err != nil {
+		return nil, err
 	}
 
 	// Sort records canonically
@@ -354,13 +395,12 @@ func (s *Signer) SignRRSet(rrSet []*protocol.ResourceRecord, key *SigningKey, in
 	copy(sorted, rrSet)
 	canonicalSort(sorted)
 
-	// Get owner name and type from first record
-	ownerName := sorted[0].Name.String()
-	rrtype := sorted[0].Type
-	ttl := sorted[0].TTL
-
 	// Count labels
-	labels := uint8(len(splitLabels(ownerName)))
+	labelCount := len(splitLabels(ownerName))
+	if labelCount > 0xff {
+		return nil, fmt.Errorf("owner name has too many labels for RRSIG: %d (max 255)", labelCount)
+	}
+	labels := uint8(labelCount)
 
 	// Create RRSIG record
 	signerName, err := protocol.ParseName(s.zone)
@@ -410,8 +450,78 @@ func (s *Signer) SignRRSet(rrSet []*protocol.ResourceRecord, key *SigningKey, in
 	return rrsigRR, nil
 }
 
+func validateRRSetForSigning(rrSet []*protocol.ResourceRecord) (string, uint16, uint32, error) {
+	if len(rrSet) == 0 {
+		return "", 0, 0, fmt.Errorf("cannot sign empty RRSet")
+	}
+
+	first := rrSet[0]
+	if first == nil {
+		return "", 0, 0, fmt.Errorf("nil RR in RRSet")
+	}
+	if first.Name == nil {
+		return "", 0, 0, fmt.Errorf("nil RR owner name")
+	}
+	if first.Data == nil {
+		return "", 0, 0, fmt.Errorf("nil RDATA for %s type %d", first.Name.String(), first.Type)
+	}
+
+	ownerName := first.Name.String()
+	rrtype := first.Type
+	class := first.Class
+	ttl := first.TTL
+	for i, rr := range rrSet[1:] {
+		index := i + 1
+		if rr == nil {
+			return "", 0, 0, fmt.Errorf("nil RR in RRSet")
+		}
+		if rr.Name == nil {
+			return "", 0, 0, fmt.Errorf("nil RR owner name")
+		}
+		if rr.Data == nil {
+			return "", 0, 0, fmt.Errorf("nil RDATA for %s type %d", rr.Name.String(), rr.Type)
+		}
+		if rr.Name.String() != ownerName || rr.Type != rrtype || rr.Class != class {
+			return "", 0, 0, fmt.Errorf("record %d does not belong to RRSet %s type %d class %d", index, ownerName, rrtype, class)
+		}
+	}
+
+	return ownerName, rrtype, ttl, nil
+}
+
+func validateSigningKey(key *SigningKey) error {
+	if key == nil {
+		return fmt.Errorf("nil signing key")
+	}
+	if key.DNSKEY == nil {
+		return fmt.Errorf("nil DNSKEY in signing key")
+	}
+	if key.PrivateKey == nil {
+		return fmt.Errorf("nil private key in signing key")
+	}
+	return nil
+}
+
+func signerUnixTime(t time.Time) uint32 {
+	sec := t.Unix()
+	if sec <= 0 {
+		return 0
+	}
+	if sec > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(sec)
+}
+
 // createSignedData creates the canonical data that was signed.
 func (s *Signer) createSignedData(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) ([]byte, error) {
+	if rrsig == nil {
+		return nil, fmt.Errorf("nil RRSIG")
+	}
+	if rrsig.SignerName == nil {
+		return nil, fmt.Errorf("nil RRSIG signer name")
+	}
+
 	// Build the RRSIG RDATA portion (without signature)
 	// TypeCovered | Algorithm | Labels | OriginalTTL | Expiration | Inception | KeyTag | SignerName
 
@@ -447,6 +557,16 @@ func (s *Signer) createSignedData(rrSet []*protocol.ResourceRecord, rrsig *proto
 
 	// Add canonical owner name for each RR in the set
 	for _, rr := range rrSet {
+		if rr == nil {
+			return nil, fmt.Errorf("nil RR in RRSet")
+		}
+		if rr.Name == nil {
+			return nil, fmt.Errorf("nil RR owner name")
+		}
+		if rr.Data == nil {
+			return nil, fmt.Errorf("nil RDATA for %s type %d", rr.Name.String(), rr.Type)
+		}
+
 		ownerData := protocol.CanonicalWireName(rr.Name.String())
 		data = append(data, ownerData...)
 
@@ -461,12 +581,19 @@ func (s *Signer) createSignedData(rrSet []*protocol.ResourceRecord, rrsig *proto
 			byte(rrsig.OriginalTTL>>8), byte(rrsig.OriginalTTL))
 
 		// RData length (2 bytes) and RData
-		buf := make([]byte, rr.Data.Len())
+		rdataLen := rr.Data.Len()
+		if rdataLen > 0xffff {
+			return nil, fmt.Errorf("RDATA for %s type %d too large: %d bytes (max 65535)", rr.Name.String(), rr.Type, rdataLen)
+		}
+		buf := make([]byte, rdataLen)
 		n, err := rr.Data.Pack(buf, 0)
 		if err != nil {
 			return nil, fmt.Errorf("packing RDATA for %s type %d: %w", rr.Name.String(), rr.Type, err)
 		}
 		rdata := buf[:n]
+		if len(rdata) > 0xffff {
+			return nil, fmt.Errorf("RDATA for %s type %d too large: %d bytes (max 65535)", rr.Name.String(), rr.Type, len(rdata))
+		}
 		data = append(data, byte(len(rdata)>>8), byte(len(rdata)))
 		data = append(data, rdata...)
 	}

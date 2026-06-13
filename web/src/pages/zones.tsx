@@ -9,6 +9,21 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { api, type Zone } from '@/lib/api';
 import { Globe, Plus, Trash2, ExternalLink, Search } from 'lucide-react';
 
+function normalizeZoneName(name: string): string {
+  const trimmed = name.trim().toLowerCase();
+  return trimmed.endsWith('.') ? trimmed : `${trimmed}.`;
+}
+
+function defaultNameserverFor(zoneName: string): string {
+  const zone = normalizeZoneName(zoneName || 'example.com');
+  return `ns1.${zone}`;
+}
+
+function defaultAdminEmailFor(zoneName: string): string {
+  const zone = normalizeZoneName(zoneName || 'example.com');
+  return `admin.${zone}`;
+}
+
 export function ZonesPage() {
   const [zones, setZones] = useState<Zone[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,16 +60,30 @@ export function ZonesPage() {
 }
 
 function CreateZoneDialog({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
-  const [name, setName] = useState(''); const [ttl, setTTL] = useState('3600'); const [email, setEmail] = useState(''); const [ns, setNs] = useState(''); const [saving, setSaving] = useState(false); const [error, setError] = useState('');
+  const [name, setName] = useState('');
+  const [ttl, setTTL] = useState('3600');
+  const [email, setEmail] = useState(defaultAdminEmailFor(''));
+  const [ns, setNs] = useState(defaultNameserverFor(''));
+  const [emailTouched, setEmailTouched] = useState(false);
+  const [nsTouched, setNsTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!open) return;
+    if (!emailTouched) setEmail(defaultAdminEmailFor(name));
+    if (!nsTouched) setNs(defaultNameserverFor(name));
+  }, [open, name, emailTouched, nsTouched]);
+
   const handle = async () => {
     setError(''); if (!name.trim()) { setError('Zone name is required'); return; } const nameservers = ns.split('\n').map((s) => s.trim()).filter(Boolean); if (!nameservers.length) { setError('At least one nameserver is required'); return; }
-    setSaving(true); try { await api('POST', '/api/v1/zones', { name: name.trim(), ttl: parseInt(ttl) || 3600, admin_email: email.trim(), nameservers }); setName(''); setTTL('3600'); setEmail(''); setNs(''); onCreated(); onClose(); } catch (e) { setError(e instanceof Error ? e.message : 'Failed'); } finally { setSaving(false); }
+    setSaving(true); try { await api('POST', '/api/v1/zones', { name: normalizeZoneName(name), ttl: parseInt(ttl) || 3600, admin_email: email.trim(), nameservers }); setName(''); setTTL('3600'); setEmail(defaultAdminEmailFor('')); setNs(defaultNameserverFor('')); setEmailTouched(false); setNsTouched(false); onCreated(); onClose(); } catch (e) { setError(e instanceof Error ? e.message : 'Failed'); } finally { setSaving(false); }
   };
   return (<Dialog open={open} onClose={onClose}><DialogTitle>Create New Zone</DialogTitle><div className="space-y-4 mt-5">
     {error && <div className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</div>}
     <div><label className="text-sm font-medium mb-1.5 block">Zone Name</label><Input placeholder="example.com." value={name} onChange={(e) => setName(e.target.value)} autoFocus /></div>
-    <div className="grid grid-cols-2 gap-4"><div><label className="text-sm font-medium mb-1.5 block">Default TTL</label><Input type="number" value={ttl} onChange={(e) => setTTL(e.target.value)} /></div><div><label className="text-sm font-medium mb-1.5 block">Admin Email</label><Input placeholder="admin.example.com." value={email} onChange={(e) => setEmail(e.target.value)} /></div></div>
-    <div><label className="text-sm font-medium mb-1.5 block">Nameservers (one per line)</label><Textarea rows={3} placeholder={"ns1.example.com.\nns2.example.com."} value={ns} onChange={(e) => setNs(e.target.value)} /></div>
+    <div className="grid grid-cols-2 gap-4"><div><label className="text-sm font-medium mb-1.5 block">Default TTL</label><Input type="number" value={ttl} onChange={(e) => setTTL(e.target.value)} /></div><div><label className="text-sm font-medium mb-1.5 block">Admin Email</label><Input placeholder="admin.example.com." value={email} onChange={(e) => { setEmailTouched(true); setEmail(e.target.value); }} /></div></div>
+    <div><label className="text-sm font-medium mb-1.5 block">Nameservers (one per line)</label><Textarea rows={3} placeholder={"ns1.example.com.\nns2.example.com."} value={ns} onChange={(e) => { setNsTouched(true); setNs(e.target.value); }} /></div>
     <div className="flex justify-end gap-2 pt-2"><Button variant="outline" onClick={onClose}>Cancel</Button><Button onClick={handle} disabled={saving}>{saving ? 'Creating...' : 'Create Zone'}</Button></div>
   </div></Dialog>);
 }

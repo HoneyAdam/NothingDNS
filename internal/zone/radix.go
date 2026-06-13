@@ -19,12 +19,28 @@ func NewRadixTree() *RadixTree {
 	}
 }
 
+func (t *RadixTree) ensureRoot() *radixNode {
+	if t == nil {
+		return nil
+	}
+	if t.root == nil {
+		t.root = &radixNode{children: make(map[string]*radixNode)}
+	}
+	return t.root
+}
+
 func (t *RadixTree) Insert(origin string, z *Zone) {
 	labels := splitDomainReversed(origin)
-	node := t.root
+	node := t.ensureRoot()
+	if node == nil {
+		return
+	}
 	for _, label := range labels {
 		if label == "" {
 			label = "."
+		}
+		if node.children == nil {
+			node.children = make(map[string]*radixNode)
 		}
 		child, ok := node.children[label]
 		if !ok {
@@ -37,6 +53,9 @@ func (t *RadixTree) Insert(origin string, z *Zone) {
 }
 
 func (t *RadixTree) Find(name string) *Zone {
+	if t == nil || t.root == nil {
+		return nil
+	}
 	labels := splitDomainReversed(name)
 	node := t.root
 	var best *Zone
@@ -59,6 +78,27 @@ func (t *RadixTree) Find(name string) *Zone {
 		}
 	}
 	return best
+}
+
+func (t *RadixTree) List() map[string]*Zone {
+	result := make(map[string]*Zone)
+	if t == nil || t.root == nil {
+		return result
+	}
+	t.root.collectZones(result)
+	return result
+}
+
+func (n *radixNode) collectZones(result map[string]*Zone) {
+	if n == nil {
+		return
+	}
+	if n.value != nil {
+		result[n.value.Origin] = n.value
+	}
+	for _, child := range n.children {
+		child.collectZones(result)
+	}
 }
 
 func splitDomainReversed(name string) []string {

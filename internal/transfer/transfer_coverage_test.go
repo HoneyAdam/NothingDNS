@@ -1248,9 +1248,9 @@ func TestHandleUpdate_DeleteNameAuthority(t *testing.T) {
 			{Name: name, QType: protocol.TypeSOA, QClass: protocol.ClassIN},
 		},
 		Authorities: []*protocol.ResourceRecord{
-			// Delete name operation (ClassNONE + TypeANY)
+			// Delete name operation (ClassANY + TypeANY)
 			{Name: mustParseName2("test.example.com."), Type: protocol.TypeANY,
-				Class: protocol.ClassNONE, TTL: 0,
+				Class: protocol.ClassANY, TTL: 0,
 				Data: &protocol.RDataA{Address: [4]byte{0, 0, 0, 0}},
 			},
 		},
@@ -1263,7 +1263,7 @@ func TestHandleUpdate_DeleteNameAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleUpdate() error = %v", err)
 	}
-	// Should succeed - parseUpdates handles ClassNONE+TypeANY as delete name
+	// Should succeed - parseUpdates handles ClassANY+TypeANY as delete name
 	if resp.Header.Flags.RCODE != protocol.RcodeSuccess {
 		t.Errorf("expected RcodeSuccess, got %d", resp.Header.Flags.RCODE)
 	}
@@ -1327,56 +1327,56 @@ func TestApplyUpdate_DeleteRRSetOp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseRData_InvalidA_Coverage(t *testing.T) {
-	_, err := parseRData(protocol.TypeA, "not-an-ip", "example.com.")
+	_, err := parseRData(protocol.TypeA, "not-an-ip")
 	if err == nil {
 		t.Error("Expected error for invalid A record IP")
 	}
 }
 
 func TestParseRData_InvalidAAAA(t *testing.T) {
-	_, err := parseRData(protocol.TypeAAAA, "not-an-ipv6", "example.com.")
+	_, err := parseRData(protocol.TypeAAAA, "not-an-ipv6")
 	if err == nil {
 		t.Error("Expected error for invalid AAAA record IP")
 	}
 }
 
 func TestParseRData_InvalidCNAME(t *testing.T) {
-	_, err := parseRData(protocol.TypeCNAME, string(make([]byte, 100)), "example.com.")
+	_, err := parseRData(protocol.TypeCNAME, string(make([]byte, 100)))
 	if err == nil {
 		t.Error("Expected error for invalid CNAME name")
 	}
 }
 
 func TestParseRData_InvalidNS(t *testing.T) {
-	_, err := parseRData(protocol.TypeNS, string(make([]byte, 100)), "example.com.")
+	_, err := parseRData(protocol.TypeNS, string(make([]byte, 100)))
 	if err == nil {
 		t.Error("Expected error for invalid NS name")
 	}
 }
 
 func TestParseRData_InvalidMXExchange(t *testing.T) {
-	_, err := parseRData(protocol.TypeMX, "10 "+string(make([]byte, 100)), "example.com.")
+	_, err := parseRData(protocol.TypeMX, "10 "+string(make([]byte, 100)))
 	if err == nil {
 		t.Error("Expected error for invalid MX exchange name")
 	}
 }
 
 func TestParseRData_InvalidPTR(t *testing.T) {
-	_, err := parseRData(protocol.TypePTR, string(make([]byte, 100)), "example.com.")
+	_, err := parseRData(protocol.TypePTR, string(make([]byte, 100)))
 	if err == nil {
 		t.Error("Expected error for invalid PTR name")
 	}
 }
 
 func TestParseRData_InvalidSRVTarget(t *testing.T) {
-	_, err := parseRData(protocol.TypeSRV, "10 20 443 "+string(make([]byte, 100)), "example.com.")
+	_, err := parseRData(protocol.TypeSRV, "10 20 443 "+string(make([]byte, 100)))
 	if err == nil {
 		t.Error("Expected error for invalid SRV target name")
 	}
 }
 
 func TestParseRData_TXT_Coverage(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeTXT, `"hello world"`, "example.com.")
+	rdata, err := parseRData(protocol.TypeTXT, `"hello world"`)
 	if err != nil {
 		t.Fatalf("parseRData(TXT) error = %v", err)
 	}

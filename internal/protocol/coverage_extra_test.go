@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -635,6 +636,29 @@ func TestResourceRecordPackDataError(t *testing.T) {
 	_, err := rr.Pack(buf, 0, nil)
 	if err == nil {
 		t.Error("Pack should fail when buffer too small for RData")
+	}
+}
+
+func TestResourceRecordPackRejectsOversizedRData(t *testing.T) {
+	name, _ := ParseName("example.com.")
+	rr := &ResourceRecord{
+		Name:  name,
+		Type:  65280,
+		Class: ClassIN,
+		TTL:   300,
+		Data: &RDataRaw{
+			TypeVal: 65280,
+			Data:    make([]byte, 0x10000),
+		},
+	}
+
+	buf := make([]byte, rr.WireLength())
+	_, err := rr.Pack(buf, 0, nil)
+	if err == nil {
+		t.Fatal("Pack accepted RDATA that cannot fit in uint16 RDLENGTH")
+	}
+	if !strings.Contains(err.Error(), "exceeds 65535") {
+		t.Fatalf("Pack error = %v, want oversized RDATA error", err)
 	}
 }
 

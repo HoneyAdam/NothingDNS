@@ -8,15 +8,8 @@ import (
 // ---------------------------------------------------------------------------
 // cache.go:58-60 - RemainingTTL negative remaining branch
 // The branch `if remaining < 0 { return 0 }` in RemainingTTL is
-// a defensive guard. It's triggered when IsExpired(now) returns false
-// but ExpireTime.Sub(now) is negative. This can theoretically happen
-// due to clock adjustments or nanosecond precision issues.
-//
-// Since IsExpired checks `now.After(e.ExpireTime)`, and Sub returns
-// negative when ExpireTime < now, the only way to hit this branch is
-// when now is not After ExpireTime but ExpireTime.Sub(now) < 0, which
-// means now == ExpireTime exactly (Sub returns 0, not negative).
-// So this branch is effectively unreachable through normal time API.
+// a defensive guard. With IsExpired treating now >= ExpireTime as expired,
+// this branch is effectively unreachable through normal time API.
 //
 // We test the function's behavior at the boundary to confirm it
 // returns 0 for all edge cases.
@@ -26,8 +19,7 @@ func TestRemainingTTL_NegativeBranch_SyntheticEntry(t *testing.T) {
 	now := time.Now()
 
 	// Case 1: Entry that is exactly at expiry time.
-	// IsExpired(now) = now.After(now) = false
-	// remaining = now.Sub(now) = 0 >= 0, so returns uint32(0) = 0
+	// Exact boundary is expired, so RemainingTTL returns 0.
 	entry := &Entry{
 		ExpireTime: now,
 	}

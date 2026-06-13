@@ -174,6 +174,7 @@ func (p *Parser) parseMapping(indent int) (*Node, error) {
 		Line: p.current.Line,
 		Col:  p.current.Col,
 	}
+	seenKeys := make(map[string]struct{})
 
 	// Remember the indentation level when we entered this mapping
 	entryIndentLevel := p.tokenizer.CurrentIndent()
@@ -280,7 +281,9 @@ func (p *Parser) parseMapping(indent int) (*Node, error) {
 			return nil, err
 		}
 
-		node.Children = append(node.Children, key, value)
+		if err := addMappingPair(node, seenKeys, key, value); err != nil {
+			return nil, err
+		}
 
 		// Check for end of mapping after a pair
 		for p.current.Type == TokenNewline {
@@ -404,13 +407,16 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 					if err != nil {
 						return nil, err
 					}
-					// Continue parsing rest of mapping if more keys
 					value = &Node{
-						Type:     NodeMapping,
-						Line:     savedKey.Line,
-						Col:      savedKey.Col,
-						Children: []*Node{savedKey, valNode},
+						Type: NodeMapping,
+						Line: savedKey.Line,
+						Col:  savedKey.Col,
 					}
+					seenItemKeys := make(map[string]struct{})
+					if err := addMappingPair(value, seenItemKeys, savedKey, valNode); err != nil {
+						return nil, err
+					}
+					// Continue parsing rest of mapping if more keys
 					// Parse additional key-value pairs that belong to THIS
 					// sequence-item mapping. After a DEDENT, peek the
 					// next significant token: if it's at or beyond the
@@ -463,6 +469,8 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 							}
 							if p.current.Type == TokenDash {
 								v, err = p.parseBlockSequence(indent + 1)
+							} else if p.current.Type == TokenString && p.peek().Type == TokenColon {
+								v, err = p.parseMapping(indent + 1)
 							} else {
 								v, err = p.parseValue()
 							}
@@ -483,7 +491,9 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 						if err != nil {
 							return nil, err
 						}
-						value.Children = append(value.Children, k, v)
+						if err := addMappingPair(value, seenItemKeys, k, v); err != nil {
+							return nil, err
+						}
 					}
 				} else {
 					// Just a scalar
@@ -550,13 +560,16 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 				if err != nil {
 					return nil, err
 				}
-				// Continue parsing rest of mapping if more keys
 				value = &Node{
-					Type:     NodeMapping,
-					Line:     savedKey.Line,
-					Col:      savedKey.Col,
-					Children: []*Node{savedKey, valNode},
+					Type: NodeMapping,
+					Line: savedKey.Line,
+					Col:  savedKey.Col,
 				}
+				seenItemKeys := make(map[string]struct{})
+				if err := addMappingPair(value, seenItemKeys, savedKey, valNode); err != nil {
+					return nil, err
+				}
+				// Continue parsing rest of mapping if more keys
 				// Parse additional key-value pairs that belong to THIS
 				// sequence-item mapping. See sibling loop above for the
 				// column-based dedent handling rationale.
@@ -602,6 +615,8 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 						}
 						if p.current.Type == TokenDash {
 							v, err = p.parseBlockSequence(indent + 1)
+						} else if p.current.Type == TokenString && p.peek().Type == TokenColon {
+							v, err = p.parseMapping(indent + 1)
 						} else {
 							v, err = p.parseValue()
 						}
@@ -622,7 +637,9 @@ func (p *Parser) parseBlockSequence(indent int) (*Node, error) {
 					if err != nil {
 						return nil, err
 					}
-					value.Children = append(value.Children, k, v)
+					if err := addMappingPair(value, seenItemKeys, k, v); err != nil {
+						return nil, err
+					}
 				}
 			} else {
 				// Just a scalar
@@ -692,6 +709,7 @@ func (p *Parser) parseFlowMapping() (*Node, error) {
 		Line: p.current.Line,
 		Col:  p.current.Col,
 	}
+	seenKeys := make(map[string]struct{})
 
 	p.advance() // consume '{'
 
@@ -735,7 +753,9 @@ func (p *Parser) parseFlowMapping() (*Node, error) {
 			return nil, err
 		}
 
-		node.Children = append(node.Children, key, value)
+		if err := addMappingPair(node, seenKeys, key, value); err != nil {
+			return nil, err
+		}
 
 		// Optional comma
 		if p.current.Type == TokenComma {
@@ -745,6 +765,15 @@ func (p *Parser) parseFlowMapping() (*Node, error) {
 
 	p.advance() // consume '}'
 	return node, nil
+}
+
+func addMappingPair(node *Node, seenKeys map[string]struct{}, key, value *Node) error {
+	if _, exists := seenKeys[key.Value]; exists {
+		return fmt.Errorf("duplicate mapping key %q at line %d", key.Value, key.Line)
+	}
+	seenKeys[key.Value] = struct{}{}
+	node.Children = append(node.Children, key, value)
+	return nil
 }
 
 // parseFlowSequence parses a flow sequence [item, ...].

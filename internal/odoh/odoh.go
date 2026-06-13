@@ -50,6 +50,8 @@ var (
 	ErrDecryptionFailed = errors.New("decryption failed")
 	ErrInvalidNonce     = errors.New("invalid nonce")
 	ErrTooManyDHPairs   = errors.New("too many DH pairs for this context")
+	errNilConfig        = errors.New("odoh config cannot be nil")
+	errBodyTooLarge     = errors.New("odoh body too large")
 )
 
 // HPKE AEAD algorithms supported by ODoH.
@@ -154,6 +156,9 @@ func NewODoHConfig(targetName, proxyName string) *ODoHConfig {
 
 // NewObliviousClient creates a new ODoH client.
 func NewObliviousClient(config *ODoHConfig) (*ObliviousClient, error) {
+	if config == nil {
+		return nil, errNilConfig
+	}
 	return &ObliviousClient{
 		config: config,
 		client: &http.Client{
@@ -202,6 +207,9 @@ func (c *ObliviousClient) Query(dnsQuery []byte) ([]byte, error) {
 // ObliviousDoHConfigContents. The client config carries it in
 // TargetPublicKey for compatibility with the existing API surface.
 func (c *ObliviousClient) getTargetConfigContents() ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	if len(c.config.TargetPublicKey) == 0 {
 		return nil, ErrInvalidKey
 	}
@@ -211,6 +219,9 @@ func (c *ObliviousClient) getTargetConfigContents() ([]byte, error) {
 // postEncapsulated POSTs the RFC 9230 wire-format message to the
 // configured proxy URL and returns the response bytes.
 func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	req, err := http.NewRequest("POST", c.config.ProxyURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -227,13 +238,20 @@ func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("proxy returned status: %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading proxy response: %w", err)
+	}
+	return respBody, nil
 }
 
 // getTargetPublicKey returns the target's public key.
 // The key must be provided via configuration or fetched securely.
 // Returns an error if no valid key is configured.
 func (c *ObliviousClient) getTargetPublicKey() ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	// In a real implementation, the key would be:
 	// 1. Fetched from DNS (with DNSSEC validation)
 	// 2. Pre-configured by the operator
@@ -308,7 +326,7 @@ func (c *ObliviousClient) sendToProxy(msg *ObliviousDNSMessage) (*ObliviousDNSMe
 		return nil, fmt.Errorf("proxy returned status: %d", resp.StatusCode)
 	}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -353,6 +371,9 @@ func (c *ObliviousClient) decapsulateResponse(response *ObliviousDNSMessage, eph
 
 // NewObliviousProxy creates a new ODoH proxy server.
 func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
+	if config == nil {
+		return nil, errNilConfig
+	}
 	return &ObliviousProxy{
 		config: config,
 		client: &http.Client{
@@ -367,13 +388,21 @@ func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
 // requires the proxy never see the inner DNS message, which is exactly
 // what a byte-for-byte pass-through achieves.
 func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p == nil || p.config == nil {
+		http.Error(w, "ODoH proxy not initialised", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := readLimitedODoHBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -386,7 +415,9 @@ func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(respBytes)
+	if _, err := w.Write(respBytes); err != nil {
+		return
+	}
 }
 
 // forwardRaw POSTs the opaque ODoH message bytes to the configured
@@ -408,7 +439,11 @@ func (p *ObliviousProxy) forwardRaw(body []byte) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("target returned status: %d", resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
+	respBody, err := readLimitedODoHBody(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading target response: %w", err)
+	}
+	return respBody, nil
 }
 
 // NewObliviousTarget creates a new ODoH target resolver. The target
@@ -438,6 +473,9 @@ func NewObliviousTarget(config *ODoHConfig, handler server.Handler) (*ObliviousT
 // validateODoHSuite returns an error if the config's KEM/KDF/AEAD does
 // not name one of the supported HPKE suites.
 func validateODoHSuite(cfg *ODoHConfig) error {
+	if cfg == nil {
+		return errNilConfig
+	}
 	if cfg.HPKEKEM != HPKEDHX25519 {
 		return fmt.Errorf("KEM %d not supported (only X25519 = %d)", cfg.HPKEKEM, HPKEDHX25519)
 	}
@@ -470,6 +508,10 @@ const HPKEAEADAES128GCM = 3
 // On any decode, decrypt, or resolution failure, HTTP 400 / 500 is
 // returned without leaking which step failed.
 func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if t == nil {
+		http.Error(w, "ODoH target not initialised", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -479,8 +521,12 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize))
+	body, err := readLimitedODoHBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "Request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -519,13 +565,28 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(encryptedResponse)
+	if _, err := w.Write(encryptedResponse); err != nil {
+		return
+	}
+}
+
+func readLimitedODoHBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxBodySize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxBodySize {
+		return nil, errBodyTooLarge
+	}
+	return body, nil
 }
 
 // PublicKey returns the raw X25519 public key bytes. Most clients want
 // ConfigContents()/ConfigsObject() instead.
 func (t *ObliviousTarget) PublicKey() []byte {
-	return t.pubKey
+	pubKey := make([]byte, len(t.pubKey))
+	copy(pubKey, t.pubKey)
+	return pubKey
 }
 
 // ConfigContents returns the marshaled ObliviousDoHConfigContents
@@ -546,7 +607,11 @@ func (t *ObliviousTarget) ConfigsObject() []byte {
 	if t.keyPair == nil {
 		return nil
 	}
-	return t.keyPair.configsObject()
+	cfgs, err := t.keyPair.configsObject()
+	if err != nil {
+		return nil
+	}
+	return cfgs
 }
 
 // decapsulateQuery decrypts a DNS query using HPKE.
@@ -801,16 +866,17 @@ func clearBytes(b []byte) {
 func buildProxyRequest(msg *ObliviousDNSMessage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Write public key length and value
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.PublicKey)))
-	buf.Write(msg.PublicKey)
-
-	// Write ciphertext length and value
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.Ciphertext)))
-	buf.Write(msg.Ciphertext)
+	if err := writeU16Bytes(&buf, "public key", msg.PublicKey); err != nil {
+		return nil, err
+	}
+	if err := writeU16Bytes(&buf, "ciphertext", msg.Ciphertext); err != nil {
+		return nil, err
+	}
 
 	// Write nonce
-	buf.Write(msg.Nonce)
+	if _, err := buf.Write(msg.Nonce); err != nil {
+		return nil, err
+	}
 
 	return buf.Bytes(), nil
 }
@@ -824,7 +890,7 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 		return nil, err
 	}
 	pubKey := make([]byte, pubLen)
-	if _, err := r.Read(pubKey); err != nil {
+	if _, err := io.ReadFull(r, pubKey); err != nil {
 		return nil, err
 	}
 
@@ -834,14 +900,17 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 		return nil, err
 	}
 	ciphertext := make([]byte, ctLen)
-	if _, err := r.Read(ciphertext); err != nil {
+	if _, err := io.ReadFull(r, ciphertext); err != nil {
 		return nil, err
 	}
 
 	// Read nonce (12 bytes for AES-GCM)
 	nonce := make([]byte, 12)
-	if _, err := r.Read(nonce); err != nil {
+	if _, err := io.ReadFull(r, nonce); err != nil {
 		return nil, err
+	}
+	if r.Len() != 0 {
+		return nil, fmt.Errorf("trailing data after nonce: %d bytes", r.Len())
 	}
 
 	return &ObliviousDNSMessage{
@@ -854,20 +923,33 @@ func parseProxyRequest(body []byte) (*ObliviousDNSMessage, error) {
 func buildProxyResponse(msg *ObliviousDNSMessage) ([]byte, error) {
 	var buf bytes.Buffer
 
-	// Write public key
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.PublicKey)))
-	buf.Write(msg.PublicKey)
-
-	// Write ciphertext
-	binary.Write(&buf, binary.BigEndian, uint16(len(msg.Ciphertext)))
-	buf.Write(msg.Ciphertext)
+	if err := writeU16Bytes(&buf, "public key", msg.PublicKey); err != nil {
+		return nil, err
+	}
+	if err := writeU16Bytes(&buf, "ciphertext", msg.Ciphertext); err != nil {
+		return nil, err
+	}
 
 	// Write nonce
-	buf.Write(msg.Nonce)
+	if _, err := buf.Write(msg.Nonce); err != nil {
+		return nil, err
+	}
 
 	return buf.Bytes(), nil
 }
 
 func parseProxyResponse(body []byte) (*ObliviousDNSMessage, error) {
 	return parseProxyRequest(body) // Same format
+}
+
+func writeU16Bytes(buf *bytes.Buffer, field string, b []byte) error {
+	n, err := u16Length(field, len(b))
+	if err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, n); err != nil {
+		return err
+	}
+	_, err = buf.Write(b)
+	return err
 }

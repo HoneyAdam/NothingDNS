@@ -70,6 +70,8 @@ func TestUnmarshalYAMLBasic(t *testing.T) {
 server:
   port: 5353
   pid_file: /tmp/nothingdns.pid
+  systemd_notify: /run/systemd/notify
+  acl_allow_unrestricted_recursion: true
   bind:
     - 127.0.0.1
 zonemd: true
@@ -96,6 +98,12 @@ upstream:
 	if cfg.Server.PIDFile != "/tmp/nothingdns.pid" {
 		t.Errorf("expected pid_file '/tmp/nothingdns.pid', got %q", cfg.Server.PIDFile)
 	}
+	if cfg.Server.SystemdNotify != "/run/systemd/notify" {
+		t.Errorf("expected systemd_notify '/run/systemd/notify', got %q", cfg.Server.SystemdNotify)
+	}
+	if !cfg.Server.ACLAllowUnrestrictedRecursion {
+		t.Error("expected acl_allow_unrestricted_recursion to be true")
+	}
 	if !cfg.ZONEMD {
 		t.Error("expected zonemd to be true")
 	}
@@ -112,6 +120,152 @@ upstream:
 	}
 }
 
+func TestUnmarshalYAMLMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"zero unlimited", "memory_limit_mb: 0\n", 0},
+		{"positive", "memory_limit_mb: 512\n", 512},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := UnmarshalYAML(tt.input)
+			if err != nil {
+				t.Fatalf("UnmarshalYAML: %v", err)
+			}
+			if cfg.MemoryLimitMB != tt.want {
+				t.Errorf("MemoryLimitMB = %d, want %d", cfg.MemoryLimitMB, tt.want)
+			}
+		})
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidServerIntegers(t *testing.T) {
+	tests := []string{
+		"server:\n  port: nope\n",
+		"server:\n  udp_workers: many\n",
+		"server:\n  tcp_workers: [1]\n",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			if cfg, err := UnmarshalYAML(input); err == nil {
+				t.Fatalf("expected error for invalid server integer, got cfg %#v", cfg)
+			}
+		})
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidMemoryLimit(t *testing.T) {
+	tests := []string{
+		"memory_limit_mb: nope\n",
+		"memory_limit_mb: -1\n",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			if cfg, err := UnmarshalYAML(input); err == nil {
+				t.Fatalf("expected error for invalid memory_limit_mb, got cfg %#v", cfg)
+			}
+		})
+	}
+}
+
+func TestUnmarshalYAMLDSOConfig(t *testing.T) {
+	input := `
+dso:
+  enabled: true
+  session_timeout: 25s
+  max_sessions: 42
+  heartbeat_interval: 3s
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.DSO.Enabled {
+		t.Fatal("expected DSO to be enabled")
+	}
+	if cfg.DSO.SessionTimeout != "25s" {
+		t.Errorf("expected session_timeout '25s', got %q", cfg.DSO.SessionTimeout)
+	}
+	if cfg.DSO.MaxSessions != 42 {
+		t.Errorf("expected max_sessions 42, got %d", cfg.DSO.MaxSessions)
+	}
+	if cfg.DSO.HeartbeatInterval != "3s" {
+		t.Errorf("expected heartbeat_interval '3s', got %q", cfg.DSO.HeartbeatInterval)
+	}
+}
+
+func TestUnmarshalYAMLExtensionConfigs(t *testing.T) {
+	input := `
+idna:
+  enabled: true
+  use_std3_rules: false
+  allow_unassigned: true
+  check_bidi: false
+  check_joiner: false
+mdns:
+  enabled: true
+  multicast_ip: 224.0.0.252
+  port: 5354
+  browser: true
+  hostname: test-host.local.
+odoh:
+  enabled: true
+  bind: ":9443"
+  target_url: https://target.example/dns-query
+  proxy_url: https://proxy.example/odoh
+  kem: 4
+  kdf: 1
+  aead: 3
+catalog:
+  enabled: true
+  catalog_zone: catalog.example.
+  producer_class: PRIMARY
+  consumer_class: SECONDARY
+yang:
+  enabled: true
+  enable_cli: false
+  enable_netconf: true
+  netconf_bind: ":1830"
+  models:
+    - dns-zone
+    - dns-query
+    - dns-server
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !cfg.IDNA.Enabled || cfg.IDNA.UseSTD3Rules || !cfg.IDNA.AllowUnassigned || cfg.IDNA.CheckBidi || cfg.IDNA.CheckJoiner {
+		t.Fatalf("unexpected IDNA config: %+v", cfg.IDNA)
+	}
+	if !cfg.MDNS.Enabled || cfg.MDNS.MulticastIP != "224.0.0.252" || cfg.MDNS.Port != 5354 ||
+		!cfg.MDNS.Browser || cfg.MDNS.HostName != "test-host.local." {
+		t.Fatalf("unexpected mDNS config: %+v", cfg.MDNS)
+	}
+	if !cfg.ODoH.Enabled || cfg.ODoH.Bind != ":9443" ||
+		cfg.ODoH.TargetURL != "https://target.example/dns-query" ||
+		cfg.ODoH.ProxyURL != "https://proxy.example/odoh" ||
+		cfg.ODoH.KEM != 4 || cfg.ODoH.KDF != 1 || cfg.ODoH.AEAD != 3 {
+		t.Fatalf("unexpected ODoH config: %+v", cfg.ODoH)
+	}
+	if !cfg.Catalog.Enabled || cfg.Catalog.CatalogZone != "catalog.example." ||
+		cfg.Catalog.ProducerClass != "PRIMARY" || cfg.Catalog.ConsumerClass != "SECONDARY" {
+		t.Fatalf("unexpected Catalog config: %+v", cfg.Catalog)
+	}
+	if !cfg.YANG.Enabled || cfg.YANG.EnableCLI || !cfg.YANG.EnableNETCONF ||
+		cfg.YANG.NETCONFBind != ":1830" ||
+		!reflect.DeepEqual(cfg.YANG.Models, []string{"dns-zone", "dns-query", "dns-server"}) {
+		t.Fatalf("unexpected YANG config: %+v", cfg.YANG)
+	}
+}
+
 func TestUnmarshalYAMLRootKeyWarnings(t *testing.T) {
 	var buf bytes.Buffer
 	prev := util.GetDefaultLogger()
@@ -122,6 +276,11 @@ func TestUnmarshalYAMLRootKeyWarnings(t *testing.T) {
 
 	input := `
 resolver:
+  enabled: true
+catalog:
+  enabled: true
+  catalog_zone: catalog.example.
+yang:
   enabled: true
 misspelled_section:
   enabled: true
@@ -134,6 +293,12 @@ misspelled_section:
 	output := buf.String()
 	if !strings.Contains(output, `section "resolver" is a stale documented section`) {
 		t.Fatalf("expected stale documented section warning, got %q", output)
+	}
+	if strings.Contains(output, `section "catalog" is a stale documented section`) {
+		t.Fatalf("did not expect catalog stale documented section warning, got %q", output)
+	}
+	if strings.Contains(output, `section "yang" is a stale documented section`) {
+		t.Fatalf("did not expect yang stale documented section warning, got %q", output)
 	}
 	if !strings.Contains(output, `unknown top-level key "misspelled_section"`) {
 		t.Fatalf("expected unknown key warning, got %q", output)
@@ -189,6 +354,72 @@ cache:
 	}
 	if cfg.Cache.StaleGraceSecs != 7200 {
 		t.Errorf("expected stale_grace_secs 7200, got %d", cfg.Cache.StaleGraceSecs)
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidCacheIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "size",
+			input: `
+cache:
+  size: many
+`,
+		},
+		{
+			name: "default_ttl",
+			input: `
+cache:
+  default_ttl: later
+`,
+		},
+		{
+			name: "max_ttl",
+			input: `
+cache:
+  max_ttl: long
+`,
+		},
+		{
+			name: "min_ttl",
+			input: `
+cache:
+  min_ttl: short
+`,
+		},
+		{
+			name: "negative_ttl",
+			input: `
+cache:
+  negative_ttl: no
+`,
+		},
+		{
+			name: "prefetch_threshold",
+			input: `
+cache:
+  prefetch_threshold:
+    - 30
+`,
+		},
+		{
+			name: "stale_grace_secs",
+			input: `
+cache:
+  stale_grace_secs: stale
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid cache integer to return an error")
+			}
+		})
 	}
 }
 
@@ -338,6 +569,58 @@ rrl:
 	}
 }
 
+func TestUnmarshalYAMLRejectsInvalidRRLIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "rate",
+			input: `
+rrl:
+  rate: nope
+`,
+		},
+		{
+			name: "burst",
+			input: `
+rrl:
+  burst: many
+`,
+		},
+		{
+			name: "max_buckets",
+			input: `
+rrl:
+  max_buckets:
+    - 100
+`,
+		},
+		{
+			name: "rate_limit alias",
+			input: `
+rrl:
+  rate_limit: bad
+`,
+		},
+		{
+			name: "max_table_size alias",
+			input: `
+rrl:
+  max_table_size: bad
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid RRL integer to return an error")
+			}
+		})
+	}
+}
+
 func TestUnmarshalYAMLZones(t *testing.T) {
 	input := `
 zones:
@@ -390,6 +673,25 @@ server:
 
 	if len(cfg.Server.Bind) != 1 || cfg.Server.Bind[0] != "127.0.0.1" {
 		t.Errorf("unexpected bind: %v", cfg.Server.Bind)
+	}
+}
+
+func TestUnmarshalYAMLWithEnvVarsPreservesYAMLSyntaxCharacters(t *testing.T) {
+	t.Setenv("LOG_OUTPUT_WITH_YAML_CHARS", "file:/var/log/nothingdns/query.log # literal suffix")
+
+	input := `
+logging:
+  output: ${LOG_OUTPUT_WITH_YAML_CHARS}
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "file:/var/log/nothingdns/query.log # literal suffix"
+	if cfg.Logging.Output != want {
+		t.Fatalf("logging output = %q, want %q", cfg.Logging.Output, want)
 	}
 }
 
@@ -530,6 +832,73 @@ dnssec:
 	}
 }
 
+func TestUnmarshalYAMLDNSSECSigningNumericBounds(t *testing.T) {
+	input := `
+dnssec:
+  signing:
+    keys:
+      - private_key: /keys/key.private
+        type: ksk
+        algorithm: 255
+    nsec3:
+      iterations: 65535
+`
+
+	cfg, err := UnmarshalYAML(input)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	if got := cfg.DNSSEC.Signing.Keys[0].Algorithm; got != 255 {
+		t.Fatalf("algorithm = %d, want 255", got)
+	}
+	if got := cfg.DNSSEC.Signing.NSEC3.Iterations; got != 65535 {
+		t.Fatalf("iterations = %d, want 65535", got)
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidDNSSECNumericFields(t *testing.T) {
+	tests := []string{
+		`dnssec:
+  signing:
+    keys:
+      - private_key: /keys/key.private
+        type: ksk
+        algorithm: -1
+`,
+		`dnssec:
+  signing:
+    keys:
+      - private_key: /keys/key.private
+        type: ksk
+        algorithm: 256
+`,
+		`dnssec:
+  signing:
+    keys:
+      - private_key: /keys/key.private
+        type: ksk
+        algorithm: [13]
+`,
+		`dnssec:
+  signing:
+    nsec3:
+      iterations: -1
+`,
+		`dnssec:
+  signing:
+    nsec3:
+      iterations: 65536
+`,
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			if cfg, err := UnmarshalYAML(input); err == nil {
+				t.Fatalf("expected error for invalid DNSSEC numeric field, got cfg %#v", cfg)
+			}
+		})
+	}
+}
+
 func TestUnmarshalYAMLMetrics(t *testing.T) {
 	input := `
 metrics:
@@ -578,6 +947,45 @@ cluster:
 	}
 	if len(cfg.Cluster.SeedNodes) != 2 {
 		t.Errorf("expected 2 seed nodes, got %d", len(cfg.Cluster.SeedNodes))
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidClusterIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "gossip_port",
+			input: `
+cluster:
+  gossip_port: gossip
+`,
+		},
+		{
+			name: "weight",
+			input: `
+cluster:
+  weight:
+    - 10
+`,
+		},
+		{
+			name: "rpc min_tls_version",
+			input: `
+cluster:
+  rpc:
+    min_tls_version: modern
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid cluster integer to return an error")
+			}
+		})
 	}
 }
 
@@ -640,11 +1048,54 @@ slave_zones:
 	}
 }
 
+func TestUnmarshalYAMLRejectsInvalidRemainingPolicyIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "slave max_retries",
+			input: `
+slave_zones:
+  - zone_name: example.com.
+    max_retries: many
+`,
+		},
+		{
+			name: "rpz priority",
+			input: `
+rpz:
+  zones:
+    - name: block
+      file: /zones/block.rpz
+      priority:
+        - 10
+`,
+		},
+		{
+			name: "dns64 prefix_len",
+			input: `
+dns64:
+  prefix_len: wide
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid policy integer to return an error")
+			}
+		})
+	}
+}
+
 func TestUnmarshalYAMLResolution(t *testing.T) {
 	input := `
 resolution:
   timeout: 5s
   recursive: true
+  authoritative_only: true
   max_depth: 15
 `
 
@@ -659,8 +1110,45 @@ resolution:
 	if !cfg.Resolution.Recursive {
 		t.Error("expected recursive to be true")
 	}
+	if !cfg.Resolution.AuthoritativeOnly {
+		t.Error("expected authoritative_only to be true")
+	}
 	if cfg.Resolution.MaxDepth != 15 {
 		t.Errorf("expected max_depth 15, got %d", cfg.Resolution.MaxDepth)
+	}
+	if !cfg.Resolution.QnameMinimization {
+		t.Error("expected qname_minimization default to remain true when omitted")
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidResolutionIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "max_depth",
+			input: `
+resolution:
+  max_depth: deep
+`,
+		},
+		{
+			name: "edns0_buffer_size",
+			input: `
+resolution:
+  edns0_buffer_size:
+    - 1232
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid resolution integer to return an error")
+			}
+		})
 	}
 }
 
@@ -724,6 +1212,63 @@ server:
 	}
 }
 
+func TestUnmarshalYAMLRejectsInvalidServerNestedIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "xot min_tls_version",
+			input: `
+server:
+  xot:
+    min_tls_version: tls13
+`,
+		},
+		{
+			name: "http max_sessions_per_user",
+			input: `
+server:
+  http:
+    max_sessions_per_user: many
+`,
+		},
+		{
+			name: "http odoh_kem",
+			input: `
+server:
+  http:
+    odoh_kem:
+      - 4
+`,
+		},
+		{
+			name: "http odoh_kdf",
+			input: `
+server:
+  http:
+    odoh_kdf: hkdf
+`,
+		},
+		{
+			name: "http odoh_aead",
+			input: `
+server:
+  http:
+    odoh_aead: aes
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid server nested integer to return an error")
+			}
+		})
+	}
+}
+
 func TestUnmarshalYAMLUpstreamAnycast(t *testing.T) {
 	input := `
 upstream:
@@ -748,6 +1293,53 @@ upstream:
 	}
 	if len(cfg.Upstream.AnycastGroups) != 1 {
 		t.Errorf("expected 1 anycast group, got %d", len(cfg.Upstream.AnycastGroups))
+	}
+}
+
+func TestUnmarshalYAMLRejectsInvalidUpstreamIntegers(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name: "topology weight",
+			input: `
+upstream:
+  topology:
+    weight: heavy
+`,
+		},
+		{
+			name: "backend port",
+			input: `
+upstream:
+  anycast_groups:
+    - anycast_ip: 10.0.0.1
+      backends:
+        - physical_ip: 192.168.1.1
+          port: dns
+`,
+		},
+		{
+			name: "backend weight",
+			input: `
+upstream:
+  anycast_groups:
+    - anycast_ip: 10.0.0.1
+      backends:
+        - physical_ip: 192.168.1.1
+          weight:
+            - 100
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnmarshalYAML(tt.input); err == nil {
+				t.Fatal("expected invalid upstream integer to return an error")
+			}
+		})
 	}
 }
 
@@ -1177,6 +1769,25 @@ func TestValidateUpstreamWithAnycast(t *testing.T) {
 			},
 			wantErr: true,
 			errMsg:  "must be between 0-100",
+		},
+		{
+			name: "invalid group health_check duration",
+			config: &Config{
+				Upstream: UpstreamConfig{
+					Strategy: "random",
+					AnycastGroups: []AnycastGroupConfig{
+						{
+							AnycastIP:   "10.0.0.1",
+							HealthCheck: "not-a-duration",
+							Backends: []AnycastBackendConfig{
+								{PhysicalIP: "192.168.1.1", Port: 53, Weight: 100},
+							},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "invalid health_check",
 		},
 		{
 			name: "invalid strategy",
@@ -3169,6 +3780,32 @@ func TestNodeGetIntNonScalarChild(t *testing.T) {
 			}
 			if result != tt.expected {
 				t.Errorf("GetInt(%q) = %d, want %d", tt.key, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestNodeGetIntStrictScalarParsing(t *testing.T) {
+	node := &Node{
+		Type: NodeMapping,
+		Children: []*Node{
+			{Type: NodeScalar, Value: "negative"},
+			{Type: NodeScalar, Value: "-42"},
+			{Type: NodeScalar, Value: "mixed"},
+			{Type: NodeScalar, Value: "12abc34"},
+			{Type: NodeScalar, Value: "empty"},
+			{Type: NodeScalar, Value: ""},
+		},
+	}
+
+	if got, err := node.GetInt("negative"); err != nil || got != -42 {
+		t.Fatalf("GetInt negative = %d, err=%v; want -42, nil", got, err)
+	}
+
+	for _, key := range []string{"mixed", "empty"} {
+		t.Run(key, func(t *testing.T) {
+			if got, err := node.GetInt(key); err == nil {
+				t.Fatalf("GetInt(%q) = %d, nil err; want parse error", key, got)
 			}
 		})
 	}

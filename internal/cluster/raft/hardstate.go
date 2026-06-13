@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // HardState is the subset of Raft state that the spec requires to survive
@@ -25,6 +27,7 @@ type HardState struct {
 
 const hardStateFileName = "raft-hardstate.bin"
 const hardStateMagic uint32 = 0x52485354 // "RHST"
+const maxHardStateVotedForLen = 256      // sanity cap
 
 // hardStatePath returns the on-disk path for the HardState file given a
 // data directory.
@@ -61,8 +64,7 @@ func loadHardState(dataDir string) (HardState, error) {
 	}
 	votedLen := binary.BigEndian.Uint16(header[12:14])
 	if votedLen > 0 {
-		const maxVotedForLen = 256 // sanity cap
-		if votedLen > maxVotedForLen {
+		if votedLen > maxHardStateVotedForLen {
 			return HardState{}, fmt.Errorf("hardstate votedFor too large: %d", votedLen)
 		}
 		buf := make([]byte, votedLen)
@@ -92,9 +94,13 @@ var syncHardStateParentDir = func(dir string) error {
 	return nil
 }
 
-func saveHardState(dataDir string, hs HardState) error {
+func saveHardState(dataDir string, hs HardState) (err error) {
 	if dataDir == "" {
 		return errors.New("raft: hardstate dataDir is empty; refusing to skip persistence")
+	}
+	voted := []byte(hs.VotedFor)
+	if len(voted) > maxHardStateVotedForLen {
+		return fmt.Errorf("hardstate votedFor too large: %d", len(voted))
 	}
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return fmt.Errorf("mkdir hardstate dir: %w", err)
@@ -109,7 +115,9 @@ func saveHardState(dataDir string, hs HardState) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+				err = fmt.Errorf("remove temp hardstate: %w", removeErr)
+			}
 		}
 	}()
 
@@ -118,21 +126,9 @@ func saveHardState(dataDir string, hs HardState) error {
 		return fmt.Errorf("chmod tmp hardstate: %w", err)
 	}
 
-	voted := []byte(hs.VotedFor)
-	header := make([]byte, 4+8+2)
-	binary.BigEndian.PutUint32(header[0:4], hardStateMagic)
-	binary.BigEndian.PutUint64(header[4:12], uint64(hs.CurrentTerm))
-	binary.BigEndian.PutUint16(header[12:14], uint16(len(voted)))
-
-	if _, err := tmp.Write(header); err != nil {
+	if err := writeHardState(tmp, hs); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write hardstate header: %w", err)
-	}
-	if len(voted) > 0 {
-		if _, err := tmp.Write(voted); err != nil {
-			tmp.Close()
-			return fmt.Errorf("write votedFor: %w", err)
-		}
+		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -148,6 +144,28 @@ func saveHardState(dataDir string, hs HardState) error {
 
 	if err := syncHardStateParentDir(dataDir); err != nil {
 		return fmt.Errorf("fsync hardstate dir: %w", err)
+	}
+	return nil
+}
+
+func writeHardState(w io.Writer, hs HardState) error {
+	voted := []byte(hs.VotedFor)
+	if len(voted) > maxHardStateVotedForLen {
+		return fmt.Errorf("hardstate votedFor too large: %d", len(voted))
+	}
+
+	header := make([]byte, 4+8+2)
+	binary.BigEndian.PutUint32(header[0:4], hardStateMagic)
+	binary.BigEndian.PutUint64(header[4:12], uint64(hs.CurrentTerm))
+	binary.BigEndian.PutUint16(header[12:14], uint16(len(voted)))
+
+	if err := util.WriteFull(w, header); err != nil {
+		return fmt.Errorf("write hardstate header: %w", err)
+	}
+	if len(voted) > 0 {
+		if err := util.WriteFull(w, voted); err != nil {
+			return fmt.Errorf("write votedFor: %w", err)
+		}
 	}
 	return nil
 }

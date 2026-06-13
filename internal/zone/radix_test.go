@@ -66,6 +66,49 @@ func TestRadixTree_BuildAndFind(t *testing.T) {
 	}
 }
 
+func TestRadixTree_List(t *testing.T) {
+	zones := map[string]*Zone{
+		"example.com.":     {Origin: "example.com."},
+		"sub.example.com.": {Origin: "sub.example.com."},
+		".":                {Origin: "."},
+	}
+
+	tree := BuildRadixTree(zones)
+	list := tree.List()
+	if len(list) != len(zones) {
+		t.Fatalf("List len = %d, want %d", len(list), len(zones))
+	}
+	for origin, want := range zones {
+		if got := list[origin]; got != want {
+			t.Fatalf("List()[%q] = %v, want %v", origin, got, want)
+		}
+	}
+
+	var nilTree *RadixTree
+	if got := nilTree.List(); len(got) != 0 {
+		t.Fatalf("nil RadixTree List len = %d, want 0", len(got))
+	}
+}
+
+func TestRadixTree_ZeroValueAndNilReceiverSafe(t *testing.T) {
+	z := &Zone{Origin: "example.com."}
+
+	var tree RadixTree
+	tree.Insert("example.com.", z)
+	if got := tree.Find("www.example.com."); got != z {
+		t.Fatalf("zero-value RadixTree Find() = %v, want inserted zone", got)
+	}
+	if list := tree.List(); list["example.com."] != z {
+		t.Fatalf("zero-value RadixTree List()[example.com.] = %v, want inserted zone", list["example.com."])
+	}
+
+	var nilTree *RadixTree
+	nilTree.Insert("example.net.", &Zone{Origin: "example.net."})
+	if got := nilTree.Find("example.net."); got != nil {
+		t.Fatalf("nil RadixTree Find() = %v, want nil", got)
+	}
+}
+
 func TestSplitDomainReversed(t *testing.T) {
 	tests := []struct {
 		name     string

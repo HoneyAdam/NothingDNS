@@ -184,6 +184,73 @@ func TestNSECCacheNODATA(t *testing.T) {
 	}
 }
 
+func TestNSECCacheSynthesizedAuthorityTTLsAreBoundedByRemainingProofTTL(t *testing.T) {
+	nc := NewNSECCache(100)
+	entry := &nsecEntry{
+		Owner:      mustName("alpha.example.com."),
+		NextDomain: mustName("gamma.example.com."),
+		TypeBitMap: []uint16{protocol.TypeA, protocol.TypeNSEC},
+		ExpireTime: time.Now().Add(2 * time.Minute),
+		SOA: &protocol.ResourceRecord{
+			Name:  mustName("example.com."),
+			Type:  protocol.TypeSOA,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data: &protocol.RDataSOA{
+				MName:   mustName("ns1.example.com."),
+				RName:   mustName("admin.example.com."),
+				Serial:  1,
+				Refresh: 3600,
+				Retry:   600,
+				Expire:  86400,
+				Minimum: 300,
+			},
+		},
+	}
+	nc.entries["alpha.example.com."] = entry
+
+	for _, resp := range []*protocol.Message{
+		nc.Lookup("beta.example.com.", protocol.TypeA),
+		nc.Lookup("alpha.example.com.", protocol.TypeAAAA),
+	} {
+		if resp == nil {
+			t.Fatal("expected synthesized response")
+		}
+		if len(resp.Authorities) != 2 {
+			t.Fatalf("authority count = %d, want 2", len(resp.Authorities))
+		}
+		for _, rr := range resp.Authorities {
+			if rr.TTL > 120 {
+				t.Fatalf("authority TTL = %d, want <= remaining proof TTL", rr.TTL)
+			}
+			if rr.TTL == 300 {
+				t.Fatal("authority TTL was not decremented from original SOA TTL")
+			}
+		}
+	}
+}
+
+func TestRemainingNSECTTLBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		expireTime time.Time
+		want       uint32
+	}{
+		{name: "expired", expireTime: time.Now().Add(-time.Second), want: 0},
+		{name: "sub_second", expireTime: time.Now().Add(500 * time.Millisecond), want: 0},
+		{name: "saturates_far_future", expireTime: time.Now().Add(time.Duration(1<<63 - 1)), want: ^uint32(0)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			entry := &nsecEntry{ExpireTime: tc.expireTime}
+			if got := remainingNSECTTL(entry); got != tc.want {
+				t.Fatalf("remainingNSECTTL() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNSECCacheExpiration(t *testing.T) {
 	nc := NewNSECCache(100)
 
@@ -233,6 +300,30 @@ func TestNSECCacheExpiration(t *testing.T) {
 	}
 }
 
+func TestNSECCacheExactExpiryBoundary(t *testing.T) {
+	nc := NewNSECCache(100)
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	entry := &nsecEntry{
+		Owner:      mustName("a.example.com."),
+		NextDomain: mustName("z.example.com."),
+		TypeBitMap: []uint16{protocol.TypeA, protocol.TypeNSEC},
+		ExpireTime: now,
+	}
+	nc.entries["a.example.com."] = entry
+
+	if !nsecEntryExpiredAt(entry, now) {
+		t.Fatal("NSEC entry should be expired exactly at ExpireTime")
+	}
+	if resp := nc.lookupAt("m.example.com.", protocol.TypeA, now); resp != nil {
+		t.Fatalf("Lookup at exact expiry returned response: %+v", resp)
+	}
+
+	nc.evictExpiredAt(now)
+	if _, exists := nc.entries["a.example.com."]; exists {
+		t.Fatal("evictExpired should remove NSEC entry exactly at ExpireTime")
+	}
+}
+
 func TestNSECCacheIgnoresNonNXDOMAIN(t *testing.T) {
 	nc := NewNSECCache(100)
 
@@ -258,5 +349,98 @@ func TestNSECCacheIgnoresNonNXDOMAIN(t *testing.T) {
 	nc.AddFromResponse(resp, true)
 	if nc.Size() != 0 {
 		t.Errorf("expected 0 entries for non-NXDOMAIN, got %d", nc.Size())
+	}
+}
+
+func TestNSECCacheAddFromResponseSkipsMalformedAuthorityRecords(t *testing.T) {
+	nc := NewNSECCache(100)
+	resp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.NewResponseFlags(protocol.RcodeNameError),
+		},
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeSOA, Data: (*protocol.RDataSOA)(nil)},
+			{Name: mustName("example.com."), Type: protocol.TypeSOA, Data: &protocol.RDataSOA{Minimum: 60}},
+			{Type: protocol.TypeNSEC, Data: &protocol.RDataNSEC{NextDomain: mustName("b.example.com.")}},
+			{Name: mustName("a.example.com."), Type: protocol.TypeNSEC, Data: (*protocol.RDataNSEC)(nil)},
+			{Name: mustName("a.example.com."), Type: protocol.TypeNSEC, Data: &protocol.RDataNSEC{}},
+			{
+				Name:  mustName("a.example.com."),
+				Type:  protocol.TypeNSEC,
+				Class: protocol.ClassIN,
+				TTL:   300,
+				Data: &protocol.RDataNSEC{
+					NextDomain: mustName("c.example.com."),
+					TypeBitMap: []uint16{protocol.TypeNSEC},
+				},
+			},
+		},
+	}
+
+	nc.AddFromResponse(resp, true)
+
+	if nc.Size() != 1 {
+		t.Fatalf("cache size = %d, want 1 valid NSEC entry", nc.Size())
+	}
+	synthResp := nc.Lookup("b.example.com.", protocol.TypeA)
+	if synthResp == nil {
+		t.Fatal("expected synthesized NXDOMAIN from valid NSEC entry")
+	}
+	if len(synthResp.Authorities) != 2 {
+		t.Fatalf("authority count = %d, want SOA + NSEC", len(synthResp.Authorities))
+	}
+}
+
+func TestNSECCacheLookupSkipsMalformedEntries(t *testing.T) {
+	nc := NewNSECCache(100)
+	nc.entries["nil"] = nil
+	nc.entries["missing-owner"] = &nsecEntry{NextDomain: mustName("z.example.com."), ExpireTime: time.Now().Add(time.Minute)}
+	nc.entries["missing-next"] = &nsecEntry{Owner: mustName("a.example.com."), ExpireTime: time.Now().Add(time.Minute)}
+
+	if resp := nc.Lookup("m.example.com.", protocol.TypeA); resp != nil {
+		t.Fatalf("Lookup with malformed entries returned response: %+v", resp)
+	}
+	if got := remainingNSECTTL(nil); got != 0 {
+		t.Fatalf("remainingNSECTTL(nil) = %d, want 0", got)
+	}
+	if got := appendSOAWithTTL(nil, nil, 10); len(got) != 0 {
+		t.Fatalf("appendSOAWithTTL(nil entry) len = %d, want 0", len(got))
+	}
+}
+
+func TestNSECCacheEvictsLiveEntriesAtMaxSize(t *testing.T) {
+	nc := NewNSECCache(2)
+
+	for _, rr := range []struct {
+		owner string
+		next  string
+	}{
+		{owner: "a.example.com.", next: "b.example.com."},
+		{owner: "b.example.com.", next: "c.example.com."},
+		{owner: "c.example.com.", next: "d.example.com."},
+	} {
+		resp := &protocol.Message{
+			Header: protocol.Header{
+				Flags: protocol.NewResponseFlags(protocol.RcodeNameError),
+			},
+			Authorities: []*protocol.ResourceRecord{
+				{
+					Name:  mustName(rr.owner),
+					Type:  protocol.TypeNSEC,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data: &protocol.RDataNSEC{
+						NextDomain: mustName(rr.next),
+						TypeBitMap: []uint16{protocol.TypeNSEC},
+					},
+				},
+			},
+		}
+		nc.AddFromResponse(resp, true)
+	}
+
+	if nc.Size() != 2 {
+		t.Fatalf("expected live NSEC cache to stay at max size 2, got %d", nc.Size())
 	}
 }

@@ -2,6 +2,8 @@ package doh
 
 import (
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -28,6 +30,27 @@ func TestNewHandlerWithPadding(t *testing.T) {
 	}
 	if !h.padding {
 		t.Error("padding should be true")
+	}
+}
+
+func TestHandlerServeHTTPRejectsUninitializedHandler(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler *Handler
+	}{
+		{name: "nil handler", handler: nil},
+		{name: "zero value handler", handler: &Handler{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/dns-query", nil)
+			rr := httptest.NewRecorder()
+
+			tc.handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+			}
+		})
 	}
 }
 

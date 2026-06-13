@@ -30,7 +30,10 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 		if h.metrics != nil {
 			h.metrics.RecordResponse(protocol.RcodeSuccess)
 		}
-		if h.checkRPZResponseIP(w, r, q, resp) {
+		if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+			if err != nil {
+				h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
+			}
 			return true
 		}
 		reply(w, r, resp)
@@ -56,7 +59,10 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				if h.checkRPZResponseIP(w, r, q, resp) {
+				if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+					if err != nil {
+						h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
+					}
 					return true
 				}
 				reply(w, r, resp)
@@ -80,7 +86,10 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 		if h.metrics != nil {
 			h.metrics.RecordResponse(protocol.RcodeSuccess)
 		}
-		if h.checkRPZResponseIP(w, r, q, resp) {
+		if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+			if err != nil {
+				h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
+			}
 			return true
 		}
 		reply(w, r, resp)
@@ -128,7 +137,10 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 				if h.metrics != nil {
 					h.metrics.RecordResponse(protocol.RcodeSuccess)
 				}
-				if h.checkRPZResponseIP(w, r, q, resp) {
+				if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+					if err != nil {
+						h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
+					}
 					return true
 				}
 				reply(w, r, resp)
@@ -139,7 +151,10 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			if h.checkRPZResponseIP(w, r, q, resp) {
+			if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+				if err != nil {
+					h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
+				}
 				return true
 			}
 			reply(w, r, resp)
@@ -344,7 +359,10 @@ func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protoc
 	if h.metrics != nil {
 		h.metrics.RecordResponse(protocol.RcodeSuccess)
 	}
-	if h.checkRPZResponseIP(w, r, q, resp) {
+	if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
+		if err != nil {
+			h.logger.Warnf("RPZ response write failed for %s: %v", q.Name.String(), err)
+		}
 		return
 	}
 	reply(w, r, resp)

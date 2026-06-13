@@ -11,6 +11,15 @@ import (
 	"testing"
 )
 
+type repeatedByteReader byte
+
+func (r repeatedByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(r)
+	}
+	return len(p), nil
+}
+
 // ============================================================================
 // captureOutput helper - redirects os.Stdout to capture fmt.Printf output
 // ============================================================================
@@ -497,6 +506,32 @@ func TestAPIRequest_InvalidJSONResponse(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid JSON response") {
 		t.Errorf("error should mention invalid JSON, got %q", err.Error())
+	}
+}
+
+func TestAPIRequest_ResponseBodyTooLarge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := io.CopyN(w, repeatedByteReader('x'), maxAPIResponseBody+1); err != nil {
+			t.Errorf("writing oversized response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	origServer := globalFlags.Server
+	origAPIKey := globalFlags.APIKey
+	globalFlags.Server = server.URL
+	globalFlags.APIKey = ""
+	defer func() {
+		globalFlags.Server = origServer
+		globalFlags.APIKey = origAPIKey
+	}()
+
+	_, err := apiRequest("GET", "/api/v1/status", "")
+	if err == nil {
+		t.Fatal("expected error for oversized response body, got nil")
+	}
+	if !strings.Contains(err.Error(), "response body exceeds") {
+		t.Errorf("error should mention response body limit, got %q", err.Error())
 	}
 }
 

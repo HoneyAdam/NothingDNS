@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -216,12 +217,12 @@ func (m *CacheManager) SaveCacheToKV(kv *storage.KVStore) error {
 }
 
 // LoadCacheFromKV loads the cache from a KVStore bucket (alternative method).
-func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) {
+func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) error {
 	if kv == nil || m.Cache == nil {
-		return
+		return nil
 	}
 
-	_ = kv.View(func(tx *storage.Tx) error {
+	if err := kv.View(func(tx *storage.Tx) error {
 		bucket := tx.Bucket([]byte("cache"))
 		if bucket == nil {
 			return nil
@@ -234,8 +235,7 @@ func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) {
 
 		var entries []cache.CacheEntryJSON
 		if err := json.Unmarshal(data, &entries); err != nil {
-			m.logger.Warnf("Failed to parse cache from KV store: %v", err)
-			return nil
+			return fmt.Errorf("parse cache from KV store: %w", err)
 		}
 
 		// Validate deserialized entries (MED-007)
@@ -251,5 +251,8 @@ func (m *CacheManager) LoadCacheFromKV(kv *storage.KVStore) {
 			m.logger.Infof("Cache restored %d entries from KV store", restored)
 		}
 		return nil
-	})
+	}); err != nil {
+		return fmt.Errorf("loading cache from KV store: %w", err)
+	}
+	return nil
 }

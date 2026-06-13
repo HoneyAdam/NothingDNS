@@ -321,6 +321,9 @@ func TestMessageTruncateFull(t *testing.T) {
 	if len(msg.Additionals) != 0 {
 		t.Errorf("Truncate should have removed all additionals, got %d", len(msg.Additionals))
 	}
+	if msg.Header.Flags.TC {
+		t.Error("Truncate must not set TC bit when only additionals were removed (RFC 2181 §9)")
+	}
 
 	// Test truncation that removes authorities
 	msg2 := NewMessage(Header{ID: 0x1234})
@@ -334,6 +337,9 @@ func TestMessageTruncateFull(t *testing.T) {
 	msg2.Truncate(questionOnlySize)
 	if len(msg2.Authorities) != 0 {
 		t.Errorf("Truncate should have removed all authorities, got %d", len(msg2.Authorities))
+	}
+	if !msg2.Header.Flags.TC {
+		t.Error("Truncate should set TC bit when removing authorities")
 	}
 
 	// Test truncation that removes answers and sets TC bit
@@ -350,6 +356,85 @@ func TestMessageTruncateFull(t *testing.T) {
 	if !msg3.Header.Flags.TC {
 		t.Error("Truncate should set TC bit when message still doesn't fit")
 	}
+}
+
+// TestMessageTruncateTCBitSemantics verifies RFC 2181 §9 TC semantics:
+// TC is set only when required data (Answer/Authority records) was removed,
+// never when only Additional-section records were dropped.
+func TestMessageTruncateTCBitSemantics(t *testing.T) {
+	name, _ := ParseName("example.com.")
+
+	newRR := func(i byte, typ uint16) *ResourceRecord {
+		return &ResourceRecord{
+			Name: name, Type: typ, Class: ClassIN, TTL: 300,
+			Data: &RDataA{Address: [4]byte{i, 2, 3, 4}},
+		}
+	}
+
+	t.Run("only additionals dropped sets no TC", func(t *testing.T) {
+		msg := NewMessage(Header{ID: 0x1234})
+		msg.AddQuestion(&Question{Name: name, QType: TypeA, QClass: ClassIN})
+		msg.AddAnswer(newRR(1, TypeA))
+		for i := byte(0); i < 5; i++ {
+			msg.AddAdditional(newRR(i, TypeA))
+		}
+		// Budget that fits header + question + the one answer, but not the
+		// additionals: removing additionals alone makes it fit.
+		maxSize := msg.WireLength() - len(msg.Additionals)*msg.Additionals[0].WireLength()
+		msg.Truncate(maxSize)
+		if got := msg.WireLength(); got > maxSize {
+			t.Fatalf("message does not fit after Truncate: %d > %d", got, maxSize)
+		}
+		if len(msg.Answers) != 1 {
+			t.Errorf("answers should be intact, got %d", len(msg.Answers))
+		}
+		if len(msg.Additionals) != 0 {
+			t.Errorf("additionals should be removed, got %d", len(msg.Additionals))
+		}
+		if msg.Header.ARCount != 0 {
+			t.Errorf("ARCount = %d, want 0", msg.Header.ARCount)
+		}
+		if msg.Header.Flags.TC {
+			t.Error("TC must not be set when only additionals were dropped (RFC 2181 §9)")
+		}
+	})
+
+	t.Run("answers dropped sets TC", func(t *testing.T) {
+		msg := NewMessage(Header{ID: 0x1234})
+		msg.AddQuestion(&Question{Name: name, QType: TypeA, QClass: ClassIN})
+		for i := byte(0); i < 5; i++ {
+			msg.AddAnswer(newRR(i, TypeA))
+		}
+		msg.AddAdditional(newRR(9, TypeA))
+		// Budget that forces removal of additionals AND at least one answer.
+		maxSize := 12 + name.WireLength() + 4 + 2*msg.Answers[0].WireLength()
+		msg.Truncate(maxSize)
+		if got := msg.WireLength(); got > maxSize {
+			t.Fatalf("message does not fit after Truncate: %d > %d", got, maxSize)
+		}
+		if len(msg.Answers) >= 5 {
+			t.Fatalf("expected answers to be removed, still have %d", len(msg.Answers))
+		}
+		if !msg.Header.Flags.TC {
+			t.Error("TC must be set when Answer records were removed")
+		}
+	})
+
+	t.Run("nothing dropped sets no TC", func(t *testing.T) {
+		msg := NewMessage(Header{ID: 0x1234})
+		msg.AddQuestion(&Question{Name: name, QType: TypeA, QClass: ClassIN})
+		msg.AddAnswer(newRR(1, TypeA))
+		msg.AddAdditional(newRR(2, TypeA))
+		before := msg.WireLength()
+		msg.Truncate(before) // exactly fits
+		if len(msg.Answers) != 1 || len(msg.Additionals) != 1 {
+			t.Errorf("no records should be removed, got %d answers / %d additionals",
+				len(msg.Answers), len(msg.Additionals))
+		}
+		if msg.Header.Flags.TC {
+			t.Error("TC must not be set when nothing was removed")
+		}
+	})
 }
 
 // ============================================================================

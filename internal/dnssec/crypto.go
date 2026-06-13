@@ -75,10 +75,16 @@ func parseRSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 	}
 
 	// Read exponent
+	if expLen > 4 {
+		return nil, fmt.Errorf("RSA exponent too long: %d bytes", expLen)
+	}
 	if offset+expLen > len(keyData) {
 		return nil, fmt.Errorf("RSA key data too short for exponent")
 	}
 	exponent := new(big.Int).SetBytes(keyData[offset : offset+expLen])
+	if exponent.Sign() <= 0 || !exponent.IsInt64() {
+		return nil, fmt.Errorf("invalid RSA exponent")
+	}
 	offset += expLen
 
 	// Read modulus
@@ -86,6 +92,9 @@ func parseRSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 		return nil, fmt.Errorf("RSA key data missing modulus")
 	}
 	modulus := new(big.Int).SetBytes(keyData[offset:])
+	if modulus.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid RSA modulus")
+	}
 
 	return &PublicKey{
 		Algorithm: algorithm,
@@ -99,18 +108,9 @@ func parseRSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 // parseECDSAPublicKey parses an ECDSA public key from DNSKEY wire format.
 // Wire format: X coordinate (32 bytes for P-256, 48 bytes for P-384) + Y coordinate
 func parseECDSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
-	var curve elliptic.Curve
-	var coordLen int
-
-	switch algorithm {
-	case protocol.AlgorithmECDSAP256SHA256:
-		curve = elliptic.P256()
-		coordLen = 32
-	case protocol.AlgorithmECDSAP384SHA384:
-		curve = elliptic.P384()
-		coordLen = 48
-	default:
-		return nil, fmt.Errorf("unsupported ECDSA algorithm: %d", algorithm)
+	curve, coordLen, err := ecdsaCurveForAlgorithm(algorithm)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(keyData) != coordLen*2 {
@@ -119,6 +119,9 @@ func parseECDSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 
 	x := new(big.Int).SetBytes(keyData[:coordLen])
 	y := new(big.Int).SetBytes(keyData[coordLen:])
+	if !curve.IsOnCurve(x, y) {
+		return nil, fmt.Errorf("invalid ECDSA public key")
+	}
 
 	return &PublicKey{
 		Algorithm: algorithm,
@@ -130,6 +133,31 @@ func parseECDSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 	}, nil
 }
 
+func ecdsaCurveForAlgorithm(algorithm uint8) (elliptic.Curve, int, error) {
+	switch algorithm {
+	case protocol.AlgorithmECDSAP256SHA256:
+		return elliptic.P256(), 32, nil
+	case protocol.AlgorithmECDSAP384SHA384:
+		return elliptic.P384(), 48, nil
+	default:
+		return nil, 0, fmt.Errorf("unsupported ECDSA algorithm: %d", algorithm)
+	}
+}
+
+func validateECDSAPublicKey(key *ecdsa.PublicKey, algorithm uint8) error {
+	curve, _, err := ecdsaCurveForAlgorithm(algorithm)
+	if err != nil {
+		return err
+	}
+	if key == nil || key.Curve == nil || key.X == nil || key.Y == nil {
+		return fmt.Errorf("invalid ECDSA public key")
+	}
+	if key.Curve.Params().BitSize != curve.Params().BitSize || !curve.IsOnCurve(key.X, key.Y) {
+		return fmt.Errorf("invalid ECDSA public key")
+	}
+	return nil
+}
+
 // parseEd25519PublicKey parses an Ed25519 public key from DNSKEY wire format.
 // Wire format: 32-byte public key
 func parseEd25519PublicKey(keyData []byte) (*PublicKey, error) {
@@ -139,13 +167,20 @@ func parseEd25519PublicKey(keyData []byte) (*PublicKey, error) {
 
 	return &PublicKey{
 		Algorithm: protocol.AlgorithmED25519,
-		Key:       ed25519.PublicKey(keyData),
+		Key:       ed25519.PublicKey(append([]byte(nil), keyData...)),
 	}, nil
 }
 
 // VerifySignature verifies an RRSIG over signed data.
 // The signedData should be the canonical wire format of the RRSet.
 func VerifySignature(sig *protocol.RDataRRSIG, signedData []byte, key *PublicKey) error {
+	if sig == nil {
+		return fmt.Errorf("signature is nil")
+	}
+	if key == nil {
+		return fmt.Errorf("public key is nil")
+	}
+
 	// Check algorithm matches
 	if sig.Algorithm != key.Algorithm {
 		return fmt.Errorf("algorithm mismatch: sig=%d, key=%d", sig.Algorithm, key.Algorithm)
@@ -171,6 +206,9 @@ func verifyRSASHA256(signature, signedData []byte, key *PublicKey) error {
 	if !ok {
 		return fmt.Errorf("key is not RSA")
 	}
+	if rsaKey == nil || rsaKey.N == nil || rsaKey.N.Sign() <= 0 || rsaKey.E <= 0 {
+		return fmt.Errorf("invalid RSA public key")
+	}
 
 	hash := sha256.Sum256(signedData)
 	err := rsa.VerifyPKCS1v15(rsaKey, crypto.SHA256, hash[:], signature)
@@ -185,6 +223,9 @@ func verifyRSASHA512(signature, signedData []byte, key *PublicKey) error {
 	rsaKey, ok := key.Key.(*rsa.PublicKey)
 	if !ok {
 		return fmt.Errorf("key is not RSA")
+	}
+	if rsaKey == nil || rsaKey.N == nil || rsaKey.N.Sign() <= 0 || rsaKey.E <= 0 {
+		return fmt.Errorf("invalid RSA public key")
 	}
 
 	hash := sha512.Sum512(signedData)
@@ -218,6 +259,9 @@ func verifyECDSA(signature, signedData []byte, key *PublicKey) error {
 	default:
 		return fmt.Errorf("unsupported ECDSA algorithm: %d", key.Algorithm)
 	}
+	if err := validateECDSAPublicKey(ecdsaKey, key.Algorithm); err != nil {
+		return err
+	}
 
 	if len(signature) != coordLen*2 {
 		return fmt.Errorf("ECDSA signature length mismatch: expected %d, got %d", coordLen*2, len(signature))
@@ -238,6 +282,9 @@ func verifyEd25519(signature, signedData []byte, key *PublicKey) error {
 	if !ok {
 		return fmt.Errorf("key is not Ed25519")
 	}
+	if len(edKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid Ed25519 public key size: %d", len(edKey))
+	}
 
 	if !ed25519.Verify(edKey, signedData, signature) {
 		return fmt.Errorf("Ed25519 verification failed")
@@ -247,6 +294,9 @@ func verifyEd25519(signature, signedData []byte, key *PublicKey) error {
 
 // SignData creates a signature for the given data using the specified algorithm.
 func SignData(algorithm uint8, key *PrivateKey, data []byte) ([]byte, error) {
+	if key == nil {
+		return nil, fmt.Errorf("private key is nil")
+	}
 	if algorithm != key.Algorithm {
 		return nil, fmt.Errorf("algorithm mismatch: data=%d, key=%d", algorithm, key.Algorithm)
 	}
@@ -271,6 +321,9 @@ func signRSASHA256(data []byte, key *PrivateKey) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key is not RSA")
 	}
+	if rsaKey == nil || rsaKey.N == nil || rsaKey.N.Sign() <= 0 || rsaKey.D == nil || rsaKey.E <= 0 {
+		return nil, fmt.Errorf("invalid RSA private key")
+	}
 
 	hash := sha256.Sum256(data)
 	return rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA256, hash[:])
@@ -282,6 +335,9 @@ func signRSASHA512(data []byte, key *PrivateKey) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key is not RSA")
 	}
+	if rsaKey == nil || rsaKey.N == nil || rsaKey.N.Sign() <= 0 || rsaKey.D == nil || rsaKey.E <= 0 {
+		return nil, fmt.Errorf("invalid RSA private key")
+	}
 
 	hash := sha512.Sum512(data)
 	return rsa.SignPKCS1v15(rand.Reader, rsaKey, crypto.SHA512, hash[:])
@@ -292,6 +348,9 @@ func signECDSA(data []byte, key *PrivateKey) ([]byte, error) {
 	ecdsaKey, ok := key.Key.(*ecdsa.PrivateKey)
 	if !ok {
 		return nil, fmt.Errorf("key is not ECDSA")
+	}
+	if ecdsaKey == nil || ecdsaKey.D == nil || ecdsaKey.D.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid ECDSA private key")
 	}
 
 	var hash []byte
@@ -308,6 +367,9 @@ func signECDSA(data []byte, key *PrivateKey) ([]byte, error) {
 		coordLen = 48
 	default:
 		return nil, fmt.Errorf("unsupported ECDSA algorithm: %d", key.Algorithm)
+	}
+	if err := validateECDSAPublicKey(&ecdsaKey.PublicKey, key.Algorithm); err != nil {
+		return nil, fmt.Errorf("invalid ECDSA private key")
 	}
 
 	r, s, err := ecdsa.Sign(rand.Reader, ecdsaKey, hash)
@@ -335,6 +397,9 @@ func signEd25519(data []byte, key *PrivateKey) ([]byte, error) {
 	edKey, ok := key.Key.(ed25519.PrivateKey)
 	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
+	}
+	if len(edKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 private key size: %d", len(edKey))
 	}
 
 	return ed25519.Sign(edKey, data), nil
@@ -412,6 +477,9 @@ func generateEd25519KeyPair() (*PrivateKey, *PublicKey, error) {
 
 // PackDNSKEYPublicKey packs a public key into DNSKEY wire format.
 func PackDNSKEYPublicKey(key *PublicKey) ([]byte, error) {
+	if key == nil {
+		return nil, fmt.Errorf("public key is nil")
+	}
 	switch key.Algorithm {
 	case protocol.AlgorithmRSASHA256, protocol.AlgorithmRSASHA512:
 		return packRSAPublicKey(key)
@@ -429,6 +497,9 @@ func packRSAPublicKey(key *PublicKey) ([]byte, error) {
 	rsaKey, ok := key.Key.(*rsa.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("key is not RSA")
+	}
+	if rsaKey == nil || rsaKey.N == nil || rsaKey.N.Sign() <= 0 || rsaKey.E <= 0 {
+		return nil, fmt.Errorf("invalid RSA public key")
 	}
 
 	exponent := big.NewInt(int64(rsaKey.E)).Bytes()
@@ -459,8 +530,14 @@ func packECDSAPublicKey(key *PublicKey) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key is not ECDSA")
 	}
+	if err := validateECDSAPublicKey(ecdsaKey, key.Algorithm); err != nil {
+		return nil, err
+	}
 
-	coordLen := (ecdsaKey.Curve.Params().BitSize + 7) / 8
+	_, coordLen, err := ecdsaCurveForAlgorithm(key.Algorithm)
+	if err != nil {
+		return nil, err
+	}
 
 	xBytes := ecdsaKey.X.Bytes()
 	yBytes := ecdsaKey.Y.Bytes()
@@ -482,8 +559,11 @@ func packEd25519PublicKey(key *PublicKey) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key is not Ed25519")
 	}
+	if len(edKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid Ed25519 public key size: %d", len(edKey))
+	}
 
-	return []byte(edKey), nil
+	return append([]byte(nil), edKey...), nil
 }
 
 // NSEC3Hash computes the NSEC3 hash of a domain name.

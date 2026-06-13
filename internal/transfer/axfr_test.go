@@ -3,6 +3,7 @@ package transfer
 import (
 	"bytes"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,21 @@ func TestAXFRServer_AddRemoveZone(t *testing.T) {
 
 	if _, ok := server.zones["example.com."]; ok {
 		t.Error("Zone not removed correctly")
+	}
+}
+
+func TestAXFRServer_AddZone_NilInputs(t *testing.T) {
+	server := NewAXFRServer(nil)
+
+	server.AddZone(nil)
+	if len(server.zones) != 0 {
+		t.Fatalf("AddZone(nil) added %d zones, want 0", len(server.zones))
+	}
+
+	z := zone.NewZone("example.com.")
+	server.AddZone(z)
+	if got := server.zones["example.com."]; got != z {
+		t.Fatalf("AddZone(valid) with nil constructor map stored %v, want zone", got)
 	}
 }
 
@@ -158,6 +174,51 @@ func TestAXFRServer_HandleAXFR_NoZone(t *testing.T) {
 	}
 }
 
+func TestAXFRServer_HandleAXFR_InvalidRequest(t *testing.T) {
+	server := NewAXFRServer(nil, WithAllowList([]string{"127.0.0.0/8"}))
+	clientIP := net.ParseIP("127.0.0.1")
+
+	tests := []struct {
+		name string
+		req  *protocol.Message
+		want string
+	}{
+		{
+			name: "nil request",
+			req:  nil,
+			want: "AXFR request is nil",
+		},
+		{
+			name: "nil question",
+			req: &protocol.Message{
+				Questions: []*protocol.Question{nil},
+			},
+			want: "AXFR question is invalid",
+		},
+		{
+			name: "nil question name",
+			req: &protocol.Message{
+				Questions: []*protocol.Question{
+					{
+						QType:  protocol.TypeAXFR,
+						QClass: protocol.ClassIN,
+					},
+				},
+			},
+			want: "AXFR question is invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := server.HandleAXFR(tt.req, clientIP)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("HandleAXFR() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestAXFRServer_HandleAXFR_NoSOA(t *testing.T) {
 	zones := make(map[string]*zone.Zone)
 	server := NewAXFRServer(zones, WithAllowList([]string{"127.0.0.0/8"}))
@@ -186,6 +247,40 @@ func TestAXFRServer_HandleAXFR_NoSOA(t *testing.T) {
 
 	if err == nil {
 		t.Error("Expected error for zone without SOA")
+	}
+}
+
+func TestAXFRServer_HandleAXFR_NilZone(t *testing.T) {
+	zones := map[string]*zone.Zone{"example.com.": nil}
+	server := NewAXFRServer(zones, WithAllowList([]string{"127.0.0.0/8"}))
+
+	name, _ := protocol.ParseName("example.com.")
+	req := &protocol.Message{
+		Header: protocol.Header{
+			ID:      1234,
+			QDCount: 1,
+		},
+		Questions: []*protocol.Question{
+			{
+				Name:   name,
+				QType:  protocol.TypeAXFR,
+				QClass: protocol.ClassIN,
+			},
+		},
+	}
+
+	_, _, err := server.HandleAXFR(req, net.ParseIP("127.0.0.1"))
+	if err == nil || !strings.Contains(err.Error(), "zone is nil") {
+		t.Fatalf("HandleAXFR() error = %v, want zone is nil", err)
+	}
+}
+
+func TestAXFRServer_generateAXFRRecords_NilZone(t *testing.T) {
+	server := NewAXFRServer(nil)
+
+	_, err := server.generateAXFRRecords(nil)
+	if err == nil || !strings.Contains(err.Error(), "zone is nil") {
+		t.Fatalf("generateAXFRRecords(nil) error = %v, want zone is nil", err)
 	}
 }
 
@@ -358,7 +453,7 @@ func TestNewAXFRClient_WithOptions(t *testing.T) {
 }
 
 func TestParseRData_A(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeA, "192.0.2.1", "example.com.")
+	rdata, err := parseRData(protocol.TypeA, "192.0.2.1")
 	if err != nil {
 		t.Fatalf("parseRData(A) error = %v", err)
 	}
@@ -375,7 +470,7 @@ func TestParseRData_A(t *testing.T) {
 }
 
 func TestParseRData_AAAA(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeAAAA, "2001:db8::1", "example.com.")
+	rdata, err := parseRData(protocol.TypeAAAA, "2001:db8::1")
 	if err != nil {
 		t.Fatalf("parseRData(AAAA) error = %v", err)
 	}
@@ -392,7 +487,7 @@ func TestParseRData_AAAA(t *testing.T) {
 }
 
 func TestParseRData_CNAME(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeCNAME, "target.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeCNAME, "target.example.com.")
 	if err != nil {
 		t.Fatalf("parseRData(CNAME) error = %v", err)
 	}
@@ -408,7 +503,7 @@ func TestParseRData_CNAME(t *testing.T) {
 }
 
 func TestParseRData_NS(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeNS, "ns1.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeNS, "ns1.example.com.")
 	if err != nil {
 		t.Fatalf("parseRData(NS) error = %v", err)
 	}
@@ -424,7 +519,7 @@ func TestParseRData_NS(t *testing.T) {
 }
 
 func TestParseRData_MX(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeMX, "10 mail.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeMX, "10 mail.example.com.")
 	if err != nil {
 		t.Fatalf("parseRData(MX) error = %v", err)
 	}
@@ -454,7 +549,7 @@ func TestParseRData_TXT(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		rdata, err := parseRData(protocol.TypeTXT, tt.input, "example.com.")
+		rdata, err := parseRData(protocol.TypeTXT, tt.input)
 		if err != nil {
 			t.Fatalf("parseRData(TXT) error = %v", err)
 		}
@@ -471,7 +566,7 @@ func TestParseRData_TXT(t *testing.T) {
 }
 
 func TestParseRData_InvalidA(t *testing.T) {
-	_, err := parseRData(protocol.TypeA, "not-an-ip", "example.com.")
+	_, err := parseRData(protocol.TypeA, "not-an-ip")
 	if err == nil {
 		t.Error("Expected error for invalid IP")
 	}
@@ -699,5 +794,131 @@ func TestAXFRClient_buildAXFRRequest(t *testing.T) {
 
 	if !hasTSIG(req2) {
 		t.Error("Expected TSIG record in request")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: AXFR must use the shared presentation-format parser so
+// rich record types ship as real wire RData — never as raw ASCII bytes.
+// ---------------------------------------------------------------------------
+
+func newAXFRRegressionZone() *zone.Zone {
+	z := zone.NewZone("example.com.")
+	z.SOA = &zone.SOARecord{
+		MName:   "ns1.example.com.",
+		RName:   "admin.example.com.",
+		Serial:  2024010101,
+		Refresh: 3600,
+		Retry:   600,
+		Expire:  604800,
+		Minimum: 86400,
+		TTL:     86400,
+	}
+	return z
+}
+
+// A TLSA record must come out of AXFR as *protocol.RDataTLSA with correct
+// wire bytes, not as RDataRaw carrying the presentation string.
+func TestAXFRServer_generateAXFRRecords_TLSAWireFormat(t *testing.T) {
+	server := NewAXFRServer(make(map[string]*zone.Zone))
+
+	z := newAXFRRegressionZone()
+	z.Records["_443._tcp.example.com."] = []zone.Record{
+		{Type: "TLSA", TTL: 3600, RData: "3 1 1 abcdef0102"},
+	}
+
+	records, err := server.generateAXFRRecords(z)
+	if err != nil {
+		t.Fatalf("generateAXFRRecords() error = %v", err)
+	}
+
+	var tlsa *protocol.ResourceRecord
+	for _, rr := range records {
+		if rr.Type == protocol.TypeTLSA {
+			tlsa = rr
+			break
+		}
+	}
+	if tlsa == nil {
+		t.Fatal("TLSA record missing from AXFR output")
+	}
+
+	data, ok := tlsa.Data.(*protocol.RDataTLSA)
+	if !ok {
+		t.Fatalf("TLSA Data = %T, want *protocol.RDataTLSA", tlsa.Data)
+	}
+
+	buf := make([]byte, data.Len())
+	if _, err := data.Pack(buf, 0); err != nil {
+		t.Fatalf("TLSA Pack() error = %v", err)
+	}
+	want := []byte{0x03, 0x01, 0x01, 0xab, 0xcd, 0xef, 0x01, 0x02}
+	if !bytes.Equal(buf, want) {
+		t.Errorf("TLSA wire bytes = %x, want %x", buf, want)
+	}
+}
+
+// A record stored with the DKIM alias type must be included in the AXFR
+// output as a TXT-type RR instead of being silently skipped.
+func TestAXFRServer_generateAXFRRecords_DKIMAlias(t *testing.T) {
+	server := NewAXFRServer(make(map[string]*zone.Zone))
+
+	z := newAXFRRegressionZone()
+	z.Records["selector._domainkey.example.com."] = []zone.Record{
+		{Type: "DKIM", TTL: 3600, RData: "\"v=DKIM1; k=rsa; p=MIGf\""},
+	}
+
+	records, err := server.generateAXFRRecords(z)
+	if err != nil {
+		t.Fatalf("generateAXFRRecords() error = %v", err)
+	}
+
+	var txt *protocol.ResourceRecord
+	for _, rr := range records {
+		if rr.Type == protocol.TypeTXT {
+			txt = rr
+			break
+		}
+	}
+	if txt == nil {
+		t.Fatal("DKIM record missing from AXFR output, want TXT-type RR")
+	}
+	if txt.Name.String() != "selector._domainkey.example.com." {
+		t.Errorf("DKIM RR name = %s, want selector._domainkey.example.com.", txt.Name.String())
+	}
+	if _, ok := txt.Data.(*protocol.RDataTXT); !ok {
+		t.Errorf("DKIM RR Data = %T, want *protocol.RDataTXT", txt.Data)
+	}
+}
+
+// A record with garbage rdata for a known type must be skipped, not shipped
+// to secondaries as raw presentation bytes.
+func TestAXFRServer_generateAXFRRecords_GarbageRDataSkipped(t *testing.T) {
+	server := NewAXFRServer(make(map[string]*zone.Zone))
+
+	z := newAXFRRegressionZone()
+	z.Records["_443._tcp.example.com."] = []zone.Record{
+		{Type: "TLSA", TTL: 3600, RData: "this is not a tlsa record"},
+	}
+	z.Records["www.example.com."] = []zone.Record{
+		{Type: "A", TTL: 3600, RData: "192.0.2.1"},
+	}
+
+	records, err := server.generateAXFRRecords(z)
+	if err != nil {
+		t.Fatalf("generateAXFRRecords() error = %v", err)
+	}
+
+	// SOA + A + SOA: the broken TLSA record must be skipped entirely.
+	if len(records) != 3 {
+		t.Errorf("Expected 3 records (SOA, A, SOA), got %d", len(records))
+	}
+	for _, rr := range records {
+		if rr.Type == protocol.TypeTLSA {
+			t.Error("garbage TLSA record was shipped instead of skipped")
+		}
+		if _, ok := rr.Data.(*protocol.RDataRaw); ok {
+			t.Errorf("record %s/%d shipped as RDataRaw", rr.Name.String(), rr.Type)
+		}
 	}
 }

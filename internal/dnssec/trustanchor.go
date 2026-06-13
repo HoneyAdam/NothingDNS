@@ -29,13 +29,40 @@ type TrustAnchor struct {
 	ValidUntil *time.Time // nil if no expiration
 }
 
+func cloneTrustAnchor(anchor *TrustAnchor) *TrustAnchor {
+	if anchor == nil {
+		return nil
+	}
+	clone := *anchor
+	clone.Digest = cloneBytes(anchor.Digest)
+	clone.PublicKey = cloneBytes(anchor.PublicKey)
+	if anchor.ValidUntil != nil {
+		validUntil := *anchor.ValidUntil
+		clone.ValidUntil = &validUntil
+	}
+	return &clone
+}
+
+func cloneBytes(data []byte) []byte {
+	if data == nil {
+		return nil
+	}
+	return append([]byte(nil), data...)
+}
+
 // IsValid checks if the trust anchor is currently valid.
 func (ta *TrustAnchor) IsValid() bool {
-	now := time.Now()
+	return ta.isValidAt(time.Now())
+}
+
+func (ta *TrustAnchor) isValidAt(now time.Time) bool {
+	if ta == nil {
+		return false
+	}
 	if now.Before(ta.ValidFrom) {
 		return false
 	}
-	if ta.ValidUntil != nil && now.After(*ta.ValidUntil) {
+	if ta.ValidUntil != nil && !now.Before(*ta.ValidUntil) {
 		return false
 	}
 	return true
@@ -43,6 +70,9 @@ func (ta *TrustAnchor) IsValid() bool {
 
 // MatchesDS checks if a DS record matches this trust anchor.
 func (ta *TrustAnchor) MatchesDS(ds *protocol.RDataDS) bool {
+	if ta == nil || ds == nil {
+		return false
+	}
 	return ta.KeyTag == ds.KeyTag &&
 		ta.Algorithm == ds.Algorithm &&
 		ta.DigestType == ds.DigestType &&
@@ -51,7 +81,7 @@ func (ta *TrustAnchor) MatchesDS(ds *protocol.RDataDS) bool {
 
 // MatchesDNSKEY checks if a DNSKEY record matches this trust anchor.
 func (ta *TrustAnchor) MatchesDNSKEY(dnskey *protocol.RDataDNSKEY) bool {
-	if ta.PublicKey == nil {
+	if ta == nil || dnskey == nil || ta.PublicKey == nil {
 		return false
 	}
 	tag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
@@ -84,11 +114,17 @@ func NewTrustAnchorStoreWithBuiltIn() *TrustAnchorStore {
 
 // AddAnchor adds a trust anchor to the store.
 func (s *TrustAnchorStore) AddAnchor(anchor *TrustAnchor) {
+	if anchor == nil {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	zone := canonicalZone(anchor.Zone)
-	s.anchors[zone] = append(s.anchors[zone], anchor)
+	stored := cloneTrustAnchor(anchor)
+	stored.Zone = zone
+	s.anchors[zone] = append(s.anchors[zone], stored)
 }
 
 // RemoveAnchor removes a specific trust anchor.
@@ -113,7 +149,9 @@ func (s *TrustAnchorStore) GetAnchorsForZone(zone string) []*TrustAnchor {
 
 	zone = canonicalZone(zone)
 	result := make([]*TrustAnchor, len(s.anchors[zone]))
-	copy(result, s.anchors[zone])
+	for i, anchor := range s.anchors[zone] {
+		result[i] = cloneTrustAnchor(anchor)
+	}
 	return result
 }
 
@@ -123,6 +161,7 @@ func (s *TrustAnchorStore) FindClosestAnchor(name string) (*TrustAnchor, []strin
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	name = canonicalZone(name)
 	labels := splitLabels(name)
 
 	// Try from most specific to root
@@ -132,7 +171,7 @@ func (s *TrustAnchorStore) FindClosestAnchor(name string) (*TrustAnchor, []strin
 			// Return the first valid anchor
 			for _, anchor := range anchors {
 				if anchor.IsValid() {
-					return anchor, labels[:i]
+					return cloneTrustAnchor(anchor), labels[:i]
 				}
 			}
 		}
@@ -142,7 +181,7 @@ func (s *TrustAnchorStore) FindClosestAnchor(name string) (*TrustAnchor, []strin
 	if anchors, ok := s.anchors["."]; ok && len(anchors) > 0 {
 		for _, anchor := range anchors {
 			if anchor.IsValid() {
-				return anchor, labels
+				return cloneTrustAnchor(anchor), labels
 			}
 		}
 	}
@@ -387,6 +426,9 @@ var BuiltInRootAnchors = []*TrustAnchor{
 
 // DSFromDNSKEY creates a DS record from a DNSKEY.
 func DSFromDNSKEY(zone string, dnskey *protocol.RDataDNSKEY, digestType uint8) (*TrustAnchor, error) {
+	if dnskey == nil {
+		return nil, fmt.Errorf("dnskey is nil")
+	}
 	keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
 
 	var digest []byte
@@ -413,7 +455,7 @@ func DSFromDNSKEY(zone string, dnskey *protocol.RDataDNSKEY, digestType uint8) (
 		Algorithm:  dnskey.Algorithm,
 		DigestType: digestType,
 		Digest:     digest,
-		PublicKey:  dnskey.PublicKey,
+		PublicKey:  cloneBytes(dnskey.PublicKey),
 		ValidFrom:  time.Now(),
 	}, nil
 }

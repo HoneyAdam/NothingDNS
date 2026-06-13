@@ -174,6 +174,40 @@ func TestRRL_SetEnabled_Toggle(t *testing.T) {
 	}
 }
 
+func TestRRL_SetEnabledStartsCleanupWhenInitiallyDisabled(t *testing.T) {
+	r := NewRRL(RRLConfig{Enabled: false, Rate: 1, Burst: 1, Window: 60})
+	defer r.Stop()
+	r.cleanupInterval = 10 * time.Millisecond
+
+	key := rrlKey(net.ParseIP("203.0.113.70"), 1, 0)
+	r.mu.Lock()
+	r.buckets[key] = &rrlBucket{
+		lastTime:  time.Now().Add(-10 * time.Minute),
+		createdAt: time.Now().Add(-10 * time.Minute),
+	}
+	r.mu.Unlock()
+
+	r.SetEnabled(true)
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		_, present := r.buckets[key]
+		r.mu.Unlock()
+		if !present {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	r.mu.Lock()
+	_, present := r.buckets[key]
+	r.mu.Unlock()
+	if present {
+		t.Fatal("cleanup goroutine did not prune stale bucket after SetEnabled(true)")
+	}
+}
+
 func TestRRL_SuppressionExpires(t *testing.T) {
 	// Tiny window so we can wait it out in a test.
 	r := NewRRL(RRLConfig{Enabled: true, Rate: 1, Burst: 1, Window: 1}) // 1s
@@ -193,6 +227,27 @@ func TestRRL_SuppressionExpires(t *testing.T) {
 	// there are ~1.1 tokens available, so the call succeeds.
 	if allowed, suppressed := r.Allow(ip, 1, 0); !allowed || suppressed {
 		t.Errorf("after window expired: want allowed, got allowed=%v suppressed=%v", allowed, suppressed)
+	}
+}
+
+func TestRRL_AllowFutureLastTimeDoesNotSuppress(t *testing.T) {
+	r := NewRRL(RRLConfig{Enabled: true, Rate: 1, Burst: 2, Window: 60})
+	defer r.Stop()
+
+	ip := net.ParseIP("203.0.113.90")
+	if allowed, suppressed := r.Allow(ip, 1, 0); !allowed || suppressed {
+		t.Fatalf("first request should seed the bucket, got allowed=%v suppressed=%v", allowed, suppressed)
+	}
+
+	key := rrlKey(ip, 1, 0)
+	r.mu.Lock()
+	b := r.buckets[key]
+	b.tokens = 1
+	b.lastTime = time.Now().Add(time.Hour)
+	r.mu.Unlock()
+
+	if allowed, suppressed := r.Allow(ip, 1, 0); !allowed || suppressed {
+		t.Fatalf("future lastTime should not drain tokens or suppress, got allowed=%v suppressed=%v", allowed, suppressed)
 	}
 }
 

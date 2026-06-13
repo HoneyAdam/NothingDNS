@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -15,12 +16,13 @@ import (
 
 // MetricsCollector collects and exposes Prometheus-format metrics.
 type MetricsCollector struct {
-	mu     sync.RWMutex
-	config Config
-	server *http.Server
-	wg     sync.WaitGroup
-	ctx    context.Context
-	cancel context.CancelFunc
+	mu          sync.RWMutex
+	lifecycleMu sync.Mutex
+	config      Config
+	server      *http.Server
+	wg          sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
 
 	// Query metrics
 	queriesTotal   map[string]*uint64 // by query type
@@ -120,7 +122,6 @@ func New(cfg Config) *MetricsCollector {
 		cfg.Path = "/metrics"
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
 	return &MetricsCollector{
 		config:             cfg,
 		queriesTotal:       make(map[string]*uint64),
@@ -128,8 +129,6 @@ func New(cfg Config) *MetricsCollector {
 		upstreamQueries:    make(map[string]*uint64),
 		latencyHists:       make(map[string]*latencyHistogram),
 		startTime:          time.Now(),
-		ctx:                ctx,
-		cancel:             cancel,
 		historySize:        60, // 60 minutes of history
 		historyTimestamps:  make([]int64, 60),
 		historyQueries:     make([]uint64, 60),
@@ -146,11 +145,17 @@ func (m *MetricsCollector) Start() error {
 	}
 
 	// SECURITY: Refuse to serve metrics without auth. Operators must set
-	// auth_token when enabling the metrics endpoint on any non-loopback bind.
+	// auth_token whenever the metrics endpoint is enabled.
 	if m.config.AuthToken == "" {
 		return fmt.Errorf("metrics enabled but auth_token not configured: " +
 			"refusing to serve sensitive operational metrics without authentication; " +
 			"set metrics.auth_token in config or bind metrics to localhost only")
+	}
+
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.server != nil {
+		return nil
 	}
 
 	mux := http.NewServeMux()
@@ -160,8 +165,8 @@ func (m *MetricsCollector) Start() error {
 	mux.HandleFunc(m.config.Path, metricsHandler)
 	mux.HandleFunc("/health", healthHandler)
 
-	m.mu.Lock()
-	m.server = &http.Server{
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := &http.Server{
 		Addr:              m.config.Bind,
 		Handler:           mux,
 		ReadHeaderTimeout: 2 * time.Second,
@@ -170,32 +175,43 @@ func (m *MetricsCollector) Start() error {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 15,
 	}
+
+	ln, err := net.Listen("tcp", m.config.Bind)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("listen metrics %s: %w", m.config.Bind, err)
+	}
+
+	m.mu.Lock()
+	m.server = srv
+	m.ctx = ctx
+	m.cancel = cancel
 	m.mu.Unlock()
 
 	m.wg.Add(1)
-	go func() {
+	go func(srv *http.Server) {
 		defer m.wg.Done()
-		if err := m.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			util.Warnf("metrics server error: %v", err)
 		}
-	}()
+	}(srv)
 
 	// Start metrics history snapshot goroutine
 	m.wg.Add(1)
-	go m.historyLoop()
+	go m.historyLoop(ctx)
 
 	return nil
 }
 
 // historyLoop snapshots metrics every minute into a ring buffer.
-func (m *MetricsCollector) historyLoop() {
+func (m *MetricsCollector) historyLoop(ctx context.Context) {
 	defer m.wg.Done()
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-m.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
 			m.recordHistorySnapshot()
@@ -222,18 +238,20 @@ func (m *MetricsCollector) recordHistorySnapshot() {
 	m.historyCacheHits[idx] = atomic.LoadUint64(&m.cacheHits)
 	m.historyCacheMisses[idx] = atomic.LoadUint64(&m.cacheMisses)
 
-	// Average upstream latency
-	m.mu.RLock()
-	var totalLatency int64
-	var count int
+	// Average latency across all recorded query observations.
+	m.latencyMu.RLock()
+	var totalLatency uint64
+	var totalCount uint64
 	for _, h := range m.latencyHists {
-		totalLatency += int64(atomic.LoadUint64(&h.sumNs))
-		count++
+		totalLatency += atomic.LoadUint64(&h.sumNs)
+		totalCount += atomic.LoadUint64(&h.totalCount)
 	}
-	m.mu.RUnlock()
+	m.latencyMu.RUnlock()
 
-	if count > 0 {
-		m.historyUpstreamMs[idx] = totalLatency / int64(count) / 1e6
+	if totalCount > 0 {
+		m.historyUpstreamMs[idx] = int64(totalLatency / totalCount / 1e6)
+	} else {
+		m.historyUpstreamMs[idx] = 0
 	}
 
 	m.historyIndex++
@@ -244,16 +262,23 @@ func (m *MetricsCollector) recordHistorySnapshot() {
 
 // Stop stops the metrics HTTP server.
 func (m *MetricsCollector) Stop() error {
-	m.mu.RLock()
-	srv := m.server
-	m.mu.RUnlock()
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 
+	m.mu.Lock()
+	srv := m.server
+	cancelFunc := m.cancel
 	if srv == nil {
+		m.mu.Unlock()
 		return nil
 	}
+	m.server = nil
+	m.ctx = nil
+	m.cancel = nil
+	m.mu.Unlock()
 
-	if m.cancel != nil {
-		m.cancel()
+	if cancelFunc != nil {
+		cancelFunc()
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -443,7 +468,7 @@ func (m *MetricsCollector) handleMetrics(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 
 	// Uptime
-	uptime := time.Since(m.startTime).Seconds()
+	uptime := nonNegativeDurationSince(m.startTime, time.Now()).Seconds()
 	fmt.Fprintf(w, "# HELP nothingdns_server_uptime_seconds Server uptime in seconds\n")
 	fmt.Fprintf(w, "# TYPE nothingdns_server_uptime_seconds gauge\n")
 	fmt.Fprintf(w, "nothingdns_server_uptime_seconds %.2f\n\n", uptime)
@@ -510,9 +535,10 @@ func (m *MetricsCollector) handleMetrics(w http.ResponseWriter, r *http.Request)
 	for qtype, h := range m.latencyHists {
 		count := atomic.LoadUint64(&h.totalCount)
 		sum := atomic.LoadUint64(&h.sumNs)
+		cumulative := uint64(0)
 		for i, label := range latencyLabels {
-			bucketCount := atomic.LoadUint64(&h.bucketCounts[i])
-			fmt.Fprintf(w, "nothingdns_query_duration_seconds_bucket{type=\"%s\",le=\"%s\"} %d\n", qtype, label, bucketCount)
+			cumulative += atomic.LoadUint64(&h.bucketCounts[i])
+			fmt.Fprintf(w, "nothingdns_query_duration_seconds_bucket{type=\"%s\",le=\"%s\"} %d\n", qtype, label, cumulative)
 		}
 		fmt.Fprintf(w, "nothingdns_query_duration_seconds_bucket{type=\"%s\",le=\"+Inf\"} %d\n", qtype, count)
 		fmt.Fprintf(w, "nothingdns_query_duration_seconds_sum{type=\"%s\"} %.6f\n", qtype, float64(sum)/1e9)
@@ -635,7 +661,7 @@ func (m *MetricsCollector) Snapshot() DashboardSnapshot {
 	}
 	m.mu.RUnlock()
 
-	secs := int64(time.Since(m.startTime).Seconds())
+	secs := int64(nonNegativeDurationSince(m.startTime, time.Now()).Seconds())
 	blocked := atomic.LoadUint64(&m.blocklistBlocks)
 
 	// Recent query rate: prefer the delta between the two most recent history
@@ -677,5 +703,12 @@ func (m *MetricsCollector) Snapshot() DashboardSnapshot {
 func (m *MetricsCollector) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintf(w, `{"status":"healthy","uptime":"%s"}`, time.Since(m.startTime).String())
+	fmt.Fprintf(w, `{"status":"healthy","uptime":"%s"}`, nonNegativeDurationSince(m.startTime, time.Now()).String())
+}
+
+func nonNegativeDurationSince(start, now time.Time) time.Duration {
+	if now.Before(start) {
+		return 0
+	}
+	return now.Sub(start)
 }

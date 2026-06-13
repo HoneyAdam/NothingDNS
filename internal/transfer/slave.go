@@ -72,11 +72,11 @@ func (c *SlaveZoneConfig) Validate() error {
 		return fmt.Errorf("invalid transfer type: %s (must be 'ixfr' or 'axfr')", c.TransferType)
 	}
 
-	if c.Timeout == 0 {
+	if c.Timeout <= 0 {
 		c.Timeout = 30 * time.Second
 	}
 
-	if c.RetryInterval == 0 {
+	if c.RetryInterval <= 0 {
 		c.RetryInterval = 5 * time.Minute
 	}
 

@@ -70,45 +70,69 @@ func NewQuery(id uint16, name string, qtype uint16) (*Message, error) {
 
 // IsQuery returns true if this is a query message.
 func (m *Message) IsQuery() bool {
+	if m == nil {
+		return false
+	}
 	return !m.Header.Flags.QR
 }
 
 // IsResponse returns true if this is a response message.
 func (m *Message) IsResponse() bool {
+	if m == nil {
+		return false
+	}
 	return m.Header.Flags.QR
 }
 
 // SetResponse converts this message to a response with the given RCODE.
 func (m *Message) SetResponse(rcode uint8) {
+	if m == nil {
+		return
+	}
 	m.Header.SetResponse(rcode)
 }
 
 // AddQuestion adds a question to the message.
 func (m *Message) AddQuestion(q *Question) {
+	if m == nil {
+		return
+	}
 	m.Questions = append(m.Questions, q)
 	m.Header.QDCount = uint16(len(m.Questions))
 }
 
 // AddAnswer adds an answer record to the message.
 func (m *Message) AddAnswer(rr *ResourceRecord) {
+	if m == nil {
+		return
+	}
 	m.Answers = append(m.Answers, rr)
 	m.Header.ANCount = uint16(len(m.Answers))
 }
 
 // AddAuthority adds an authority record to the message.
 func (m *Message) AddAuthority(rr *ResourceRecord) {
+	if m == nil {
+		return
+	}
 	m.Authorities = append(m.Authorities, rr)
 	m.Header.NSCount = uint16(len(m.Authorities))
 }
 
 // AddAdditional adds an additional record to the message.
 func (m *Message) AddAdditional(rr *ResourceRecord) {
+	if m == nil {
+		return
+	}
 	m.Additionals = append(m.Additionals, rr)
 	m.Header.ARCount = uint16(len(m.Additionals))
 }
 
 // GetOPT returns the OPT record from the additional section, or nil if not present.
 func (m *Message) GetOPT() *ResourceRecord {
+	if m == nil {
+		return nil
+	}
 	for _, rr := range m.Additionals {
 		if rr != nil && rr.Type == TypeOPT {
 			return rr
@@ -119,13 +143,18 @@ func (m *Message) GetOPT() *ResourceRecord {
 
 // SetEDNS0 adds an OPT record for EDNS0 support.
 func (m *Message) SetEDNS0(udpPayloadSize uint16, do bool) {
-	// Remove existing OPT record if present
-	for i, rr := range m.Additionals {
-		if rr.Type == TypeOPT {
-			m.Additionals = append(m.Additionals[:i], m.Additionals[i+1:]...)
-			break
-		}
+	if m == nil {
+		return
 	}
+	// Remove invalid entries and existing OPT records before appending the new one.
+	additionals := m.Additionals[:0]
+	for _, rr := range m.Additionals {
+		if rr == nil || rr.Type == TypeOPT {
+			continue
+		}
+		additionals = append(additionals, rr)
+	}
+	m.Additionals = additionals
 
 	// Build the TTL field with DO bit and version 0
 	ttl := BuildEDNSTTL(0, 0, do, 0)
@@ -143,7 +172,13 @@ func (m *Message) SetEDNS0(udpPayloadSize uint16, do bool) {
 
 // WireLength returns the total length of the message in wire format.
 func (m *Message) WireLength() int {
+	if m == nil {
+		return 0
+	}
 	length := HeaderLen
+	if m.Header.Flags.Opcode == OpcodeDSO {
+		return length + len(m.RawBody)
+	}
 
 	for _, q := range m.Questions {
 		length += q.WireLength()
@@ -234,11 +269,13 @@ func (m *Message) Release() {
 
 // Pack serializes the DNS message to wire format.
 func (m *Message) Pack(buf []byte) (int, error) {
+	if m == nil {
+		return 0, fmt.Errorf("nil message")
+	}
 	// Update header counts
-	m.Header.QDCount = uint16(len(m.Questions))
-	m.Header.ANCount = uint16(len(m.Answers))
-	m.Header.NSCount = uint16(len(m.Authorities))
-	m.Header.ARCount = uint16(len(m.Additionals))
+	if err := m.updateHeaderCounts(); err != nil {
+		return 0, err
+	}
 
 	// Check buffer size
 	if len(buf) < m.WireLength() {
@@ -250,6 +287,10 @@ func (m *Message) Pack(buf []byte) (int, error) {
 		return 0, fmt.Errorf("packing header: %w", err)
 	}
 	offset := HeaderLen
+	if m.Header.Flags.Opcode == OpcodeDSO {
+		copy(buf[offset:], m.RawBody)
+		return offset + len(m.RawBody), nil
+	}
 
 	// Compression map for name compression (pooled to avoid per-call allocation)
 	compression := compressionPool.Get().(map[string]int)
@@ -295,6 +336,87 @@ func (m *Message) Pack(buf []byte) (int, error) {
 	}
 
 	return offset, nil
+}
+
+func (m *Message) updateHeaderCounts() error {
+	if m == nil {
+		return fmt.Errorf("nil message")
+	}
+	if m.Header.Flags.Opcode == OpcodeDSO {
+		m.Header.QDCount = 0
+		m.Header.ANCount = 0
+		m.Header.NSCount = 0
+		m.Header.ARCount = 0
+		return nil
+	}
+	if err := validateQuestionsForPack(m.Questions); err != nil {
+		return err
+	}
+	if err := validateResourceRecordsForPack("answer", m.Answers); err != nil {
+		return err
+	}
+	if err := validateResourceRecordsForPack("authority", m.Authorities); err != nil {
+		return err
+	}
+	if err := validateResourceRecordsForPack("additional", m.Additionals); err != nil {
+		return err
+	}
+
+	qd, err := sectionCount("questions", len(m.Questions))
+	if err != nil {
+		return err
+	}
+	an, err := sectionCount("answers", len(m.Answers))
+	if err != nil {
+		return err
+	}
+	ns, err := sectionCount("authorities", len(m.Authorities))
+	if err != nil {
+		return err
+	}
+	ar, err := sectionCount("additionals", len(m.Additionals))
+	if err != nil {
+		return err
+	}
+	m.Header.QDCount = qd
+	m.Header.ANCount = an
+	m.Header.NSCount = ns
+	m.Header.ARCount = ar
+	return nil
+}
+
+func sectionCount(section string, n int) (uint16, error) {
+	if n > 0xffff {
+		return 0, fmt.Errorf("too many %s: %d (max 65535)", section, n)
+	}
+	return uint16(n), nil
+}
+
+func validateQuestionsForPack(questions []*Question) error {
+	for i, q := range questions {
+		if q == nil {
+			return fmt.Errorf("nil question at index %d", i)
+		}
+		if q.Name == nil {
+			return fmt.Errorf("nil question name at index %d", i)
+		}
+	}
+	return nil
+}
+
+func validateResourceRecordsForPack(section string, records []*ResourceRecord) error {
+	for i, rr := range records {
+		if rr == nil {
+			return fmt.Errorf("nil %s record at index %d", section, i)
+		}
+		if rr.Name == nil {
+			return fmt.Errorf("nil %s record name at index %d", section, i)
+		}
+		if isNilRData(rr.Data) {
+			return fmt.Errorf("nil %s record data at index %d", section, i)
+		}
+	}
+	return nil
 }
 
 // Unpack deserializes a DNS message from wire format. The returned
@@ -416,6 +538,9 @@ func UnpackMessage(buf []byte) (*Message, error) {
 
 // String returns a human-readable representation of the message (like dig output).
 func (m *Message) String() string {
+	if m == nil {
+		return "<nil message>"
+	}
 	result := m.Header.String() + "\n"
 
 	// Questions
@@ -455,21 +580,35 @@ func (m *Message) String() string {
 
 // Copy creates a deep copy of the message.
 func (m *Message) Copy() *Message {
+	if m == nil {
+		return nil
+	}
 	msg := &Message{
 		Header: *m.Header.Copy(),
 	}
+	if len(m.RawBody) > 0 {
+		msg.RawBody = append([]byte(nil), m.RawBody...)
+	}
 
 	for _, q := range m.Questions {
-		msg.Questions = append(msg.Questions, q.Copy())
+		if q != nil {
+			msg.Questions = append(msg.Questions, q.Copy())
+		}
 	}
 	for _, rr := range m.Answers {
-		msg.Answers = append(msg.Answers, rr.Copy())
+		if rr != nil {
+			msg.Answers = append(msg.Answers, rr.Copy())
+		}
 	}
 	for _, rr := range m.Authorities {
-		msg.Authorities = append(msg.Authorities, rr.Copy())
+		if rr != nil {
+			msg.Authorities = append(msg.Authorities, rr.Copy())
+		}
 	}
 	for _, rr := range m.Additionals {
-		msg.Additionals = append(msg.Additionals, rr.Copy())
+		if rr != nil {
+			msg.Additionals = append(msg.Additionals, rr.Copy())
+		}
 	}
 
 	return msg
@@ -477,6 +616,9 @@ func (m *Message) Copy() *Message {
 
 // Clear removes all sections but keeps the header.
 func (m *Message) Clear() {
+	if m == nil {
+		return
+	}
 	m.Questions = m.Questions[:0]
 	m.Answers = m.Answers[:0]
 	m.Authorities = m.Authorities[:0]
@@ -485,13 +627,22 @@ func (m *Message) Clear() {
 }
 
 // Truncate truncates the message to fit within the given size limit.
-// Sets the TC bit if truncation occurred.
+//
+// Per RFC 2181 §9 the TC bit means that *required* data was omitted, so it
+// is set only when records are removed from the Answer or Authority
+// sections (or the message still does not fit after removing everything).
+// Dropping Additional-section records (OPT, glue, ...) alone does not set
+// TC. Removal is always on whole-record boundaries.
 func (m *Message) Truncate(maxSize int) {
+	if m == nil {
+		return
+	}
 	if m.WireLength() <= maxSize {
 		return
 	}
 
-	// Try removing additional records first
+	// Try removing additional records first. These are optional data, so
+	// dropping them does not set the TC bit (RFC 2181 §9).
 	for len(m.Additionals) > 0 && m.WireLength() > maxSize {
 		m.Additionals = m.Additionals[:len(m.Additionals)-1]
 	}
@@ -501,24 +652,31 @@ func (m *Message) Truncate(maxSize int) {
 		return
 	}
 
+	truncated := false
+
 	// Try removing authority records
 	for len(m.Authorities) > 0 && m.WireLength() > maxSize {
 		m.Authorities = m.Authorities[:len(m.Authorities)-1]
+		truncated = true
 	}
 	m.Header.NSCount = uint16(len(m.Authorities))
 
 	if m.WireLength() <= maxSize {
+		if truncated {
+			m.Header.SetTruncated(true)
+		}
 		return
 	}
 
 	// Try removing answer records
 	for len(m.Answers) > 0 && m.WireLength() > maxSize {
 		m.Answers = m.Answers[:len(m.Answers)-1]
+		truncated = true
 	}
 	m.Header.ANCount = uint16(len(m.Answers))
 
-	// If we still don't fit, set TC bit
-	if m.WireLength() > maxSize {
+	// If required records were removed or we still do not fit, set TC bit.
+	if truncated || m.WireLength() > maxSize {
 		m.Header.SetTruncated(true)
 	}
 }

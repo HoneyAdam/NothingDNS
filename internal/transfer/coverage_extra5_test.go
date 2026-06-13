@@ -29,7 +29,7 @@ func TestAXFRServer_zoneRecordToRR_InvalidOwner_Extra5(t *testing.T) {
 	longLabel := strings.Repeat("a", 70)
 	_, err := s.zoneRecordToRR(longLabel+".example.com.", zone.Record{
 		Name: longLabel + ".example.com.", Type: "A", TTL: 3600, RData: "1.2.3.4",
-	}, "example.com.")
+	})
 	if err == nil {
 		t.Error("expected error for invalid owner name in zoneRecordToRR")
 	}
@@ -500,7 +500,7 @@ func TestIXFRServer_changeToRR_InvalidName_Extra5(t *testing.T) {
 	longLabel := strings.Repeat("a", 70)
 	_, err := server.changeToRR(zone.RecordChange{
 		Name: longLabel + ".example.com.", Type: protocol.TypeA, TTL: 3600, RData: "1.2.3.4",
-	}, "example.com.")
+	})
 	if err == nil {
 		t.Error("expected error for invalid name in changeToRR")
 	}
@@ -516,7 +516,7 @@ func TestIXFRServer_changeToRR_InvalidRData_Extra5(t *testing.T) {
 
 	_, err := server.changeToRR(zone.RecordChange{
 		Name: "www.example.com.", Type: protocol.TypeA, TTL: 3600, RData: "not-an-ip",
-	}, "example.com.")
+	})
 	if err == nil {
 		t.Error("expected error for invalid RData in changeToRR")
 	}
@@ -532,7 +532,7 @@ func TestIXFRServer_changeToRR_Success_Extra5(t *testing.T) {
 
 	rr, err := server.changeToRR(zone.RecordChange{
 		Name: "www.example.com.", Type: protocol.TypeA, TTL: 3600, RData: "1.2.3.4",
-	}, "example.com.")
+	})
 	if err != nil {
 		t.Fatalf("changeToRR: %v", err)
 	}

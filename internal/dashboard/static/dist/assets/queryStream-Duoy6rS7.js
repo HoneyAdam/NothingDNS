@@ -1,1 +1,0 @@
-import{o as e}from"./api-BuBj5OGK.js";var t=100,n=e(e=>({events:[],connected:!1,pushEvent:n=>e(e=>({events:[n,...e.events].slice(0,t)})),setConnected:t=>e({connected:t})}));export{n as t};

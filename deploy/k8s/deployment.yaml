@@ -68,6 +68,11 @@ spec:
             secretKeyRef:
               name: nothingdns-auth
               key: metrics-auth-token
+        - name: NOTHINGDNS_STORAGE_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: nothingdns-auth
+              key: storage-encryption-key
         - name: NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
@@ -104,6 +109,8 @@ spec:
         - name: tls
           mountPath: /etc/nothingdns/tls
           readOnly: true
+        - name: data
+          mountPath: /var/lib/nothingdns
         args:
         - --config
         - /etc/nothingdns/config.yaml
@@ -127,3 +134,6 @@ spec:
       - name: tls
         secret:
           secretName: nothingdns-tls
+      - name: data
+        persistentVolumeClaim:
+          claimName: nothingdns-data

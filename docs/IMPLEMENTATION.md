@@ -21,14 +21,13 @@
 13. [Configuration System](#13-configuration-system)
 14. [REST API](#14-rest-api)
 15. [gRPC Inter-Node](#15-grpc-inter-node)
-16. [MCP Server](#16-mcp-server)
-17. [Web Dashboard](#17-web-dashboard)
-18. [CLI Tool (dnsctl)](#18-cli-tool-dnsctl)
-19. [Metrics & Observability](#19-metrics--observability)
-20. [Shared Utilities](#20-shared-utilities)
-21. [Testing Strategy](#21-testing-strategy)
-22. [Build & Release Pipeline](#22-build--release-pipeline)
-23. [Implementation Order & Dependencies](#23-implementation-order--dependencies)
+16. [Web Dashboard](#16-web-dashboard)
+17. [CLI Tool (dnsctl)](#17-cli-tool-dnsctl)
+18. [Metrics & Observability](#18-metrics--observability)
+19. [Shared Utilities](#19-shared-utilities)
+20. [Testing Strategy](#20-testing-strategy)
+21. [Build & Release Pipeline](#21-build--release-pipeline)
+22. [Implementation Order & Dependencies](#22-implementation-order--dependencies)
 
 ---
 
@@ -66,10 +65,10 @@ toolchain go1.26.3
 // Initialization order:
 // Logger → Config → Storage → ZoneStore → Cache → Filter →
 // AuthEngine → Resolver → DNSSEC → Cluster → Listeners →
-// API → Dashboard → MCP → Metrics
+// API → Dashboard → Metrics
 
 // Shutdown order (reverse):
-// Metrics → MCP → Dashboard → API → Listeners →
+// Metrics → Dashboard → API → Listeners →
 // Cluster → DNSSEC → Resolver → AuthEngine → Filter →
 // Cache → ZoneStore → Storage → Logger
 ```
@@ -2140,7 +2139,6 @@ type Config struct {
     API       APIConfig
     Dashboard DashboardConfig
     Metrics   MetricsConfig
-    MCP       MCPConfig
     Logging   LoggingConfig
 }
 
@@ -2297,62 +2295,7 @@ type GRPCServer struct {
 
 ---
 
-## 16. MCP Server
-
-```go
-// internal/api/mcp/server.go
-
-type MCPServer struct {
-    zoneStore   *auth.ZoneStore
-    resolver    *resolver.Engine
-    cache       *resolver.Cache
-    cluster     *cluster.Raft
-    blocklist   *filter.Blocklist
-    config      *config.Config
-    metrics     *metrics.Collector
-}
-
-// MCP Protocol: JSON-RPC 2.0
-// Transport: stdio (for Claude Code CLI) or SSE (for web clients)
-//
-// Initialization handshake:
-// Client → {"jsonrpc":"2.0","method":"initialize","params":{...}}
-// Server → {"jsonrpc":"2.0","result":{"capabilities":{...},"serverInfo":{...}}}
-//
-// stdio mode: Read JSON-RPC from stdin, write to stdout.
-// SSE mode: HTTP endpoint, server-sent events for responses.
-
-// internal/api/mcp/tools.go
-
-// MCP tools are functions the LLM can call.
-// Each tool: name, description, inputSchema (JSON Schema), handler func.
-//
-// Tool implementations delegate to existing subsystems:
-// dns_zone_list → zoneStore.ListZones()
-// dns_record_add → POST /api/v1/zones/{name}/records (via internal func)
-// dns_query → create DNS query message, run through pipeline
-// etc.
-//
-// Input validation using JSON Schema defined per tool.
-
-// internal/api/mcp/resources.go
-
-// MCP resources are data the LLM can read.
-// URI scheme: dns://
-// Each resource: URI template, description, handler func.
-
-// internal/api/mcp/prompts.go
-
-// MCP prompts are pre-built prompt templates.
-// Help LLMs perform complex DNS operations:
-// - troubleshoot_dns: "Query failed for {domain}. Check cache, zone, upstream."
-// - migrate_from_bind: "I'll help import your BIND zones. Upload named.conf."
-// - optimize_config: "Analyzing current config for performance improvements."
-```
-
----
-
-## 17. Web Dashboard
+## 16. Web Dashboard
 
 ```go
 // internal/dashboard/server.go
@@ -2401,7 +2344,7 @@ type DashboardServer struct {
 
 ---
 
-## 18. CLI Tool (dnsctl)
+## 17. CLI Tool (dnsctl)
 
 ```go
 // cmd/dnsctl/main.go
@@ -2441,7 +2384,7 @@ type DashboardServer struct {
 
 ---
 
-## 19. Metrics & Observability
+## 18. Metrics & Observability
 
 ```go
 // internal/metrics/collector.go
@@ -2505,9 +2448,9 @@ func (c *Collector) RenderPrometheus(w io.Writer) error
 
 ---
 
-## 20. Shared Utilities
+## 19. Shared Utilities
 
-### 20.1 Logger
+### 19.1 Logger
 
 ```go
 // internal/util/logger.go
@@ -2540,7 +2483,7 @@ func (l *Logger) Warn(msg string, fields ...interface{})
 func (l *Logger) Error(msg string, fields ...interface{})
 ```
 
-### 20.2 Other Utilities
+### 19.2 Other Utilities
 
 ```go
 // internal/util/pool.go
@@ -2561,9 +2504,9 @@ func (l *Logger) Error(msg string, fields ...interface{})
 
 ---
 
-## 21. Testing Strategy
+## 20. Testing Strategy
 
-### 21.1 Unit Tests
+### 20.1 Unit Tests
 - Every package has `*_test.go` files
 - DNS wire protocol: round-trip marshal/unmarshal tests for every record type
 - Zone file parser: test with sample BIND zone files (valid + invalid)
@@ -2571,19 +2514,19 @@ func (l *Logger) Error(msg string, fields ...interface{})
 - Raft: election, log replication, snapshot (using in-memory transport)
 - DNSSEC: sign + verify round-trips for each algorithm
 
-### 21.2 Integration Tests
+### 20.2 Integration Tests
 - Full query pipeline: UDP query → response (using net.UDPConn loopback)
 - Authoritative: load zone, query, verify response sections
 - Recursive: mock upstream, verify iterative resolution
 - Zone transfer: AXFR/IXFR between two instances
 - Cluster: 3-node in-process cluster, verify leader election + replication
 
-### 21.3 Conformance Tests
+### 20.3 Conformance Tests
 - RFC compliance: test against known-good DNS query/response pairs
 - DNSSEC validation: test against known signed zones
 - Zone file parser: test against BIND test suite zone files
 
-### 21.4 Benchmark Tests
+### 20.4 Benchmark Tests
 - `go test -bench=.` for hot paths:
   - Message marshal/unmarshal
   - Cache lookup
@@ -2593,9 +2536,9 @@ func (l *Logger) Error(msg string, fields ...interface{})
 
 ---
 
-## 22. Build & Release Pipeline
+## 21. Build & Release Pipeline
 
-### 22.1 Makefile Targets
+### 21.1 Makefile Targets
 ```
 make build        # Build both binaries
 make test         # Run all tests
@@ -2606,7 +2549,7 @@ make docker       # Build Docker image
 make clean        # Remove build artifacts
 ```
 
-### 22.2 CI/CD (GitHub Actions)
+### 21.2 CI/CD (GitHub Actions)
 ```
 on push/PR:
   - go vet
@@ -2623,7 +2566,7 @@ on tag:
 
 ---
 
-## 23. Implementation Order & Dependencies
+## 22. Implementation Order & Dependencies
 
 ### Phase 1: Foundation (Week 1-2)
 ```
@@ -2729,22 +2672,21 @@ on tag:
 ### Phase 10: Management (Week 20-22)
 ```
 57. internal/api/rest/* — REST API (router, all endpoints, swagger)
-58. internal/api/mcp/* — MCP server (tools, resources, prompts)
-59. internal/dashboard/* — Web dashboard (embed, websocket, static assets)
-60. internal/metrics/* — Prometheus metrics, health endpoint
-61. cmd/dnsctl/* — CLI management tool
+58. internal/dashboard/* — Web dashboard (embed, websocket, static assets)
+59. internal/metrics/* — Prometheus metrics, health endpoint
+60. cmd/dnsctl/* — CLI management tool
 ```
 **Milestone: Full management suite operational.**
 
 ### Phase 11: Polish & Release (Week 23-24)
 ```
-62. Comprehensive test suite
-63. Benchmark optimization
-64. Documentation (README, man pages)
-65. Docker image + compose files
-66. CI/CD pipeline
-67. Performance tuning
-68. Security audit
+61. Comprehensive test suite
+62. Benchmark optimization
+63. Documentation (README, man pages)
+64. Docker image + compose files
+65. CI/CD pipeline
+66. Performance tuning
+67. Security audit
 ```
 **Milestone: v1.0.0 release-ready.**
 

@@ -23,6 +23,9 @@ func (r *RDataMX) Type() uint16 { return TypeMX }
 
 // Pack serializes the MX record.
 func (r *RDataMX) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil MX record")
+	}
 	startOffset := offset
 
 	// Preference (2 bytes)
@@ -46,6 +49,9 @@ func (r *RDataMX) Pack(buf []byte, offset int) (int, error) {
 // rdlength-bypass rationale; enforce that the 2-byte preference plus
 // the encoded Exchange name fit strictly within rdlength.
 func (r *RDataMX) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil MX record")
+	}
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 	if endOffset > len(buf) {
@@ -75,6 +81,9 @@ func (r *RDataMX) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
 
 // String returns the MX record data.
 func (r *RDataMX) String() string {
+	if r == nil {
+		return ""
+	}
 	exchange := "."
 	if r.Exchange != nil {
 		exchange = r.Exchange.String()
@@ -84,6 +93,9 @@ func (r *RDataMX) String() string {
 
 // Len returns the wire length.
 func (r *RDataMX) Len() int {
+	if r == nil {
+		return 0
+	}
 	if r.Exchange == nil {
 		return 3
 	}
@@ -92,6 +104,9 @@ func (r *RDataMX) Len() int {
 
 // Copy creates a copy.
 func (r *RDataMX) Copy() RData {
+	if r == nil {
+		return nil
+	}
 	var exchange *Name
 	if r.Exchange != nil {
 		exchange = NewName(r.Exchange.Labels, r.Exchange.FQDN)
@@ -116,6 +131,9 @@ func (r *RDataTXT) Type() uint16 { return TypeTXT }
 
 // Pack serializes the TXT record.
 func (r *RDataTXT) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil TXT record")
+	}
 	startOffset := offset
 
 	for _, s := range r.Strings {
@@ -137,6 +155,9 @@ func (r *RDataTXT) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the TXT record.
 func (r *RDataTXT) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil TXT record")
+	}
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -172,6 +193,9 @@ func (r *RDataTXT) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 
 // String returns the TXT record data.
 func (r *RDataTXT) String() string {
+	if r == nil {
+		return ""
+	}
 	var parts []string
 	for _, s := range r.Strings {
 		// Quote strings that contain spaces or special chars
@@ -185,6 +209,9 @@ func (r *RDataTXT) String() string {
 
 // Len returns the wire length.
 func (r *RDataTXT) Len() int {
+	if r == nil {
+		return 0
+	}
 	length := 0
 	for _, s := range r.Strings {
 		length += 1 + len(s)
@@ -194,6 +221,9 @@ func (r *RDataTXT) Len() int {
 
 // Copy creates a copy.
 func (r *RDataTXT) Copy() RData {
+	if r == nil {
+		return nil
+	}
 	strings := make([]string, len(r.Strings))
 	copy(strings, r.Strings)
 	return &RDataTXT{Strings: strings}

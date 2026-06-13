@@ -66,6 +66,12 @@ func TestToASCII(t *testing.T) {
 			want:    "",
 			wantErr: ErrHyphenEnd,
 		},
+		{
+			name:    "mixed domain invalid ASCII label",
+			input:   "bad_label.münchen.de",
+			want:    "",
+			wantErr: ErrInvalidRune,
+		},
 	}
 
 	for _, tt := range tests {
@@ -659,17 +665,21 @@ func TestCharToDigit(t *testing.T) {
 func TestEncodePunycode(t *testing.T) {
 	tests := []struct {
 		input string
+		want  string
 	}{
-		{"example"}, // ASCII only
-		{"münchen"}, // Has non-ASCII
-		{"München"}, // Uppercase
+		{"example", "example"},    // ASCII only
+		{"bücher", "bcher-kva"},   // RFC 3492-style mixed basic/non-basic
+		{"münchen", "mnchen-3ya"}, // German umlaut
+		{"mañana", "maana-pta"},   // Multiple basic chars around non-basic
+		{"☃", "n3h"},              // No basic code points
+		{"München", "Mnchen-3ya"}, // Punycode preserves input case
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := encodePunycode(tt.input)
-			if got == "" {
-				t.Errorf("encodePunycode(%q) returned empty string", tt.input)
+			if got != tt.want {
+				t.Errorf("encodePunycode(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -731,16 +741,21 @@ func TestAdapt(t *testing.T) {
 func TestEncodeSuffix(t *testing.T) {
 	// encodeSuffix is used by encodePunycode for non-ASCII labels
 	tests := []struct {
-		src []rune
+		src  []rune
+		b    int
+		want string
 	}{
-		{[]rune("münchen")},
-		{[]rune("österreich")},
+		{[]rune("münchen"), 6, "3ya"},
+		{[]rune("bücher"), 5, "kva"},
+		{[]rune("☃"), 0, "n3h"},
 	}
 
 	for _, tt := range tests {
 		t.Run(string(tt.src), func(t *testing.T) {
-			got := encodeSuffix(tt.src)
-			_ = got // Just verify it doesn't panic
+			got := encodeSuffix(tt.src, tt.b)
+			if got != tt.want {
+				t.Errorf("encodeSuffix(%q, %d) = %q, want %q", string(tt.src), tt.b, got, tt.want)
+			}
 		})
 	}
 }
@@ -752,16 +767,21 @@ func TestEncodeLabelUnicode(t *testing.T) {
 	if err != nil {
 		t.Errorf("encodeLabel(%q) error = %v", label, err)
 	}
-	_ = encoded
+	if encoded != "mnchen-3ya" {
+		t.Errorf("encodeLabel(%q) = %q, want %q", label, encoded, "mnchen-3ya")
+	}
 }
 
 func TestToASCIIDomainWithPunycode(t *testing.T) {
 	// A domain that would use punycode
 	// This exercises the full ToASCII path for non-ASCII domains
 	domain := "münchen.de"
-	_, err := ToASCII(domain)
+	got, err := ToASCII(domain)
 	if err != nil {
 		t.Errorf("ToASCII(%q) error = %v", domain, err)
+	}
+	if got != "xn--mnchen-3ya.de" {
+		t.Errorf("ToASCII(%q) = %q, want %q", domain, got, "xn--mnchen-3ya.de")
 	}
 }
 
@@ -772,7 +792,9 @@ func TestToUnicodePunycode(t *testing.T) {
 	if err != nil {
 		t.Errorf("ToUnicode(%q) error = %v", domain, err)
 	}
-	_ = got
+	if got != "münchen.de" {
+		t.Errorf("ToUnicode(%q) = %q, want %q", domain, got, "münchen.de")
+	}
 }
 
 func TestValidateLabelWithIDNA(t *testing.T) {

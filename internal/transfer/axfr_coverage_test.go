@@ -81,7 +81,7 @@ func TestAXFRServer_zoneRecordToRR_ValidName(t *testing.T) {
 		RData: "192.0.2.1",
 	}
 
-	_, err := server.zoneRecordToRR("www.example.com.", rec, "example.com.")
+	_, err := server.zoneRecordToRR("www.example.com.", rec)
 	if err != nil {
 		t.Errorf("Unexpected error for valid name: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestAXFRServer_zoneRecordToRR_UnknownType(t *testing.T) {
 		RData: "some-data",
 	}
 
-	_, err := server.zoneRecordToRR("www.example.com.", rec, "example.com.")
+	_, err := server.zoneRecordToRR("www.example.com.", rec)
 	if err == nil {
 		t.Error("Expected error for unknown record type")
 	}
@@ -105,7 +105,7 @@ func TestAXFRServer_zoneRecordToRR_UnknownType(t *testing.T) {
 
 // Test parseRData with various record types and edge cases
 func TestParseRData_PTR(t *testing.T) {
-	rdata, err := parseRData(protocol.TypePTR, "ptr.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypePTR, "ptr.example.com.")
 	if err != nil {
 		t.Fatalf("parseRData(PTR) error = %v", err)
 	}
@@ -121,7 +121,7 @@ func TestParseRData_PTR(t *testing.T) {
 }
 
 func TestParseRData_SRV(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeSRV, "10 20 443 target.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeSRV, "10 20 443 target.example.com.")
 	if err != nil {
 		t.Fatalf("parseRData(SRV) error = %v", err)
 	}
@@ -146,14 +146,14 @@ func TestParseRData_SRV(t *testing.T) {
 }
 
 func TestParseRData_InvalidSRVFormat(t *testing.T) {
-	_, err := parseRData(protocol.TypeSRV, "not-enough-fields", "example.com.")
+	_, err := parseRData(protocol.TypeSRV, "not-enough-fields")
 	if err == nil {
 		t.Error("Expected error for invalid SRV data format")
 	}
 }
 
 func TestParseRData_ValidAAAA(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeAAAA, "2001:db8::1", "example.com.")
+	rdata, err := parseRData(protocol.TypeAAAA, "2001:db8::1")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestParseRData_ValidAAAA(t *testing.T) {
 }
 
 func TestParseRData_ValidCNAME(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeCNAME, "target.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeCNAME, "target.example.com.")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestParseRData_ValidCNAME(t *testing.T) {
 }
 
 func TestParseRData_ValidNS(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeNS, "ns1.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeNS, "ns1.example.com.")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestParseRData_ValidNS(t *testing.T) {
 }
 
 func TestParseRData_ValidMX(t *testing.T) {
-	rdata, err := parseRData(protocol.TypeMX, "10 mail.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypeMX, "10 mail.example.com.")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestParseRData_ValidMX(t *testing.T) {
 }
 
 func TestParseRData_ValidPTR(t *testing.T) {
-	rdata, err := parseRData(protocol.TypePTR, "ptr.example.com.", "example.com.")
+	rdata, err := parseRData(protocol.TypePTR, "ptr.example.com.")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -203,39 +203,46 @@ func TestParseRData_ValidPTR(t *testing.T) {
 }
 
 func TestParseRData_RawType(t *testing.T) {
-	// Test unknown type returns RDataRaw
-	rdata, err := parseRData(12345, "some-data", "example.com.")
-	if err != nil {
-		t.Fatalf("parseRData(Raw) error = %v", err)
-	}
-
-	raw, ok := rdata.(*protocol.RDataRaw)
-	if !ok {
-		t.Fatal("Expected *protocol.RDataRaw")
-	}
-
-	if string(raw.Data) != "some-data" {
-		t.Errorf("Expected raw data 'some-data', got %s", string(raw.Data))
+	// Unknown types are rejected instead of being shipped as raw
+	// presentation bytes (which would corrupt the wire format).
+	if _, err := parseRData(12345, "some-data"); err == nil {
+		t.Fatal("parseRData(unknown type) expected error")
 	}
 }
 
 func TestParseRData_MXWithoutPreference(t *testing.T) {
-	// MX without preference should default to 0
-	rdata, err := parseRData(protocol.TypeMX, "mail.example.com.", "example.com.")
-	if err != nil {
-		t.Fatalf("parseRData(MX) error = %v", err)
+	// MX without a preference field is not valid presentation format.
+	if _, err := parseRData(protocol.TypeMX, "mail.example.com."); err == nil {
+		t.Fatal("parseRData(MX without preference) expected error")
 	}
+}
 
-	mx, ok := rdata.(*protocol.RDataMX)
-	if !ok {
-		t.Fatal("Expected *protocol.RDataMX")
+func TestParseRData_MXInvalidPreference(t *testing.T) {
+	tests := []string{
+		"bad mail.example.com.",
+		"-1 mail.example.com.",
+		"65536 mail.example.com.",
 	}
+	for _, rdata := range tests {
+		if _, err := parseRData(protocol.TypeMX, rdata); err == nil {
+			t.Fatalf("parseRData(MX, %q) expected error", rdata)
+		}
+	}
+}
 
-	if mx.Preference != 0 {
-		t.Errorf("Expected preference 0, got %d", mx.Preference)
+func TestParseRData_SRVInvalidNumericFields(t *testing.T) {
+	tests := []string{
+		"bad 20 443 server.example.com.",
+		"10 bad 443 server.example.com.",
+		"10 20 bad server.example.com.",
+		"65536 20 443 server.example.com.",
+		"10 65536 443 server.example.com.",
+		"10 20 65536 server.example.com.",
 	}
-	if mx.Exchange.String() != "mail.example.com." {
-		t.Errorf("Expected exchange mail.example.com., got %s", mx.Exchange.String())
+	for _, rdata := range tests {
+		if _, err := parseRData(protocol.TypeSRV, rdata); err == nil {
+			t.Fatalf("parseRData(SRV, %q) expected error", rdata)
+		}
 	}
 }
 
@@ -538,7 +545,7 @@ func TestAXFRServer_zoneRecordToRR_ParseRDataError(t *testing.T) {
 		RData: "invalid-ip-address", // Will fail parsing
 	}
 
-	_, err := server.zoneRecordToRR("www.example.com.", rec, "example.com.")
+	_, err := server.zoneRecordToRR("www.example.com.", rec)
 	if err == nil {
 		t.Error("Expected error for invalid RData")
 	}
@@ -698,6 +705,30 @@ func TestAXFRClient_sendMessage_Success(t *testing.T) {
 	}
 }
 
+func TestAXFRClient_sendMessage_RetriesPartialWrites(t *testing.T) {
+	client := NewAXFRClient("ns1.example.com:53")
+	q, err := protocol.NewQuestion("example.com.", protocol.TypeAXFR, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion failed: %v", err)
+	}
+	msg := &protocol.Message{
+		Header:    protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{q},
+	}
+	conn := &mockConn{writeLimit: 3}
+
+	if err := client.sendMessage(conn, msg); err != nil {
+		t.Fatalf("sendMessage returned error: %v", err)
+	}
+	if conn.writeCalls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.writeCalls)
+	}
+	msgLen := int(conn.written[0])<<8 | int(conn.written[1])
+	if got, want := len(conn.written), 2+msgLen; got != want {
+		t.Fatalf("written length = %d, want %d", got, want)
+	}
+}
+
 func TestAXFRClient_sendMessage_WriteError(t *testing.T) {
 	client := NewAXFRClient("ns1.example.com:53")
 
@@ -724,16 +755,43 @@ func TestAXFRClient_sendMessage_WriteError(t *testing.T) {
 	}
 }
 
+func TestIXFRClient_sendMessage_RetriesPartialWrites(t *testing.T) {
+	client := NewIXFRClient("ns1.example.com:53")
+	q, err := protocol.NewQuestion("example.com.", protocol.TypeIXFR, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion failed: %v", err)
+	}
+	msg := &protocol.Message{
+		Header:    protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{q},
+	}
+	conn := &mockConn{writeLimit: 4}
+
+	if err := client.sendMessage(conn, msg); err != nil {
+		t.Fatalf("sendMessage returned error: %v", err)
+	}
+	if conn.writeCalls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.writeCalls)
+	}
+	msgLen := int(conn.written[0])<<8 | int(conn.written[1])
+	if got, want := len(conn.written), 2+msgLen; got != want {
+		t.Fatalf("written length = %d, want %d", got, want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // mockConn for testing receiveAXFRResponse with mock data
 // ---------------------------------------------------------------------------
 
 type mockConn struct {
-	writeErr error
-	readErr  error
-	readData []byte
-	readPos  int
-	closed   bool
+	writeErr   error
+	writeLimit int
+	written    []byte
+	writeCalls int
+	readErr    error
+	readData   []byte
+	readPos    int
+	closed     bool
 }
 
 func (m *mockConn) Read(b []byte) (int, error) {
@@ -749,10 +807,16 @@ func (m *mockConn) Read(b []byte) (int, error) {
 }
 
 func (m *mockConn) Write(b []byte) (int, error) {
+	m.writeCalls++
 	if m.writeErr != nil {
 		return 0, m.writeErr
 	}
-	return len(b), nil
+	n := len(b)
+	if m.writeLimit > 0 && m.writeLimit < n {
+		n = m.writeLimit
+	}
+	m.written = append(m.written, b[:n]...)
+	return n, nil
 }
 
 func (m *mockConn) Close() error                       { m.closed = true; return nil }

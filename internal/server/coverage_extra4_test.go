@@ -1,10 +1,12 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -209,6 +211,286 @@ func TestTCPResponseWriterWriteDetailedV2(t *testing.T) {
 	}
 	if rw.writeCount != 2 {
 		t.Errorf("writeCount = %d, want 2", rw.writeCount)
+	}
+}
+
+func TestTCPResponseWriterAllowsFullPayloadWithLengthPrefix(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	type readResult struct {
+		length uint16
+		err    error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		var lengthBuf [2]byte
+		if _, err := io.ReadFull(clientConn, lengthBuf[:]); err != nil {
+			resultCh <- readResult{err: err}
+			return
+		}
+		length := binary.BigEndian.Uint16(lengthBuf[:])
+		_, err := io.CopyN(io.Discard, clientConn, int64(length))
+		resultCh <- readResult{length: length, err: err}
+	}()
+
+	rw := &tcpResponseWriter{
+		conn:    serverConn,
+		client:  &ClientInfo{Protocol: "tcp"},
+		maxSize: TCPMaxMessageSize,
+		writeMu: &sync.Mutex{},
+	}
+
+	msgLen := TCPMaxMessageSize - 1
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID: 0xDD03,
+			Flags: protocol.Flags{
+				QR:     true,
+				Opcode: protocol.OpcodeDSO,
+			},
+		},
+		RawBody: make([]byte, msgLen-protocol.HeaderLen),
+	}
+
+	written, err := rw.Write(msg)
+	if err != nil {
+		t.Fatalf("Write should allow %d byte DNS payload: %v", msgLen, err)
+	}
+	if written != msgLen+2 {
+		t.Fatalf("Write returned %d bytes, want %d", written, msgLen+2)
+	}
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("client read failed: %v", result.err)
+	}
+	if int(result.length) != msgLen {
+		t.Fatalf("TCP length prefix = %d, want %d", result.length, msgLen)
+	}
+}
+
+func TestTCPResponseWriterTruncatesResponseLargerThanFrameBuffer(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	type readResult struct {
+		length  uint16
+		payload []byte
+		err     error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		var lengthBuf [2]byte
+		if _, err := io.ReadFull(clientConn, lengthBuf[:]); err != nil {
+			resultCh <- readResult{err: err}
+			return
+		}
+		length := binary.BigEndian.Uint16(lengthBuf[:])
+		payload := make([]byte, length)
+		_, err := io.ReadFull(clientConn, payload)
+		resultCh <- readResult{length: length, payload: payload, err: err}
+	}()
+
+	rw := &tcpResponseWriter{
+		conn:    serverConn,
+		client:  &ClientInfo{Protocol: "tcp"},
+		maxSize: 512,
+		writeMu: &sync.Mutex{},
+	}
+
+	q, err := protocol.NewQuestion("truncate-frame.example.com.", protocol.TypeA, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion failed: %v", err)
+	}
+	name := mustParseName("truncate-frame.example.com.")
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0xDD04,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+		Questions: []*protocol.Question{q},
+	}
+	for i := 0; i < 200; i++ {
+		msg.AddAnswer(&protocol.ResourceRecord{
+			Name:  name,
+			Type:  protocol.TypeA,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, byte(i)}},
+		})
+	}
+	if msg.WireLength() <= rw.maxSize {
+		t.Fatalf("test response wire length %d must exceed max payload %d", msg.WireLength(), rw.maxSize)
+	}
+
+	written, err := rw.Write(msg)
+	if err != nil {
+		t.Fatalf("Write should truncate instead of failing before truncation: %v", err)
+	}
+
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("client read failed: %v", result.err)
+	}
+	if int(result.length) > rw.maxSize {
+		t.Fatalf("TCP length prefix = %d, want <= %d", result.length, rw.maxSize)
+	}
+	if written != int(result.length)+2 {
+		t.Fatalf("Write returned %d bytes, want %d", written, int(result.length)+2)
+	}
+
+	got, err := protocol.UnpackMessage(result.payload)
+	if err != nil {
+		t.Fatalf("UnpackMessage failed: %v", err)
+	}
+	if !got.Header.Flags.TC {
+		t.Fatal("truncated response should set TC flag")
+	}
+	if len(got.Answers) == 0 || len(got.Answers) >= 200 {
+		t.Fatalf("truncated answer count = %d, want between 1 and 199", len(got.Answers))
+	}
+}
+
+func TestWriteFullDNSFrameRetriesPartialWrites(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 3}
+	frame := []byte{0, 10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+
+	written, err := writeFullDNSFrame(conn, frame)
+	if err != nil {
+		t.Fatalf("writeFullDNSFrame failed: %v", err)
+	}
+	if written != len(frame) {
+		t.Fatalf("written = %d, want %d", written, len(frame))
+	}
+	if string(conn.written) != string(frame) {
+		t.Fatalf("written frame = %v, want %v", conn.written, frame)
+	}
+	if conn.calls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.calls)
+	}
+}
+
+func TestWriteFullDNSFrameRejectsZeroByteWrite(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 0}
+	_, err := writeFullDNSFrame(conn, []byte{1, 2, 3})
+	if !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("writeFullDNSFrame error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+type partialWriteConn struct {
+	maxWrite         int
+	written          []byte
+	calls            int
+	writeDeadlineErr error
+}
+
+func (c *partialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(p) {
+		n = len(p)
+	}
+	c.written = append(c.written, p[:n]...)
+	return n, nil
+}
+
+func (c *partialWriteConn) Close() error {
+	return nil
+}
+
+func (c *partialWriteConn) LocalAddr() net.Addr {
+	return &net.IPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
+
+func (c *partialWriteConn) RemoteAddr() net.Addr {
+	return &net.IPAddr{IP: net.IPv4(127, 0, 0, 1)}
+}
+
+func (c *partialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return c.writeDeadlineErr
+}
+
+func TestTCPResponseWriterWriteDeadlineError(t *testing.T) {
+	deadlineErr := errors.New("deadline failed")
+	conn := &partialWriteConn{
+		maxWrite:         8,
+		writeDeadlineErr: deadlineErr,
+	}
+	rw := &tcpResponseWriter{
+		conn:    conn,
+		client:  &ClientInfo{Protocol: "tcp"},
+		maxSize: TCPMaxMessageSize,
+		writeMu: &sync.Mutex{},
+	}
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0xD1,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+	}
+
+	written, err := rw.Write(msg)
+	if !errors.Is(err, deadlineErr) {
+		t.Fatalf("Write error = %v, want %v", err, deadlineErr)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
+	if conn.calls != 0 {
+		t.Fatalf("connection Write calls = %d, want 0", conn.calls)
+	}
+}
+
+func TestTLSResponseWriterWriteDeadlineError(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	tlsConn := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true})
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("close client conn: %v", err)
+	}
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("close server conn: %v", err)
+	}
+
+	rw := &tlsResponseWriter{
+		conn:    tlsConn,
+		client:  &ClientInfo{Protocol: "dot"},
+		maxSize: TLSMaxMessageSize,
+	}
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0xD2,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+	}
+
+	written, err := rw.Write(msg)
+	if err == nil {
+		t.Fatal("expected write deadline error")
+	}
+	if !strings.Contains(err.Error(), "set write deadline") {
+		t.Fatalf("Write error = %v, want set write deadline context", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
 	}
 }
 

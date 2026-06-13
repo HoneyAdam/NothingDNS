@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
+	"github.com/nothingdns/nothingdns/internal/cluster/raft"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
 
@@ -543,6 +544,49 @@ func TestCluster_IsLeader_NoGossip(t *testing.T) {
 
 	if c.IsLeader() {
 		t.Error("IsLeader() should return false when gossip is nil")
+	}
+}
+
+func TestCluster_LeadershipUsesRaftWhenGossipNil(t *testing.T) {
+	ci, err := raft.NewClusterIntegration("raft-node", nil, nil, "127.0.0.1:0", t.TempDir(), "", "", util.DefaultLogger())
+	if err != nil {
+		t.Fatalf("NewClusterIntegration() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := ci.Stop(); err != nil {
+			t.Fatalf("Stop() error = %v", err)
+		}
+	})
+	if err := ci.Start(); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for !ci.IsLeader() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ci.IsLeader() {
+		t.Fatal("Raft node did not become leader")
+	}
+
+	c := &Cluster{
+		config:    Config{NodeID: "raft-node"},
+		consensus: ConsensusRaft,
+		raft:      ci,
+	}
+
+	leaderID, ok := c.GetLeader()
+	if !ok {
+		t.Fatal("GetLeader() ok should be true in Raft mode")
+	}
+	if leaderID != "raft-node" {
+		t.Fatalf("leaderID = %q, want raft-node", leaderID)
+	}
+	if !c.IsLeader() {
+		t.Fatal("IsLeader() should use Raft state when gossip is nil")
+	}
+	if c.DetectSplitBrain() {
+		t.Fatal("DetectSplitBrain() should be false in Raft mode")
 	}
 }
 

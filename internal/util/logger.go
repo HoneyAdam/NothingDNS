@@ -100,6 +100,9 @@ func (l *Logger) SetFormat(format LogFormat) {
 func (l *Logger) SetOutput(output io.Writer) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if output == nil {
+		output = os.Stdout
+	}
 	l.output = output
 }
 
@@ -267,6 +270,9 @@ var defaultLogger = DefaultLogger()
 
 // SetDefaultLogger sets the global default logger.
 func SetDefaultLogger(l *Logger) {
+	if l == nil {
+		l = DefaultLogger()
+	}
 	defaultLogger = l
 }
 

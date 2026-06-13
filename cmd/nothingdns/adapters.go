@@ -92,6 +92,10 @@ func (a *resolverCacheAdapter) SetNegative(key string, rcode uint8) {
 	a.cache.SetNegative(key, rcode)
 }
 
+func (a *resolverCacheAdapter) SetNegativeWithTTL(key string, rcode uint8, ttl uint32) {
+	a.cache.SetNegativeWithTTL(key, rcode, ttl)
+}
+
 // doqHandlerAdapter adapts a server.Handler (ServeDNS) into a quic.DoQHandler (ServeDoQ).
 // It unpacks the DNS query from raw bytes, runs it through the DNS handler, and
 // writes the wire-format response back to the QUIC stream.
@@ -120,17 +124,23 @@ func (a *doqHandlerAdapter) ServeDoQ(stream *quic.Stream, queryData []byte) {
 
 // doqResponseWriter implements server.ResponseWriter for QUIC streams.
 type doqResponseWriter struct {
-	stream *quic.Stream
+	stream doqStreamWriter
+}
+
+type doqStreamWriter interface {
+	Write([]byte) (int, error)
 }
 
 func (w *doqResponseWriter) Write(msg *protocol.Message) (int, error) {
 	// The 2-octet length prefix (RFC 9250) caps a DoQ message at 65535 bytes.
 	// Truncate record-boundary-aware (sets TC) rather than letting uint16(n)
 	// silently wrap and emit a garbled frame — matching the TCP/DoT writers.
-	if msg.WireLength() > 65535 {
+	wireLen := msg.WireLength()
+	if wireLen > 65535 {
 		msg.Truncate(65535)
+		wireLen = msg.WireLength()
 	}
-	buf := make([]byte, msg.WireLength()+2)
+	buf := make([]byte, wireLen+2)
 	n, err := msg.Pack(buf[2:])
 	if err != nil {
 		return 0, err
@@ -139,7 +149,10 @@ func (w *doqResponseWriter) Write(msg *protocol.Message) (int, error) {
 		return 0, fmt.Errorf("doq: response %d bytes exceeds 65535 after truncation", n)
 	}
 	binary.BigEndian.PutUint16(buf[0:2], uint16(n))
-	return w.stream.Write(buf[:n+2])
+	if err := util.WriteFull(w.stream, buf[:n+2]); err != nil {
+		return 0, err
+	}
+	return n + 2, nil
 }
 
 func (w *doqResponseWriter) ClientInfo() *server.ClientInfo {

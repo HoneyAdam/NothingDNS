@@ -24,17 +24,22 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		LogLevel:   "", // Not available in HTTPConfig
 	}
 
-	if s.configGetter != nil {
-		cfg := s.configGetter()
-		resp.DNS64 = DNS64ConfigInfo{
-			Enabled:     cfg.DNS64.Enabled,
-			Prefix:      cfg.DNS64.Prefix,
-			PrefixLen:   cfg.DNS64.PrefixLen,
-			ExcludeNets: cfg.DNS64.ExcludeNets,
-		}
-		resp.Cookie = CookieConfigInfo{
-			Enabled:        cfg.Cookie.Enabled,
-			SecretRotation: cfg.Cookie.SecretRotation,
+	s.runtimeMu.RLock()
+	configGetter := s.configGetter
+	s.runtimeMu.RUnlock()
+	if configGetter != nil {
+		cfg := configGetter()
+		if cfg != nil {
+			resp.DNS64 = DNS64ConfigInfo{
+				Enabled:     cfg.DNS64.Enabled,
+				Prefix:      cfg.DNS64.Prefix,
+				PrefixLen:   cfg.DNS64.PrefixLen,
+				ExcludeNets: cfg.DNS64.ExcludeNets,
+			}
+			resp.Cookie = CookieConfigInfo{
+				Enabled:        cfg.Cookie.Enabled,
+				SecretRotation: cfg.Cookie.SecretRotation,
+			}
 		}
 	}
 
@@ -52,8 +57,11 @@ func (s *Server) handleGeoDNSStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stats := geodns.Stats{Enabled: false}
-	if s.geoEngine != nil {
-		stats = s.geoEngine.Stats()
+	s.runtimeMu.RLock()
+	geoEngine := s.geoEngine
+	s.runtimeMu.RUnlock()
+	if geoEngine != nil {
+		stats = geoEngine.Stats()
 	}
 
 	s.writeJSON(w, http.StatusOK, &GeoDNSStatsResponse{
@@ -77,8 +85,11 @@ func (s *Server) handleSlaveZones(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := &SlaveZonesResponse{SlaveZones: []SlaveZoneResponse{}}
-	if s.slaveManager != nil {
-		for _, sz := range s.slaveManager.GetAllSlaveZones() {
+	s.runtimeMu.RLock()
+	slaveManager := s.slaveManager
+	s.runtimeMu.RUnlock()
+	if slaveManager != nil {
+		for _, sz := range slaveManager.GetAllSlaveZones() {
 			status := "pending"
 			serial := sz.GetLastSerial()
 			records := 0

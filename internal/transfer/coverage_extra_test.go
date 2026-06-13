@@ -1,12 +1,14 @@
 package transfer
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -82,23 +84,20 @@ func TestTKEYRecord_String_CovExtra(t *testing.T) {
 }
 
 func TestTKEYToResourceRecord_CovExtra(t *testing.T) {
-	// NOTE: TKEYToResourceRecord has a buffer sizing bug: rdataLen uses 2 bytes
-	// for the expiration field but formatTKEYTime returns 6 bytes, and offset
-	// advances by 8. This causes a panic with non-empty KeyData/OtherData.
-	// Test with empty slices to avoid the panic (covers the algorithm parsing path).
+	inception := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	expiration := inception.Add(time.Hour)
+	keyData := []byte{1, 2, 3, 4}
+	otherData := []byte{5, 6}
 	rec := &TKEYRecord{
 		Algorithm:  "hmac-sha256.",
+		Inception:  inception,
+		Expiration: expiration,
 		Mode:       TKEYModeServerAssignment,
 		Error:      TKEYErrNoError,
-		KeyData:    nil,
-		OtherData:  nil,
-		Expiration: time.Now().Add(time.Hour),
+		KeyData:    keyData,
+		OtherData:  otherData,
 	}
-	defer func() {
-		if r := recover(); r != nil {
-			t.Logf("TKEYToResourceRecord panicked (known buffer sizing bug): %v", r)
-		}
-	}()
+
 	rr, err := TKEYToResourceRecord(rec)
 	if err != nil {
 		t.Fatalf("TKEYToResourceRecord() error: %v", err)
@@ -108,6 +107,44 @@ func TestTKEYToResourceRecord_CovExtra(t *testing.T) {
 	}
 	if rr.Type != protocol.TypeTKEY {
 		t.Errorf("expected type TKEY, got %d", rr.Type)
+	}
+	raw, ok := rr.Data.(*protocol.RDataRaw)
+	if !ok {
+		t.Fatalf("rr.Data = %T, want *protocol.RDataRaw", rr.Data)
+	}
+
+	algWire := protocol.CanonicalWireName(rec.Algorithm)
+	wantLen := len(algWire) + 4 + 4 + 2 + 2 + 2 + len(keyData) + 2 + len(otherData)
+	if len(raw.Data) != wantLen {
+		t.Fatalf("RDATA length = %d, want %d", len(raw.Data), wantLen)
+	}
+	offset := len(algWire)
+	if got := binary.BigEndian.Uint32(raw.Data[offset:]); got != uint32(inception.Unix()) {
+		t.Errorf("inception = %d, want %d", got, uint32(inception.Unix()))
+	}
+	offset += 4
+	if got := binary.BigEndian.Uint32(raw.Data[offset:]); got != uint32(expiration.Unix()) {
+		t.Errorf("expiration = %d, want %d", got, uint32(expiration.Unix()))
+	}
+	offset += 4
+	if got := binary.BigEndian.Uint16(raw.Data[offset:]); got != TKEYModeServerAssignment {
+		t.Errorf("mode = %d, want %d", got, TKEYModeServerAssignment)
+	}
+	offset += 2
+	if got := binary.BigEndian.Uint16(raw.Data[offset:]); got != TKEYErrNoError {
+		t.Errorf("error = %d, want %d", got, TKEYErrNoError)
+	}
+	offset += 2
+	keyLen := int(binary.BigEndian.Uint16(raw.Data[offset:]))
+	offset += 2
+	if keyLen != len(keyData) || !bytes.Equal(raw.Data[offset:offset+keyLen], keyData) {
+		t.Errorf("key data = %x, want %x", raw.Data[offset:offset+keyLen], keyData)
+	}
+	offset += keyLen
+	otherLen := int(binary.BigEndian.Uint16(raw.Data[offset:]))
+	offset += 2
+	if otherLen != len(otherData) || !bytes.Equal(raw.Data[offset:offset+otherLen], otherData) {
+		t.Errorf("other data = %x, want %x", raw.Data[offset:offset+otherLen], otherData)
 	}
 }
 
@@ -235,19 +272,116 @@ func TestValidateTKEY_ExpiredRecord_CovExtra(t *testing.T) {
 	}
 }
 
-func TestFormatTKEYTime_CovExtra(t *testing.T) {
-	// Verify formatTKEYTime produces 6 bytes
-	ts := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
-	result := formatTKEYTime(ts)
-	if len(result) != 6 {
-		t.Fatalf("formatTKEYTime returned %d bytes, want 6", len(result))
+func TestTKEYExpiredAtBoundary_CovExtra(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	if tkeyExpiredAt(now.Add(time.Nanosecond), now) {
+		t.Error("TKEY should not be expired before expiration")
 	}
-	// Reconstruct unix time from the 6 bytes
-	unixVal := uint64(result[0])<<40 | uint64(result[1])<<32 |
-		uint64(result[2])<<24 | uint64(result[3])<<16 |
-		uint64(result[4])<<8 | uint64(result[5])
-	if unixVal != uint64(ts.Unix()) {
-		t.Errorf("reconstructed unix = %d, want %d", unixVal, ts.Unix())
+	if !tkeyExpiredAt(now, now) {
+		t.Error("TKEY should be expired at exact expiration")
+	}
+	if !tkeyExpiredAt(now.Add(-time.Nanosecond), now) {
+		t.Error("TKEY should be expired after expiration")
+	}
+}
+
+func TestFormatTKEYTime_CovExtra(t *testing.T) {
+	ts := time.Date(2025, 6, 15, 12, 0, 0, 0, time.UTC)
+	result, err := formatTKEYTime(ts)
+	if err != nil {
+		t.Fatalf("formatTKEYTime() error: %v", err)
+	}
+	if result != uint32(ts.Unix()) {
+		t.Errorf("formatTKEYTime = %d, want %d", result, uint32(ts.Unix()))
+	}
+}
+
+func TestFormatTKEYTime_Bounds_CovExtra(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      time.Time
+		want    uint32
+		wantErr bool
+	}{
+		{
+			name:    "before epoch rejected",
+			in:      time.Unix(-1, 0),
+			wantErr: true,
+		},
+		{
+			name: "epoch accepted",
+			in:   time.Unix(0, 0),
+			want: 0,
+		},
+		{
+			name: "max uint32 accepted",
+			in:   time.Unix(int64(^uint32(0)), 0),
+			want: ^uint32(0),
+		},
+		{
+			name:    "above max uint32 rejected",
+			in:      time.Unix(int64(^uint32(0))+1, 0),
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := formatTKEYTime(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("formatTKEYTime(%s) error = nil, want error", tt.in.UTC().Format(time.RFC3339))
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("formatTKEYTime(%s) error: %v", tt.in.UTC().Format(time.RFC3339), err)
+			}
+			if got != tt.want {
+				t.Fatalf("formatTKEYTime(%s) = %d, want %d", tt.in.UTC().Format(time.RFC3339), got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTKEYToResourceRecord_RejectsOutOfRangeTimes_CovExtra(t *testing.T) {
+	tests := []struct {
+		name       string
+		inception  time.Time
+		expiration time.Time
+		errSubstr  string
+	}{
+		{
+			name:       "inception before epoch",
+			inception:  time.Unix(-1, 0),
+			expiration: time.Unix(1, 0),
+			errSubstr:  "invalid TKEY inception",
+		},
+		{
+			name:       "expiration above max uint32",
+			inception:  time.Unix(1, 0),
+			expiration: time.Unix(int64(^uint32(0))+1, 0),
+			errSubstr:  "invalid TKEY expiration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := TKEYToResourceRecord(&TKEYRecord{
+				Algorithm:  "hmac-sha256.",
+				Inception:  tt.inception,
+				Expiration: tt.expiration,
+				Mode:       TKEYModeServerAssignment,
+				Error:      TKEYErrNoError,
+			})
+			if err == nil {
+				t.Fatal("TKEYToResourceRecord() error = nil, want error")
+			}
+			if !strings.Contains(err.Error(), tt.errSubstr) {
+				t.Fatalf("TKEYToResourceRecord() error = %q, want substring %q", err.Error(), tt.errSubstr)
+			}
+		})
 	}
 }
 
@@ -493,6 +627,21 @@ func TestKeyStore_GetPreviousKey_GraceExpired_CovExtra(t *testing.T) {
 	}
 }
 
+func TestKeyStore_PreviousKeyExpiredAtBoundary_CovExtra(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	gracePeriod := 5 * time.Minute
+
+	if previousKeyExpiredAt(now.Add(-gracePeriod+time.Nanosecond), now, gracePeriod) {
+		t.Error("previous key should still be valid before grace boundary")
+	}
+	if !previousKeyExpiredAt(now.Add(-gracePeriod), now, gracePeriod) {
+		t.Error("previous key should expire exactly at grace boundary")
+	}
+	if !previousKeyExpiredAt(now.Add(-gracePeriod-time.Nanosecond), now, gracePeriod) {
+		t.Error("previous key should expire after grace boundary")
+	}
+}
+
 func TestKeyStore_GetPreviousKey_NameMismatch_CovExtra(t *testing.T) {
 	ks := NewKeyStore()
 	key1 := &TSIGKey{
@@ -636,6 +785,56 @@ func TestNewXoTServer_WithConfig_CovExtra(t *testing.T) {
 	}
 }
 
+func TestXoTExtractIXFRClientSerialReadsAuthoritySOA(t *testing.T) {
+	name, err := protocol.ParseName("example.com.")
+	if err != nil {
+		t.Fatalf("ParseName() error: %v", err)
+	}
+	mname, err := protocol.ParseName("ns1.example.com.")
+	if err != nil {
+		t.Fatalf("ParseName() error: %v", err)
+	}
+	rname, err := protocol.ParseName("admin.example.com.")
+	if err != nil {
+		t.Fatalf("ParseName() error: %v", err)
+	}
+
+	soaRR := func(serial uint32) *protocol.ResourceRecord {
+		return &protocol.ResourceRecord{
+			Name:  name,
+			Type:  protocol.TypeSOA,
+			Class: protocol.ClassIN,
+			TTL:   3600,
+			Data: &protocol.RDataSOA{
+				MName:   mname,
+				RName:   rname,
+				Serial:  serial,
+				Refresh: 3600,
+				Retry:   600,
+				Expire:  604800,
+				Minimum: 86400,
+			},
+		}
+	}
+
+	req := &protocol.Message{
+		Questions: []*protocol.Question{
+			{Name: name, QType: protocol.TypeIXFR, QClass: protocol.ClassIN},
+		},
+		Authorities: []*protocol.ResourceRecord{soaRR(123)},
+		Additionals: []*protocol.ResourceRecord{soaRR(999)},
+	}
+
+	if got := extractIXFRClientSerial(req); got != 123 {
+		t.Fatalf("client serial = %d, want authority SOA serial 123", got)
+	}
+
+	req.Authorities = nil
+	if got := extractIXFRClientSerial(req); got != 999 {
+		t.Fatalf("fallback client serial = %d, want additional SOA serial 999", got)
+	}
+}
+
 func TestXoTServer_isAllowed_NoAllowList_CovExtra(t *testing.T) {
 	srv := &XoTServer{}
 	if !srv.isAllowed(net.ParseIP("1.2.3.4")) {
@@ -686,9 +885,9 @@ func TestTLSCACache_GetNonexistent_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_A_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeA, "192.168.1.1", "")
+	rdata, err := parseRData(protocol.TypeA, "192.168.1.1")
 	if err != nil {
-		t.Fatalf("parseXoTRData A error: %v", err)
+		t.Fatalf("parseRData A error: %v", err)
 	}
 	a, ok := rdata.(*protocol.RDataA)
 	if !ok {
@@ -700,16 +899,16 @@ func TestParseXoTRData_A_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_A_InvalidIPv4_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeA, "::1", "")
+	_, err := parseRData(protocol.TypeA, "::1")
 	if err == nil {
 		t.Error("expected error for IPv6 in A record")
 	}
 }
 
 func TestParseXoTRData_AAAA_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeAAAA, "2001:db8::1", "")
+	rdata, err := parseRData(protocol.TypeAAAA, "2001:db8::1")
 	if err != nil {
-		t.Fatalf("parseXoTRData AAAA error: %v", err)
+		t.Fatalf("parseRData AAAA error: %v", err)
 	}
 	aaaa, ok := rdata.(*protocol.RDataAAAA)
 	if !ok {
@@ -725,9 +924,9 @@ func TestParseXoTRData_AAAA_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_CNAME_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeCNAME, "target.example.com.", "")
+	rdata, err := parseRData(protocol.TypeCNAME, "target.example.com.")
 	if err != nil {
-		t.Fatalf("parseXoTRData CNAME error: %v", err)
+		t.Fatalf("parseRData CNAME error: %v", err)
 	}
 	if _, ok := rdata.(*protocol.RDataCNAME); !ok {
 		t.Fatal("expected RDataCNAME")
@@ -735,9 +934,9 @@ func TestParseXoTRData_CNAME_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_NS_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeNS, "ns1.example.com.", "")
+	rdata, err := parseRData(protocol.TypeNS, "ns1.example.com.")
 	if err != nil {
-		t.Fatalf("parseXoTRData NS error: %v", err)
+		t.Fatalf("parseRData NS error: %v", err)
 	}
 	if _, ok := rdata.(*protocol.RDataNS); !ok {
 		t.Fatal("expected RDataNS")
@@ -745,9 +944,9 @@ func TestParseXoTRData_NS_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_MX_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeMX, "10 mail.example.com.", "")
+	rdata, err := parseRData(protocol.TypeMX, "10 mail.example.com.")
 	if err != nil {
-		t.Fatalf("parseXoTRData MX error: %v", err)
+		t.Fatalf("parseRData MX error: %v", err)
 	}
 	mx, ok := rdata.(*protocol.RDataMX)
 	if !ok {
@@ -759,9 +958,9 @@ func TestParseXoTRData_MX_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_TXT_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeTXT, "hello world", "")
+	rdata, err := parseRData(protocol.TypeTXT, "hello world")
 	if err != nil {
-		t.Fatalf("parseXoTRData TXT error: %v", err)
+		t.Fatalf("parseRData TXT error: %v", err)
 	}
 	txt, ok := rdata.(*protocol.RDataTXT)
 	if !ok {
@@ -773,9 +972,9 @@ func TestParseXoTRData_TXT_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_PTR_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypePTR, "ptr.example.com.", "")
+	rdata, err := parseRData(protocol.TypePTR, "ptr.example.com.")
 	if err != nil {
-		t.Fatalf("parseXoTRData PTR error: %v", err)
+		t.Fatalf("parseRData PTR error: %v", err)
 	}
 	if _, ok := rdata.(*protocol.RDataPTR); !ok {
 		t.Fatal("expected RDataPTR")
@@ -783,9 +982,9 @@ func TestParseXoTRData_PTR_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_SRV_Valid_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeSRV, "10 20 443 server.example.com.", "")
+	rdata, err := parseRData(protocol.TypeSRV, "10 20 443 server.example.com.")
 	if err != nil {
-		t.Fatalf("parseXoTRData SRV error: %v", err)
+		t.Fatalf("parseRData SRV error: %v", err)
 	}
 	srv, ok := rdata.(*protocol.RDataSRV)
 	if !ok {
@@ -797,35 +996,51 @@ func TestParseXoTRData_SRV_Valid_CovExtra(t *testing.T) {
 }
 
 func TestParseXoTRData_SRV_Invalid_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeSRV, "badformat", "")
+	_, err := parseRData(protocol.TypeSRV, "badformat")
 	if err == nil {
 		t.Error("expected error for invalid SRV format")
 	}
 }
 
-func TestParseXoTRData_DefaultRaw_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeCAA, "0 issue ca.example.com", "")
+func TestParseXoTRData_SRVInvalidNumericFields_CovExtra(t *testing.T) {
+	tests := []string{
+		"bad 20 443 server.example.com.",
+		"10 bad 443 server.example.com.",
+		"10 20 bad server.example.com.",
+		"65536 20 443 server.example.com.",
+		"10 65536 443 server.example.com.",
+		"10 20 65536 server.example.com.",
+	}
+	for _, rdata := range tests {
+		if _, err := parseRData(protocol.TypeSRV, rdata); err == nil {
+			t.Fatalf("parseRData(SRV, %q) expected error", rdata)
+		}
+	}
+}
+
+func TestParseXoTRData_CAA_CovExtra(t *testing.T) {
+	rdata, err := parseRData(protocol.TypeCAA, "0 issue ca.example.com")
 	if err != nil {
-		t.Fatalf("parseXoTRData default error: %v", err)
+		t.Fatalf("parseRData CAA error: %v", err)
 	}
-	raw, ok := rdata.(*protocol.RDataRaw)
+	caa, ok := rdata.(*protocol.RDataCAA)
 	if !ok {
-		t.Fatal("expected RDataRaw for unknown type")
+		t.Fatalf("rdata = %T, want *protocol.RDataCAA", rdata)
 	}
-	if raw.TypeVal != protocol.TypeCAA {
-		t.Errorf("type = %d, want CAA", raw.TypeVal)
+	if caa.Flags != 0 || caa.Tag != "issue" || caa.Value != "ca.example.com" {
+		t.Errorf("CAA = %d %q %q, want 0 \"issue\" \"ca.example.com\"", caa.Flags, caa.Tag, caa.Value)
 	}
 }
 
 func TestParseXoTRData_A_InvalidIP_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeA, "not-an-ip", "")
+	_, err := parseRData(protocol.TypeA, "not-an-ip")
 	if err == nil {
 		t.Error("expected error for invalid A record")
 	}
 }
 
 func TestParseXoTRData_AAAA_InvalidIP_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeAAAA, "not-an-ip", "")
+	_, err := parseRData(protocol.TypeAAAA, "not-an-ip")
 	if err == nil {
 		t.Error("expected error for invalid AAAA record")
 	}
@@ -887,11 +1102,15 @@ func TestXoTServer_generateAXFRRecords_ValidZone_CovExtra(t *testing.T) {
 }
 
 func TestXoTServer_generateAXFRRecords_NoSOA_CovExtra(t *testing.T) {
-	z := zone.NewZone("example.com.")
 	srv := &XoTServer{}
-	_, err := srv.generateAXFRRecords(z)
-	if err == nil {
-		t.Error("expected error for zone without SOA")
+
+	if _, err := srv.generateAXFRRecords(nil); err == nil || !strings.Contains(err.Error(), "zone is nil") {
+		t.Fatalf("generateAXFRRecords(nil) error = %v, want zone is nil", err)
+	}
+
+	z := zone.NewZone("example.com.")
+	if _, err := srv.generateAXFRRecords(z); err == nil || !strings.Contains(err.Error(), "zone has no SOA record") {
+		t.Fatalf("generateAXFRRecords(no SOA) error = %v, want zone has no SOA record", err)
 	}
 }
 
@@ -916,6 +1135,19 @@ func (m *mockJournalStore) Truncate(zoneName string, keepCount int) error {
 	return nil
 }
 
+func TestXoTServer_generateIXFRRecords_RejectsMissingSOA_CovExtra(t *testing.T) {
+	srv := &XoTServer{}
+
+	if _, err := srv.generateIXFRRecords(nil, 100); err == nil || !strings.Contains(err.Error(), "zone is nil") {
+		t.Fatalf("generateIXFRRecords(nil) error = %v, want zone is nil", err)
+	}
+
+	z := zone.NewZone("example.com.")
+	if _, err := srv.generateIXFRRecords(z, 100); err == nil || !strings.Contains(err.Error(), "zone has no SOA record") {
+		t.Fatalf("generateIXFRRecords(no SOA) error = %v, want zone has no SOA record", err)
+	}
+}
+
 func TestXoTServer_generateIXFRRecords_SameSerial_CovExtra(t *testing.T) {
 	z := zone.NewZone("example.com.")
 	z.SOA = &zone.SOARecord{
@@ -934,6 +1166,26 @@ func TestXoTServer_generateIXFRRecords_SameSerial_CovExtra(t *testing.T) {
 	}
 	if records[0].Type != protocol.TypeSOA {
 		t.Errorf("record type = %d, want SOA", records[0].Type)
+	}
+}
+
+func TestXoTServer_generateIXFRRecords_ClientSerialNewerUsesSingleSOA(t *testing.T) {
+	z := zone.NewZone("example.com.")
+	z.SOA = &zone.SOARecord{
+		MName: "ns1.example.com.", RName: "admin.example.com.",
+		Serial: 0xFFFFFFFF, TTL: 3600, Refresh: 3600, Retry: 600, Expire: 604800, Minimum: 86400,
+	}
+
+	srv := &XoTServer{}
+	records, err := srv.generateIXFRRecords(z, 1)
+	if err != nil {
+		t.Fatalf("generateIXFRRecords() error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record (SOA only), got %d", len(records))
+	}
+	if records[0].Type != protocol.TypeSOA {
+		t.Fatalf("record type = %d, want SOA", records[0].Type)
 	}
 }
 
@@ -1008,6 +1260,66 @@ func TestXoTServer_generateIXFRRecords_WithJournal_Incremental(t *testing.T) {
 	if soa.Serial != 200 {
 		t.Errorf("SOA serial = %d, want 200", soa.Serial)
 	}
+
+	var soaSerials []uint32
+	for _, rr := range records {
+		if rr.Type != protocol.TypeSOA {
+			continue
+		}
+		soa, ok := rr.Data.(*protocol.RDataSOA)
+		if !ok {
+			t.Fatalf("SOA record has data type %T", rr.Data)
+		}
+		soaSerials = append(soaSerials, soa.Serial)
+	}
+	wantSerials := []uint32{200, 100, 150, 150, 200, 200}
+	if len(soaSerials) != len(wantSerials) {
+		t.Fatalf("SOA serial count = %d, want %d (%v)", len(soaSerials), len(wantSerials), soaSerials)
+	}
+	for i := range wantSerials {
+		if soaSerials[i] != wantSerials[i] {
+			t.Fatalf("SOA serials = %v, want %v", soaSerials, wantSerials)
+		}
+	}
+}
+
+func TestXoTServer_generateIXFRRecords_WrapAroundSerialUsesIncremental(t *testing.T) {
+	z := zone.NewZone("example.com.")
+	z.SOA = &zone.SOARecord{
+		MName: "ns1.example.com.", RName: "admin.example.com.",
+		Serial: 1, TTL: 3600, Refresh: 3600, Retry: 600, Expire: 604800, Minimum: 86400,
+	}
+
+	mockStore := &mockJournalStore{
+		entries: map[string][]*IXFRJournalEntry{
+			"example.com.": {
+				{
+					Serial: 1,
+					Added: []zone.RecordChange{
+						{Name: "www.example.com.", Type: protocol.TypeA, TTL: 3600, RData: "10.0.0.1"},
+					},
+					Timestamp: time.Now(),
+				},
+			},
+		},
+	}
+
+	srv := &XoTServer{journalStore: mockStore}
+	records, err := srv.generateIXFRRecords(z, 0xFFFFFFFF)
+	if err != nil {
+		t.Fatalf("generateIXFRRecords() error: %v", err)
+	}
+
+	foundAdded := false
+	for _, rr := range records {
+		if rr.Type == protocol.TypeA {
+			foundAdded = true
+			break
+		}
+	}
+	if !foundAdded {
+		t.Fatal("expected incremental IXFR to include wrapped serial journal addition")
+	}
 }
 
 func TestXoTServer_generateIXFRRecords_WithJournal_FallbackToAXFR(t *testing.T) {
@@ -1042,6 +1354,43 @@ func TestXoTServer_Close_Idempotent_CovExtra(t *testing.T) {
 	srv := &XoTServer{}
 	srv.Close()
 	srv.Close() // Should not panic
+}
+
+func TestXoTServer_Close_StopsAcceptLoop_CovExtra(t *testing.T) {
+	certFile, keyFile := writeTestXoTCertFiles(t)
+	port := getFreeTCPPort(t)
+	zones := map[string]*zone.Zone{
+		"example.com.": zone.NewZone("example.com."),
+	}
+	srv, err := NewXoTServer(zones, &XoTConfig{
+		CertFile:   certFile,
+		KeyFile:    keyFile,
+		ListenPort: port,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewXoTServer() error: %v", err)
+	}
+	if err := srv.Serve("127.0.0.1"); err != nil {
+		t.Fatalf("Serve() error: %v", err)
+	}
+	go srv.AcceptLoop()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- srv.Close()
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close() error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		if srv.listener != nil {
+			_ = srv.listener.Close()
+		}
+		t.Fatal("Close() did not stop AcceptLoop")
+	}
 }
 
 func TestXoTServer_Addr_CovExtra(t *testing.T) {
@@ -1272,7 +1621,7 @@ func TestXoTServer_zoneRecordToRR_InvalidType_CovExtra(t *testing.T) {
 		TTL:   300,
 		RData: "data",
 	}
-	_, err := srv.zoneRecordToRR("test.example.com.", rec, "example.com.")
+	_, err := srv.zoneRecordToRR("test.example.com.", rec)
 	if err == nil {
 		t.Error("expected error for unknown record type")
 	}
@@ -1287,7 +1636,7 @@ func TestXoTServer_zoneRecordToRR_InvalidName_CovExtra(t *testing.T) {
 		RData: "1.2.3.4",
 	}
 	// Empty name may still parse or fail depending on ParseName
-	_, err := srv.zoneRecordToRR("", rec, "example.com.")
+	_, err := srv.zoneRecordToRR("", rec)
 	// We just want to cover the code path
 	_ = err
 }
@@ -1570,35 +1919,35 @@ func TestTLSAUsageConstants_CovExtra(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// parseXoTRData MX with bad exchange
+// parseRData MX with bad exchange
 // ---------------------------------------------------------------------------
 
 func TestParseXoTRData_MX_InvalidExchange_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeMX, "10 !!!invalid!!!", "")
+	_, err := parseRData(protocol.TypeMX, "10 !!!invalid!!!")
 	if err == nil {
 		t.Error("expected error for invalid MX exchange")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// parseXoTRData invalid CNAME and NS
+// parseRData invalid CNAME and NS
 // ---------------------------------------------------------------------------
 
 func TestParseXoTRData_CNAME_EmptyString_CovExtra(t *testing.T) {
 	// Empty string passes ParseName, so just verify it doesn't crash
-	_, _ = parseXoTRData(protocol.TypeCNAME, "", "")
+	_, _ = parseRData(protocol.TypeCNAME, "")
 }
 
 func TestParseXoTRData_NS_EmptyString_CovExtra(t *testing.T) {
-	_, _ = parseXoTRData(protocol.TypeNS, "", "")
+	_, _ = parseRData(protocol.TypeNS, "")
 }
 
 func TestParseXoTRData_PTR_EmptyString_CovExtra(t *testing.T) {
-	_, _ = parseXoTRData(protocol.TypePTR, "", "")
+	_, _ = parseRData(protocol.TypePTR, "")
 }
 
 func TestParseXoTRData_SRV_InvalidTarget_CovExtra(t *testing.T) {
-	_, err := parseXoTRData(protocol.TypeSRV, "10 20 443 !!!invalid!!!", "")
+	_, err := parseRData(protocol.TypeSRV, "10 20 443 !!!invalid!!!")
 	if err == nil {
 		t.Error("expected error for invalid SRV target")
 	}
@@ -1676,6 +2025,53 @@ func writeTestCAFile(t *testing.T) string {
 	return path
 }
 
+func writeTestXoTCertFiles(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "xot-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "xot-cert.pem")
+	keyPath := filepath.Join(dir, "xot-key.pem")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write cert: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+	return certPath, keyPath
+}
+
+func getFreeTCPPort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for free port: %v", err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
 func TestReadCAFile_CovExtra(t *testing.T) {
 	// Fail closed on a missing CA file (the previous impl ignored the filename
 	// and returned the system root pool, silently bypassing the operator CA).
@@ -1730,21 +2126,26 @@ func TestRDataTSIG_Copy_NilReceiver_CovExtra(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// XoT parseXoTRData MX fallback path (Sscanf failure)
+// parseRData MX without a preference field
 // ---------------------------------------------------------------------------
 
 func TestParseXoTRData_MX_NoPreference_CovExtra(t *testing.T) {
-	rdata, err := parseXoTRData(protocol.TypeMX, "mail.example.com.", "")
-	if err != nil {
-		t.Fatalf("parseXoTRData MX (no pref) error: %v", err)
+	// MX without a preference field is not valid presentation format.
+	if _, err := parseRData(protocol.TypeMX, "mail.example.com."); err == nil {
+		t.Fatal("parseRData(MX without preference) expected error")
 	}
-	mx, ok := rdata.(*protocol.RDataMX)
-	if !ok {
-		t.Fatal("expected RDataMX")
+}
+
+func TestParseXoTRData_MXInvalidPreference_CovExtra(t *testing.T) {
+	tests := []string{
+		"bad mail.example.com.",
+		"-1 mail.example.com.",
+		"65536 mail.example.com.",
 	}
-	// Preference should be 0 since Sscanf failed
-	if mx.Preference != 0 {
-		t.Errorf("preference = %d, want 0 (Sscanf failure fallback)", mx.Preference)
+	for _, rdata := range tests {
+		if _, err := parseRData(protocol.TypeMX, rdata); err == nil {
+			t.Fatalf("parseRData(MX, %q) expected error", rdata)
+		}
 	}
 }
 
@@ -1817,15 +2218,12 @@ func TestTKEYQuery_BoundaryKeySizes_CovExtra(t *testing.T) {
 
 func TestFormatTKEYTime_Zero_CovExtra(t *testing.T) {
 	ts := time.Unix(0, 0)
-	result := formatTKEYTime(ts)
-	if len(result) != 6 {
-		t.Fatalf("expected 6 bytes, got %d", len(result))
+	result, err := formatTKEYTime(ts)
+	if err != nil {
+		t.Fatalf("formatTKEYTime() error: %v", err)
 	}
-	for _, b := range result {
-		if b != 0 {
-			t.Errorf("expected all zeros for unix=0, got %x", result)
-			break
-		}
+	if result != 0 {
+		t.Errorf("expected zero unix time, got %d", result)
 	}
 }
 

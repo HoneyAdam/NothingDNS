@@ -191,7 +191,10 @@ func (ks *KeyStore) SaveKey(zoneName string, key *SigningKey) error {
 		stored.PrivateKeyData = encrypted
 	}
 
-	encoded := encodeStoredKey(stored)
+	encoded, err := encodeStoredKey(stored)
+	if err != nil {
+		return fmt.Errorf("encode key: %w", err)
+	}
 
 	return ks.store.Update(func(tx KeyStoreTx) error {
 		root, err := tx.CreateBucketIfNotExists(keystoreBucket)
@@ -285,13 +288,23 @@ func (ks *KeyStore) DeleteZoneKeys(zoneName string) error {
 // --- Serialization ---
 
 func serializeSigningKey(key *SigningKey) (*StoredKey, error) {
+	if key == nil {
+		return nil, fmt.Errorf("signing key is nil")
+	}
+	if key.DNSKEY == nil {
+		return nil, fmt.Errorf("signing key DNSKEY is nil")
+	}
+	if key.PrivateKey == nil {
+		return nil, fmt.Errorf("signing key private key is nil")
+	}
+
 	stored := &StoredKey{
 		KeyTag:        key.KeyTag,
 		Algorithm:     key.DNSKEY.Algorithm,
 		Flags:         key.DNSKEY.Flags,
 		IsKSK:         key.IsKSK,
 		IsZSK:         key.IsZSK,
-		PublicKeyData: key.DNSKEY.PublicKey,
+		PublicKeyData: append([]byte(nil), key.DNSKEY.PublicKey...),
 	}
 
 	// Serialize private key to DER format
@@ -306,6 +319,9 @@ func serializeSigningKey(key *SigningKey) (*StoredKey, error) {
 
 // marshalPrivateKey serializes a DNSSEC private key to DER bytes.
 func marshalPrivateKey(pk *PrivateKey) ([]byte, error) {
+	if pk == nil {
+		return nil, fmt.Errorf("private key is nil")
+	}
 	switch k := pk.Key.(type) {
 	case *rsa.PrivateKey:
 		return x509.MarshalPKCS1PrivateKey(k), nil
@@ -313,7 +329,7 @@ func marshalPrivateKey(pk *PrivateKey) ([]byte, error) {
 		return x509.MarshalECPrivateKey(k)
 	case ed25519.PrivateKey:
 		// Ed25519 keys are 64 bytes: seed(32) + public(32)
-		return []byte(k), nil
+		return append([]byte(nil), k...), nil
 	default:
 		return nil, fmt.Errorf("unsupported private key type: %T", pk.Key)
 	}
@@ -347,7 +363,7 @@ func unmarshalPrivateKey(algorithm uint8, data []byte) (*PrivateKey, error) {
 		if len(data) != ed25519.PrivateKeySize {
 			return nil, fmt.Errorf("invalid Ed25519 key size: %d", len(data))
 		}
-		return &PrivateKey{Algorithm: algorithm, Key: ed25519.PrivateKey(data)}, nil
+		return &PrivateKey{Algorithm: algorithm, Key: ed25519.PrivateKey(append([]byte(nil), data...))}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported algorithm: %d", algorithm)
@@ -356,6 +372,10 @@ func unmarshalPrivateKey(algorithm uint8, data []byte) (*PrivateKey, error) {
 
 // RestoreSigningKey converts a StoredKey back to a SigningKey.
 func RestoreSigningKey(stored *StoredKey) (*SigningKey, error) {
+	if stored == nil {
+		return nil, fmt.Errorf("stored key is nil")
+	}
+
 	privKey, err := unmarshalPrivateKey(stored.Algorithm, stored.PrivateKeyData)
 	if err != nil {
 		return nil, fmt.Errorf("restore private key: %w", err)
@@ -365,7 +385,7 @@ func RestoreSigningKey(stored *StoredKey) (*SigningKey, error) {
 		Flags:     stored.Flags,
 		Protocol:  3, // Always 3 per RFC 4034
 		Algorithm: stored.Algorithm,
-		PublicKey: stored.PublicKeyData,
+		PublicKey: append([]byte(nil), stored.PublicKeyData...),
 	}
 
 	return &SigningKey{
@@ -382,7 +402,17 @@ func RestoreSigningKey(stored *StoredKey) (*SigningKey, error) {
 // Format: [2 keytag][1 algorithm][2 flags][1 isKSK][1 isZSK]
 //
 //	[2 pubKeyLen][pubKey][4 privKeyLen][privKey]
-func encodeStoredKey(sk *StoredKey) []byte {
+func encodeStoredKey(sk *StoredKey) ([]byte, error) {
+	if sk == nil {
+		return nil, fmt.Errorf("nil stored key")
+	}
+	if len(sk.PublicKeyData) > 0xffff {
+		return nil, fmt.Errorf("stored key public key too large: %d bytes (max 65535)", len(sk.PublicKeyData))
+	}
+	if uint64(len(sk.PrivateKeyData)) > uint64(^uint32(0)) {
+		return nil, fmt.Errorf("stored key private key too large: %d bytes (max %d)", len(sk.PrivateKeyData), uint64(^uint32(0)))
+	}
+
 	size := 2 + 1 + 2 + 1 + 1 + 2 + len(sk.PublicKeyData) + 4 + len(sk.PrivateKeyData)
 	buf := make([]byte, size)
 	offset := 0
@@ -411,7 +441,7 @@ func encodeStoredKey(sk *StoredKey) []byte {
 	offset += 4
 	copy(buf[offset:], sk.PrivateKeyData)
 
-	return buf
+	return buf, nil
 }
 
 func decodeStoredKey(data []byte) (*StoredKey, error) {

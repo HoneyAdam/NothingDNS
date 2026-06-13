@@ -10,11 +10,12 @@ import (
 )
 
 func (s *Server) handleODoHConfig(w http.ResponseWriter, r *http.Request) {
-	if s.odohTarget == nil {
+	odohTarget := s.currentODoHTarget()
+	if odohTarget == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "ODoH target not available")
 		return
 	}
-	pubKey := s.odohTarget.PublicKey()
+	pubKey := odohTarget.PublicKey()
 	w.Header().Set("Content-Type", "application/odoh-config+json")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"public_key":"%s","kem":%d,"kdf":%d,"aead":%d}`,
@@ -48,16 +49,17 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check upstream health if configured
-	if s.upstreamLB != nil {
-		healthy := s.upstreamLB.IsHealthy()
+	runtimeSnapshot := s.currentRuntimeSnapshot()
+	if runtimeSnapshot.upstreamLB != nil {
+		healthy := runtimeSnapshot.upstreamLB.IsHealthy()
 		if !healthy {
 			status = "unhealthy"
 			code = http.StatusServiceUnavailable
 		}
-	} else if s.upstreamClient != nil {
+	} else if runtimeSnapshot.upstreamClient != nil {
 		// Single upstream: check if at least one server is healthy
 		// upstream.Client has servers field, check via health
-		healthy := s.upstreamClient.IsHealthy()
+		healthy := runtimeSnapshot.upstreamClient.IsHealthy()
 		if !healthy {
 			status = "unhealthy"
 			code = http.StatusServiceUnavailable

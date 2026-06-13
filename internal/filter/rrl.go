@@ -36,16 +36,18 @@ type rrlBucket struct {
 // enabled is atomic.Bool because Allow/LogResponse read it on the hot
 // path without taking rrl.mu, while SetEnabled writes it.
 type RRL struct {
-	mu       sync.Mutex
-	buckets  map[string]*rrlBucket
-	rate     float64
-	burst    int
-	window   time.Duration
-	enabled  atomic.Bool
-	stopCh   chan struct{}
-	stopOnce sync.Once // guards Stop from panicking on a second call
+	mu        sync.Mutex
+	buckets   map[string]*rrlBucket
+	rate      float64
+	burst     int
+	window    time.Duration
+	enabled   atomic.Bool
+	stopCh    chan struct{}
+	stopOnce  sync.Once // guards Stop from panicking on a second call
+	startOnce sync.Once
 
-	maxBuckets int
+	maxBuckets      int
+	cleanupInterval time.Duration
 }
 
 // rrlKey builds a unique key for a response bucket.
@@ -110,17 +112,18 @@ func NewRRL(cfg RRLConfig) *RRL {
 	}
 
 	rrl := &RRL{
-		buckets:    make(map[string]*rrlBucket),
-		rate:       float64(cfg.Rate),
-		burst:      cfg.Burst,
-		window:     time.Duration(cfg.Window) * time.Second,
-		stopCh:     make(chan struct{}),
-		maxBuckets: cfg.MaxBuckets,
+		buckets:         make(map[string]*rrlBucket),
+		rate:            float64(cfg.Rate),
+		burst:           cfg.Burst,
+		window:          time.Duration(cfg.Window) * time.Second,
+		stopCh:          make(chan struct{}),
+		maxBuckets:      cfg.MaxBuckets,
+		cleanupInterval: 60 * time.Second,
 	}
 	rrl.enabled.Store(cfg.Enabled)
 
 	if rrl.enabled.Load() {
-		go rrl.cleanup()
+		rrl.startCleanup()
 	}
 
 	return rrl
@@ -164,7 +167,7 @@ func (rrl *RRL) Allow(clientIP net.IP, qtype uint16, rcode uint8) (allowed, supp
 	}
 
 	// Refill tokens based on elapsed time.
-	elapsed := now.Sub(b.lastTime).Seconds()
+	elapsed := elapsedSecondsSince(b.lastTime, now)
 	b.tokens += rrl.rate * elapsed
 	if b.tokens > float64(rrl.burst) {
 		b.tokens = float64(rrl.burst)
@@ -224,7 +227,6 @@ func (rrl *RRL) LogSuperlative(clientIP net.IP, qtype uint16, rcode uint8, query
 }
 
 // Stop terminates the background cleanup goroutine.
-// Stop terminates the background cleanup goroutine.
 // Idempotent — see RateLimiter.Stop.
 func (rrl *RRL) Stop() {
 	rrl.stopOnce.Do(func() {
@@ -235,11 +237,24 @@ func (rrl *RRL) Stop() {
 // SetEnabled toggles RRL at runtime. Wait-free for readers.
 func (rrl *RRL) SetEnabled(enabled bool) {
 	rrl.enabled.Store(enabled)
+	if enabled {
+		rrl.startCleanup()
+	}
+}
+
+func (rrl *RRL) startCleanup() {
+	rrl.startOnce.Do(func() {
+		go rrl.cleanup()
+	})
 }
 
 // cleanup periodically removes stale buckets.
 func (rrl *RRL) cleanup() {
-	ticker := time.NewTicker(60 * time.Second)
+	interval := rrl.cleanupInterval
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {

@@ -7,8 +7,69 @@ package raft
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+func TestFrameWriterCompletesPartialWrites(t *testing.T) {
+	w := &chunkedWriter{maxWrite: 2}
+	req := VoteRequest{
+		Term:         7,
+		CandidateID:  "node-a",
+		LastLogIndex: 42,
+		LastLogTerm:  6,
+	}
+
+	fw := newFrameWriter(w, nil)
+	if err := fw.writeFramed(msgTypeVoteRequest, req); err != nil {
+		t.Fatalf("writeFramed: %v", err)
+	}
+	if w.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", w.calls)
+	}
+
+	fr := newFrameReader(bytes.NewReader(w.buf.Bytes()), nil)
+	var got VoteRequest
+	msgType, err := fr.readFramed(&got)
+	if err != nil {
+		t.Fatalf("readFramed: %v", err)
+	}
+	if msgType != msgTypeVoteRequest {
+		t.Fatalf("msgType = %d, want %d", msgType, msgTypeVoteRequest)
+	}
+	if got != req {
+		t.Fatalf("VoteRequest = %+v, want %+v", got, req)
+	}
+}
+
+func TestWriteAllRejectsZeroProgress(t *testing.T) {
+	err := util.WriteFull(zeroProgressWriter{}, []byte{1})
+	if err != io.ErrNoProgress {
+		t.Fatalf("WriteFull error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+type chunkedWriter struct {
+	buf      bytes.Buffer
+	maxWrite int
+	calls    int
+}
+
+func (w *chunkedWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.maxWrite <= 0 || len(p) <= w.maxWrite {
+		return w.buf.Write(p)
+	}
+	return w.buf.Write(p[:w.maxWrite])
+}
+
+type zeroProgressWriter struct{}
+
+func (zeroProgressWriter) Write([]byte) (int, error) {
+	return 0, nil
+}
 
 func TestEncodeDecodeVoteResponse(t *testing.T) {
 	orig := VoteResponse{

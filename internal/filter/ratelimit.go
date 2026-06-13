@@ -93,7 +93,7 @@ func (rl *RateLimiter) Allow(clientIP net.IP) bool {
 	}
 
 	// Refill tokens based on elapsed time
-	elapsed := now.Sub(b.lastTime).Seconds()
+	elapsed := elapsedSecondsSince(b.lastTime, now)
 	b.tokens += rl.rate * elapsed
 	if b.tokens > float64(rl.burst) {
 		b.tokens = float64(rl.burst)
@@ -106,6 +106,13 @@ func (rl *RateLimiter) Allow(clientIP net.IP) bool {
 
 	b.tokens--
 	return true
+}
+
+func elapsedSecondsSince(lastTime, now time.Time) float64 {
+	if now.Before(lastTime) {
+		return 0
+	}
+	return now.Sub(lastTime).Seconds()
 }
 
 // Stop terminates the background cleanup goroutine.

@@ -104,6 +104,18 @@ func TestUnescapeLabelHighByteEscape(t *testing.T) {
 	}
 }
 
+func TestUnescapeLabelDecimalEscapeRejectsOutOfByteRange(t *testing.T) {
+	for _, input := range []string{"\\256", "\\999"} {
+		result, err := UnescapeLabel(input)
+		if err == nil {
+			t.Errorf("Expected error for %q, got: %q", input, result)
+		}
+		if err != nil && !strings.Contains(err.Error(), "invalid decimal escape") {
+			t.Errorf("Expected 'invalid decimal escape' error for %q, got: %v", input, err)
+		}
+	}
+}
+
 // ============================================================================
 // UnescapeLabel - decimal escape for null byte
 // ============================================================================

@@ -704,6 +704,60 @@ func TestValidateRRSIG(t *testing.T) {
 	}
 }
 
+func TestValidatorClockSkewSeconds(t *testing.T) {
+	tests := []struct {
+		name      string
+		clockSkew time.Duration
+		want      uint32
+	}{
+		{name: "negative", clockSkew: -5 * time.Minute, want: 0},
+		{name: "zero", clockSkew: 0, want: 0},
+		{name: "sub_second", clockSkew: 500 * time.Millisecond, want: 0},
+		{name: "whole_seconds", clockSkew: 5 * time.Minute, want: 300},
+		{name: "saturates_before_uint32_wrap", clockSkew: time.Duration(1<<63 - 1), want: ^uint32(0)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := validatorClockSkewSeconds(tc.clockSkew); got != tc.want {
+				t.Fatalf("validatorClockSkewSeconds(%v) = %d, want %d", tc.clockSkew, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRRSIGTimeValid(t *testing.T) {
+	tests := []struct {
+		name       string
+		inception  uint32
+		expiration uint32
+		now        uint32
+		skew       uint32
+		want       bool
+	}{
+		{name: "current within validity", inception: 90, expiration: 110, now: 100, want: true},
+		{name: "expired beyond skew", inception: 90, expiration: 97, now: 100, skew: 2, want: false},
+		{name: "expiration within skew", inception: 90, expiration: 98, now: 100, skew: 2, want: true},
+		{name: "future inception within skew", inception: 102, expiration: 110, now: 100, skew: 2, want: true},
+		{name: "future inception beyond skew", inception: 103, expiration: 110, now: 100, skew: 2, want: false},
+		{name: "valid across uint32 wrap", inception: ^uint32(0) - 1, expiration: 5, now: 1, want: true},
+		{name: "expired across uint32 wrap beyond skew", inception: ^uint32(0) - 10, expiration: ^uint32(0) - 1, now: 3, skew: 2, want: false},
+		{name: "expiration across uint32 wrap within skew", inception: ^uint32(0) - 10, expiration: ^uint32(0), now: 1, skew: 2, want: true},
+		{name: "future inception across uint32 wrap within skew", inception: 0, expiration: 10, now: ^uint32(0), skew: 1, want: true},
+		{name: "future inception across uint32 wrap beyond skew", inception: 1, expiration: 10, now: ^uint32(0), skew: 1, want: false},
+		{name: "huge skew preserves previous permissive behavior", inception: 1, expiration: 2, now: 100, skew: 1 << 31, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rrsigTimeValid(tc.inception, tc.expiration, tc.now, tc.skew); got != tc.want {
+				t.Fatalf("rrsigTimeValid(inception=%d, expiration=%d, now=%d, skew=%d) = %v, want %v",
+					tc.inception, tc.expiration, tc.now, tc.skew, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateMessage(t *testing.T) {
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 
@@ -734,7 +788,10 @@ func TestCanonicalizeRR(t *testing.T) {
 	}
 
 	// Test canonicalization
-	result := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600)
+	if err != nil {
+		t.Fatalf("canonicalizeRR: %v", err)
+	}
 	if len(result) == 0 {
 		t.Error("canonicalizeRR should return non-empty result")
 	}
@@ -749,6 +806,7 @@ func TestCanonicalizeRR(t *testing.T) {
 func TestCanonicalizeRRSet(t *testing.T) {
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 	name, _ := protocol.ParseName("example.com.")
+	signerName, _ := protocol.ParseName("example.com.")
 
 	rrSet := []*protocol.ResourceRecord{
 		{Name: name, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
@@ -758,11 +816,34 @@ func TestCanonicalizeRRSet(t *testing.T) {
 	rrsig := &protocol.RDataRRSIG{
 		TypeCovered: protocol.TypeA,
 		OriginalTTL: 3600,
+		SignerName:  signerName,
 	}
 
-	result := v.canonicalizeRRSet(rrSet, rrsig)
+	result, err := v.canonicalizeRRSet(rrSet, rrsig)
+	if err != nil {
+		t.Fatalf("canonicalizeRRSet: %v", err)
+	}
 	if len(result) == 0 {
 		t.Error("canonicalizeRRSet should return non-empty result")
+	}
+}
+
+func TestCanonicalizeRRRejectsOversizedRDATA(t *testing.T) {
+	v := NewValidator(DefaultValidatorConfig(), nil, nil)
+	name, _ := protocol.ParseName("oversized.example.com.")
+	rr := &protocol.ResourceRecord{
+		Name:  name,
+		Type:  65000,
+		Class: protocol.ClassIN,
+		TTL:   300,
+		Data: &protocol.RDataRaw{
+			TypeVal: 65000,
+			Data:    make([]byte, 0x10000),
+		},
+	}
+
+	if _, err := v.canonicalizeRR(rr, 300); err == nil {
+		t.Fatal("expected oversized RDATA to fail")
 	}
 }
 
@@ -1506,7 +1587,10 @@ func TestValidateMessageWithValidRRSIG(t *testing.T) {
 	}
 
 	// Use the signer to create proper signed data
-	signedData := v.canonicalizeRRSet([]*protocol.ResourceRecord{aRecord}, rrsig)
+	signedData, err := v.canonicalizeRRSet([]*protocol.ResourceRecord{aRecord}, rrsig)
+	if err != nil {
+		t.Fatalf("canonicalizeRRSet: %v", err)
+	}
 	signature, err := SignData(protocol.AlgorithmECDSAP256SHA256, priv, signedData)
 	if err != nil {
 		t.Fatalf("Failed to sign data: %v", err)
@@ -1647,7 +1731,10 @@ func TestValidateRRSIGWithMatchingKey(t *testing.T) {
 	}
 
 	// Create proper signed data
-	signedData := v.canonicalizeRRSet(rrSet, rrsig)
+	signedData, err := v.canonicalizeRRSet(rrSet, rrsig)
+	if err != nil {
+		t.Fatalf("canonicalizeRRSet: %v", err)
+	}
 	signature, err := SignData(protocol.AlgorithmECDSAP256SHA256, priv, signedData)
 	if err != nil {
 		t.Fatalf("Failed to sign data: %v", err)
@@ -1705,7 +1792,10 @@ func TestValidateRRSIGIgnoreTime(t *testing.T) {
 		SignerName:  signerName,
 	}
 
-	signedData := v.canonicalizeRRSet(rrSet, rrsig)
+	signedData, err := v.canonicalizeRRSet(rrSet, rrsig)
+	if err != nil {
+		t.Fatalf("canonicalizeRRSet: %v", err)
+	}
 	signature, err := SignData(protocol.AlgorithmECDSAP256SHA256, priv, signedData)
 	if err != nil {
 		t.Fatalf("Failed to sign data: %v", err)
@@ -2064,6 +2154,82 @@ func TestValidateNegativeResponseNSEC3WrongDataType(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedDenialRRsSkipsMalformedRecords(t *testing.T) {
+	v := NewValidator(DefaultValidatorConfig(), nil, nil)
+	nsecOwner, _ := protocol.ParseName("a.example.com.")
+	msg := &protocol.Message{
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeNSEC},
+			{
+				Name:  nsecOwner,
+				Type:  protocol.TypeNSEC,
+				Class: protocol.ClassIN,
+				Data:  &protocol.RDataNSEC{},
+			},
+		},
+	}
+	chain := []*chainLink{
+		{
+			zone: "example.com.",
+			dnsKeys: []*protocol.ResourceRecord{
+				nil,
+				{Type: protocol.TypeDNSKEY},
+			},
+		},
+	}
+
+	if got := v.authenticatedDenialRRs(msg, chain); len(got) != 0 {
+		t.Fatalf("authenticatedDenialRRs returned %d records, want 0", len(got))
+	}
+}
+
+func TestFindRRSIGSkipsMalformedRecords(t *testing.T) {
+	v := NewValidator(DefaultValidatorConfig(), nil, nil)
+	if got := v.findRRSIG([]*protocol.ResourceRecord{
+		nil,
+		{Type: protocol.TypeRRSIG, Data: &protocol.RDataRRSIG{TypeCovered: protocol.TypeA}},
+	}, "example.com.", protocol.TypeA); got != nil {
+		t.Fatalf("findRRSIG returned %+v, want nil", got)
+	}
+}
+
+func TestValidateNSEC3ClosestEncloserRejectsMalformedRecords(t *testing.T) {
+	v := NewValidator(DefaultValidatorConfig(), nil, nil)
+	owner, _ := protocol.ParseName("abc.example.com.")
+	valid := func() *protocol.ResourceRecord {
+		return &protocol.ResourceRecord{
+			Name:  owner,
+			Type:  protocol.TypeNSEC3,
+			Class: protocol.ClassIN,
+			Data: &protocol.RDataNSEC3{
+				HashAlgorithm: protocol.NSEC3HashSHA1,
+				NextHashed:    []byte{0x01},
+			},
+		}
+	}
+	var typedNil *protocol.RDataNSEC3
+
+	tests := []struct {
+		name string
+		rrs  []*protocol.ResourceRecord
+	}{
+		{name: "nil record", rrs: []*protocol.ResourceRecord{nil}},
+		{name: "nil owner", rrs: []*protocol.ResourceRecord{{Type: protocol.TypeNSEC3, Data: &protocol.RDataNSEC3{HashAlgorithm: protocol.NSEC3HashSHA1}}}},
+		{name: "typed nil data", rrs: []*protocol.ResourceRecord{{Name: owner, Type: protocol.TypeNSEC3, Data: typedNil}}},
+		{name: "wrong data", rrs: []*protocol.ResourceRecord{{Name: owner, Type: protocol.TypeNSEC3, Data: &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}}}}},
+		{name: "later nil record", rrs: []*protocol.ResourceRecord{valid(), nil}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := v.validateNSEC3ClosestEncloser("www.example.com.", tc.rrs); got {
+				t.Fatal("validateNSEC3ClosestEncloser returned true for malformed records")
+			}
+		})
+	}
+}
+
 func TestExtractNSEC3HashEmpty(t *testing.T) {
 	hash := extractNSEC3Hash("")
 	if hash != "" {
@@ -2344,7 +2510,10 @@ func TestValidateResponseFullChain(t *testing.T) {
 	}
 
 	v := NewValidator(config, store, nil)
-	signedData := v.canonicalizeRRSet([]*protocol.ResourceRecord{aRecord}, rrsig)
+	signedData, err := v.canonicalizeRRSet([]*protocol.ResourceRecord{aRecord}, rrsig)
+	if err != nil {
+		t.Fatalf("canonicalizeRRSet: %v", err)
+	}
 	signature, err := SignData(protocol.AlgorithmECDSAP256SHA256, priv, signedData)
 	if err != nil {
 		t.Fatalf("Failed to sign data: %v", err)

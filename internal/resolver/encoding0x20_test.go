@@ -108,4 +108,26 @@ func TestVerify0x20Response(t *testing.T) {
 	if verify0x20Response("www.example.com.", emptyResp) {
 		t.Error("verify0x20Response should return false for empty questions")
 	}
+
+	malformedCases := []struct {
+		name string
+		resp *protocol.Message
+	}{
+		{name: "nil response"},
+		{
+			name: "nil first question",
+			resp: &protocol.Message{Questions: []*protocol.Question{nil}},
+		},
+		{
+			name: "nil question name",
+			resp: &protocol.Message{Questions: []*protocol.Question{{QType: protocol.TypeA}}},
+		},
+	}
+	for _, tc := range malformedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if verify0x20Response("www.example.com.", tc.resp) {
+				t.Fatal("verify0x20Response should return false for malformed questions")
+			}
+		})
+	}
 }

@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,34 @@ func TestWALCreate(t *testing.T) {
 	stats := wal.Stats()
 	if stats.SegmentCount != 1 {
 		t.Errorf("Expected 1 segment, got %d", stats.SegmentCount)
+	}
+}
+
+func TestOpenWALNormalizesInvalidOptions(t *testing.T) {
+	dir := t.TempDir()
+
+	wal, err := OpenWAL(dir, WALOptions{
+		MaxSegmentSize:  -1,
+		SyncInterval:    0,
+		PreallocateSize: -1,
+	})
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	if wal.opts.MaxSegmentSize != MaxSegmentSize {
+		t.Fatalf("MaxSegmentSize = %d, want %d", wal.opts.MaxSegmentSize, MaxSegmentSize)
+	}
+	if wal.opts.SyncInterval != SyncInterval {
+		t.Fatalf("SyncInterval = %v, want %v", wal.opts.SyncInterval, SyncInterval)
+	}
+	if wal.opts.PreallocateSize != 0 {
+		t.Fatalf("PreallocateSize = %d, want 0", wal.opts.PreallocateSize)
+	}
+
+	if _, err := wal.Append(EntryTypePut, []byte("normalized")); err != nil {
+		t.Fatalf("Append failed: %v", err)
 	}
 }
 
@@ -148,6 +178,40 @@ func TestWALTruncate(t *testing.T) {
 	}
 }
 
+func TestWALTruncateReportsSegmentCloseError(t *testing.T) {
+	dir := t.TempDir()
+
+	removedPath := filepath.Join(dir, WALFilePrefix+"00000000000000000000"+WALFileSuffix)
+	removedFile, err := os.OpenFile(removedPath, os.O_CREATE|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatalf("open removed segment: %v", err)
+	}
+	if err := removedFile.Close(); err != nil {
+		t.Fatalf("close removed segment fixture: %v", err)
+	}
+
+	activePath := filepath.Join(dir, WALFilePrefix+"00000000000000000001"+WALFileSuffix)
+	if err := os.WriteFile(activePath, nil, 0600); err != nil {
+		t.Fatalf("write active segment fixture: %v", err)
+	}
+	active := &WALSegment{ID: 1, Path: activePath}
+	wal := &WAL{
+		segments: []*WALSegment{
+			{ID: 0, Path: removedPath, file: removedFile},
+			active,
+		},
+		active: active,
+	}
+
+	err = wal.Truncate(0)
+	if err == nil {
+		t.Fatal("Truncate should report segment close error")
+	}
+	if !strings.Contains(err.Error(), "close segment 0") {
+		t.Fatalf("Truncate error should include segment close context, got: %v", err)
+	}
+}
+
 func TestWALRecovery(t *testing.T) {
 	dir := t.TempDir()
 
@@ -249,6 +313,32 @@ func TestWALReader(t *testing.T) {
 	wal.Close()
 }
 
+func TestWALReaderNextReportsCloseErrorAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, WALFilePrefix+"00000000000000000000"+WALFileSuffix)
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatalf("write empty segment: %v", err)
+	}
+
+	originalCloseWALReaderFile := closeWALReaderFile
+	closeWALReaderFile = func(*os.File) error {
+		return errors.New("reader close failed")
+	}
+	t.Cleanup(func() { closeWALReaderFile = originalCloseWALReaderFile })
+
+	wal := &WAL{
+		segments: []*WALSegment{{ID: 0, Path: path}},
+	}
+	reader := wal.NewReader()
+	_, err := reader.Next()
+	if err == nil {
+		t.Fatal("Next should report close error after EOF")
+	}
+	if !strings.Contains(err.Error(), "close segment after EOF") {
+		t.Fatalf("Next error should include close context, got: %v", err)
+	}
+}
+
 // TestWALReader_MultiEntry guards against a regression where
 // WALReader.Next() used bytes.Buffer.Truncate to "consume" a
 // decoded payload — Truncate keeps the front and discards the
@@ -293,6 +383,46 @@ func TestWALReader_MultiEntry(t *testing.T) {
 		if string(entry.Data) != string(payloads[i]) {
 			t.Errorf("entry %d: expected payload %q, got %q", i, payloads[i], entry.Data)
 		}
+	}
+}
+
+func TestWALReader_LargeEntrySpanningReads(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultWALOptions()
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	largePayload := strings.Repeat("x", 5000)
+	if _, err := wal.Append(EntryTypePut, []byte(largePayload)); err != nil {
+		t.Fatalf("Append large payload failed: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("after-large")); err != nil {
+		t.Fatalf("Append second payload failed: %v", err)
+	}
+	if err := wal.Sync(); err != nil {
+		t.Fatalf("Sync failed: %v", err)
+	}
+
+	reader := wal.NewReader()
+	defer reader.Close()
+	defer wal.Close()
+
+	entry, err := reader.Next()
+	if err != nil {
+		t.Fatalf("Next large payload returned error: %v", err)
+	}
+	if string(entry.Data) != largePayload {
+		t.Fatalf("large payload mismatch: got %d bytes, want %d", len(entry.Data), len(largePayload))
+	}
+
+	entry, err = reader.Next()
+	if err != nil {
+		t.Fatalf("Next second payload returned error: %v", err)
+	}
+	if string(entry.Data) != "after-large" {
+		t.Fatalf("second payload = %q, want %q", entry.Data, "after-large")
 	}
 }
 
@@ -507,6 +637,242 @@ func TestWALAppendReportsRollbackFailure(t *testing.T) {
 	}
 }
 
+func TestWALCloseReportsFinalSyncError(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	wal.mu.Lock()
+	wal.syncPending = true
+	if err := wal.active.file.Close(); err != nil {
+		wal.mu.Unlock()
+		t.Fatalf("close active file: %v", err)
+	}
+	wal.mu.Unlock()
+
+	err = wal.Close()
+	if err == nil {
+		t.Fatal("Close with pending sync on closed active file should fail")
+	}
+	if !strings.Contains(err.Error(), "final sync") {
+		t.Fatalf("Close error should include final sync context, got: %v", err)
+	}
+}
+
+func TestWALSyncLoopRecordsAsyncSyncError(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+
+	if _, err := wal.Append(EntryTypePut, []byte("test_data")); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	wal.mu.Lock()
+	if err := wal.active.file.Close(); err != nil {
+		wal.mu.Unlock()
+		t.Fatalf("close active file: %v", err)
+	}
+	wal.syncPending = true
+	wal.mu.Unlock()
+
+	select {
+	case wal.syncChan <- struct{}{}:
+	default:
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		wal.mu.Lock()
+		syncErr := wal.syncErr
+		wal.mu.Unlock()
+		if syncErr != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("syncLoop did not record async sync error")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	if _, err := wal.Append(EntryTypePut, []byte("after_error")); err == nil {
+		t.Fatal("Append after async sync error should fail")
+	} else if !strings.Contains(err.Error(), "previous WAL sync failed") {
+		t.Fatalf("Append error should mention previous sync failure, got: %v", err)
+	}
+
+	wal.mu.Lock()
+	wal.closed = true
+	close(wal.stopChan)
+	wal.active.file = nil
+	wal.mu.Unlock()
+	wal.wg.Wait()
+}
+
+func TestWALSyncClearsPreviousSyncError(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	wal.mu.Lock()
+	wal.syncErr = errors.New("old sync error")
+	wal.syncPending = true
+	wal.mu.Unlock()
+
+	if err := wal.Sync(); err != nil {
+		t.Fatalf("Sync should clear previous error after successful fsync: %v", err)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("after_clear")); err != nil {
+		t.Fatalf("Append after successful Sync failed: %v", err)
+	}
+}
+
+func TestWALCreateNewSegmentSyncsPendingActiveSegment(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	if _, err := wal.Append(EntryTypePut, []byte("test_data")); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	wal.mu.Lock()
+	wal.syncPending = true
+	oldActive := wal.active
+	oldID := oldActive.ID
+	err = wal.createNewSegment()
+	syncPending := wal.syncPending
+	oldSealed := oldActive.sealed
+	oldFileNil := oldActive.file == nil
+	newID := wal.active.ID
+	wal.mu.Unlock()
+	if err != nil {
+		t.Fatalf("createNewSegment failed: %v", err)
+	}
+	if syncPending {
+		t.Fatal("createNewSegment should sync pending active segment before rotation")
+	}
+	if !oldSealed {
+		t.Fatal("old active segment should be sealed")
+	}
+	if !oldFileNil {
+		t.Fatal("old active segment file should be closed and cleared")
+	}
+	if newID != oldID+1 {
+		t.Fatalf("active segment ID = %d, want %d", newID, oldID+1)
+	}
+}
+
+func TestWALCreateNewSegmentKeepsActiveSegmentOnCreateFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	nextPath := filepath.Join(dir, WALFilePrefix+"00000000000000000001"+WALFileSuffix)
+	if err := os.Mkdir(nextPath, 0700); err != nil {
+		t.Fatalf("create next segment directory: %v", err)
+	}
+
+	wal.mu.Lock()
+	oldActive := wal.active
+	oldID := oldActive.ID
+	err = wal.createNewSegment()
+	activeSame := wal.active == oldActive
+	activeFileNil := wal.active.file == nil
+	activeSealed := wal.active.sealed
+	segmentCount := len(wal.segments)
+	wal.mu.Unlock()
+
+	if err == nil {
+		t.Fatal("createNewSegment should fail when next segment path is a directory")
+	}
+	if !strings.Contains(err.Error(), "create segment file") {
+		t.Fatalf("createNewSegment error should include create context, got: %v", err)
+	}
+	if !activeSame {
+		t.Fatal("active segment changed after failed createNewSegment")
+	}
+	if activeFileNil {
+		t.Fatal("active segment file should remain open after failed createNewSegment")
+	}
+	if activeSealed {
+		t.Fatal("active segment should not be sealed after failed createNewSegment")
+	}
+	if segmentCount != 1 {
+		t.Fatalf("segment count = %d, want 1", segmentCount)
+	}
+	if _, err := wal.Append(EntryTypePut, []byte("after_failed_rotation")); err != nil {
+		t.Fatalf("Append after failed createNewSegment for active %d failed: %v", oldID, err)
+	}
+}
+
+func TestWALCreateNewSegmentReportsPendingSyncError(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultWALOptions()
+	opts.SyncInterval = time.Hour
+	wal, err := OpenWAL(dir, opts)
+	if err != nil {
+		t.Fatalf("OpenWAL failed: %v", err)
+	}
+	defer wal.Close()
+
+	if _, err := wal.Append(EntryTypePut, []byte("test_data")); err != nil {
+		t.Fatalf("Append failed: %v", err)
+	}
+
+	nextPath := filepath.Join(dir, WALFilePrefix+"00000000000000000001"+WALFileSuffix)
+	wal.mu.Lock()
+	if err := wal.active.file.Close(); err != nil {
+		wal.mu.Unlock()
+		t.Fatalf("close active file: %v", err)
+	}
+	wal.syncPending = true
+	err = wal.createNewSegment()
+	wal.syncPending = false
+	wal.syncErr = nil
+	wal.active.file = nil
+	wal.mu.Unlock()
+
+	if err == nil {
+		t.Fatal("createNewSegment should return pending sync error")
+	}
+	if !strings.Contains(err.Error(), "sync active segment before rotation") {
+		t.Fatalf("createNewSegment error should include sync context, got: %v", err)
+	}
+	if _, statErr := os.Stat(nextPath); !os.IsNotExist(statErr) {
+		t.Fatalf("failed rotation should remove new segment path, stat err: %v", statErr)
+	}
+}
+
 func TestWALMultipleSegments(t *testing.T) {
 	dir := t.TempDir()
 
@@ -565,4 +931,39 @@ func TestWALFileExists(t *testing.T) {
 	if !found {
 		t.Error("Expected to find .log files in WAL directory")
 	}
+}
+
+func TestWriteWALBufferCompletesPartialWrites(t *testing.T) {
+	writer := &chunkedWriter{maxWrite: 2}
+	data := []byte("wal-entry")
+
+	written, err := writeWALBuffer(writer, data)
+	if err != nil {
+		t.Fatalf("writeWALBuffer error: %v", err)
+	}
+	if written != len(data) {
+		t.Fatalf("writeWALBuffer wrote %d bytes, want %d", written, len(data))
+	}
+	if got := writer.buf.String(); got != string(data) {
+		t.Fatalf("writeWALBuffer wrote %q, want %q", got, string(data))
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+}
+
+func TestWriteWALBufferRejectsZeroProgress(t *testing.T) {
+	written, err := writeWALBuffer(zeroProgressWriter{}, []byte("wal-entry"))
+	if err != io.ErrShortWrite {
+		t.Fatalf("writeWALBuffer error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if written != 0 {
+		t.Fatalf("writeWALBuffer wrote %d bytes, want 0", written)
+	}
+}
+
+type zeroProgressWriter struct{}
+
+func (zeroProgressWriter) Write([]byte) (int, error) {
+	return 0, nil
 }

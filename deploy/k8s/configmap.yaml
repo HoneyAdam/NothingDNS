@@ -34,6 +34,9 @@ data:
     logging:
       level: info
       format: json
+    storage:
+      data_dir: /var/lib/nothingdns
+      encryption_key: "${NOTHINGDNS_STORAGE_ENCRYPTION_KEY}"
     cluster:
       enabled: true
       gossip_port: 7946

@@ -4,6 +4,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
 	"github.com/nothingdns/nothingdns/internal/util"
@@ -29,7 +31,7 @@ func NewDNSSECManager(cfg *config.Config, resolverAdapter dnssec.Resolver, logge
 	// Load custom trust anchors if specified
 	if cfg.DNSSEC.TrustAnchor != "" {
 		if err := trustAnchors.LoadFromFile(cfg.DNSSEC.TrustAnchor); err != nil {
-			logger.Warnf("Failed to load trust anchor file: %v", err)
+			return nil, fmt.Errorf("loading DNSSEC trust anchor file %s: %w", cfg.DNSSEC.TrustAnchor, err)
 		} else {
 			logger.Infof("Loaded trust anchors from %s", cfg.DNSSEC.TrustAnchor)
 		}

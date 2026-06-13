@@ -639,6 +639,9 @@ func sameDNSName(a, b string) bool {
 // the ASCII case-folding RFC 1035 requires.
 func (v *Validator) findRRSIG(answers []*protocol.ResourceRecord, name string, rrtype uint16) *protocol.RDataRRSIG {
 	for _, rr := range answers {
+		if rr == nil || rr.Name == nil {
+			continue
+		}
 		if rr.Type != protocol.TypeRRSIG {
 			continue
 		}
@@ -659,20 +662,20 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 	if !v.config.IgnoreTime {
 		now := uint32(time.Now().Unix())
 		// Convert clock skew to seconds for comparison with uint32 timestamps
-		clockSkewSec := uint32(v.config.ClockSkew.Seconds())
+		clockSkewSec := validatorClockSkewSeconds(v.config.ClockSkew)
 		// Apply clock skew tolerance: allow signatures that expired recently
 		// or are not yet valid by up to ClockSkew (handles time sync issues)
-		if rrsig.Expiration+clockSkewSec < now {
-			return false // Signature expired (beyond clock skew tolerance)
-		}
-		if rrsig.Inception > now+clockSkewSec {
-			return false // Signature not yet valid (beyond clock skew tolerance)
+		if !rrsigTimeValid(rrsig.Inception, rrsig.Expiration, now, clockSkewSec) {
+			return false
 		}
 	}
 
 	// Find matching DNSKEY
 	var matchingKey *protocol.RDataDNSKEY
 	for _, rr := range dnsKeys {
+		if rr == nil {
+			continue
+		}
 		dnskey, ok := rr.Data.(*protocol.RDataDNSKEY)
 		if !ok {
 			continue
@@ -695,11 +698,38 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 	}
 
 	// Create canonical signed data
-	signedData := v.canonicalizeRRSet(rrSet, rrsig)
+	signedData, err := v.canonicalizeRRSet(rrSet, rrsig)
+	if err != nil {
+		return false
+	}
 
 	// Verify signature
 	err = VerifySignature(rrsig, signedData, pubKey)
 	return err == nil
+}
+
+func validatorClockSkewSeconds(clockSkew time.Duration) uint32 {
+	if clockSkew <= 0 {
+		return 0
+	}
+
+	const maxUint32 = ^uint32(0)
+	maxDuration := time.Duration(int64(maxUint32) * int64(time.Second))
+	if clockSkew >= maxDuration {
+		return maxUint32
+	}
+
+	return uint32(clockSkew / time.Second)
+}
+
+func rrsigTimeValid(inception, expiration, now, skew uint32) bool {
+	if skew >= 1<<31 {
+		return true
+	}
+	if protocol.SerialAfter(now, expiration+skew) {
+		return false
+	}
+	return !protocol.SerialAfter(inception, now+skew)
 }
 
 // canonicalizeRRSet builds the exact byte sequence that the signer hashed
@@ -714,7 +744,14 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 // "succeeded" against a different prefix-stripped input), turning DNSSEC
 // validation into a placebo. The prefix construction here mirrors the
 // signer's createSignedData in internal/dnssec/signer.go.
-func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) []byte {
+func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *protocol.RDataRRSIG) ([]byte, error) {
+	if rrsig == nil {
+		return nil, fmt.Errorf("nil RRSIG")
+	}
+	if rrsig.SignerName == nil {
+		return nil, fmt.Errorf("nil RRSIG signer name")
+	}
+
 	var result []byte
 
 	// 1. RRSIG RDATA prefix: TypeCovered | Algorithm | Labels | OriginalTTL
@@ -732,9 +769,7 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 		byte(rrsig.Inception>>8), byte(rrsig.Inception),
 		byte(rrsig.KeyTag>>8), byte(rrsig.KeyTag),
 	)
-	if rrsig.SignerName != nil {
-		result = append(result, protocol.CanonicalWireName(rrsig.SignerName.String())...)
-	}
+	result = append(result, protocol.CanonicalWireName(rrsig.SignerName.String())...)
 
 	// 2. Each RR in canonical wire form, in canonical RRset order.
 	sorted := make([]*protocol.ResourceRecord, len(rrSet))
@@ -742,10 +777,14 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 	canonicalSort(sorted)
 
 	for _, rr := range sorted {
-		result = append(result, v.canonicalizeRR(rr, rrsig.OriginalTTL)...)
+		rrWire, err := v.canonicalizeRR(rr, rrsig.OriginalTTL)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, rrWire...)
 	}
 
-	return result
+	return result, nil
 }
 
 // canonicalizeRR creates a canonical wire format representation of a record.
@@ -755,7 +794,17 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 // - Class (2 bytes, big-endian)
 // - TTL (4 bytes, big-endian) - from RRSIG's OriginalTTL
 // - RDATA in canonical form
-func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) []byte {
+func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) ([]byte, error) {
+	if rr == nil {
+		return nil, fmt.Errorf("nil RR")
+	}
+	if rr.Name == nil {
+		return nil, fmt.Errorf("nil RR owner name")
+	}
+	if rr.Data == nil {
+		return nil, fmt.Errorf("nil RDATA for %s type %d", rr.Name.String(), rr.Type)
+	}
+
 	// Estimate buffer size: max name (255) + type (2) + class (2) + ttl (4) + rdata
 	buf := make([]byte, 0, 512)
 
@@ -779,6 +828,9 @@ func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) []by
 
 	// 5. RDATA length (2 bytes, big-endian)
 	rdataLen := rr.Data.Len()
+	if rdataLen > 0xffff {
+		return nil, fmt.Errorf("RDATA for %s type %d too large: %d bytes (max 65535)", rr.Name.String(), rr.Type, rdataLen)
+	}
 	rdatalenBytes := make([]byte, 2)
 	protocol.PutUint16(rdatalenBytes, uint16(rdataLen))
 	buf = append(buf, rdatalenBytes...)
@@ -787,12 +839,18 @@ func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) []by
 	if rdataLen > 0 {
 		rdataBuf := make([]byte, rdataLen)
 		n, err := rr.Data.Pack(rdataBuf, 0)
-		if err == nil && n > 0 {
+		if err != nil {
+			return nil, fmt.Errorf("packing RDATA for %s type %d: %w", rr.Name.String(), rr.Type, err)
+		}
+		if n > 0 {
+			if n > 0xffff {
+				return nil, fmt.Errorf("RDATA for %s type %d too large: %d bytes (max 65535)", rr.Name.String(), rr.Type, n)
+			}
 			buf = append(buf, rdataBuf[:n]...)
 		}
 	}
 
-	return buf
+	return buf, nil
 }
 
 // toLowerBytes converts a string to lowercase bytes.
@@ -1007,20 +1065,27 @@ func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protoc
 	// Use the first NSEC3's params as the canonical set. Per RFC 5155 §8.1
 	// all NSEC3 in a single proof MUST share params; mismatches make the
 	// proof unverifiable.
-	first, ok := rrs[0].Data.(*protocol.RDataNSEC3)
-	if !ok {
+	var first *protocol.RDataNSEC3
+	for _, rr := range rrs {
+		if rr == nil || rr.Name == nil {
+			return false
+		}
+		n, ok := rr.Data.(*protocol.RDataNSEC3)
+		if !ok || n == nil {
+			return false
+		}
+		if first == nil {
+			first = n
+			continue
+		}
+		if n.HashAlgorithm != first.HashAlgorithm || n.Iterations != first.Iterations || !bytes.Equal(n.Salt, first.Salt) {
+			return false
+		}
+	}
+	if first == nil {
 		return false
 	}
 	algo, iter, salt := first.HashAlgorithm, first.Iterations, first.Salt
-	for _, rr := range rrs[1:] {
-		n, ok := rr.Data.(*protocol.RDataNSEC3)
-		if !ok {
-			return false
-		}
-		if n.HashAlgorithm != algo || n.Iterations != iter || !bytes.Equal(n.Salt, salt) {
-			return false
-		}
-	}
 
 	hashName := func(name string) (string, bool) {
 		h, err := NSEC3Hash(name, algo, iter, salt)
@@ -1032,9 +1097,12 @@ func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protoc
 	ownerHashOf := func(rr *protocol.ResourceRecord) string {
 		return strings.ToUpper(extractNSEC3Hash(rr.Name.String()))
 	}
-	nextHashOf := func(rr *protocol.ResourceRecord) string {
-		n := rr.Data.(*protocol.RDataNSEC3)
-		return strings.ToUpper(protocol.Base32Encode(n.NextHashed))
+	nextHashOf := func(rr *protocol.ResourceRecord) (string, bool) {
+		n, ok := rr.Data.(*protocol.RDataNSEC3)
+		if !ok || n == nil {
+			return "", false
+		}
+		return strings.ToUpper(protocol.Base32Encode(n.NextHashed)), true
 	}
 
 	// 1. Closest encloser: walk queryName's ancestors (longest first,
@@ -1092,7 +1160,10 @@ func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protoc
 	nextCloserCovered := false
 	for _, rr := range rrs {
 		o := ownerHashOf(rr)
-		n := nextHashOf(rr)
+		n, ok := nextHashOf(rr)
+		if !ok {
+			return false
+		}
 		if nsec3HashInRange(nextCloserHashU, o, n) {
 			nextCloserCovered = true
 			break
@@ -1115,7 +1186,10 @@ func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protoc
 	wildcardCovered := false
 	for _, rr := range rrs {
 		o := ownerHashOf(rr)
-		n := nextHashOf(rr)
+		n, ok := nextHashOf(rr)
+		if !ok {
+			return false
+		}
 		if nsec3HashInRange(wildcardHashU, o, n) {
 			wildcardCovered = true
 			break
@@ -1403,6 +1477,9 @@ func (v *Validator) verifyDSDenial(msg *protocol.Message, zone string, chain []*
 	}
 	sets := make(map[rrsetKey][]*protocol.ResourceRecord)
 	for _, rr := range msg.Authorities {
+		if rr == nil || rr.Name == nil {
+			continue
+		}
 		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
 			continue
 		}
@@ -1468,6 +1545,9 @@ func (v *Validator) authenticatedDenialRRs(msg *protocol.Message, chain []*chain
 	}
 	sets := make(map[rrsetKey][]*protocol.ResourceRecord)
 	for _, rr := range msg.Authorities {
+		if rr == nil || rr.Name == nil {
+			continue
+		}
 		if rr.Type != protocol.TypeNSEC && rr.Type != protocol.TypeNSEC3 {
 			continue
 		}

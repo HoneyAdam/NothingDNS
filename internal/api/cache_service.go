@@ -4,9 +4,9 @@ import (
 	"github.com/nothingdns/nothingdns/internal/cache"
 )
 
-// CacheService provides cache operations for both REST and MCP handlers.
-// It is the single source of truth for cache-related business logic,
-// avoiding duplication and ensuring consistent response types across transports.
+// CacheService is the single source of truth for cache-related business
+// logic, kept separate from the HTTP handler layer and ensuring consistent
+// response types.
 type CacheService struct {
 	cache *cache.Cache
 }

@@ -92,10 +92,11 @@ func (m *mockTransport) setAllRootHandlers(fn func(msg *protocol.Message) *proto
 // --- Mock Cache ---
 
 type mockCache struct {
-	mu        sync.Mutex
-	entries   map[string]*CacheEntry
-	sets      []string
-	negatives []string
+	mu           sync.Mutex
+	entries      map[string]*CacheEntry
+	sets         []string
+	negatives    []string
+	negativeTTLs []uint32
 }
 
 func newMockCache() *mockCache {
@@ -122,6 +123,14 @@ func (m *mockCache) SetNegative(key string, rcode uint8) {
 	defer m.mu.Unlock()
 	m.entries[key] = &CacheEntry{IsNegative: true, RCode: rcode}
 	m.negatives = append(m.negatives, key)
+}
+
+func (m *mockCache) SetNegativeWithTTL(key string, rcode uint8, ttl uint32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.entries[key] = &CacheEntry{IsNegative: true, RCode: rcode}
+	m.negatives = append(m.negatives, key)
+	m.negativeTTLs = append(m.negativeTTLs, ttl)
 }
 
 // --- Helpers ---
@@ -157,6 +166,24 @@ func makeCNAMERR(name, target string) *protocol.ResourceRecord {
 		Class: protocol.ClassIN,
 		TTL:   300,
 		Data:  &protocol.RDataCNAME{CName: targetObj},
+	}
+}
+
+func makeSOARR(name string) *protocol.ResourceRecord {
+	return &protocol.ResourceRecord{
+		Name:  mustName(name),
+		Type:  protocol.TypeSOA,
+		Class: protocol.ClassIN,
+		TTL:   900,
+		Data: &protocol.RDataSOA{
+			MName:   mustName("a.root-servers.net."),
+			RName:   mustName("nstld.verisign-grs.com."),
+			Serial:  2024010101,
+			Refresh: 1800,
+			Retry:   900,
+			Expire:  604800,
+			Minimum: 86400,
+		},
 	}
 }
 
@@ -311,18 +338,7 @@ func TestResolver_NXDomain(t *testing.T) {
 		}
 		resp.Questions = msg.Questions
 		// Add SOA in authority to indicate negative response
-		soaMName, _ := protocol.ParseName("a.root-servers.net.")
-		soaRName, _ := protocol.ParseName("nstld.verisign-grs.com.")
-		resp.AddAuthority(&protocol.ResourceRecord{
-			Name:  mustName("."),
-			Type:  protocol.TypeSOA,
-			Class: protocol.ClassIN,
-			TTL:   900,
-			Data: &protocol.RDataSOA{
-				MName: soaMName, RName: soaRName,
-				Serial: 2024010101, Refresh: 1800, Retry: 900, Expire: 604800, Minimum: 86400,
-			},
-		})
+		resp.AddAuthority(makeSOARR("."))
 		return resp
 	})
 
@@ -339,6 +355,48 @@ func TestResolver_NXDomain(t *testing.T) {
 	// Should be negatively cached
 	if len(cache.negatives) == 0 {
 		t.Error("Expected negative cache entry")
+	}
+}
+
+func TestResolver_NODATA(t *testing.T) {
+	cache := newMockCache()
+	transport := newMockTransport()
+
+	transport.setAllRootHandlers(func(msg *protocol.Message) *protocol.Message {
+		resp := &protocol.Message{
+			Header:    protocol.Header{ID: msg.Header.ID, Flags: protocol.Flags{QR: true, AA: true, RCODE: protocol.RcodeSuccess}},
+			Questions: msg.Questions,
+		}
+		resp.AddAuthority(makeSOARR("example.com."))
+		return resp
+	})
+
+	r := NewResolver(DefaultConfig(), cache, transport)
+	resp, err := r.Resolve(context.Background(), "www.example.com.", protocol.TypeAAAA)
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+
+	if resp.Header.Flags.RCODE != protocol.RcodeSuccess {
+		t.Fatalf("Expected NOERROR/NODATA, got RCODE %d", resp.Header.Flags.RCODE)
+	}
+	if len(resp.Answers) != 0 {
+		t.Fatalf("Expected no answers for NODATA, got %d", len(resp.Answers))
+	}
+	if !resp.Header.Flags.RA {
+		t.Fatal("Expected RA bit on recursive NODATA response")
+	}
+	if len(cache.negatives) != 1 {
+		t.Fatalf("Expected one negative cache entry, got %d", len(cache.negatives))
+	}
+	if got, want := cache.negatives[0], "www.example.com.:28"; got != want {
+		t.Fatalf("Negative cache key = %q, want %q", got, want)
+	}
+	if len(cache.negativeTTLs) != 1 {
+		t.Fatalf("Expected one negative cache TTL, got %d", len(cache.negativeTTLs))
+	}
+	if got, want := cache.negativeTTLs[0], uint32(900); got != want {
+		t.Fatalf("Negative cache TTL = %d, want %d", got, want)
 	}
 }
 
@@ -569,6 +627,31 @@ func TestCacheKey(t *testing.T) {
 	if key != "example.com.:1" {
 		t.Errorf("Expected 'example.com.:1', got '%s'", key)
 	}
+	key = cacheKey("WWW.Example.COM.", protocol.TypeA)
+	if key != "www.example.com.:1" {
+		t.Errorf("Expected lowercase cache key, got '%s'", key)
+	}
+}
+
+func TestResolver_CacheHitIsCaseInsensitive(t *testing.T) {
+	cache := newMockCache()
+	transport := newMockTransport()
+	r := NewResolver(DefaultConfig(), cache, transport)
+	msg := protocol.NewMessage(protocol.Header{
+		Flags: protocol.Flags{QR: true, RA: true, RCODE: protocol.RcodeSuccess},
+	})
+	cache.entries[cacheKey("www.example.com.", protocol.TypeA)] = &CacheEntry{Message: msg}
+
+	resp, err := r.Resolve(context.Background(), "WWW.Example.COM.", protocol.TypeA)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if resp == nil {
+		t.Fatal("Resolve() returned nil response")
+	}
+	if calls := transport.getCalls(); len(calls) != 0 {
+		t.Fatalf("Resolve() queried transport despite cache hit: %v", calls)
+	}
 }
 
 func TestContainsString(t *testing.T) {
@@ -612,18 +695,26 @@ func TestQuestionMatches(t *testing.T) {
 	query := mk("www.Example.com.", protocol.TypeA, protocol.ClassIN)
 
 	cases := []struct {
-		name string
-		resp *protocol.Message
-		want bool
+		name  string
+		query *protocol.Message
+		resp  *protocol.Message
+		want  bool
 	}{
-		{"case-insensitive echo", mk("www.example.com.", protocol.TypeA, protocol.ClassIN), true},
-		{"different name", mk("evil.com.", protocol.TypeA, protocol.ClassIN), false},
-		{"different qtype", mk("www.example.com.", protocol.TypeAAAA, protocol.ClassIN), false},
-		{"different qclass", mk("www.example.com.", protocol.TypeA, protocol.ClassCH), false},
-		{"empty response question", &protocol.Message{}, false},
+		{"case-insensitive echo", query, mk("www.example.com.", protocol.TypeA, protocol.ClassIN), true},
+		{"different name", query, mk("evil.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"different qtype", query, mk("www.example.com.", protocol.TypeAAAA, protocol.ClassIN), false},
+		{"different qclass", query, mk("www.example.com.", protocol.TypeA, protocol.ClassCH), false},
+		{"nil query", nil, mk("www.example.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"nil response", query, nil, false},
+		{"empty query question", &protocol.Message{}, mk("www.example.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"empty response question", query, &protocol.Message{}, false},
+		{"nil query question", &protocol.Message{Questions: []*protocol.Question{nil}}, mk("www.example.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"nil response question", query, &protocol.Message{Questions: []*protocol.Question{nil}}, false},
+		{"nil query question name", &protocol.Message{Questions: []*protocol.Question{{QType: protocol.TypeA, QClass: protocol.ClassIN}}}, mk("www.example.com.", protocol.TypeA, protocol.ClassIN), false},
+		{"nil response question name", query, &protocol.Message{Questions: []*protocol.Question{{QType: protocol.TypeA, QClass: protocol.ClassIN}}}, false},
 	}
 	for _, tc := range cases {
-		if got := questionMatches(query, tc.resp); got != tc.want {
+		if got := questionMatches(tc.query, tc.resp); got != tc.want {
 			t.Errorf("%s: questionMatches = %v, want %v", tc.name, got, tc.want)
 		}
 	}

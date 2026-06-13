@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/nothingdns/nothingdns/internal/auth"
 	"github.com/nothingdns/nothingdns/internal/cache"
@@ -566,6 +567,30 @@ func TestHandleConfigCache_NoCache(t *testing.T) {
 	}
 }
 
+func TestHandleConfigCache_OperatorForbidden(t *testing.T) {
+	store := newAuthStoreWithUser(t, "operator", "testpass123", auth.RoleOperator)
+	s := newServerWithAuth(store)
+	s.cache = cache.New(cache.Config{Capacity: 1000})
+
+	operatorUser, _ := store.GetUser("operator")
+	body, err := json.Marshal(map[string]any{"size": 5000})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/config/cache", bytes.NewReader(body))
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
+	rec := httptest.NewRecorder()
+
+	s.handleConfigCache(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := s.cache.GetConfig().Capacity; got != 1000 {
+		t.Fatalf("cache capacity changed after rejected operator update: got %d", got)
+	}
+}
+
 func TestHandleConfigCache_InvalidJSON(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
@@ -581,6 +606,57 @@ func TestHandleConfigCache_InvalidJSON(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleConfigCacheRejectsInvalidNumericFields(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]any
+	}{
+		{name: "negative size", body: map[string]any{"size": -1}},
+		{name: "zero size", body: map[string]any{"size": 0}},
+		{name: "negative min ttl", body: map[string]any{"min_ttl": -1}},
+		{name: "negative max ttl", body: map[string]any{"max_ttl": -1}},
+		{name: "negative default ttl", body: map[string]any{"default_ttl": -1}},
+		{name: "negative negative ttl", body: map[string]any{"negative_ttl": -1}},
+		{name: "negative prefetch threshold", body: map[string]any{"prefetch_threshold": -1}},
+		{name: "negative stale grace", body: map[string]any{"stale_grace_secs": -1}},
+		{name: "duration overflow", body: map[string]any{"default_ttl": 9223372037}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+			s := newServerWithAuth(store)
+			s.cache = cache.New(cache.Config{
+				Capacity:   1000,
+				DefaultTTL: 300 * time.Second,
+			})
+
+			adminUser, _ := store.GetUser("admin")
+			body, err := json.Marshal(tt.body)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/config/cache", bytes.NewReader(body))
+			ctx := WithUser(req.Context(), adminUser)
+			req = req.WithContext(ctx)
+			rec := httptest.NewRecorder()
+
+			s.handleConfigCache(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			got := s.cache.GetConfig()
+			if got.Capacity != 1000 {
+				t.Fatalf("capacity changed after rejected update: got %d", got.Capacity)
+			}
+			if got.DefaultTTL != 300*time.Second {
+				t.Fatalf("default ttl changed after rejected update: got %s", got.DefaultTTL)
+			}
+		})
 	}
 }
 

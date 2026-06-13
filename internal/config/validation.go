@@ -4,10 +4,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/nothingdns/nothingdns/internal/auth"
 )
 
 // placeholderSecretTokens is the list of substrings that must never appear in a
@@ -29,6 +34,16 @@ func looksLikePlaceholderSecret(s string) string {
 		return placeholderSecretRE.FindString(s)
 	}
 	return ""
+}
+
+func appendDurationValidation(errors []string, prefix, field, value string) []string {
+	if value == "" {
+		return errors
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q: %v", prefix, field, value, err))
+	}
+	return errors
 }
 
 // secretHasMinEntropy returns an error if the secret is below 32 bytes or
@@ -187,6 +202,39 @@ func (c *Config) validateSecrets() []string {
 	return errors
 }
 
+func (c *Config) validateHTTPUsers() []string {
+	var errors []string
+	if role := strings.ToLower(strings.TrimSpace(c.Server.HTTP.AuthTokenRole)); role != "" {
+		if err := auth.ValidateRole(auth.Role(role)); err != nil {
+			errors = append(errors, fmt.Sprintf("http.auth_token_role: %v", err))
+		}
+	}
+	if strings.TrimSpace(c.Server.HTTP.TokenPersistencePath) != "" && strings.TrimSpace(c.Server.HTTP.AuthSecret) == "" {
+		errors = append(errors, "http.token_persistence_path requires http.auth_secret so persisted sessions can be decrypted after restart")
+	}
+	if c.Server.HTTP.MaxSessionsPerUser < 0 {
+		errors = append(errors, "http.max_sessions_per_user cannot be negative")
+	}
+	seen := make(map[string]int, len(c.Server.HTTP.Users))
+	for i, user := range c.Server.HTTP.Users {
+		prefix := fmt.Sprintf("http.users[%d]", i)
+		if err := auth.ValidateUsername(user.Username); err != nil {
+			errors = append(errors, fmt.Sprintf("%s.username: %v", prefix, err))
+		} else if previous, ok := seen[user.Username]; ok {
+			errors = append(errors, fmt.Sprintf("%s.username: duplicate username %q (already defined at http.users[%d])", prefix, user.Username, previous))
+		} else {
+			seen[user.Username] = i
+		}
+		if err := auth.ValidatePassword(user.Password); err != nil {
+			errors = append(errors, fmt.Sprintf("%s.password: %v", prefix, err))
+		}
+		if err := auth.ValidateRole(auth.Role(user.Role)); err != nil {
+			errors = append(errors, fmt.Sprintf("%s.role: %v", prefix, err))
+		}
+	}
+	return errors
+}
+
 func (c *Config) validateServer() []string {
 	var errors []string
 
@@ -216,6 +264,25 @@ func (c *Config) validateServer() []string {
 			errors = append(errors, "http: tls_cert_file and tls_key_file are required when DoH is enabled (DoH must use HTTPS)")
 		}
 	}
+	if c.Server.HTTP.ODoHEnabled {
+		errors = appendODoHSuiteValidation(errors, "http", "odoh_kem", "odoh_kdf", "odoh_aead",
+			c.Server.HTTP.ODoHKEM, c.Server.HTTP.ODoHKDF, c.Server.HTTP.ODoHAEAD)
+	}
+	if c.Server.QUIC.Enabled {
+		certFile, keyFile := effectiveQUICCertificate(c)
+		if certFile == "" || keyFile == "" {
+			errors = append(errors, "server.quic: cert_file and key_file are required when QUIC/DoQ is enabled (or configure server.tls cert_file/key_file for fallback)")
+		}
+	}
+	if c.Server.XoT.Enabled {
+		certFile, keyFile := effectiveXoTCertificate(c)
+		if certFile == "" || keyFile == "" {
+			errors = append(errors, "server.xot: cert_file and key_file are required when XoT is enabled (or configure server.tls cert_file/key_file for fallback)")
+		}
+		if c.Server.XoT.MinTLSVersion != 0 && c.Server.XoT.MinTLSVersion != 12 && c.Server.XoT.MinTLSVersion != 13 {
+			errors = append(errors, fmt.Sprintf("server.xot: invalid min_tls_version %d (must be 12 or 13)", c.Server.XoT.MinTLSVersion))
+		}
+	}
 
 	// Validate worker counts
 	if c.Server.UDPWorkers < 0 {
@@ -223,6 +290,139 @@ func (c *Config) validateServer() []string {
 	}
 	if c.Server.TCPWorkers < 0 {
 		errors = append(errors, "server: tcp_workers cannot be negative")
+	}
+	errors = appendDurationValidation(errors, "server", "shutdown_timeout", c.ShutdownTimeout)
+
+	return errors
+}
+
+func effectiveQUICCertificate(c *Config) (string, string) {
+	certFile := c.Server.QUIC.CertFile
+	keyFile := c.Server.QUIC.KeyFile
+	if certFile == "" && c.Server.TLS.CertFile != "" {
+		certFile = c.Server.TLS.CertFile
+		keyFile = c.Server.TLS.KeyFile
+	}
+	return certFile, keyFile
+}
+
+func effectiveXoTCertificate(c *Config) (string, string) {
+	certFile := c.Server.XoT.CertFile
+	keyFile := c.Server.XoT.KeyFile
+	if certFile == "" && c.Server.TLS.CertFile != "" {
+		certFile = c.Server.TLS.CertFile
+		keyFile = c.Server.TLS.KeyFile
+	}
+	return certFile, keyFile
+}
+
+func (c *Config) validateCookie() []string {
+	var errors []string
+
+	errors = appendDurationValidation(errors, "cookie", "secret_rotation", c.Cookie.SecretRotation)
+
+	return errors
+}
+
+func (c *Config) validateDSO() []string {
+	var errors []string
+
+	errors = appendDurationValidation(errors, "dso", "session_timeout", c.DSO.SessionTimeout)
+	errors = appendDurationValidation(errors, "dso", "heartbeat_interval", c.DSO.HeartbeatInterval)
+	if c.DSO.MaxSessions < 0 {
+		errors = append(errors, "dso: max_sessions cannot be negative")
+	}
+
+	return errors
+}
+
+func (c *Config) validateExtensions() []string {
+	var errors []string
+
+	if c.MDNS.Enabled {
+		ip := net.ParseIP(c.MDNS.MulticastIP)
+		if ip == nil {
+			errors = append(errors, fmt.Sprintf("mdns: multicast_ip %q must be a valid IP address", c.MDNS.MulticastIP))
+		} else if ip.To4() == nil || !ip.IsMulticast() {
+			errors = append(errors, fmt.Sprintf("mdns: multicast_ip %q must be an IPv4 multicast address", c.MDNS.MulticastIP))
+		}
+		if c.MDNS.Port < 1 || c.MDNS.Port > 65535 {
+			errors = append(errors, fmt.Sprintf("mdns: invalid port %d (must be 1-65535)", c.MDNS.Port))
+		}
+	}
+
+	if c.ODoH.Enabled {
+		if c.ODoH.TargetURL == "" {
+			errors = appendODoHSuiteValidation(errors, "odoh", "kem", "kdf", "aead",
+				c.ODoH.KEM, c.ODoH.KDF, c.ODoH.AEAD)
+		}
+		errors = appendURLValidation(errors, "odoh", "target_url", c.ODoH.TargetURL)
+		errors = appendURLValidation(errors, "odoh", "proxy_url", c.ODoH.ProxyURL)
+	}
+
+	if c.Catalog.Enabled {
+		errors = append(errors, "catalog: enabled but catalog zones are not wired into the daemon runtime")
+	}
+	if c.YANG.Enabled {
+		errors = append(errors, "yang: enabled but YANG services are not wired into the daemon runtime")
+	}
+
+	return errors
+}
+
+func appendURLValidation(errors []string, prefix, field, value string) []string {
+	if value == "" {
+		return errors
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q", prefix, field, value))
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return append(errors, fmt.Sprintf("%s: invalid %s %q: scheme must be http or https", prefix, field, value))
+	}
+	return errors
+}
+
+func appendODoHSuiteValidation(errors []string, prefix, kemField, kdfField, aeadField string, kem, kdf, aead int) []string {
+	if !isValidODoHKEM(kem) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, kemField, kem))
+	}
+	if !isValidODoHKDF(kdf) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, kdfField, kdf))
+	}
+	if !isValidODoHAEAD(aead) {
+		errors = append(errors, fmt.Sprintf("%s: unsupported %s %d", prefix, aeadField, aead))
+	}
+	return errors
+}
+
+func isValidODoHKEM(kem int) bool {
+	return kem == 4
+}
+
+func isValidODoHKDF(kdf int) bool {
+	return kdf == 1
+}
+
+func isValidODoHAEAD(aead int) bool {
+	return aead == 1 || aead == 3
+}
+
+func (c *Config) validateResolution() []string {
+	var errors []string
+
+	if c.Resolution.MaxDepth < 0 {
+		errors = append(errors, "resolution: max_depth cannot be negative")
+	}
+	if c.Resolution.EDNS0BufferSize < 0 || c.Resolution.EDNS0BufferSize > 65535 {
+		errors = append(errors, fmt.Sprintf("resolution: edns0_buffer_size %d must be between 0-65535", c.Resolution.EDNS0BufferSize))
+	}
+	errors = appendDurationValidation(errors, "resolution", "timeout", c.Resolution.Timeout)
+	if c.Resolution.Recursive && c.Resolution.RootHints != "" {
+		if _, err := os.Stat(c.Resolution.RootHints); err != nil {
+			errors = append(errors, fmt.Sprintf("resolution: root_hints %q is not accessible: %v", c.Resolution.RootHints, err))
+		}
 	}
 
 	return errors
@@ -236,6 +436,9 @@ func (c *Config) validateUpstream() []string {
 	if !validStrategies[c.Upstream.Strategy] {
 		errors = append(errors, fmt.Sprintf("upstream: invalid strategy '%s' (must be random, round_robin, or fastest)", c.Upstream.Strategy))
 	}
+
+	errors = appendDurationValidation(errors, "upstream", "health_check", c.Upstream.HealthCheck)
+	errors = appendDurationValidation(errors, "upstream", "failover_timeout", c.Upstream.FailoverTimeout)
 
 	// Validate servers (only if no anycast groups configured)
 	if len(c.Upstream.Servers) == 0 && len(c.Upstream.AnycastGroups) == 0 {
@@ -257,6 +460,8 @@ func (c *Config) validateUpstream() []string {
 		} else if !isValidIP(group.AnycastIP) {
 			errors = append(errors, fmt.Sprintf("%s: anycast_ip '%s' must be a valid IP address", prefix, group.AnycastIP))
 		}
+
+		errors = appendDurationValidation(errors, prefix, "health_check", group.HealthCheck)
 
 		if len(group.Backends) == 0 {
 			errors = append(errors, fmt.Sprintf("%s: at least one backend must be specified", prefix))
@@ -490,6 +695,62 @@ func (c *Config) validateRPZ() []string {
 	return errors
 }
 
+func (c *Config) validateGeoDNS() []string {
+	var errors []string
+
+	if !c.GeoDNS.Enabled {
+		return errors
+	}
+
+	mmdbFile := strings.TrimSpace(c.GeoDNS.MMDBFile)
+	if mmdbFile != "" {
+		info, err := os.Stat(mmdbFile)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("geodns.mmdb_file: cannot access '%s': %v", mmdbFile, err))
+		} else if info.IsDir() {
+			errors = append(errors, fmt.Sprintf("geodns.mmdb_file: '%s' must be a file, not a directory", mmdbFile))
+		}
+	}
+
+	return errors
+}
+
+func (c *Config) validateDNS64() []string {
+	var errors []string
+
+	if !c.DNS64.Enabled {
+		return errors
+	}
+
+	if c.DNS64.PrefixLen != 0 && !isValidDNS64PrefixLength(c.DNS64.PrefixLen) {
+		errors = append(errors, fmt.Sprintf("dns64: invalid prefix_len %d (must be one of 32, 40, 48, 56, 64, 96)", c.DNS64.PrefixLen))
+	}
+	if prefix := strings.TrimSpace(c.DNS64.Prefix); prefix != "" {
+		ip := net.ParseIP(prefix)
+		if ip == nil {
+			errors = append(errors, fmt.Sprintf("dns64: invalid prefix %q", prefix))
+		} else if ip.To4() != nil {
+			errors = append(errors, fmt.Sprintf("dns64: prefix %q must be IPv6", prefix))
+		}
+	}
+	for _, cidr := range c.DNS64.ExcludeNets {
+		if !isValidCIDR(cidr) {
+			errors = append(errors, fmt.Sprintf("dns64.exclude_nets: invalid CIDR '%s'", cidr))
+		}
+	}
+
+	return errors
+}
+
+func isValidDNS64PrefixLength(prefixLen int) bool {
+	switch prefixLen {
+	case 32, 40, 48, 56, 64, 96:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *Config) validateCluster() []string {
 	var errors []string
 
@@ -573,6 +834,8 @@ func (c *Config) validateSlaveZones() []string {
 		if slave.MaxRetries < 0 {
 			errors = append(errors, fmt.Sprintf("%s: max_retries cannot be negative", prefix))
 		}
+		errors = appendDurationValidation(errors, prefix, "timeout", slave.Timeout)
+		errors = appendDurationValidation(errors, prefix, "retry_interval", slave.RetryInterval)
 	}
 
 	return errors
@@ -588,6 +851,109 @@ func (c *Config) validateTransfer() []string {
 	}
 
 	return errors
+}
+
+func (c *Config) validateProduction() []string {
+	var errors []string
+
+	if c.Server.HTTP.Enabled {
+		if strings.TrimSpace(c.Server.HTTP.AuthSecret) == "" {
+			errors = append(errors, "production: http.auth_secret must be set to a stable 32-byte random secret")
+		}
+		if len(c.Server.HTTP.Users) == 0 {
+			errors = append(errors, "production: at least one http.users entry is required; do not rely on the auto-created admin")
+		} else if !hasHTTPAdminUser(c.Server.HTTP.Users) {
+			errors = append(errors, "production: at least one http.users entry must have role admin")
+		}
+		if isPublicListenAddress(c.Server.HTTP.Bind) && (c.Server.HTTP.TLSCertFile == "" || c.Server.HTTP.TLSKeyFile == "") {
+			errors = append(errors, "production: public http.bind requires tls_cert_file and tls_key_file")
+		}
+		if isPublicListenAddress(c.Server.HTTP.Bind) && hasWildcardOrigin(c.Server.HTTP.AllowedOrigins) {
+			errors = append(errors, "production: public http.bind cannot use wildcard http.allowed_origins")
+		}
+		if tokenPath := strings.TrimSpace(c.Server.HTTP.TokenPersistencePath); tokenPath != "" && !filepath.IsAbs(tokenPath) {
+			errors = append(errors, "production: http.token_persistence_path must be an absolute path")
+		}
+	}
+
+	if c.Resolution.Recursive && len(c.ACL) == 0 && c.Server.ACLAllowUnrestrictedRecursion {
+		errors = append(errors, "production: recursive resolver cannot run open; configure acl rules or disable acl_allow_unrestricted_recursion")
+	}
+
+	if c.DNSSEC.Enabled && c.DNSSEC.IgnoreTime {
+		errors = append(errors, "production: dnssec.ignore_time must be false")
+	}
+
+	storageDataDir := strings.TrimSpace(c.Storage.DataDir)
+	if storageDataDir == "" {
+		errors = append(errors, "production: storage.data_dir is required so persistent zone DB and IXFR journals do not depend on the daemon working directory")
+	} else if !filepath.IsAbs(storageDataDir) {
+		errors = append(errors, "production: storage.data_dir must be an absolute path")
+	}
+	if strings.TrimSpace(c.Storage.EncryptionKey) == "" {
+		errors = append(errors, "production: storage.encryption_key is required for persistent zone DB encryption at rest")
+	}
+
+	if c.Cluster.Enabled {
+		if c.Cluster.AllowInsecureCluster {
+			errors = append(errors, "production: cluster.allow_insecure must be false")
+		}
+		if strings.TrimSpace(c.Cluster.EncryptionKey) == "" {
+			errors = append(errors, "production: cluster.encryption_key is required when cluster is enabled")
+		}
+		if strings.EqualFold(c.Cluster.ConsensusMode, "raft") && strings.TrimSpace(c.Cluster.DataDir) == "" {
+			errors = append(errors, "production: cluster.data_dir is required for raft consensus")
+		} else if strings.EqualFold(c.Cluster.ConsensusMode, "raft") && !filepath.IsAbs(strings.TrimSpace(c.Cluster.DataDir)) {
+			errors = append(errors, "production: cluster.data_dir must be an absolute path")
+		}
+	}
+
+	if c.Metrics.Enabled && isPublicListenAddress(c.Metrics.Bind) && strings.TrimSpace(c.Metrics.AuthToken) == "" {
+		errors = append(errors, "production: public metrics.bind requires metrics.auth_token")
+	}
+
+	if len(c.Transfer.AllowList) > 0 && !c.Transfer.RequireTSIG {
+		errors = append(errors, "production: transfer.require_tsig must be true when transfer.allow_list is non-empty")
+	}
+
+	return errors
+}
+
+func hasHTTPAdminUser(users []AuthUserConfig) bool {
+	for _, user := range users {
+		if auth.Role(user.Role) == auth.RoleAdmin {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWildcardOrigin(origins []string) bool {
+	for _, origin := range origins {
+		if strings.TrimSpace(origin) == "*" {
+			return true
+		}
+	}
+	return false
+}
+
+func isPublicListenAddress(addr string) bool {
+	if strings.TrimSpace(addr) == "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return !strings.EqualFold(host, "localhost")
+	}
+	return !ip.IsLoopback()
 }
 
 func (c *Config) validateViews() []string {
@@ -619,6 +985,55 @@ func (c *Config) validateViews() []string {
 			}
 			if _, _, err := net.ParseCIDR(cidr); err != nil {
 				errors = append(errors, fmt.Sprintf("%s: invalid CIDR '%s'", prefix, cidr))
+			}
+		}
+	}
+
+	return errors
+}
+
+func (c *Config) validateZoneFiles() []string {
+	var errors []string
+
+	for i, zoneFile := range c.Zones {
+		path := strings.TrimSpace(zoneFile)
+		if path == "" {
+			errors = append(errors, fmt.Sprintf("zones[%d]: zone file path cannot be empty", i))
+			continue
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("zones[%d]: cannot access zone file %q: %v", i, path, err))
+			continue
+		}
+		if info.IsDir() {
+			errors = append(errors, fmt.Sprintf("zones[%d]: %q must be a file, not a directory", i, path))
+		}
+	}
+
+	if zoneDir := strings.TrimSpace(c.ZoneDir); zoneDir != "" {
+		info, err := os.Stat(zoneDir)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("zone_dir: cannot access %q: %v", zoneDir, err))
+		} else if !info.IsDir() {
+			errors = append(errors, fmt.Sprintf("zone_dir: %q must be a directory", zoneDir))
+		}
+	}
+
+	for i, view := range c.Views {
+		for j, zoneFile := range view.ZoneFiles {
+			path := strings.TrimSpace(zoneFile)
+			if path == "" {
+				errors = append(errors, fmt.Sprintf("views[%d].zone_files[%d]: zone file path cannot be empty", i, j))
+				continue
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("views[%d].zone_files[%d]: cannot access zone file %q: %v", i, j, path, err))
+				continue
+			}
+			if info.IsDir() {
+				errors = append(errors, fmt.Sprintf("views[%d].zone_files[%d]: %q must be a file, not a directory", i, j, path))
 			}
 		}
 	}

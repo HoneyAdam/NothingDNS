@@ -225,6 +225,90 @@ func TestEncodeJSON_AuthoritySection(t *testing.T) {
 	}
 }
 
+func TestEncodeJSON_SkipsMalformedRecords(t *testing.T) {
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+		Questions: []*protocol.Question{
+			nil,
+			{QType: protocol.TypeA},
+			{
+				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				QType:  protocol.TypeA,
+				QClass: protocol.ClassIN,
+			},
+		},
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeA},
+			{
+				Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Type: protocol.TypeA,
+				TTL:  300,
+				Data: (*protocol.RDataA)(nil),
+			},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			nil,
+			{
+				Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Type: protocol.TypeNS,
+				TTL:  60,
+				Data: (*protocol.RDataNS)(nil),
+			},
+		},
+		Additionals: []*protocol.ResourceRecord{
+			nil,
+			{Type: protocol.TypeOPT},
+			{
+				Name: &protocol.Name{Labels: []string{"extra", "example", "com"}, FQDN: true},
+				Type: protocol.TypeA,
+				TTL:  30,
+				Data: (*protocol.RDataA)(nil),
+			},
+		},
+	}
+
+	data, err := EncodeJSON(msg)
+	if err != nil {
+		t.Fatalf("EncodeJSON failed: %v", err)
+	}
+
+	var resp JSONResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("Failed to unmarshal JSON: %v", err)
+	}
+
+	if len(resp.Question) != 1 {
+		t.Fatalf("Expected 1 valid question, got %d", len(resp.Question))
+	}
+	if resp.Question[0].Name != "example.com." {
+		t.Errorf("Expected valid question name 'example.com.', got %q", resp.Question[0].Name)
+	}
+
+	if len(resp.Answer) != 1 {
+		t.Fatalf("Expected 1 valid answer, got %d", len(resp.Answer))
+	}
+	if resp.Answer[0].Name != "example.com." || resp.Answer[0].Type != protocol.TypeA || resp.Answer[0].Data != "" {
+		t.Errorf("Unexpected answer record: %+v", resp.Answer[0])
+	}
+
+	if len(resp.Authority) != 1 {
+		t.Fatalf("Expected 1 valid authority, got %d", len(resp.Authority))
+	}
+	if resp.Authority[0].Name != "example.com." || resp.Authority[0].Type != protocol.TypeNS || resp.Authority[0].Data != "" {
+		t.Errorf("Unexpected authority record: %+v", resp.Authority[0])
+	}
+
+	if len(resp.Additional) != 1 {
+		t.Fatalf("Expected 1 valid additional, got %d", len(resp.Additional))
+	}
+	if resp.Additional[0].Name != "extra.example.com." || resp.Additional[0].Type != protocol.TypeA || resp.Additional[0].Data != "" {
+		t.Errorf("Unexpected additional record: %+v", resp.Additional[0])
+	}
+}
+
 func TestParseJSONQueryParams_Basic(t *testing.T) {
 	msg, err := ParseJSONQueryParams("example.com", "A")
 	if err != nil {

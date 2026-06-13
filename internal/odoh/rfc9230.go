@@ -90,17 +90,26 @@ func newODoHKeyPair() (*odohKeyPair, error) {
 //
 // Most clients fetch the ObliviousDoHConfigs object, so we return the
 // outer-wrapped form ready to serve over /.well-known/odohconfigs.
-func (kp *odohKeyPair) configsObject() []byte {
+func (kp *odohKeyPair) configsObject() ([]byte, error) {
+	configLen, err := u16Length("config contents", len(kp.configBytes))
+	if err != nil {
+		return nil, err
+	}
+
 	// One config inside ObliviousDoHConfigs.
 	inner := make([]byte, 0, 4+len(kp.configBytes))
 	inner = append(inner, u16BE(0x0001)...) // version
-	inner = append(inner, u16BE(uint16(len(kp.configBytes)))...)
+	inner = append(inner, u16BE(configLen)...)
 	inner = append(inner, kp.configBytes...)
 
+	innerLen, err := u16Length("config list", len(inner))
+	if err != nil {
+		return nil, err
+	}
 	outer := make([]byte, 0, 2+len(inner))
-	outer = append(outer, u16BE(uint16(len(inner)))...)
+	outer = append(outer, u16BE(innerLen)...)
 	outer = append(outer, inner...)
-	return outer
+	return outer, nil
 }
 
 // odohMessage is the wire form for both query and response (RFC 9230
@@ -117,14 +126,22 @@ type odohMessage struct {
 	encryptedMessage []byte
 }
 
-func marshalODoHMessage(m *odohMessage) []byte {
+func marshalODoHMessage(m *odohMessage) ([]byte, error) {
+	keyIDLen, err := u16Length("key_id", len(m.keyID))
+	if err != nil {
+		return nil, err
+	}
+	encryptedLen, err := u16Length("encrypted_message", len(m.encryptedMessage))
+	if err != nil {
+		return nil, err
+	}
 	out := make([]byte, 0, 1+2+len(m.keyID)+2+len(m.encryptedMessage))
 	out = append(out, m.msgType)
-	out = append(out, u16BE(uint16(len(m.keyID)))...)
+	out = append(out, u16BE(keyIDLen)...)
 	out = append(out, m.keyID...)
-	out = append(out, u16BE(uint16(len(m.encryptedMessage)))...)
+	out = append(out, u16BE(encryptedLen)...)
 	out = append(out, m.encryptedMessage...)
-	return out
+	return out, nil
 }
 
 func parseODoHMessage(b []byte) (*odohMessage, error) {
@@ -159,6 +176,10 @@ func encryptQueryRFC9230(targetConfig []byte, dnsQuery []byte) (msgBytes []byte,
 	if err != nil {
 		return nil, nil, err
 	}
+	dnsLen, err := u16Length("dns query", len(dnsQuery))
+	if err != nil {
+		return nil, nil, err
+	}
 
 	keyID, err := suite.labeledExtract(nil, []byte("key_id"), targetConfig, labelKindHPKE)
 	if err != nil {
@@ -180,7 +201,7 @@ func encryptQueryRFC9230(targetConfig []byte, dnsQuery []byte) (msgBytes []byte,
 	// RFC 9230 §6.2 plaintext format:
 	//   u16 dns_message_len || dns_message || u16 padding_len || padding
 	pt := make([]byte, 0, 4+len(dnsQuery))
-	pt = append(pt, u16BE(uint16(len(dnsQuery)))...)
+	pt = append(pt, u16BE(dnsLen)...)
 	pt = append(pt, dnsQuery...)
 	pt = append(pt, u16BE(0)...) // padding_len = 0
 
@@ -198,7 +219,11 @@ func encryptQueryRFC9230(targetConfig []byte, dnsQuery []byte) (msgBytes []byte,
 		keyID:            keyID,
 		encryptedMessage: encrypted,
 	}
-	return marshalODoHMessage(msg), &queryContext{suite: suite, ctx: ctx, enc: enc, keyID: keyID}, nil
+	msgBytes, err = marshalODoHMessage(msg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return msgBytes, &queryContext{suite: suite, ctx: ctx, enc: enc, keyID: keyID}, nil
 }
 
 type queryContext struct {
@@ -318,6 +343,10 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	dnsLen, err := u16Length("dns response", len(dnsResponse))
+	if err != nil {
+		return nil, err
+	}
 
 	// AAD = 0x02 || u16(0) || []   (RFC 9230 §4.1.2 response AAD: just the
 	// message type and empty key_id — see §6.1, key_id length is 0 for
@@ -326,7 +355,7 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 
 	// Plaintext envelope:  u16 dns_len || dns || u16 pad_len || pad
 	pt := make([]byte, 0, 4+len(dnsResponse))
-	pt = append(pt, u16BE(uint16(len(dnsResponse)))...)
+	pt = append(pt, u16BE(dnsLen)...)
 	pt = append(pt, dnsResponse...)
 	pt = append(pt, u16BE(0)...) // padding_len = 0
 
@@ -337,7 +366,7 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 		keyID:            nil, // responses carry no key_id (RFC 9230 §6.1)
 		encryptedMessage: ct,
 	}
-	return marshalODoHMessage(msg), nil
+	return marshalODoHMessage(msg)
 }
 
 // decryptResponse is the client side of encryptResponse.
@@ -404,4 +433,11 @@ func u16BE(v uint16) []byte {
 	var b [2]byte
 	binary.BigEndian.PutUint16(b[:], v)
 	return b[:]
+}
+
+func u16Length(field string, n int) (uint16, error) {
+	if n > 0xffff {
+		return 0, fmt.Errorf("odoh: %s too large: %d bytes (max 65535)", field, n)
+	}
+	return uint16(n), nil
 }

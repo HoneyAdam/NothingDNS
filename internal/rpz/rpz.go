@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -248,8 +249,15 @@ func (e *Engine) parseLine(line, policyName string) (*Rule, error) {
 	// Parse TTL
 	ttl := uint32(0)
 	for i := 1; i < typeIdx; i++ {
-		var t uint32
-		if _, err := fmt.Sscanf(fields[i], "%d", &t); err == nil {
+		upper := strings.ToUpper(fields[i])
+		if upper == "IN" || upper == "CH" {
+			continue
+		}
+		t, ok, err := parseTTLField(fields[i])
+		if err != nil {
+			return nil, err
+		}
+		if ok {
 			ttl = t
 			break
 		}
@@ -276,6 +284,54 @@ func (e *Engine) parseLine(line, policyName string) (*Rule, error) {
 		PolicyName:   policyName,
 		Priority:     priority,
 	}, nil
+}
+
+// parseTTLField parses a candidate TTL field. It accepts plain integers and
+// BIND-style unit suffixes (s/m/h/d/w, case-insensitive), including compound
+// forms like "1h30m". A field that does not start with a digit returns
+// (0, false, nil) so the caller treats it as not-a-TTL; a malformed numeric
+// field (bad unit, missing digits, uint32 overflow) is an error.
+func parseTTLField(field string) (uint32, bool, error) {
+	if field == "" || field[0] < '0' || field[0] > '9' {
+		return 0, false, nil
+	}
+	const maxTTL = uint64(1<<32 - 1)
+	var total uint64
+	for i := 0; i < len(field); {
+		start := i
+		for i < len(field) && field[i] >= '0' && field[i] <= '9' {
+			i++
+		}
+		if start == i {
+			return 0, false, fmt.Errorf("invalid ttl %q", field)
+		}
+		value, err := strconv.ParseUint(field[start:i], 10, 32)
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid ttl %q", field)
+		}
+		multiplier := uint64(1)
+		if i < len(field) {
+			switch field[i] {
+			case 's', 'S':
+			case 'm', 'M':
+				multiplier = 60
+			case 'h', 'H':
+				multiplier = 3600
+			case 'd', 'D':
+				multiplier = 86400
+			case 'w', 'W':
+				multiplier = 604800
+			default:
+				return 0, false, fmt.Errorf("invalid ttl %q", field)
+			}
+			i++
+		}
+		total += value * multiplier
+		if total > maxTTL {
+			return 0, false, fmt.Errorf("invalid ttl %q: exceeds uint32 max", field)
+		}
+	}
+	return uint32(total), true, nil
 }
 
 // parseOwnerName extracts trigger type and pattern from an RPZ owner name.
@@ -350,13 +406,26 @@ func reverseRPZToCIDR(rpzIP string) string {
 func (e *Engine) parseAction(rtype, rdata string) (PolicyAction, string) {
 	switch rtype {
 	case "CNAME":
-		target := strings.TrimSuffix(rdata, ".")
-		// CNAME to "." (root) means NODATA (NOERROR with no answers)
-		if target == "" || rdata == "." {
-			return ActionNODATA, ""
+		rawTarget := strings.Trim(strings.TrimSpace(rdata), "\"")
+		target := strings.TrimSuffix(rawTarget, ".")
+		switch strings.ToLower(target) {
+		case "rpz-passthru":
+			return ActionPassThrough, ""
+		case "rpz-drop":
+			return ActionDrop, ""
+		case "rpz-tcp-only":
+			return ActionTCPOnly, ""
+		}
+
+		// CNAME to "." (root) means NXDOMAIN; CNAME to "*." means NODATA.
+		if rawTarget == "." {
+			return ActionNXDOMAIN, ""
 		}
 		if target == "*" {
-			return ActionNXDOMAIN, ""
+			return ActionNODATA, ""
+		}
+		if target == "" {
+			return ActionNODATA, ""
 		}
 		return ActionCNAME, target
 	case "A", "AAAA":

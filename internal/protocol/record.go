@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 )
 
@@ -26,6 +27,19 @@ type RData interface {
 
 	// Copy creates a deep copy of the record data.
 	Copy() RData
+}
+
+func isNilRData(data RData) bool {
+	if data == nil {
+		return true
+	}
+	v := reflect.ValueOf(data)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // ResourceRecord represents a DNS resource record (RFC 1035 §4.1.3).
@@ -64,9 +78,12 @@ func NewResourceRecord(name string, rrtype, rrclass uint16, ttl uint32, data RDa
 
 // WireLength returns the length of the resource record in wire format.
 func (rr *ResourceRecord) WireLength() int {
+	if rr == nil || rr.Name == nil {
+		return 0
+	}
 	// Name length + Type (2) + Class (2) + TTL (4) + RDLENGTH (2) + RData length
 	rdataLen := 0
-	if rr.Data != nil {
+	if !isNilRData(rr.Data) {
 		rdataLen = rr.Data.Len()
 	}
 	return rr.Name.WireLength() + 10 + rdataLen
@@ -75,6 +92,12 @@ func (rr *ResourceRecord) WireLength() int {
 // Pack serializes the resource record to wire format.
 // Returns the number of bytes written.
 func (rr *ResourceRecord) Pack(buf []byte, offset int, compression map[string]int) (int, error) {
+	if rr == nil {
+		return 0, fmt.Errorf("nil resource record")
+	}
+	if rr.Name == nil {
+		return 0, fmt.Errorf("nil resource record name")
+	}
 	startOffset := offset
 
 	// Pack the name
@@ -113,12 +136,15 @@ func (rr *ResourceRecord) Pack(buf []byte, offset int, compression map[string]in
 	offset += 2 // Reserve space for RDLENGTH
 
 	// Pack RData
-	if rr.Data == nil {
+	if isNilRData(rr.Data) {
 		return 0, fmt.Errorf("packing rdata: nil RData for record %s type %d", rr.Name, rr.Type)
 	}
 	rdataLen, err := rr.Data.Pack(buf, offset)
 	if err != nil {
 		return 0, fmt.Errorf("packing rdata: %w", err)
+	}
+	if rdataLen > 0xffff {
+		return 0, fmt.Errorf("packing rdata: RDATA length %d exceeds 65535 bytes", rdataLen)
 	}
 	offset += rdataLen
 
@@ -175,14 +201,18 @@ func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) 
 		if err != nil {
 			return nil, 0, fmt.Errorf("unpacking rdata: %w", err)
 		}
+		if n != int(rdlength) {
+			return nil, 0, fmt.Errorf("rdata length mismatch: consumed %d bytes, rdlength %d", n, rdlength)
+		}
 		offset += n
 	} else {
 		// Unknown type - use raw data
-		data = &RDataRaw{
+		raw := &RDataRaw{
 			TypeVal: rrtype,
 			Data:    make([]byte, rdlength),
 		}
-		copy(data.(*RDataRaw).Data, buf[offset:offset+int(rdlength)])
+		copy(raw.Data, buf[offset:offset+int(rdlength)])
+		data = raw
 		offset += int(rdlength)
 	}
 
@@ -202,10 +232,20 @@ type RDataRaw struct {
 }
 
 // Type returns the record type.
-func (r *RDataRaw) Type() uint16 { return r.TypeVal }
+func (r *RDataRaw) Type() uint16 {
+	if r == nil {
+		return 0
+	}
+
+	return r.TypeVal
+}
 
 // Pack serializes the raw data.
 func (r *RDataRaw) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil raw record")
+	}
+
 	if offset+len(r.Data) > len(buf) {
 		return 0, ErrBufferTooSmall
 	}
@@ -215,6 +255,10 @@ func (r *RDataRaw) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes raw data.
 func (r *RDataRaw) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil raw record")
+	}
+
 	if offset+int(rdlength) > len(buf) {
 		return 0, ErrBufferTooSmall
 	}
@@ -225,14 +269,28 @@ func (r *RDataRaw) Unpack(buf []byte, offset int, rdlength uint16) (int, error) 
 
 // String returns a hex representation.
 func (r *RDataRaw) String() string {
+	if r == nil {
+		return ""
+	}
+
 	return fmt.Sprintf("\\# %d %x", len(r.Data), r.Data)
 }
 
 // Len returns the length.
-func (r *RDataRaw) Len() int { return len(r.Data) }
+func (r *RDataRaw) Len() int {
+	if r == nil {
+		return 0
+	}
+
+	return len(r.Data)
+}
 
 // Copy creates a copy.
 func (r *RDataRaw) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	dataCopy := make([]byte, len(r.Data))
 	copy(dataCopy, r.Data)
 	return &RDataRaw{TypeVal: r.TypeVal, Data: dataCopy}
@@ -258,22 +316,64 @@ func createRData(rrtype uint16) RData {
 		return &RDataMX{}
 	case TypeTXT:
 		return &RDataTXT{}
+	case TypeHINFO:
+		return &RDataHINFO{}
+	case TypeRP:
+		return &RDataRP{}
+	case TypeAFSDB:
+		return &RDataAFSDB{}
+	case TypeSIG:
+		// SIG uses the same RDATA wire format as RRSIG (RFC 4034 appendix A).
+		return &RDataRRSIG{}
+	case TypeKEY:
+		// KEY uses the same RDATA wire format as DNSKEY.
+		return &RDataDNSKEY{}
+	case TypeSPF:
+		// SPF uses the same <character-string> wire encoding as TXT.
+		return &RDataTXT{}
+	case TypeLOC:
+		return &RDataLOC{}
 	case TypeSOA:
 		return &RDataSOA{}
 	case TypeSRV:
 		return &RDataSRV{}
+	case TypeKX:
+		return &RDataKX{}
+	case TypeCERT:
+		return &RDataCERT{}
 	case TypeCAA:
 		return &RDataCAA{}
+	case TypeURI:
+		return &RDataURI{}
 	case TypeNAPTR:
 		return &RDataNAPTR{}
+	case TypeAPL:
+		return &RDataAPL{}
 	case TypeSSHFP:
 		return &RDataSSHFP{}
+	case TypeHIP:
+		return &RDataHIP{}
+	case TypeIPSECKEY:
+		return &RDataIPSECKEY{}
 	case TypeTLSA:
 		return &RDataTLSA{}
+	case TypeDHCID:
+		return &RDataDHCID{}
 	case TypeDS:
+		return &RDataDS{}
+	case TypeCDS:
+		// CDS uses the same RDATA wire format as DS (RFC 7344).
 		return &RDataDS{}
 	case TypeDNSKEY:
 		return &RDataDNSKEY{}
+	case TypeCDNSKEY:
+		// CDNSKEY uses the same RDATA wire format as DNSKEY (RFC 7344).
+		return &RDataDNSKEY{}
+	case TypeTA:
+		// TA uses the same RDATA wire format as DS.
+		return &RDataDS{}
+	case TypeOPENPGPKEY:
+		return &RDataOPENPGPKEY{}
 	case TypeRRSIG:
 		return &RDataRRSIG{}
 	case TypeNSEC:
@@ -297,17 +397,24 @@ func createRData(rrtype uint16) RData {
 
 // String returns a human-readable representation of the resource record.
 func (rr *ResourceRecord) String() string {
+	if rr == nil {
+		return "<nil resource record>"
+	}
 	classStr := ClassString(rr.Class)
 	typeStr := TypeString(rr.Type)
+	name := "<nil>"
+	if rr.Name != nil {
+		name = rr.Name.String()
+	}
 
 	dataStr := ""
-	if rr.Data != nil {
+	if !isNilRData(rr.Data) {
 		dataStr = rr.Data.String()
 	}
 
 	// Format: name TTL class type data
 	return fmt.Sprintf("%s\t%d\t%s\t%s\t%s",
-		rr.Name.String(),
+		name,
 		rr.TTL,
 		classStr,
 		typeStr,
@@ -322,12 +429,16 @@ func (rr *ResourceRecord) Copy() *ResourceRecord {
 	}
 
 	var data RData
-	if rr.Data != nil {
+	if !isNilRData(rr.Data) {
 		data = rr.Data.Copy()
+	}
+	var name *Name
+	if rr.Name != nil {
+		name = NewName(rr.Name.Labels, rr.Name.FQDN)
 	}
 
 	return &ResourceRecord{
-		Name:  NewName(rr.Name.Labels, rr.Name.FQDN),
+		Name:  name,
 		Type:  rr.Type,
 		Class: rr.Class,
 		TTL:   rr.TTL,
@@ -337,15 +448,28 @@ func (rr *ResourceRecord) Copy() *ResourceRecord {
 
 // IsExpired returns true if the record has expired based on the given timestamp.
 func (rr *ResourceRecord) IsExpired(cachedAt time.Time) bool {
-	return time.Since(cachedAt) > time.Duration(rr.TTL)*time.Second
+	return rr.isExpiredAt(time.Now(), cachedAt)
+}
+
+func (rr *ResourceRecord) isExpiredAt(now, cachedAt time.Time) bool {
+	if rr == nil {
+		return true
+	}
+	return !now.Before(cachedAt.Add(time.Duration(rr.TTL) * time.Second))
 }
 
 // RemainingTTL returns the remaining TTL in seconds based on when the record was cached.
 func (rr *ResourceRecord) RemainingTTL(cachedAt time.Time) uint32 {
+	if rr == nil {
+		return 0
+	}
 	elapsed := time.Since(cachedAt)
+	if elapsed <= 0 {
+		return rr.TTL
+	}
 	ttl := time.Duration(rr.TTL) * time.Second
 	if elapsed >= ttl {
 		return 0
 	}
-	return uint32((ttl - elapsed).Seconds())
+	return uint32((ttl - elapsed) / time.Second)
 }

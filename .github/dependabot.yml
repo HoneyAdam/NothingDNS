@@ -1,0 +1,74 @@
+# Dependabot configuration — NothingDNS
+# Automatically checks for outdated dependencies and opens PRs
+
+version: 2
+updates:
+  # Go modules — root
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-request-limit: 10
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Ignore indirect dependencies pinned by quic-go and go.uber.org/mock
+    ignore:
+      - dependency-name: "golang.org/x/sync"
+        update-types: ["version-update:semver:patch"]
+      - dependency-name: "golang.org/x/mod"
+        update-types: ["version-update:semver:patch"]
+      - dependency-name: "golang.org/x/tools"
+        update-types: ["version-update:semver:patch"]
+      - dependency-name: "github.com/yuin/goldmark"
+        update-types: ["version-update:semver:patch"]
+      - dependency-name: "github.com/rogpeppe/go-internal"
+        update-types: ["version-update:semver:patch"]
+      - dependency-name: "github.com/jordanlewis/gcassert"
+        update-types: ["version-update:semver:patch"]
+
+  # Go modules — web subdirectory
+  - package-ecosystem: "gomod"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-request-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # npm packages — web/
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-request-limit: 10
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    # Ignore react-hook-form: pnpm 11 supply-chain policy flags recent publishes
+    ignore:
+      - dependency-name: "react-hook-form"
+        update-types: ["version-update:semver:patch"]
+
+  # GitHub Actions — workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Europe/Istanbul"
+    open-pull-request-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"

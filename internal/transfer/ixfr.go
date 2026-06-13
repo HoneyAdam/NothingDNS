@@ -56,6 +56,9 @@ type IXFRServer struct {
 
 // NewIXFRServer creates a new IXFR server
 func NewIXFRServer(axfrServer *AXFRServer) *IXFRServer {
+	if axfrServer == nil {
+		axfrServer = NewAXFRServer(nil)
+	}
 	return &IXFRServer{
 		axfrServer:     axfrServer,
 		zones:          axfrServer.zones,
@@ -73,6 +76,9 @@ func (s *IXFRServer) SetJournalStore(store JournalStore) {
 
 // SetMaxJournalSize sets the maximum number of journal entries per zone
 func (s *IXFRServer) SetMaxJournalSize(size int) {
+	if s == nil || size <= 0 {
+		return
+	}
 	s.journalsMu.Lock()
 	s.maxJournalSize = size
 	s.journalsMu.Unlock()
@@ -81,6 +87,9 @@ func (s *IXFRServer) SetMaxJournalSize(size int) {
 // RecordChange records a zone change for IXFR
 // Called whenever a zone is modified
 func (s *IXFRServer) RecordChange(zoneName string, oldSerial, newSerial uint32, added, deleted []zone.RecordChange) {
+	if s == nil {
+		return
+	}
 	zoneName = strings.ToLower(zoneName)
 
 	entry := &IXFRJournalEntry{
@@ -91,6 +100,12 @@ func (s *IXFRServer) RecordChange(zoneName string, oldSerial, newSerial uint32, 
 	}
 
 	s.journalsMu.Lock()
+	if s.journals == nil {
+		s.journals = make(map[string][]*IXFRJournalEntry)
+	}
+	if s.maxJournalSize <= 0 {
+		s.maxJournalSize = 100
+	}
 	s.journals[zoneName] = append(s.journals[zoneName], entry)
 
 	// Trim journal if too large
@@ -110,17 +125,27 @@ func (s *IXFRServer) RecordChange(zoneName string, oldSerial, newSerial uint32, 
 // HandleIXFR handles an IXFR request message
 // Returns the IXFR response records
 func (s *IXFRServer) HandleIXFR(req *protocol.Message, clientIP net.IP) ([]*protocol.ResourceRecord, error) {
+	if s == nil || s.axfrServer == nil {
+		return nil, fmt.Errorf("IXFR server is nil")
+	}
+
 	// Check if client is allowed (delegate to AXFR server)
 	if !s.axfrServer.IsAllowed(clientIP) {
 		return nil, fmt.Errorf("client %s not authorized for IXFR", clientIP)
 	}
 
 	// Validate request
+	if req == nil {
+		return nil, fmt.Errorf("IXFR request is nil")
+	}
 	if len(req.Questions) != 1 {
 		return nil, fmt.Errorf("IXFR requires exactly one question")
 	}
 
 	question := req.Questions[0]
+	if question == nil || question.Name == nil {
+		return nil, fmt.Errorf("IXFR question is invalid")
+	}
 	if question.QType != protocol.TypeIXFR {
 		return nil, fmt.Errorf("invalid query type for IXFR: %d", question.QType)
 	}
@@ -135,6 +160,9 @@ func (s *IXFRServer) HandleIXFR(req *protocol.Message, clientIP net.IP) ([]*prot
 		return nil, fmt.Errorf("zone %s not found", zoneName)
 	}
 
+	if z == nil {
+		return nil, fmt.Errorf("zone is nil")
+	}
 	if z.SOA == nil {
 		return nil, fmt.Errorf("zone has no SOA record")
 	}
@@ -189,7 +217,13 @@ func (s *IXFRServer) HandleIXFR(req *protocol.Message, clientIP net.IP) ([]*prot
 // extractClientSerial extracts the client's SOA serial from the IXFR request
 // Per RFC 1995, client includes an SOA record in the Authority section
 func (s *IXFRServer) extractClientSerial(req *protocol.Message) uint32 {
+	if req == nil {
+		return 0
+	}
 	for _, rr := range req.Authorities {
+		if rr == nil {
+			continue
+		}
 		if rr.Type == protocol.TypeSOA {
 			if soaData, ok := rr.Data.(*protocol.RDataSOA); ok {
 				return soaData.Serial
@@ -245,6 +279,9 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 	// correctly across the 2^32 serial wraparound.
 	startIdx := -1
 	for i, entry := range journal {
+		if entry == nil {
+			return nil, fmt.Errorf("journal entry %d is nil", i)
+		}
 		if serialIsNewer(entry.Serial, clientSerial) {
 			startIdx = i
 			break
@@ -284,6 +321,9 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 	// serial as their old-SOA value.
 	for i := startIdx; i < len(journal); i++ {
 		entry := journal[i]
+		if entry == nil {
+			return nil, fmt.Errorf("journal entry %d is nil", i)
+		}
 
 		var prevSerial uint32
 		if i == startIdx {
@@ -298,7 +338,7 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 
 		// Add deleted records
 		for _, del := range entry.Deleted {
-			rr, err := s.changeToRR(del, z.Origin)
+			rr, err := s.changeToRR(del)
 			if err != nil {
 				util.Warnf("ixfr: skipping deleted record %s/%d: %v", del.Name, del.Type, err)
 				continue
@@ -312,7 +352,7 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 
 		// Add added records
 		for _, add := range entry.Added {
-			rr, err := s.changeToRR(add, z.Origin)
+			rr, err := s.changeToRR(add)
 			if err != nil {
 				util.Warnf("ixfr: skipping added record %s/%d: %v", add.Name, add.Type, err)
 				continue
@@ -358,13 +398,13 @@ func (s *IXFRServer) createSOAWithSerial(soa *zone.SOARecord, origin *protocol.N
 }
 
 // changeToRR converts a RecordChange to a ResourceRecord
-func (s *IXFRServer) changeToRR(change zone.RecordChange, origin string) (*protocol.ResourceRecord, error) {
+func (s *IXFRServer) changeToRR(change zone.RecordChange) (*protocol.ResourceRecord, error) {
 	owner, err := protocol.ParseName(change.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	rdata, err := parseRData(change.Type, change.RData, origin)
+	rdata, err := parseRData(change.Type, change.RData)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +563,7 @@ func (c *IXFRClient) sendMessage(conn net.Conn, msg *protocol.Message) error {
 
 	buf[0] = byte(n >> 8)
 	buf[1] = byte(n)
-	_, err = conn.Write(buf[:2+n])
+	err = util.WriteFull(conn, buf[:2+n])
 	return err
 }
 

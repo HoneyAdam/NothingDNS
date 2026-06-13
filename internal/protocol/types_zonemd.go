@@ -17,6 +17,10 @@ type RDataZONEMD struct {
 
 // Pack serializes the ZONEMD RData into wire format.
 func (r *RDataZONEMD) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil ZONEMD record")
+	}
+
 	// Match sibling DNSSEC RData types (DNSKEY/DS/RRSIG) by bounds-checking
 	// before writing — prevents silent truncation/panic if a future caller
 	// sizes the buffer from something other than Len() (VULN-026).
@@ -50,6 +54,10 @@ func (r *RDataZONEMD) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the ZONEMD RData from wire format.
 func (r *RDataZONEMD) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil ZONEMD record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -87,6 +95,10 @@ func (r *RDataZONEMD) Unpack(buf []byte, offset int, rdlength uint16) (int, erro
 
 // String returns a string representation of the ZONEMD record.
 func (r *RDataZONEMD) String() string {
+	if r == nil {
+		return ""
+	}
+
 	digestStr := ""
 	for _, b := range r.Digest {
 		digestStr += fmt.Sprintf("%02x", b)
@@ -96,6 +108,10 @@ func (r *RDataZONEMD) String() string {
 
 // Copy creates a deep copy of the ZONEMD record.
 func (r *RDataZONEMD) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	digestCopy := make([]byte, len(r.Digest))
 	copy(digestCopy, r.Digest)
 	return &RDataZONEMD{
@@ -113,5 +129,9 @@ func (r *RDataZONEMD) Type() uint16 {
 
 // Len returns the length of the ZONEMD record data in wire format.
 func (r *RDataZONEMD) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	return 6 + len(r.Digest) // Serial(4) + Scheme(1) + Algorithm(1) + Digest
 }

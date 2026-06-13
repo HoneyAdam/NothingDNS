@@ -15,7 +15,7 @@
 - **Cluster:** "From single node to sovereign DNS infrastructure."
 
 ### 1.3 Elevator Pitch
-NothingDNS is a production-grade DNS server written in pure Go with zero external dependencies. A single binary delivers authoritative + recursive DNS, supports all modern protocols (UDP, TCP, DoT, DoH, DoQ), includes DNSSEC, ad-blocking, GeoDNS, split-horizon views, and Raft-based clustering — with a built-in web dashboard, REST API, CLI tool, and MCP server for AI-native management.
+NothingDNS is a production-grade DNS server written in pure Go with zero external dependencies. A single binary delivers authoritative + recursive DNS, supports all modern protocols (UDP, TCP, DoT, DoH, DoQ), includes DNSSEC, ad-blocking, GeoDNS, split-horizon views, and Raft-based clustering — with a built-in web dashboard, REST API, and CLI tool.
 
 ### 1.4 One-Liner Descriptions
 - **GitHub:** Pure Go DNS server — authoritative, recursive, DoT/DoH/DoQ, DNSSEC, clustering. Zero dependencies.
@@ -87,9 +87,6 @@ The letters "DNS" where the letterforms are created entirely from negative space
 **For Open Source Community:**
 "Every line is Go standard library. Read the code. Understand the code. No dependency maze. No hidden complexity. Pure, auditable DNS."
 
-**For AI/LLM Users:**
-"The first DNS server with a built-in MCP server. Manage your DNS infrastructure through natural language with Claude Code."
-
 ### 3.2 Feature Highlights (for README/Landing Page)
 
 **🏗️ Complete DNS Server**
@@ -125,7 +122,6 @@ The letters "DNS" where the letterforms are created entirely from negative space
 - REST API with Swagger UI
 - Web Dashboard (real-time)
 - CLI tool (dnsctl)
-- MCP Server (AI-native)
 - Prometheus metrics
 
 **📦 Zero Dependencies**
@@ -165,7 +161,7 @@ The letters "DNS" where the letterforms are created entirely from negative space
 - r/selfhosted: Replacement for Pi-hole + authoritative DNS
 - r/homelab: Single binary DNS infrastructure
 - r/netsec: DNSSEC + security features
-- r/devops: Clustering + automation + MCP
+- r/devops: Clustering + automation
 
 ### 4.2 Infographic Prompt (for Nano Banana 2)
 
@@ -180,7 +176,7 @@ SECTIONS:
 3. TOP RIGHT: Zero dependencies badge with "0" prominently displayed
 4. MIDDLE: Architecture flow (Query → Filter → Route → Resolve → Sign → Respond)
 5. BOTTOM LEFT: Cluster visualization (3 nodes with Raft arrows)
-6. BOTTOM RIGHT: Management icons (API, Dashboard, CLI, MCP robot, Prometheus graph)
+6. BOTTOM RIGHT: Management icons (API, Dashboard, CLI, Prometheus graph)
 
 FOOTER: "Pure Go • Single Binary • Zero Dependencies • github.com/nothingdns/nothingdns"
 ```
@@ -199,7 +195,7 @@ Zero external dependencies.
 ✅ DNSSEC signing & validation
 ✅ Raft clustering
 ✅ Built-in ad blocking
-✅ Web dashboard + REST API + MCP
+✅ Web dashboard + REST API
 
 One binary. That's it.
 
@@ -270,7 +266,6 @@ Zero. Dependencies.
 2. **Homelabbers/self-hosters** — Want Pi-hole + authoritative in one tool
 3. **Go developers** — Interested in the zero-dependency approach
 4. **Security-conscious orgs** — Want minimal supply chain + DNSSEC
-5. **AI/LLM users** — Interested in MCP-native infrastructure
 
 ### 6.2 Community Channels
 - GitHub Discussions (primary)

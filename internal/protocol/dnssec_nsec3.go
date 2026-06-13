@@ -37,6 +37,10 @@ func (r *RDataNSEC3) Type() uint16 { return TypeNSEC3 }
 
 // Pack serializes the NSEC3 record to wire format.
 func (r *RDataNSEC3) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC3 record")
+	}
+
 	startOffset := offset
 
 	// Hash Algorithm (1 byte)
@@ -162,6 +166,10 @@ func (r *RDataNSEC3) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the NSEC3 record from wire format.
 func (r *RDataNSEC3) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC3 record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -257,6 +265,10 @@ func (r *RDataNSEC3) Unpack(buf []byte, offset int, rdlength uint16) (int, error
 
 // String returns the NSEC3 record in presentation format.
 func (r *RDataNSEC3) String() string {
+	if r == nil {
+		return ""
+	}
+
 	saltStr := "-"
 	if len(r.Salt) > 0 {
 		saltStr = hex.EncodeToString(r.Salt)
@@ -288,6 +300,10 @@ func (r *RDataNSEC3) String() string {
 
 // Len returns the wire length of the NSEC3 record.
 func (r *RDataNSEC3) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	length := 1 + 1 + 2 + 1 + len(r.Salt) + 1 + len(r.NextHashed)
 
 	// Type Bit Map length
@@ -312,6 +328,10 @@ func (r *RDataNSEC3) Len() int {
 
 // Copy creates a deep copy of the NSEC3 record.
 func (r *RDataNSEC3) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	saltCopy := make([]byte, len(r.Salt))
 	copy(saltCopy, r.Salt)
 
@@ -334,11 +354,19 @@ func (r *RDataNSEC3) Copy() RData {
 
 // IsOptOut returns true if the opt-out flag is set.
 func (r *RDataNSEC3) IsOptOut() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.Flags&NSEC3FlagOptOut != 0
 }
 
 // HasType returns true if the given type is in the type bitmap.
 func (r *RDataNSEC3) HasType(rrtype uint16) bool {
+	if r == nil {
+		return false
+	}
+
 	for _, t := range r.TypeBitMap {
 		if t == rrtype {
 			return true
@@ -349,6 +377,10 @@ func (r *RDataNSEC3) HasType(rrtype uint16) bool {
 
 // AddType adds a type to the type bitmap.
 func (r *RDataNSEC3) AddType(rrtype uint16) {
+	if r == nil {
+		return
+	}
+
 	if !r.HasType(rrtype) {
 		r.TypeBitMap = append(r.TypeBitMap, rrtype)
 	}
@@ -356,6 +388,10 @@ func (r *RDataNSEC3) AddType(rrtype uint16) {
 
 // RemoveType removes a type from the type bitmap.
 func (r *RDataNSEC3) RemoveType(rrtype uint16) {
+	if r == nil {
+		return
+	}
+
 	for i, t := range r.TypeBitMap {
 		if t == rrtype {
 			r.TypeBitMap = append(r.TypeBitMap[:i], r.TypeBitMap[i+1:]...)

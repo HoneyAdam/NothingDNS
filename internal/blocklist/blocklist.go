@@ -3,6 +3,7 @@ package blocklist
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,6 +57,37 @@ type Config struct {
 // a blocklist. Kept small to bound attacker-controlled hopping through the
 // validator and to limit request-goroutine hold time.
 const maxBlocklistRedirects = 5
+
+var (
+	errBlocklistBodyTooLarge = errors.New("blocklist response body exceeds maximum size")
+	maxRemoteBlocklistBody   = int64(100 * 1024 * 1024)
+)
+
+type maxBytesReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func newMaxBytesReader(r io.Reader, n int64) *maxBytesReader {
+	return &maxBytesReader{r: r, remaining: n}
+}
+
+func (r *maxBytesReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		var b [1]byte
+		n, err := r.r.Read(b[:])
+		if n > 0 {
+			return 0, errBlocklistBodyTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:int(r.remaining)]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
 
 // New creates a new blocklist manager.
 func New(cfg Config) *Blocklist {
@@ -233,11 +265,8 @@ func (bl *Blocklist) loadURL(url string) error {
 		return fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
 	}
 
-	// SECURITY: Limit total response body size to prevent memory exhaustion
-	const maxBodySize = 100 * 1024 * 1024 // 100MB
-	limitedReader := io.LimitReader(resp.Body, maxBodySize)
-
-	scanner := bufio.NewScanner(limitedReader)
+	// SECURITY: Limit total response body size to prevent memory exhaustion.
+	scanner := bufio.NewScanner(newMaxBytesReader(resp.Body, maxRemoteBlocklistBody))
 	// Increase buffer for long lines (some blocklist entries can be very long)
 	const maxLineLength = 4096
 	buf := make([]byte, maxLineLength)
@@ -246,6 +275,7 @@ func (bl *Blocklist) loadURL(url string) error {
 	// SECURITY: Limit total number of entries to prevent memory exhaustion
 	const maxEntries = 10_000_000 // 10 million
 	entryCount := 0
+	sourceEntries := make(map[string]Entry)
 
 	lineNum := 0
 	for scanner.Scan() {
@@ -267,14 +297,7 @@ func (bl *Blocklist) loadURL(url string) error {
 					return fmt.Errorf("blocklist %s exceeds maximum entry count of %d", url, maxEntries)
 				}
 				domain := normalizeDomain(fields[0])
-				bl.entries[domain] = Entry{
-					Domain:  domain,
-					Comment: "url:" + url,
-				}
-				if bl.sourceEntries[url] == nil {
-					bl.sourceEntries[url] = make(map[string]Entry)
-				}
-				bl.sourceEntries[url][domain] = Entry{Domain: domain, Comment: "url:" + url}
+				sourceEntries[domain] = Entry{Domain: domain, Comment: "url:" + url}
 			}
 			continue
 		}
@@ -296,17 +319,21 @@ func (bl *Blocklist) loadURL(url string) error {
 			comment = "url:" + url
 		}
 
-		bl.entries[domain] = Entry{
-			Domain:  domain,
-			Comment: comment,
-		}
-		if bl.sourceEntries[url] == nil {
-			bl.sourceEntries[url] = make(map[string]Entry)
-		}
-		bl.sourceEntries[url][domain] = Entry{Domain: domain, Comment: comment}
+		sourceEntries[domain] = Entry{Domain: domain, Comment: comment}
 	}
 
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, errBlocklistBodyTooLarge) {
+			return fmt.Errorf("blocklist %s exceeds maximum response body size of %d bytes", url, maxRemoteBlocklistBody)
+		}
+		return err
+	}
+
+	bl.sourceEntries[url] = sourceEntries
+	for domain, entry := range sourceEntries {
+		bl.entries[domain] = entry
+	}
+	return nil
 }
 
 // loadFile loads a single blocklist file.

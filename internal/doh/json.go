@@ -3,6 +3,7 @@ package doh
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -92,21 +93,31 @@ func encodeRecords(records []*protocol.ResourceRecord) []JSONRecord {
 		if rr == nil || rr.Name == nil {
 			continue
 		}
-		data := ""
-		if rr.Data != nil {
-			data = rr.Data.String()
-		}
 		result = append(result, JSONRecord{
 			Name: rr.Name.String(),
 			Type: rr.Type,
 			TTL:  rr.TTL,
-			Data: data,
+			Data: jsonRDataString(rr.Data),
 		})
 	}
 	if len(result) == 0 {
 		return nil
 	}
 	return result
+}
+
+func jsonRDataString(data protocol.RData) string {
+	if data == nil {
+		return ""
+	}
+	value := reflect.ValueOf(data)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return ""
+		}
+	}
+	return data.String()
 }
 
 // filterOPT returns records with OPT pseudo-records removed.

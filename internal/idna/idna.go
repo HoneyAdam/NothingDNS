@@ -105,6 +105,9 @@ func ToASCII(domain string) (string, error) {
 			if len(label) > MaxLabelLength {
 				return "", ErrLabelTooLong
 			}
+			if err := validateSTD3(label); err != nil {
+				return "", err
+			}
 			result = append(result, label)
 		} else {
 			// Non-ASCII label - convert to punycode

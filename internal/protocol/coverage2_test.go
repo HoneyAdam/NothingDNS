@@ -133,6 +133,13 @@ func TestRDataNSECUnpackTruncated(t *testing.T) {
 		t.Error("NSEC.Unpack should fail when endOffset > buffer length")
 	}
 
+	// Test: next domain extends past rdlength even though the full buffer has bytes.
+	crossRDataBuf := []byte{0x03, 'w', 'w', 'w', 0x00}
+	_, err = rdata.Unpack(crossRDataBuf, 0, 2)
+	if err != ErrBufferTooSmall {
+		t.Errorf("NSEC.Unpack should reject next domain past rdlength, got %v", err)
+	}
+
 	// Test: truncated bitmap (need at least 2 bytes for window header)
 	// Pack the name portion only, then add 1 byte for incomplete bitmap
 	nameBuf := make([]byte, 512)
@@ -469,10 +476,66 @@ func TestNewEDNS0ClientSubnetNonByteAligned(t *testing.T) {
 	}
 }
 
+func TestNewEDNS0ClientSubnetProducesValidWireData(t *testing.T) {
+	tests := []struct {
+		name       string
+		ip         net.IP
+		bits       uint8
+		wantFamily uint16
+		wantBits   uint8
+		wantLen    int
+	}{
+		{"ipv4 prefix clamped", net.ParseIP("192.0.2.1"), 255, 1, 32, 4},
+		{"ipv6 prefix clamped", net.ParseIP("2001:db8::1"), 255, 2, 128, 16},
+		{"nil ip becomes root prefix", nil, 24, 1, 0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ecs := NewEDNS0ClientSubnet(tt.ip, tt.bits)
+			if ecs.Family != tt.wantFamily {
+				t.Fatalf("Family = %d, want %d", ecs.Family, tt.wantFamily)
+			}
+			if ecs.SourcePrefixLength != tt.wantBits {
+				t.Fatalf("SourcePrefixLength = %d, want %d", ecs.SourcePrefixLength, tt.wantBits)
+			}
+			if len(ecs.Address) != tt.wantLen {
+				t.Fatalf("Address length = %d, want %d", len(ecs.Address), tt.wantLen)
+			}
+			if _, err := UnpackEDNS0ClientSubnet(ecs.Pack()); err != nil {
+				t.Fatalf("constructor produced invalid ECS wire data: %v", err)
+			}
+		})
+	}
+}
+
 func TestUnpackEDNS0ClientSubnetTooShort(t *testing.T) {
 	_, err := UnpackEDNS0ClientSubnet([]byte{0, 1, 0})
 	if err == nil {
 		t.Error("UnpackEDNS0ClientSubnet should fail with < 4 bytes")
+	}
+}
+
+func TestUnpackEDNS0ClientSubnetRejectsMalformedData(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"unsupported family", []byte{0x00, 0x03, 0x00, 0x00}},
+		{"ipv4 prefix too large", []byte{0x00, 0x01, 0x21, 0x00, 192, 0, 2, 1, 0}},
+		{"ipv6 prefix too large", append([]byte{0x00, 0x02, 0x81, 0x00}, make([]byte, 17)...)},
+		{"scope prefix too large", []byte{0x00, 0x01, 0x18, 0x21, 192, 0, 2}},
+		{"address too short", []byte{0x00, 0x01, 0x18, 0x00, 192, 0}},
+		{"trailing host octet set", []byte{0x00, 0x01, 0x18, 0x00, 192, 0, 2, 1}},
+		{"host bits set", []byte{0x00, 0x01, 0x0d, 0x00, 192, 169}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := UnpackEDNS0ClientSubnet(tt.data); err == nil {
+				t.Fatal("UnpackEDNS0ClientSubnet should reject malformed ECS data")
+			}
+		})
 	}
 }
 

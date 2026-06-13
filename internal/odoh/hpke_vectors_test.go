@@ -116,3 +116,25 @@ func TestHPKE_RFC9180_A1_DHKEM(t *testing.T) {
 		t.Errorf("DHKEM shared_secret:\n got %x\nwant %x", got, want)
 	}
 }
+
+func TestHPKELabeledExpandLengthBounds(t *testing.T) {
+	suite := defaultHPKESuite()
+	hashSize := suite.hkdfHash()().Size()
+	maxLen := 255 * hashSize
+	prk := make([]byte, hashSize)
+
+	if _, err := suite.labeledExpand(prk, []byte("test"), nil, -1, labelKindHPKE); err == nil {
+		t.Fatal("expected negative LabeledExpand length to fail")
+	}
+	if _, err := suite.labeledExpand(prk, []byte("test"), nil, maxLen+1, labelKindHPKE); err == nil {
+		t.Fatal("expected over-HKDF-limit LabeledExpand length to fail")
+	}
+	if _, err := suite.labeledExpand(prk, []byte("test"), nil, 65536, labelKindHPKE); err == nil {
+		t.Fatal("expected oversized LabeledExpand length to fail")
+	}
+	if got, err := suite.labeledExpand(prk, []byte("test"), nil, maxLen, labelKindHPKE); err != nil {
+		t.Fatalf("max LabeledExpand length failed: %v", err)
+	} else if len(got) != maxLen {
+		t.Fatalf("LabeledExpand length = %d, want %d", len(got), maxLen)
+	}
+}

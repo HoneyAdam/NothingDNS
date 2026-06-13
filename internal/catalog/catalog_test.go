@@ -181,6 +181,12 @@ func TestParseCatalogMemberRecord(t *testing.T) {
 			want:    nil,
 			wantErr: true,
 		},
+		{
+			name:    "ttl overflow",
+			rdata:   "zone1.example.com. 4294967296",
+			want:    nil,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

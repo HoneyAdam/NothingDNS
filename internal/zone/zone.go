@@ -184,14 +184,27 @@ func canonicalize(name string) string {
 	return name
 }
 
+func nameInZone(name, origin string) bool {
+	name = strings.ToLower(canonicalize(name))
+	origin = strings.ToLower(canonicalize(origin))
+	if origin == "." {
+		return true
+	}
+	return name == origin || strings.HasSuffix(name, "."+origin)
+}
+
 // makeAbsolute converts a potentially relative name to absolute using the origin.
 func makeAbsolute(name, origin string) string {
 	name = strings.TrimSpace(name)
+	origin = canonicalize(origin)
 	if name == "" || name == "@" {
 		return origin
 	}
 	if strings.HasSuffix(name, ".") {
 		return name
+	}
+	if origin == "." {
+		return name + "."
 	}
 	return name + "." + origin
 }
@@ -473,7 +486,10 @@ func (p *parser) handleGenerate(args []string) error {
 	template := strings.Join(args[1:], " ")
 
 	for i := start; i <= stop; i += step {
-		expanded := expandGenerate(template, i)
+		expanded, err := expandGenerate(template, i)
+		if err != nil {
+			return fmt.Errorf("$GENERATE at iteration %d: %w", i, err)
+		}
 		if err := p.parseRecord(expanded); err != nil {
 			return fmt.Errorf("$GENERATE at iteration %d: %w", i, err)
 		}
@@ -525,7 +541,7 @@ func parseGenerateRange(s string) (start, stop, step int, err error) {
 
 // expandGenerate replaces '$' tokens in a template with the iteration value.
 // Supports bare '$' and the ${offset,width,radix} modifier syntax.
-func expandGenerate(template string, iter int) string {
+func expandGenerate(template string, iter int) (string, error) {
 	var b strings.Builder
 	b.Grow(len(template))
 
@@ -540,7 +556,11 @@ func expandGenerate(template string, iter int) string {
 			end := strings.IndexByte(template[i+2:], '}')
 			if end >= 0 {
 				modifier := template[i+2 : i+2+end]
-				b.WriteString(applyGenerateModifier(iter, modifier))
+				value, err := applyGenerateModifier(iter, modifier)
+				if err != nil {
+					return "", err
+				}
+				b.WriteString(value)
 				i = i + 2 + end // skip past '}'
 				continue
 			}
@@ -550,14 +570,14 @@ func expandGenerate(template string, iter int) string {
 		b.WriteString(strconv.Itoa(iter))
 	}
 
-	return b.String()
+	return b.String(), nil
 }
 
 // applyGenerateModifier handles ${offset,width,radix} syntax.
 // offset: integer added to the iterator value
 // width: minimum field width (zero-padded)
 // radix: d=decimal, o=octal, x=hex (default: d)
-func applyGenerateModifier(iter int, modifier string) string {
+func applyGenerateModifier(iter int, modifier string) (string, error) {
 	parts := strings.SplitN(modifier, ",", 3)
 
 	offset := 0
@@ -565,14 +585,21 @@ func applyGenerateModifier(iter int, modifier string) string {
 	radix := "d"
 
 	if len(parts) >= 1 && parts[0] != "" {
-		if v, err := strconv.Atoi(parts[0]); err == nil {
-			offset = v
+		v, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return "", fmt.Errorf("invalid $GENERATE offset %q: %w", parts[0], err)
 		}
+		offset = v
 	}
 	if len(parts) >= 2 && parts[1] != "" {
-		if v, err := strconv.Atoi(parts[1]); err == nil {
-			width = v
+		v, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return "", fmt.Errorf("invalid $GENERATE width %q: %w", parts[1], err)
 		}
+		if v < 0 {
+			return "", fmt.Errorf("invalid $GENERATE width %d", v)
+		}
+		width = v
 	}
 	if len(parts) >= 3 && parts[2] != "" {
 		radix = strings.ToLower(parts[2])
@@ -586,11 +613,13 @@ func applyGenerateModifier(iter int, modifier string) string {
 		format = fmt.Sprintf("%%0%do", width)
 	case "x":
 		format = fmt.Sprintf("%%0%dx", width)
-	default:
+	case "d":
 		format = fmt.Sprintf("%%0%dd", width)
+	default:
+		return "", fmt.Errorf("invalid $GENERATE radix %q", radix)
 	}
 
-	return fmt.Sprintf(format, val)
+	return fmt.Sprintf(format, val), nil
 }
 
 // stripZoneComment strips a BIND-style ';' comment from line, ignoring
@@ -797,20 +826,40 @@ func parseFields(line string) []string {
 	var fields []string
 	var current strings.Builder
 	inQuotes := false
+	escaped := false
+	inlineQuote := false
 
 	for _, r := range line {
+		if inQuotes && escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
 		switch r {
+		case '\\':
+			if inQuotes {
+				escaped = true
+			} else {
+				current.WriteRune(r)
+			}
 		case '"':
 			if inQuotes {
 				// End of quoted string
-				fields = append(fields, current.String())
-				current.Reset()
+				if !inlineQuote {
+					fields = append(fields, current.String())
+					current.Reset()
+				}
 				inQuotes = false
+				inlineQuote = false
 			} else {
 				// Start of quoted string
 				if current.Len() > 0 {
-					fields = append(fields, current.String())
-					current.Reset()
+					if strings.HasSuffix(current.String(), "=") {
+						inlineQuote = true
+					} else {
+						fields = append(fields, current.String())
+						current.Reset()
+					}
 				}
 				inQuotes = true
 			}
@@ -849,6 +898,9 @@ func parseFields(line string) []string {
 			current.WriteRune(r)
 		}
 	}
+	if escaped {
+		current.WriteRune('\\')
+	}
 
 	if current.Len() > 0 {
 		fields = append(fields, current.String())
@@ -861,14 +913,14 @@ func parseFields(line string) []string {
 var recordTypes = map[string]bool{
 	"A": true, "AAAA": true, "CNAME": true, "MX": true, "NS": true,
 	"PTR": true, "SOA": true, "SRV": true, "TXT": true, "CAA": true,
-	"DNSKEY": true, "DS": true, "NSEC": true, "RRSIG": true,
+	"DNSKEY": true, "DS": true, "CDNSKEY": true, "CDS": true, "NSEC": true, "RRSIG": true,
 	"TLSA": true, "SSHFP": true, "SPF": true, "DKIM": true,
 	"AFSDB": true, "APL": true, "CERT": true, "DHCID": true,
 	"DNAME": true, "HINFO": true, "HIP": true, "IPSECKEY": true,
 	"KEY": true, "KX": true, "LOC": true, "NAPTR": true,
 	"NSEC3": true, "NSEC3PARAM": true, "OPENPGPKEY": true,
-	"RP": true, "SIG": true, "TA": true, "TKEY": true,
-	"TSIG": true, "URI": true, "ZONEMD": true,
+	"RP": true, "SIG": true, "TA": true,
+	"SVCB": true, "HTTPS": true, "URI": true, "ZONEMD": true,
 }
 
 func isType(field string) bool {
@@ -940,11 +992,17 @@ func (z *Zone) lookupLocked(name, rrtype string) []Record {
 
 	var results []Record
 	for _, record := range z.Records[name] {
-		if strings.ToUpper(record.Type) == rrtype {
+		if recordTypeMatches(record.Type, rrtype) {
 			results = append(results, record)
 		}
 	}
 	return results
+}
+
+func recordTypeMatches(recordType, queryType string) bool {
+	recordType = strings.ToUpper(recordType)
+	queryType = strings.ToUpper(queryType)
+	return recordType == queryType || (recordType == "DKIM" && queryType == "TXT")
 }
 
 // LookupAll finds all records for a given name.
@@ -952,7 +1010,7 @@ func (z *Zone) LookupAll(name string) []Record {
 	z.mu.RLock()
 	defer z.mu.RUnlock()
 	name = strings.ToLower(canonicalize(name))
-	return z.Records[name]
+	return cloneRecords(z.Records[name])
 }
 
 // NameExists returns true if the given name has any records in the zone.
@@ -986,7 +1044,7 @@ func (z *Zone) LookupWildcard(name, rrtype string) (records []Record, wildcardNa
 	origin := strings.ToLower(z.Origin)
 
 	// The query name must be within this zone
-	if !strings.HasSuffix(name, origin) && name != origin {
+	if !nameInZone(name, origin) {
 		return nil, "", false
 	}
 
@@ -1010,11 +1068,11 @@ func (z *Zone) LookupWildcard(name, rrtype string) (records []Record, wildcardNa
 		if recs, ok := z.Records[wildcard]; ok && len(recs) > 0 {
 			// Found a wildcard — filter by requested type
 			if rrtype == "" || rrtype == "ANY" {
-				return recs, wildcard, true
+				return cloneRecords(recs), wildcard, true
 			}
 			var matched []Record
 			for _, r := range recs {
-				if strings.ToUpper(r.Type) == rrtype {
+				if recordTypeMatches(r.Type, rrtype) {
 					matched = append(matched, r)
 				}
 			}
@@ -1046,7 +1104,7 @@ func (z *Zone) FindDelegation(name string) (nsRecords []Record, delegationPoint 
 	origin := strings.ToLower(z.Origin)
 
 	// Query name must be within this zone
-	if !strings.HasSuffix(name, origin) && name != origin {
+	if !nameInZone(name, origin) {
 		return nil, "", false
 	}
 
@@ -1120,12 +1178,13 @@ func (z *Zone) FindDNAME(name string) (dnameRecord Record, synthCNAMETarget stri
 	origin := strings.ToLower(z.Origin)
 
 	// Name must be within this zone
-	if !strings.HasSuffix(name, origin) && name != origin {
+	if !nameInZone(name, origin) {
 		return Record{}, "", false
 	}
 
-	// Build intermediates: from query name toward origin (excluding origin itself).
-	var intermediates []string
+	// Walk parent names from most-specific to least-specific. A DNAME does
+	// not synthesize for its owner name itself; it only applies below that
+	// owner, so start at the query's immediate parent and include the origin.
 	current := name
 	for {
 		dot := strings.IndexByte(current, '.')
@@ -1133,26 +1192,19 @@ func (z *Zone) FindDNAME(name string) (dnameRecord Record, synthCNAMETarget stri
 			break
 		}
 		parent := current[dot+1:]
-		if parent == origin {
-			break
-		}
-		intermediates = append(intermediates, current)
-		current = parent
-	}
-
-	// Check from closest-to-origin (least specific) to most specific DNAME.
-	// RFC 6672: if multiple DNAME records could apply, the most specific wins.
-	// Walk intermediates in reverse: [a.b.c, a.b, a] → [a, b, a.b, a.b.c]
-	for i := len(intermediates) - 1; i >= 0; i-- {
-		candidate := intermediates[i]
-		for _, rec := range z.Records[candidate] {
+		for _, rec := range z.Records[parent] {
 			if strings.ToUpper(rec.Type) == "DNAME" {
 				// Synthesize CNAME target: replace DNAME owner suffix with target
-				dnameOwner := canonicalize(rec.Name)
+				dnameOwner := parent
 				synthTarget := strings.TrimSuffix(name, dnameOwner) + rec.RData
+				rec.Name = parent
 				return rec, synthTarget, true
 			}
 		}
+		if parent == origin {
+			break
+		}
+		current = parent
 	}
 
 	return Record{}, "", false

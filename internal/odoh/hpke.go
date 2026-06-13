@@ -141,6 +141,13 @@ func (s hpkeSuite) labeledExtract(salt, label, ikm []byte, kind labelKind) ([]by
 //	labeled_info = concat(I2OSP(L, 2), "HPKE-v1", suite_id, label, info)
 //	return Expand(prk, labeled_info, L)
 func (s hpkeSuite) labeledExpand(prk, label, info []byte, length int, kind labelKind) ([]byte, error) {
+	if length < 0 || length > 0xffff {
+		return nil, fmt.Errorf("hpke: LabeledExpand length %d out of range 0-65535", length)
+	}
+	maxHKDFOutput := 255 * s.hkdfHash()().Size()
+	if length > maxHKDFOutput {
+		return nil, fmt.Errorf("hpke: LabeledExpand length %d exceeds HKDF limit %d", length, maxHKDFOutput)
+	}
 	suiteID := s.suiteIDForKind(kind)
 	labeled := make([]byte, 0, 2+len(hpkeVersionLabel)+len(suiteID)+len(label)+len(info))
 	labeled = appendU16BE(labeled, uint16(length))

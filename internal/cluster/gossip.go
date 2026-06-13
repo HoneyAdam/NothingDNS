@@ -188,7 +188,7 @@ type ClusterMetricsPayload struct {
 type GossipProtocol struct {
 	config   GossipConfig
 	nodeList *NodeList
-	conn     *net.UDPConn
+	conn     gossipUDPConn
 
 	// Encryption
 	aead   cipher.AEAD
@@ -233,6 +233,13 @@ type GossipProtocol struct {
 	pingReceived     uint64
 }
 
+type gossipUDPConn interface {
+	ReadFromUDP([]byte) (int, *net.UDPAddr, error)
+	WriteToUDP([]byte, *net.UDPAddr) (int, error)
+	SetReadDeadline(time.Time) error
+	Close() error
+}
+
 // GossipConfig configures the gossip protocol.
 type GossipConfig struct {
 	BindAddr       string
@@ -270,10 +277,46 @@ func DefaultGossipConfig() GossipConfig {
 	}
 }
 
+func normalizeGossipConfig(config GossipConfig) GossipConfig {
+	defaults := DefaultGossipConfig()
+	if config.BindAddr == "" {
+		config.BindAddr = defaults.BindAddr
+	}
+	if config.BindPort <= 0 {
+		config.BindPort = defaults.BindPort
+	}
+	if config.GossipInterval <= 0 {
+		config.GossipInterval = defaults.GossipInterval
+	}
+	if config.ProbeInterval <= 0 {
+		config.ProbeInterval = defaults.ProbeInterval
+	}
+	if config.ProbeTimeout <= 0 {
+		config.ProbeTimeout = defaults.ProbeTimeout
+	}
+	if config.SuspicionMult <= 0 {
+		config.SuspicionMult = defaults.SuspicionMult
+	}
+	if config.RetransmitMult <= 0 {
+		config.RetransmitMult = defaults.RetransmitMult
+	}
+	if config.GossipNodes <= 0 {
+		config.GossipNodes = defaults.GossipNodes
+	}
+	if config.IndirectChecks <= 0 {
+		config.IndirectChecks = defaults.IndirectChecks
+	}
+	if config.ProtocolVersion == 0 {
+		config.ProtocolVersion = defaults.ProtocolVersion
+	}
+	return config
+}
+
 // NewGossipProtocol creates a new gossip protocol instance.
 // allowInsecure permits unencrypted gossip for test/dev scenarios where
 // AllowInsecureCluster is set at the cluster level.
 func NewGossipProtocol(config GossipConfig, nodeList *NodeList, allowInsecure bool) (*GossipProtocol, error) {
+	config = normalizeGossipConfig(config)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	gp := &GossipProtocol{
@@ -350,12 +393,21 @@ func (gp *GossipProtocol) Start() error {
 func (gp *GossipProtocol) Stop() error {
 	gp.cancel()
 
+	var closeErr error
 	if gp.conn != nil {
-		_ = gp.conn.Close()
+		if err := gp.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErr = fmt.Errorf("close gossip UDP socket: %w", err)
+		}
 	}
 
 	gp.wg.Wait()
-	return nil
+	return closeErr
+}
+
+func (gp *GossipProtocol) recoverCallback(name string) {
+	if recovered := recover(); recovered != nil {
+		util.Errorf("gossip: %s callback panic: %v", name, recovered)
+	}
 }
 
 // Join joins the cluster by contacting a seed node.
@@ -619,7 +671,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 				gp.callbacksMu.RLock()
 				if gp.onNodeJoin != nil {
 					func() {
-						defer func() { _ = recover() }()
+						defer gp.recoverCallback("node join")
 						gp.onNodeJoin(newNode)
 					}()
 				}
@@ -631,7 +683,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 			gp.callbacksMu.RLock()
 			if gp.onNodeUpdate != nil {
 				func() {
-					defer func() { _ = recover() }()
+					defer gp.recoverCallback("node update")
 					gp.onNodeUpdate(existing)
 				}()
 			}
@@ -670,7 +722,7 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 	gp.callbacksMu.RLock()
 	if gp.onCacheInvalid != nil {
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("cache invalidation")
 			gp.onCacheInvalid(payload.Keys)
 		}()
 	}
@@ -883,7 +935,7 @@ func (gp *GossipProtocol) handleZoneUpdate(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("zone update")
 			onZoneUpdate(payload)
 		}()
 	}
@@ -925,7 +977,7 @@ func (gp *GossipProtocol) handleConfigSync(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("config sync")
 			onConfigSync(payload)
 		}()
 	}
@@ -1242,10 +1294,14 @@ func (gp *GossipProtocol) checkLeaderHealth() {
 	}
 
 	// If last heartbeat is too old, leader is dead — start new election
-	if time.Since(gp.lastHeartbeat) > 15*time.Second {
+	if heartbeatTimedOutAt(gp.lastHeartbeat, time.Now(), 15*time.Second) {
 		gp.leaderTerm++ // Increment term — old leader's term is no longer valid
 		go gp.startElection()
 	}
+}
+
+func heartbeatTimedOutAt(lastHeartbeat, now time.Time, timeout time.Duration) bool {
+	return !now.Before(lastHeartbeat.Add(timeout))
 }
 
 func (gp *GossipProtocol) muLeaderSendHeartbeat() {
@@ -1388,7 +1444,7 @@ func (gp *GossipProtocol) IsLeaderAlive(timeout time.Duration) bool {
 	if gp.currentLeader == "" {
 		return false
 	}
-	if time.Since(gp.lastHeartbeat) > timeout {
+	if heartbeatTimedOutAt(gp.lastHeartbeat, time.Now(), timeout) {
 		return false
 	}
 	return true
@@ -1495,7 +1551,7 @@ func (gp *GossipProtocol) probeNodes() {
 				gp.callbacksMu.RLock()
 				if gp.onNodeLeave != nil {
 					func() {
-						defer func() { _ = recover() }()
+						defer gp.recoverCallback("node leave")
 						gp.onNodeLeave(node)
 					}()
 				}
@@ -1706,11 +1762,22 @@ func (gp *GossipProtocol) sendMessage(msgType MessageType, payload []byte, addr 
 		}
 	}
 
-	if _, err := gp.conn.WriteToUDP(data, addr); err != nil {
+	if _, err := writeGossipUDPPacket(gp.conn, data, addr); err != nil {
 		return err
 	}
 	atomic.AddUint64(&gp.messagesSent, 1)
 	return nil
+}
+
+func writeGossipUDPPacket(conn gossipUDPConn, data []byte, addr *net.UDPAddr) (int, error) {
+	n, err := conn.WriteToUDP(data, addr)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 // encryptWithAAD encrypts with additional authenticated data for replay/cross-peer protection.

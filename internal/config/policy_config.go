@@ -74,7 +74,10 @@ func unmarshalRPZ(node *Node, cfg *RPZConfig) error {
 				var pz RPZPolicyZone
 				pz.Name = zoneNode.GetString("name")
 				pz.File = zoneNode.GetString("file")
-				pz.Priority = getInt(zoneNode, "priority", 0)
+				var err error
+				if pz.Priority, err = getRequiredInt(zoneNode, "priority", 0); err != nil {
+					return fmt.Errorf("zones: %w", err)
+				}
 				cfg.Zones = append(cfg.Zones, pz)
 			}
 		}
@@ -98,8 +101,18 @@ func unmarshalGeoDNS(node *Node, cfg *GeoDNSConfig) error {
 				rule.Domain = ruleNode.GetString("domain")
 				rule.Type = ruleNode.GetString("type")
 				rule.Default = ruleNode.GetString("default")
-				// Parse records from a flat mapping: US, DE, etc.
+				// Parse records from the documented nested records map,
+				// while keeping the older flat US/DE keys compatible.
 				rule.Records = make(map[string]string)
+				if recordsNode := ruleNode.Get("records"); recordsNode != nil && recordsNode.Type == NodeMapping {
+					for i := 0; i+1 < len(recordsNode.Children); i += 2 {
+						key := recordsNode.Children[i].Value
+						value := recordsNode.Children[i+1]
+						if key != "" && value.Type == NodeScalar && value.Value != "" {
+							rule.Records[key] = value.Value
+						}
+					}
+				}
 				for _, key := range []string{"US", "CA", "DE", "FR", "GB", "JP", "CN", "AU",
 					"BR", "IN", "RU", "KR", "MX", "IT", "ES", "NL", "SE", "PL", "NO",
 					"NA", "EU", "AS", "SA", "OC", "AF"} {
@@ -126,7 +139,11 @@ func unmarshalDNS64(node *Node, cfg *DNS64Config) error {
 	if p := node.GetString("prefix"); p != "" {
 		cfg.Prefix = p
 	}
-	if pl := getInt(node, "prefix_len", 0); pl > 0 {
+	pl, err := getRequiredInt(node, "prefix_len", 0)
+	if err != nil {
+		return err
+	}
+	if pl > 0 {
 		cfg.PrefixLen = pl
 	}
 	cfg.ExcludeNets = getStringSlice(node, "exclude_nets", nil)

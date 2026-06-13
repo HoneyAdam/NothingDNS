@@ -46,6 +46,29 @@ func TestNewNodeZeroConfigFields(t *testing.T) {
 	}
 }
 
+func TestNewNodeInvalidConfigFields(t *testing.T) {
+	cfg := Config{
+		NodeID:            "n1",
+		HeartbeatInterval: -time.Millisecond,
+		ElectionTimeout:   -time.Second,
+		MaxLogEntries:     -1,
+	}
+	node := NewNode(cfg, []NodeID{"n2"}, &mockTransport{})
+	defer node.Stop()
+
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.config.HeartbeatInterval != 150*time.Millisecond {
+		t.Errorf("HeartbeatInterval = %v, want 150ms", node.config.HeartbeatInterval)
+	}
+	if node.config.ElectionTimeout != 1000*time.Millisecond {
+		t.Errorf("ElectionTimeout = %v, want 1s", node.config.ElectionTimeout)
+	}
+	if node.config.MaxLogEntries != 128 {
+		t.Errorf("MaxLogEntries = %d, want 128", node.config.MaxLogEntries)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 3. Node.CommitIndex / ApplyCh / CommitCh accessors
 // ---------------------------------------------------------------------------
@@ -1110,6 +1133,80 @@ func TestSnapshotterSaveLoadRoundtrip(t *testing.T) {
 	for i, id := range []NodeID{"node1", "node2", "node3"} {
 		if loaded.Membership[i] != id {
 			t.Errorf("Membership[%d] = %q, want %q", i, loaded.Membership[i], id)
+		}
+	}
+}
+
+func TestSyncSnapshotDir(t *testing.T) {
+	if err := syncSnapshotDir(t.TempDir()); err != nil {
+		t.Fatalf("syncSnapshotDir existing dir: %v", err)
+	}
+	if err := syncSnapshotDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("syncSnapshotDir missing dir returned nil error")
+	}
+}
+
+func TestSnapshotterSaveReturnsDirFsyncError(t *testing.T) {
+	originalSyncSnapshotDir := syncSnapshotDir
+	syncSnapshotDir = func(string) error {
+		return fmt.Errorf("dir sync failed")
+	}
+	t.Cleanup(func() { syncSnapshotDir = originalSyncSnapshotDir })
+
+	sn, err := NewSnapshotter(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSnapshotter failed: %v", err)
+	}
+	err = sn.Save(&Snapshot{
+		Index:      42,
+		Term:       3,
+		LastIndex:  41,
+		LastTerm:   3,
+		Data:       []byte("snapshot payload data"),
+		Membership: []NodeID{"node1"},
+	})
+	if err == nil {
+		t.Fatal("Save should return snapshot directory fsync error")
+	}
+	if got, want := err.Error(), "fsync snapshot dir: dir sync failed"; got != want {
+		t.Fatalf("Save error = %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotterWriteSnapshotCompletesPartialWrites(t *testing.T) {
+	sn := &Snapshotter{}
+	writer := &chunkedWriter{maxWrite: 3}
+	snap := &Snapshot{
+		Index:      9,
+		Term:       4,
+		LastIndex:  8,
+		LastTerm:   4,
+		Data:       []byte("partial snapshot payload"),
+		Membership: []NodeID{"node-a", "node-b"},
+	}
+
+	if err := sn.writeSnapshot(writer, snap); err != nil {
+		t.Fatalf("writeSnapshot: %v", err)
+	}
+	if writer.calls < 2 {
+		t.Fatalf("chunked writer should require multiple writes, got %d", writer.calls)
+	}
+
+	loaded, err := sn.readSnapshot(bytes.NewReader(writer.buf.Bytes()))
+	if err != nil {
+		t.Fatalf("readSnapshot: %v", err)
+	}
+	if loaded.Index != snap.Index || loaded.Term != snap.Term ||
+		loaded.LastIndex != snap.LastIndex || loaded.LastTerm != snap.LastTerm ||
+		!bytes.Equal(loaded.Data, snap.Data) {
+		t.Fatalf("snapshot mismatch: got %+v, want %+v", loaded, snap)
+	}
+	if len(loaded.Membership) != len(snap.Membership) {
+		t.Fatalf("membership len = %d, want %d", len(loaded.Membership), len(snap.Membership))
+	}
+	for i := range snap.Membership {
+		if loaded.Membership[i] != snap.Membership[i] {
+			t.Fatalf("membership[%d] = %q, want %q", i, loaded.Membership[i], snap.Membership[i])
 		}
 	}
 }
@@ -2259,4 +2356,33 @@ func TestSnapshotterReadSnapshot_RejectsOversizedFields(t *testing.T) {
 			t.Errorf("error %q should mention peerLen", err)
 		}
 	})
+}
+
+func TestZoneChangeWaitDeadlineBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	deadline := now.Add(10 * time.Millisecond)
+
+	if zoneChangeWaitTimedOut(now, deadline) {
+		t.Error("wait should not time out before deadline")
+	}
+	if !zoneChangeWaitTimedOut(deadline, deadline) {
+		t.Error("wait should time out at exact deadline")
+	}
+	if !zoneChangeWaitTimedOut(deadline.Add(time.Nanosecond), deadline) {
+		t.Error("wait should time out after deadline")
+	}
+}
+
+func TestZoneChangeWaitDelayClampsToRemainingTimeout(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+
+	if got := zoneChangeWaitDelay(now, now.Add(zoneChangeWaitPollInterval+time.Millisecond)); got != zoneChangeWaitPollInterval {
+		t.Errorf("delay = %v, want poll interval %v", got, zoneChangeWaitPollInterval)
+	}
+	if got := zoneChangeWaitDelay(now, now.Add(time.Millisecond)); got != time.Millisecond {
+		t.Errorf("delay = %v, want remaining timeout 1ms", got)
+	}
+	if got := zoneChangeWaitDelay(now, now); got != 0 {
+		t.Errorf("delay = %v, want 0 at deadline", got)
+	}
 }

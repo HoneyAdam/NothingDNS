@@ -201,6 +201,112 @@ func TestValidateServerCookieExpired(t *testing.T) {
 	}
 }
 
+func TestServerCookieMaxAgeSeconds(t *testing.T) {
+	tests := []struct {
+		name             string
+		rotationInterval time.Duration
+		want             uint32
+	}{
+		{name: "zero", rotationInterval: 0, want: 1},
+		{name: "negative", rotationInterval: -time.Hour, want: 1},
+		{name: "sub_second_rounds_to_minimum", rotationInterval: 250 * time.Millisecond, want: 1},
+		{name: "half_second_doubles_to_one", rotationInterval: 500 * time.Millisecond, want: 1},
+		{name: "whole_seconds_double", rotationInterval: 3 * time.Second, want: 6},
+		{name: "saturates_before_uint32_wrap", rotationInterval: time.Duration(1<<63 - 1), want: ^uint32(0)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serverCookieMaxAgeSeconds(tc.rotationInterval); got != tc.want {
+				t.Fatalf("serverCookieMaxAgeSeconds(%v) = %d, want %d", tc.rotationInterval, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestServerCookieTimestampFresh(t *testing.T) {
+	tests := []struct {
+		name   string
+		ts     uint32
+		now    uint32
+		maxAge uint32
+		want   bool
+	}{
+		{
+			name:   "fresh current timestamp",
+			ts:     100,
+			now:    100,
+			maxAge: 2,
+			want:   true,
+		},
+		{
+			name:   "fresh within max age",
+			ts:     98,
+			now:    100,
+			maxAge: 2,
+			want:   true,
+		},
+		{
+			name:   "expired beyond max age",
+			ts:     97,
+			now:    100,
+			maxAge: 2,
+			want:   false,
+		},
+		{
+			name:   "future one second tolerated",
+			ts:     101,
+			now:    100,
+			maxAge: 2,
+			want:   true,
+		},
+		{
+			name:   "future beyond tolerance rejected",
+			ts:     102,
+			now:    100,
+			maxAge: 2,
+			want:   false,
+		},
+		{
+			name:   "fresh across uint32 wrap",
+			ts:     ^uint32(0),
+			now:    1,
+			maxAge: 2,
+			want:   true,
+		},
+		{
+			name:   "expired across uint32 wrap",
+			ts:     ^uint32(0) - 2,
+			now:    1,
+			maxAge: 2,
+			want:   false,
+		},
+		{
+			name:   "future across uint32 wrap within tolerance",
+			ts:     0,
+			now:    ^uint32(0),
+			maxAge: 2,
+			want:   true,
+		},
+		{
+			name:   "future across uint32 wrap beyond tolerance",
+			ts:     1,
+			now:    ^uint32(0),
+			maxAge: 2,
+			want:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := serverCookieTimestampFresh(tc.ts, tc.now, tc.maxAge); got != tc.want {
+				t.Fatalf("serverCookieTimestampFresh(ts=%d, now=%d, maxAge=%d) = %v, want %v",
+					tc.ts, tc.now, tc.maxAge, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSecretRotation(t *testing.T) {
 	jar, err := NewCookieJar(1 * time.Hour)
 	if err != nil {

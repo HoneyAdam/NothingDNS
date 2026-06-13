@@ -85,6 +85,37 @@ func TestHandleBlocklists_GetNoBlocklist(t *testing.T) {
 	}
 }
 
+func TestHandleBlocklists_PostNoBlocklist(t *testing.T) {
+	srv, user := newBlocklistTestServer(t, nil)
+
+	body, _ := json.Marshal(BlocklistAddRequest{File: "/tmp/blocklist.txt"})
+	req := reqWithUser(httptest.NewRequest(http.MethodPost, "/api/v1/blocklists", bytes.NewReader(body)), user)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.handleBlocklists(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBlocklists_PostRequiresAdminBeforeServiceCheck(t *testing.T) {
+	srv, _ := newBlocklistTestServer(t, nil)
+	operator := &auth.User{Username: "operator", Role: auth.RoleOperator}
+
+	body, _ := json.Marshal(BlocklistAddRequest{File: "/tmp/blocklist.txt"})
+	req := reqWithUser(httptest.NewRequest(http.MethodPost, "/api/v1/blocklists", bytes.NewReader(body)), operator)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	srv.handleBlocklists(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleBlocklists_GetWithBlocklist(t *testing.T) {
 	bl := newBlocklistWithFile(t, "0.0.0.0 ad.example.com\n0.0.0.0 tracker.example.net\n")
 	srv, user := newBlocklistTestServer(t, bl)
@@ -513,7 +544,7 @@ func TestHandleBlocklistActions_NoAuth(t *testing.T) {
 
 func TestHandleBlocklistActions_ForbiddenRole(t *testing.T) {
 	// Viewer role should not have operator access.
-	store := newAuthStoreWithUser(t, "viewer", "pass123", auth.RoleViewer)
+	store := newAuthStoreWithUser(t, "viewer", "pass1234", auth.RoleViewer)
 	cfg := config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}
 	srv := NewServer(cfg, nil, nil, nil, nil, nil, nil)
 	srv.authStore = store

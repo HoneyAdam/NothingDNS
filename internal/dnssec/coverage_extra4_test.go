@@ -300,7 +300,10 @@ func TestEncodeDecodeStoredKey(t *testing.T) {
 		PrivateKeyData: []byte("private-key-data"),
 	}
 
-	encoded := encodeStoredKey(sk)
+	encoded, err := encodeStoredKey(sk)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
 	decoded, err := decodeStoredKey(encoded)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -326,6 +329,23 @@ func TestEncodeDecodeStoredKey(t *testing.T) {
 	}
 	if string(decoded.PrivateKeyData) != string(sk.PrivateKeyData) {
 		t.Error("PrivateKeyData mismatch")
+	}
+}
+
+func TestEncodeStoredKeyRejectsInvalidInput(t *testing.T) {
+	if _, err := encodeStoredKey(nil); err == nil {
+		t.Fatal("encodeStoredKey accepted nil key")
+	}
+
+	sk := &StoredKey{
+		KeyTag:         12345,
+		Algorithm:      protocol.AlgorithmECDSAP256SHA256,
+		Flags:          257,
+		PublicKeyData:  make([]byte, 0x10000),
+		PrivateKeyData: []byte("private-key-data"),
+	}
+	if _, err := encodeStoredKey(sk); err == nil {
+		t.Fatal("encodeStoredKey accepted public key data that cannot fit in uint16 length")
 	}
 }
 
@@ -404,6 +424,10 @@ func TestMarshalUnmarshal_Ed25519(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
+	privKey[0] ^= 0xFF
+	if data[0] == privKey[0] {
+		t.Fatal("marshalPrivateKey should copy Ed25519 private key bytes")
+	}
 
 	restored, err := unmarshalPrivateKey(protocol.AlgorithmED25519, data)
 	if err != nil {
@@ -411,6 +435,14 @@ func TestMarshalUnmarshal_Ed25519(t *testing.T) {
 	}
 	if restored.Algorithm != protocol.AlgorithmED25519 {
 		t.Errorf("algorithm = %d, want %d", restored.Algorithm, protocol.AlgorithmED25519)
+	}
+	restoredKey, ok := restored.Key.(ed25519.PrivateKey)
+	if !ok {
+		t.Fatalf("restored key type = %T, want ed25519.PrivateKey", restored.Key)
+	}
+	data[0] ^= 0xFF
+	if restoredKey[0] == data[0] {
+		t.Fatal("unmarshalPrivateKey should copy Ed25519 private key bytes")
 	}
 }
 
@@ -458,6 +490,10 @@ func TestSerializeSigningKey(t *testing.T) {
 	}
 	if stored.IsZSK != true {
 		t.Error("expected IsZSK=true")
+	}
+	key.DNSKEY.PublicKey[0] ^= 0xFF
+	if stored.PublicKeyData[0] == key.DNSKEY.PublicKey[0] {
+		t.Fatal("serializeSigningKey should copy DNSKEY public key bytes")
 	}
 }
 
@@ -537,6 +573,10 @@ func TestRestoreSigningKey(t *testing.T) {
 	if restored.State != KeyStateActive {
 		t.Errorf("State = %d, want KeyStateActive", restored.State)
 	}
+	stored.PublicKeyData[0] ^= 0xFF
+	if restored.DNSKEY.PublicKey[0] == stored.PublicKeyData[0] {
+		t.Fatal("RestoreSigningKey should copy public key bytes")
+	}
 }
 
 func TestRestoreSigningKey_InvalidData(t *testing.T) {
@@ -548,6 +588,12 @@ func TestRestoreSigningKey_InvalidData(t *testing.T) {
 	_, err := RestoreSigningKey(stored)
 	if err == nil {
 		t.Error("expected error for invalid key data")
+	}
+}
+
+func TestRestoreSigningKey_NilStoredKey(t *testing.T) {
+	if _, err := RestoreSigningKey(nil); err == nil {
+		t.Fatal("expected error for nil stored key")
 	}
 }
 
@@ -917,6 +963,20 @@ func TestKeyStore_SaveKey_SerializationError(t *testing.T) {
 	}
 }
 
+func TestKeyStore_SaveKey_NilInputs(t *testing.T) {
+	ks := NewKeyStore(newMockBackend())
+
+	if err := ks.SaveKey("example.com.", nil); err == nil {
+		t.Fatal("expected error for nil signing key")
+	}
+	if err := ks.SaveKey("example.com.", &SigningKey{}); err == nil {
+		t.Fatal("expected error for signing key without DNSKEY")
+	}
+	if err := ks.SaveKey("example.com.", &SigningKey{DNSKEY: &protocol.RDataDNSKEY{}}); err == nil {
+		t.Fatal("expected error for signing key without private key")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Set struct helpers
 // ---------------------------------------------------------------------------
@@ -932,7 +992,10 @@ func TestStoredKey_Fields(t *testing.T) {
 		PrivateKeyData: []byte{4, 5, 6},
 	}
 
-	encoded := encodeStoredKey(sk)
+	encoded, err := encodeStoredKey(sk)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
 	decoded, err := decodeStoredKey(encoded)
 	if err != nil {
 		t.Fatalf("roundtrip: %v", err)

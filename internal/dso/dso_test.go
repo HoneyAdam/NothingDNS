@@ -2,6 +2,7 @@ package dso
 
 import (
 	"bytes"
+	"net"
 	"testing"
 	"time"
 
@@ -40,6 +41,46 @@ func TestNewManager(t *testing.T) {
 
 	if m.inactivityTimeout != DefaultInactivityTimeout {
 		t.Errorf("inactivityTimeout = %v, want %v", m.inactivityTimeout, DefaultInactivityTimeout)
+	}
+}
+
+func TestNewManagerKeepaliveIntervalConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.KeepaliveInterval = 42 * time.Second
+
+	m := NewManager(cfg, nil)
+	if m.keepaliveInterval != 42*time.Second {
+		t.Errorf("keepaliveInterval = %v, want 42s", m.keepaliveInterval)
+	}
+}
+
+func TestNewManagerKeepaliveIntervalDefaultHonorsMinimum(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+
+	m := NewManager(cfg, nil)
+	if m.keepaliveInterval != MinKeepaliveInterval {
+		t.Errorf("keepaliveInterval = %v, want %v", m.keepaliveInterval, MinKeepaliveInterval)
+	}
+}
+
+func TestManagerCreateSessionUsesConfiguredKeepaliveInterval(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	cfg.KeepaliveInterval = 45 * time.Second
+
+	m := NewManager(cfg, nil)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	session, err := m.CreateSession(client)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if session.KeepaliveTime != 45*time.Second {
+		t.Errorf("KeepaliveTime = %v, want 45s", session.KeepaliveTime)
 	}
 }
 
@@ -215,6 +256,21 @@ func TestSession_IsExpired(t *testing.T) {
 	}
 }
 
+func TestSessionExpiredAtBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	timeout := 15 * time.Second
+
+	if sessionExpiredAt(now.Add(-timeout+time.Nanosecond), now, timeout) {
+		t.Error("session should not be expired before inactivity timeout")
+	}
+	if !sessionExpiredAt(now.Add(-timeout), now, timeout) {
+		t.Error("session should be expired exactly at inactivity timeout")
+	}
+	if !sessionExpiredAt(now.Add(-timeout-time.Nanosecond), now, timeout) {
+		t.Error("session should be expired after inactivity timeout")
+	}
+}
+
 func TestSession_UpdateActivity(t *testing.T) {
 	s := &Session{
 		ID:           1,
@@ -282,6 +338,10 @@ func TestManager_RemoveSession(t *testing.T) {
 }
 
 func TestIsDSOMessage(t *testing.T) {
+	if IsDSOMessage(nil) {
+		t.Fatal("IsDSOMessage(nil) = true, want false")
+	}
+
 	// Standard query (opcode 0)
 	standardQuery := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.Flags{Opcode: 0}},
@@ -319,9 +379,47 @@ func TestCreateDSOMessage(t *testing.T) {
 		t.Error("QR should be 0 for query")
 	}
 
-	// Check ARCount
-	if msg.Header.ARCount != uint16(len(tlvs)) {
-		t.Errorf("ARCount = %d, want %d", msg.Header.ARCount, len(tlvs))
+	// DSO TLVs live directly after the DNS header; all section counts stay zero.
+	if msg.Header.ARCount != 0 {
+		t.Errorf("ARCount = %d, want 0", msg.Header.ARCount)
+	}
+	tlv, consumed, err := UnpackTLV(msg.RawBody, 0)
+	if err != nil {
+		t.Fatalf("RawBody TLV unpack failed: %v", err)
+	}
+	if tlv.Type != DSOTLVKeepalive {
+		t.Errorf("RawBody TLV type = %d, want %d", tlv.Type, DSOTLVKeepalive)
+	}
+	if consumed != len(msg.RawBody) {
+		t.Errorf("RawBody consumed = %d, want %d", consumed, len(msg.RawBody))
+	}
+
+	if msg.WireLength() != protocol.HeaderLen+len(msg.RawBody) {
+		t.Fatalf("WireLength() = %d, want header + RawBody %d", msg.WireLength(), protocol.HeaderLen+len(msg.RawBody))
+	}
+	wire := make([]byte, msg.WireLength())
+	n, err := msg.Pack(wire)
+	if err != nil {
+		t.Fatalf("Pack: %v", err)
+	}
+	if n != len(wire) {
+		t.Fatalf("Pack length = %d, want %d", n, len(wire))
+	}
+	unpacked, err := protocol.UnpackMessage(wire)
+	if err != nil {
+		t.Fatalf("UnpackMessage: %v", err)
+	}
+	if !bytes.Equal(unpacked.RawBody, msg.RawBody) {
+		t.Fatalf("unpacked RawBody = %v, want %v", unpacked.RawBody, msg.RawBody)
+	}
+}
+
+func TestCreateDSOMessageRejectsMessageLengthOverflow(t *testing.T) {
+	_, err := CreateDSOMessage([]*TLV{
+		{Type: DSOTLVPadding, Value: make([]byte, 65520)},
+	})
+	if err == nil {
+		t.Fatal("expected DSO message larger than 65535 bytes to fail")
 	}
 }
 

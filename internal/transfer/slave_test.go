@@ -77,6 +77,25 @@ func TestSlaveZoneConfig_Validate(t *testing.T) {
 	}
 }
 
+func TestSlaveZoneConfigValidateNormalizesInvalidDurations(t *testing.T) {
+	config := SlaveZoneConfig{
+		ZoneName:      "example.com.",
+		Masters:       []string{"192.168.1.1:53"},
+		Timeout:       -time.Second,
+		RetryInterval: -time.Second,
+	}
+
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if config.Timeout != 30*time.Second {
+		t.Fatalf("Timeout = %v, want 30s", config.Timeout)
+	}
+	if config.RetryInterval != 5*time.Minute {
+		t.Fatalf("RetryInterval = %v, want 5m", config.RetryInterval)
+	}
+}
+
 func TestNewSlaveZone(t *testing.T) {
 	config := SlaveZoneConfig{
 		ZoneName:     "example.com.",

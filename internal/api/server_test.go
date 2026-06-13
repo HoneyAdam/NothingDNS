@@ -61,6 +61,31 @@ func TestAPIServer(t *testing.T) {
 	server.Stop()
 }
 
+func TestAPIServerStartReturnsBindError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	cfg := config.HTTPConfig{
+		Enabled: true,
+		Bind:    l.Addr().String(),
+	}
+
+	server := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+	err = server.Start()
+	if err == nil {
+		t.Fatal("expected API bind conflict to be returned from Start")
+	}
+	if !strings.Contains(err.Error(), "listen API") {
+		t.Fatalf("Start error = %v, want listen API context", err)
+	}
+	if stopErr := server.Stop(); stopErr != nil {
+		t.Fatalf("Stop after failed Start returned error: %v", stopErr)
+	}
+}
+
 func TestAPIStatus(t *testing.T) {
 	cfg := config.HTTPConfig{
 		Enabled:   true,
@@ -256,15 +281,15 @@ func TestReverseIPv4Relative(t *testing.T) {
 		{"192.168.1.1", "1.168.192.in-addr.arpa.", 24, "1"},
 		// /24 zone with more specific CIDR /25
 		{"192.168.1.4", "1.168.192.in-addr.arpa.", 25, "4"},
-		// /16 zone (16 fixed = 2, varying = 2): last 2 octets vary
-		{"192.168.1.4", "168.192.in-addr.arpa.", 16, "1.4"},
-		{"192.168.5.10", "168.192.in-addr.arpa.", 16, "5.10"},
+		// /16 zone (16 fixed = 2, varying = 2): last 2 reverse labels vary
+		{"192.168.1.4", "168.192.in-addr.arpa.", 16, "4.1"},
+		{"192.168.5.10", "168.192.in-addr.arpa.", 16, "10.5"},
 		// /16 zone with more specific CIDR /24
-		{"192.168.1.4", "168.192.in-addr.arpa.", 24, "1.4"},
-		// /8 zone (8 fixed = 1, varying = 3): last 3 octets vary
-		{"192.168.1.4", "192.in-addr.arpa.", 8, "168.1.4"},
+		{"192.168.1.4", "168.192.in-addr.arpa.", 24, "4.1"},
+		// /8 zone (8 fixed = 1, varying = 3): last 3 reverse labels vary
+		{"192.168.1.4", "192.in-addr.arpa.", 8, "4.1.168"},
 		// /8 zone with more specific CIDR /16
-		{"192.168.1.4", "192.in-addr.arpa.", 16, "168.1.4"},
+		{"192.168.1.4", "192.in-addr.arpa.", 16, "4.1.168"},
 	}
 	for _, tt := range tests {
 		got := reverseIPv4Relative(tt.ip, tt.origin, tt.prefix)
@@ -296,6 +321,8 @@ func TestValidateZoneCIDR(t *testing.T) {
 		// Invalid origins
 		{"example.com.", 24, 0, true},
 		{"1.168.192.in-addr.arpa", 24, 0, true}, // missing trailing dot - FIX THIS
+		{"999.in-addr.arpa.", 8, 0, true},
+		{"one.in-addr.arpa.", 8, 0, true},
 	}
 	for _, tt := range tests {
 		gotPref, err := validateZoneCIDR(tt.origin, tt.prefix)
@@ -305,6 +332,33 @@ func TestValidateZoneCIDR(t *testing.T) {
 		}
 		if !tt.wantErr && gotPref != tt.wantPref {
 			t.Errorf("validateZoneCIDR(%q, %d) prefix = %d, want %d", tt.origin, tt.prefix, gotPref, tt.wantPref)
+		}
+	}
+}
+
+func TestValidateZoneCIDRNetwork(t *testing.T) {
+	tests := []struct {
+		origin   string
+		network  string
+		prefix   int
+		wantPref int
+		wantErr  bool
+	}{
+		{"1.168.192.in-addr.arpa.", "192.168.1.0", 24, 24, false},
+		{"1.168.192.in-addr.arpa.", "192.168.1.128", 25, 24, false},
+		{"168.192.in-addr.arpa.", "192.168.5.0", 24, 16, false},
+		{"192.in-addr.arpa.", "192.0.0.0", 8, 8, false},
+		{"1.168.192.in-addr.arpa.", "10.0.0.0", 24, 0, true},
+		{"168.192.in-addr.arpa.", "192.169.1.0", 24, 0, true},
+	}
+	for _, tt := range tests {
+		gotPref, err := validateZoneCIDRNetwork(tt.origin, net.ParseIP(tt.network), tt.prefix)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("validateZoneCIDRNetwork(%q, %q, %d) error = %v, wantErr %v", tt.origin, tt.network, tt.prefix, err, tt.wantErr)
+			continue
+		}
+		if !tt.wantErr && gotPref != tt.wantPref {
+			t.Errorf("validateZoneCIDRNetwork(%q, %q, %d) prefix = %d, want %d", tt.origin, tt.network, tt.prefix, gotPref, tt.wantPref)
 		}
 	}
 }

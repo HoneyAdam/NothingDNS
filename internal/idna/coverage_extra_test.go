@@ -76,14 +76,14 @@ func TestDecodePunycode_InvalidDigit(t *testing.T) {
 
 func TestEncodeSuffix_AllASCII(t *testing.T) {
 	// All ASCII runes should return empty string (no suffix needed)
-	got := encodeSuffix([]rune{'a', 'b', 'c'})
+	got := encodeSuffix([]rune{'a', 'b', 'c'}, 3)
 	if got != "" {
 		t.Errorf("expected empty for all ASCII, got %q", got)
 	}
 }
 
 func TestEncodeSuffix_Empty(t *testing.T) {
-	got := encodeSuffix([]rune{})
+	got := encodeSuffix([]rune{}, 0)
 	if got != "" {
 		t.Errorf("expected empty, got %q", got)
 	}
@@ -147,8 +147,8 @@ func TestCharToDigit_Invalid(t *testing.T) {
 
 func TestEncodePunycode_WithUnicode(t *testing.T) {
 	got := encodePunycode("m" + "\u00fc" + "nchen")
-	if len(got) == 0 {
-		t.Error("expected non-empty output")
+	if got != "mnchen-3ya" {
+		t.Errorf("encodePunycode(münchen) = %q, want %q", got, "mnchen-3ya")
 	}
 	// All output chars should be ASCII
 	for _, r := range got {
@@ -174,9 +174,8 @@ func TestEncodePunycode_Empty(t *testing.T) {
 }
 
 func TestEncodeSuffix_NonASCIIOnly(t *testing.T) {
-	// encodeSuffix has a known bug: adapt() can return 0 causing divide-by-zero
-	// for non-trivial non-ASCII input. Test that it handles empty/ASCII cases correctly
-	// (these are the paths actually exercised by encodePunycode in practice).
-	// Pure non-ASCII test is skipped due to the bug.
-	_ = func() {} // placeholder — encodeSuffix tested via encodePunycode instead
+	got := encodeSuffix([]rune("☃"), 0)
+	if got != "n3h" {
+		t.Errorf("encodeSuffix(☃) = %q, want %q", got, "n3h")
+	}
 }

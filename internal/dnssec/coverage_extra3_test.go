@@ -713,7 +713,10 @@ func TestCanonicalizeRR_NameWithoutTrailingDot(t *testing.T) {
 		Data:  &protocol.RDataA{Address: [4]byte{192, 168, 1, 1}},
 	}
 
-	result := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600)
+	if err != nil {
+		t.Fatalf("canonicalizeRR: %v", err)
+	}
 	if len(result) == 0 {
 		t.Error("canonicalizeRR should return non-empty result")
 	}
@@ -970,16 +973,25 @@ func TestDSFromDNSKEY_SHA1_Detailed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPackECDSAPublicKey_PaddingNeeded(t *testing.T) {
-	// Create a synthetic ECDSA key with small coordinates to trigger padding
-	smallX := big.NewInt(1) // Will be 1 byte, but needs padding to 32 bytes
-	smallY := big.NewInt(2) // Will be 1 byte, but needs padding to 32 bytes
+	curve := elliptic.P256()
+	var x, y *big.Int
+	for scalar := int64(1); scalar < 10000; scalar++ {
+		x, y = curve.ScalarBaseMult(big.NewInt(scalar).Bytes())
+		if len(x.Bytes()) < 32 || len(y.Bytes()) < 32 {
+			break
+		}
+		x, y = nil, nil
+	}
+	if x == nil || y == nil {
+		t.Fatal("failed to find valid P-256 key coordinates that need padding")
+	}
 
 	key := &PublicKey{
 		Algorithm: protocol.AlgorithmECDSAP256SHA256,
 		Key: &ecdsa.PublicKey{
-			Curve: elliptic.P256(),
-			X:     smallX,
-			Y:     smallY,
+			Curve: curve,
+			X:     x,
+			Y:     y,
 		},
 	}
 
@@ -1700,6 +1712,38 @@ func TestEd25519_SignRRSet_MultiRecord_VerifyRoundTrip(t *testing.T) {
 
 	if err := VerifySignature(rrsig, tamperedData, parsedPub); err == nil {
 		t.Error("expected verification failure with tampered data")
+	}
+}
+
+func TestSignerCreateSignedDataRejectsOversizedRDATA(t *testing.T) {
+	s := NewSigner("example.com.", DefaultSignerConfig())
+	name, _ := protocol.ParseName("oversized.example.com.")
+	signerName, _ := protocol.ParseName("example.com.")
+	rrSet := []*protocol.ResourceRecord{
+		{
+			Name:  name,
+			Type:  65000,
+			Class: protocol.ClassIN,
+			TTL:   300,
+			Data: &protocol.RDataRaw{
+				TypeVal: 65000,
+				Data:    make([]byte, 0x10000),
+			},
+		},
+	}
+	rrsig := &protocol.RDataRRSIG{
+		TypeCovered: 65000,
+		Algorithm:   protocol.AlgorithmED25519,
+		Labels:      2,
+		OriginalTTL: 300,
+		Expiration:  uint32(time.Now().Add(time.Hour).Unix()),
+		Inception:   uint32(time.Now().Add(-time.Hour).Unix()),
+		KeyTag:      12345,
+		SignerName:  signerName,
+	}
+
+	if _, err := s.createSignedData(rrSet, rrsig); err == nil {
+		t.Fatal("expected oversized RDATA to fail")
 	}
 }
 

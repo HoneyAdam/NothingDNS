@@ -433,17 +433,8 @@ func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
 	client := &ClientInfo{
 		Addr:     conn.RemoteAddr(),
 		Protocol: "dot", // DNS over TLS
-		HasEDNS0: false,
 	}
-
-	// Check for EDNS0 in additional section
-	for _, rr := range msg.Additionals {
-		if rr != nil && rr.Type == protocol.TypeOPT {
-			client.HasEDNS0 = true
-			client.EDNS0UDPSize = rr.Class
-			break
-		}
-	}
+	populateEDNS0ClientInfo(client, msg)
 
 	// Create response writer
 	rw := &tlsResponseWriter{
@@ -478,37 +469,25 @@ func (w *tlsResponseWriter) Write(msg *protocol.Message) (int, error) {
 	}
 	w.written = true
 
-	// Pack the response
-	estimated := msg.WireLength() + 2
-	if estimated < 512 {
-		estimated = 512
-	}
-	if estimated > TLSMaxMessageSize {
-		estimated = TLSMaxMessageSize
-	}
-	buf := make([]byte, estimated)
-	n, err := msg.Pack(buf[2:]) // Leave room for length prefix
+	// Pack the response. Single pack attempt into a default-size frame;
+	// larger responses take the exact-size fallback inside
+	// packFramedDNSPayload (no per-response WireLength traversal here).
+	buf := make([]byte, defaultFrameBufSize)
+	frame, n, err := packFramedDNSPayload(msg, buf, w.maxSize, "TLS")
 	if err != nil {
 		return 0, err
 	}
 
-	if n > w.maxSize-2 {
-		msg.Header.Flags.TC = true
-		msg.Truncate(w.maxSize - 2)
-		n, err = msg.Pack(buf[2:])
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	// Write length prefix
-	binary.BigEndian.PutUint16(buf[0:], uint16(n))
+	binary.BigEndian.PutUint16(frame[0:], uint16(n))
 
 	// Set write timeout
-	_ = w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout))
+	if err := w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
 
 	// Write response
-	return w.conn.Write(buf[:n+2])
+	return writeFullDNSFrame(w.conn, frame[:n+2])
 }
 
 // Stop gracefully shuts down the server.
@@ -516,7 +495,9 @@ func (s *TLSServer) Stop() error {
 	s.cancel()
 
 	if s.listener != nil {
-		return s.listener.Close()
+		if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			return err
+		}
 	}
 	return nil
 }

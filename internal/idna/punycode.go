@@ -45,110 +45,89 @@ func charToDigit(char rune) int {
 
 // encodePunycode encodes a Unicode string to punycode.
 func encodePunycode(src string) string {
-	// Convert string to rune slice for processing
 	runes := []rune(src)
 
-	// Phase 1: Find ASCII-only prefix
-	var prefix []rune
+	var encoded strings.Builder
+	basicCount := 0
 	for _, r := range runes {
 		if r < 0x80 {
-			prefix = append(prefix, r)
-		} else {
-			break
+			encoded.WriteRune(r)
+			basicCount++
 		}
 	}
 
-	// Phase 2: Encode the non-ASCII suffix
-	var encoded strings.Builder
-
-	if len(prefix) > 0 {
-		encoded.WriteString(string(prefix))
-		encoded.WriteString("-")
+	if basicCount > 0 && basicCount < len(runes) {
+		encoded.WriteRune(delimiter)
 	}
-
-	// Handle non-ASCII suffix
-	if len(runes) > len(prefix) {
-		suffix := runes[len(prefix):]
-		encoded.WriteString(encodeSuffix(suffix))
+	if basicCount < len(runes) {
+		encoded.WriteString(encodeSuffix(runes, basicCount))
 	}
 
 	return encoded.String()
 }
 
-// encodeSuffix encodes the non-ASCII suffix to punycode.
-// Implements RFC 3492 Bootstring algorithm correctly.
-func encodeSuffix(src []rune) string {
+// encodeSuffix encodes non-basic code points using RFC 3492 Bootstring.
+func encodeSuffix(src []rune, basicCount int) string {
 	if len(src) == 0 {
 		return ""
 	}
 
 	var out strings.Builder
 
-	// RFC 3492 algorithm state
-	n := initialN // First non-ASCII code point (0x80)
-	delta := 0    // Cumulative delta
+	n := initialN
+	delta := 0
 	bias := initialBias
-	h := 0 // Number of code points processed (starts at 0 for suffix)
+	h := basicCount
+	b := basicCount
 
-	// Handle all characters - first pass just counts ASCII
-	for _, r := range src {
-		if r < initialN {
-			h++
-		}
-	}
-
-	// If all ASCII, nothing to encode
 	if h == len(src) {
 		return ""
 	}
 
-	// Main loop - process all non-ASCII characters
 	for h < len(src) {
-		// Find the next smallest code point >= n
-		m := initialN
-		for i := h; i < len(src); i++ {
-			if int(src[i]) >= m {
-				m = int(src[i])
+		m := int(^uint(0) >> 1)
+		for _, r := range src {
+			if int(r) >= n && int(r) < m {
+				m = int(r)
 			}
 		}
 
-		// Calculate delta
 		delta += (m - n) * (h + 1)
 		n = m
 
-		// Process each character
-		for i := h; i < len(src); i++ {
-			if int(src[i]) < n {
+		for _, r := range src {
+			c := int(r)
+			if c < n {
 				delta++
 			}
-			if int(src[i]) == n {
-				// Encode delta using adapation function
+			if c == n {
 				q := delta
-				for {
-					var k int
-					if bias <= tmax {
-						k = tmin
-					} else if bias >= tmax+tmin {
-						k = tmax
-					} else {
-						k = bias - tmin
+				for k := base; ; k += base {
+					t := k - bias
+					if t < tmin {
+						t = tmin
+					}
+					if t > tmax {
+						t = tmax
 					}
 
-					if q < k {
+					if q < t {
 						break
 					}
 
-					out.WriteRune(digitToChar(k + (q-k)%26))
-					q = (q - k) / 26
-					bias = adapt(q, bias, false)
+					out.WriteRune(digitToChar(t + (q-t)%(base-t)))
+					q = (q - t) / (base - t)
 				}
 
 				out.WriteRune(digitToChar(q))
-				bias = adapt(delta, bias, false)
+				bias = adapt(delta, h+1, h == b)
 				delta = 0
+				h++
 			}
 		}
-		h++
+
+		delta++
+		n++
 	}
 
 	return out.String()
@@ -261,7 +240,7 @@ func adapt(delta, numPoints int, first bool) int {
 	if first {
 		delta = delta / damp
 	} else {
-		delta = delta / skew
+		delta = delta / 2
 	}
 
 	if numPoints > 0 {

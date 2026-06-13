@@ -11,6 +11,7 @@ package api
 // option and confirms each field landed correctly.
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +173,69 @@ func TestServer_WithSetters(t *testing.T) {
 		t.Error("zoneSigners should be the empty map we passed")
 	}
 	srv.zoneSignersMu.Unlock()
+}
+
+func TestServerRuntimeSnapshotDoesNotRaceWithSetters(t *testing.T) {
+	cfg := config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}
+	srv := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+
+	store, err := auth.NewStore(&auth.Config{})
+	if err != nil {
+		t.Fatalf("auth.NewStore: %v", err)
+	}
+	upClient := &upstream.Client{}
+	upLB := &upstream.LoadBalancer{}
+	mc := metrics.New(metrics.Config{})
+	dashboardSrv := &dashboard.Server{}
+	odohProxy := &odoh.ObliviousProxy{}
+	odohTarget := &odoh.ObliviousTarget{}
+	tracer := otel.NewTracer(otel.Config{})
+
+	var wg sync.WaitGroup
+	const iterations = 100
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				srv.WithAuth(store).
+					WithUpstream(upClient, upLB).
+					WithMetrics(mc).
+					WithDashboard(dashboardSrv).
+					WithODoH(odohProxy).
+					WithODoHTarget(odohTarget).
+					WithTracer(tracer)
+			} else {
+				srv.WithAuth(nil).
+					WithUpstream(nil, nil).
+					WithMetrics(nil).
+					WithDashboard(nil).
+					WithODoH(nil).
+					WithODoHTarget(nil).
+					WithTracer(nil)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			snapshot := srv.currentRuntimeSnapshot()
+			_ = snapshot.authStore
+			_ = snapshot.metrics
+			_ = snapshot.dashboardServer
+			_ = snapshot.upstreamClient
+			_ = snapshot.upstreamLB
+			_ = snapshot.odohProxy
+			_ = snapshot.odohTarget
+			_ = snapshot.tracer
+			_ = srv.currentAuthStore()
+			_ = srv.currentODoHTarget()
+		}
+	}()
+
+	wg.Wait()
 }
 
 // Sanity that the existing imports stay used even if a future refactor

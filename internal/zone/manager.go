@@ -80,6 +80,20 @@ type Manager struct {
 	zoneDir      string            // directory for zone file storage
 	logger       Logger            // optional logger for errors
 	onemdEnabled bool              // enable ZONEMD computation (RFC 8976)
+
+	// mutationHook, when set, is invoked after every successful zone
+	// mutation (CreateZone, AddRecord, DeleteRecord, UpdateRecord with
+	// deleted=false; DeleteZone with deleted=true). It centralizes
+	// durability concerns (KV persistence) at the manager layer so that
+	// EVERY mutation path — REST API, Raft apply, gossip —
+	// is covered without each caller persisting explicitly.
+	//
+	// The hook is deliberately NOT fired by Load/LoadZone/Reload/Remove:
+	// those (re)load file-backed zones into memory and must not push
+	// config zones into the KV store (KV is durability for API-created
+	// zones only; persisting config zones would resurrect them after
+	// config removal).
+	mutationHook func(zoneName string, deleted bool)
 }
 
 // Logger interface for logging errors.
@@ -98,6 +112,45 @@ func NewManager() *Manager {
 // SetLogger sets the logger for the manager.
 func (m *Manager) SetLogger(logger Logger) {
 	m.logger = logger
+}
+
+// SetMutationHook registers a callback invoked after every successful zone
+// mutation (see the field doc on Manager.mutationHook).
+//
+// LOCKING CONTRACT: the hook is always called WITHOUT m.mu held, because hook
+// implementations read zone state back through manager methods that take the
+// lock (e.g. KV persistence calls Get). Mutation methods therefore release
+// the mutex before notifying.
+func (m *Manager) SetMutationHook(hook func(zoneName string, deleted bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mutationHook = hook
+}
+
+// NotifyMutated fires the mutation hook for a zone that was mutated OUTSIDE
+// the manager's mutation methods — e.g. DDNS (transfer.ApplyUpdate) mutates
+// the *Zone object directly. Such paths must call this once after applying
+// their changes so hook consumers (KV persistence) observe the new state.
+func (m *Manager) NotifyMutated(zoneName string) {
+	m.notifyMutation(normalizeZoneName(zoneName), false)
+}
+
+// notifyMutation invokes the mutation hook, if set. Must be called without
+// m.mu held — see SetMutationHook.
+func (m *Manager) notifyMutation(zoneName string, deleted bool) {
+	m.mu.RLock()
+	hook := m.mutationHook
+	m.mu.RUnlock()
+	if hook != nil {
+		hook(zoneName, deleted)
+	}
+}
+
+// warnf logs via the configured logger, if any.
+func (m *Manager) warnf(format string, args ...any) {
+	if m.logger != nil {
+		m.logger.Warnf(format, args...)
+	}
 }
 
 // SetZONEMDEnabled enables or disables ZONEMD computation for zones.
@@ -169,9 +222,7 @@ func (m *Manager) Load(name, path string) error {
 	if m.onemdEnabled {
 		zonemd, err := ComputeZoneMD(z, ZONEMDSHA256)
 		if err != nil {
-			if m.logger != nil {
-				m.logger.Warnf("zone: failed to compute ZONEMD for %s: %v", z.Origin, err)
-			}
+			m.warnf("zone: failed to compute ZONEMD for %s: %v", z.Origin, err)
 		} else {
 			z.ZONEMD = zonemd
 		}
@@ -265,18 +316,18 @@ func (m *Manager) CreateZone(origin string, defaultTTL uint32, soa *SOARecord, n
 		return fmt.Errorf("zone origin %q is reserved and cannot be created", origin)
 	}
 
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if _, exists := m.zones[origin]; exists {
-		return fmt.Errorf("zone %s already exists", origin)
-	}
-
 	if soa == nil {
 		return fmt.Errorf("SOA record is required")
 	}
 	if len(nsRecords) == 0 {
 		return fmt.Errorf("at least one NS record is required")
+	}
+
+	m.mu.Lock()
+
+	if _, exists := m.zones[origin]; exists {
+		m.mu.Unlock()
+		return fmt.Errorf("zone %s already exists", origin)
 	}
 
 	z := &Zone{
@@ -320,13 +371,13 @@ func (m *Manager) CreateZone(origin string, defaultTTL uint32, soa *SOARecord, n
 		path := filepath.Join(m.zoneDir, sanitizeZoneFileName(origin)+".zone")
 		if err := m.writeZoneFile(z, path); err != nil {
 			// Zone is loaded in memory; log the error but don't fail the operation
-			if m.logger != nil {
-				m.logger.Warnf("zone: failed to persist zone %s to %s: %v", origin, path, err)
-			}
+			m.warnf("zone: failed to persist zone %s to %s: %v", origin, path, err)
 		}
 		m.files[origin] = path
 	}
+	m.mu.Unlock()
 
+	m.notifyMutation(origin, false)
 	return nil
 }
 
@@ -335,14 +386,25 @@ func (m *Manager) DeleteZone(name string) error {
 	name = normalizeZoneName(name)
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	if _, exists := m.zones[name]; !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("zone %s not found", name)
+	}
+
+	path := m.files[name]
+	if path != "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			m.mu.Unlock()
+			return fmt.Errorf("delete zone file %s: %w", path, err)
+		}
 	}
 
 	delete(m.zones, name)
 	delete(m.files, name)
+	m.mu.Unlock()
+
+	m.notifyMutation(name, true)
 	return nil
 }
 
@@ -362,25 +424,26 @@ func (m *Manager) AddRecord(zoneName string, record Record) error {
 	}
 
 	z.Lock()
-	defer z.Unlock()
 
 	// Key by the absolute owner name (relative to the zone origin), matching
 	// the parser — so a relative "api" resolves as "api.<origin>".
 	record.Name = qualifyName(record.Name, z.Origin)
 	z.Records[record.Name] = append(z.Records[record.Name], record)
 	IncrementSerial(z)
+	z.Unlock()
 
 	if m.zoneDir != "" {
 		m.mu.RLock()
 		path := m.files[zoneName]
 		m.mu.RUnlock()
 		if path != "" {
-			if err := m.writeZoneFile(z, path); err != nil && m.logger != nil {
-				m.logger.Warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
+			if err := m.writeZoneFile(z, path); err != nil {
+				m.warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
 			}
 		}
 	}
 
+	m.notifyMutation(zoneName, false)
 	return nil
 }
 
@@ -398,11 +461,11 @@ func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 	}
 
 	z.Lock()
-	defer z.Unlock()
 
 	name = qualifyName(name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
+		z.Unlock()
 		return fmt.Errorf("no records found for %s", name)
 	}
 
@@ -417,6 +480,7 @@ func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 	}
 
 	if !found {
+		z.Unlock()
 		return fmt.Errorf("no %s record found for %s", rtype, name)
 	}
 
@@ -427,18 +491,20 @@ func (m *Manager) DeleteRecord(zoneName, name, rtype string) error {
 	}
 
 	IncrementSerial(z)
+	z.Unlock()
 
 	if m.zoneDir != "" {
 		m.mu.RLock()
 		path := m.files[zoneName]
 		m.mu.RUnlock()
 		if path != "" {
-			if err := m.writeZoneFile(z, path); err != nil && m.logger != nil {
-				m.logger.Warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
+			if err := m.writeZoneFile(z, path); err != nil {
+				m.warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
 			}
 		}
 	}
 
+	m.notifyMutation(zoneName, false)
 	return nil
 }
 
@@ -459,12 +525,12 @@ func (m *Manager) UpdateRecord(zoneName string, name, rtype, oldData string, new
 	}
 
 	z.Lock()
-	defer z.Unlock()
 
 	name = qualifyName(name, z.Origin)
 	newRecord.Name = qualifyName(newRecord.Name, z.Origin)
 	records, ok := z.Records[name]
 	if !ok {
+		z.Unlock()
 		return fmt.Errorf("no records found for %s", name)
 	}
 
@@ -478,22 +544,25 @@ func (m *Manager) UpdateRecord(zoneName string, name, rtype, oldData string, new
 	}
 
 	if !found {
+		z.Unlock()
 		return fmt.Errorf("record not found: %s %s %s", name, rtype, oldData)
 	}
 
 	IncrementSerial(z)
+	z.Unlock()
 
 	if m.zoneDir != "" {
 		m.mu.RLock()
 		path := m.files[zoneName]
 		m.mu.RUnlock()
 		if path != "" {
-			if err := m.writeZoneFile(z, path); err != nil && m.logger != nil {
-				m.logger.Warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
+			if err := m.writeZoneFile(z, path); err != nil {
+				m.warnf("zone: failed to persist zone %s to %s: %v", zoneName, path, err)
 			}
 		}
 	}
 
+	m.notifyMutation(zoneName, false)
 	return nil
 }
 
@@ -514,7 +583,7 @@ func (m *Manager) GetRecords(zoneName, name string) ([]Record, error) {
 
 	if name != "" {
 		name = qualifyName(name, z.Origin)
-		return z.Records[name], nil
+		return cloneRecords(z.Records[name]), nil
 	}
 
 	// Return all records
@@ -523,6 +592,15 @@ func (m *Manager) GetRecords(zoneName, name string) ([]Record, error) {
 		all = append(all, records...)
 	}
 	return all, nil
+}
+
+func cloneRecords(records []Record) []Record {
+	if len(records) == 0 {
+		return nil
+	}
+	cloned := make([]Record, len(records))
+	copy(cloned, records)
+	return cloned
 }
 
 // ExportZone returns the BIND format representation of a zone.
@@ -614,7 +692,7 @@ func IncrementSerial(z *Zone) {
 // invoked from API mutations (zone add/remove/update) and from the
 // catalog/IXFR paths, so this fronts every write that ever lands
 // in `zoneDir`.
-func (m *Manager) writeZoneFile(z *Zone, path string) error {
+func (m *Manager) writeZoneFile(z *Zone, path string) (err error) {
 	content, err := WriteZone(z)
 	if err != nil {
 		return err
@@ -633,7 +711,9 @@ func (m *Manager) writeZoneFile(z *Zone, path string) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+				err = fmt.Errorf("remove temp: %w", removeErr)
+			}
 		}
 	}()
 	if err := os.Chmod(tmpName, 0644); err != nil {
@@ -655,9 +735,25 @@ func (m *Manager) writeZoneFile(z *Zone, path string) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	cleanup = false
-	if dirFd, err := os.Open(dir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncDir(dir string) (err error) {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir: %w", err)
+	}
+	defer func() {
+		if closeErr := dirFd.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close dir: %w", closeErr)
+		}
+	}()
+
+	if err := dirFd.Sync(); err != nil {
+		return fmt.Errorf("fsync dir: %w", err)
 	}
 	return nil
 }

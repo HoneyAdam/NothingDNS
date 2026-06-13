@@ -28,15 +28,20 @@ type JournalStore interface {
 //	[4 serial][8 timestamp_unix]
 //	[4 addedCount]  (for each: [2 nameLen][name][2 type][4 ttl][2 rdataLen][rdata])
 //	[4 deletedCount](for each: same format)
-func EncodeJournalEntry(entry *IXFRJournalEntry) []byte {
-	// Calculate size
-	size := 4 + 8 + 4 + 4 // serial + timestamp + addedCount + deletedCount
-	for _, rc := range entry.Added {
-		size += 2 + len(rc.Name) + 2 + 4 + 2 + len(rc.RData)
+func EncodeJournalEntry(entry *IXFRJournalEntry) ([]byte, error) {
+	if entry == nil {
+		return nil, fmt.Errorf("nil journal entry")
 	}
-	for _, rc := range entry.Deleted {
-		size += 2 + len(rc.Name) + 2 + 4 + 2 + len(rc.RData)
+
+	addedSize, err := recordChangesWireSize("added", entry.Added)
+	if err != nil {
+		return nil, err
 	}
+	deletedSize, err := recordChangesWireSize("deleted", entry.Deleted)
+	if err != nil {
+		return nil, err
+	}
+	size := 4 + 8 + addedSize + deletedSize
 
 	buf := make([]byte, size)
 	offset := 0
@@ -50,7 +55,7 @@ func EncodeJournalEntry(entry *IXFRJournalEntry) []byte {
 	offset = encodeRecordChanges(buf, offset, entry.Added)
 	encodeRecordChanges(buf, offset, entry.Deleted)
 
-	return buf
+	return buf, nil
 }
 
 // DecodeJournalEntry deserializes an IXFR journal entry from bytes.
@@ -75,12 +80,33 @@ func DecodeJournalEntry(data []byte) (*IXFRJournalEntry, error) {
 		return nil, fmt.Errorf("decode added: %w", err)
 	}
 
-	entry.Deleted, _, err = decodeRecordChanges(data, offset)
+	entry.Deleted, offset, err = decodeRecordChanges(data, offset)
 	if err != nil {
 		return nil, fmt.Errorf("decode deleted: %w", err)
 	}
+	if offset != len(data) {
+		return nil, fmt.Errorf("journal entry has %d trailing bytes", len(data)-offset)
+	}
 
 	return entry, nil
+}
+
+func recordChangesWireSize(section string, changes []zone.RecordChange) (int, error) {
+	if uint64(len(changes)) > uint64(^uint32(0)) {
+		return 0, fmt.Errorf("%s change count %d exceeds uint32", section, len(changes))
+	}
+
+	size := 4 // change count
+	for i, rc := range changes {
+		if len(rc.Name) > 0xffff {
+			return 0, fmt.Errorf("%s change %d name too long: %d bytes (max 65535)", section, i, len(rc.Name))
+		}
+		if len(rc.RData) > 0xffff {
+			return 0, fmt.Errorf("%s change %d rdata too long: %d bytes (max 65535)", section, i, len(rc.RData))
+		}
+		size += 2 + len(rc.Name) + 2 + 4 + 2 + len(rc.RData)
+	}
+	return size, nil
 }
 
 func encodeRecordChanges(buf []byte, offset int, changes []zone.RecordChange) int {

@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,10 +13,23 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, errors.New("forced read error")
+}
 
 // setupMockServer creates a test HTTP server and configures globalFlags to use it.
 func setupMockServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
@@ -474,6 +489,16 @@ func TestCmdRecord_AddNegativeTTL(t *testing.T) {
 	}
 }
 
+func TestCmdRecord_AddTTLOverflow(t *testing.T) {
+	err := cmdRecord([]string{"add", "example.com", "www", "A", "192.0.2.1", "4294967296"})
+	if err == nil {
+		t.Fatal("expected error for TTL overflow")
+	}
+	if !strings.Contains(err.Error(), "4294967295") {
+		t.Fatalf("error = %q, want uint32 TTL bound", err.Error())
+	}
+}
+
 func TestCmdRecord_AddMissingArgs(t *testing.T) {
 	err := cmdRecord([]string{"add", "example.com", "www", "A"})
 	if err == nil {
@@ -539,6 +564,21 @@ func TestCmdRecord_UpdateInvalidTTL(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "TTL") {
 		t.Errorf("error should mention TTL: %v", err)
+	}
+}
+
+func TestCmdRecord_UpdateRejectsTTLBounds(t *testing.T) {
+	tests := []string{"-1", "4294967296"}
+	for _, ttl := range tests {
+		t.Run(ttl, func(t *testing.T) {
+			err := cmdRecord([]string{"update", "example.com", "www", "A", "old", "new", ttl})
+			if err == nil {
+				t.Fatalf("expected error for TTL %s", ttl)
+			}
+			if !strings.Contains(err.Error(), "TTL") {
+				t.Fatalf("error = %q, want TTL context", err.Error())
+			}
+		})
 	}
 }
 
@@ -819,11 +859,49 @@ func TestCmdServer_HealthUnhealthy(t *testing.T) {
 			return
 		}
 	})
-	// cmdServer health calls os.Exit on unhealthy, which we can't capture easily.
-	// The function writes to stdout/stderr and exits. We'll test the path by
-	// checking error from httpClient directly via a helper.
-	// Since it calls os.Exit(1), we skip direct testing and rely on coverage
-	// from integration. Instead, we verify the HTTP path in a safer way.
+
+	err := cmdServer([]string{"health"})
+	if err == nil {
+		t.Fatal("expected error for unhealthy server")
+	}
+	if !strings.Contains(err.Error(), "server unhealthy (HTTP 503)") {
+		t.Errorf("error = %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unavailable") {
+		t.Errorf("error missing response body: %q", err.Error())
+	}
+}
+
+func TestCmdServer_HealthBodyReadError(t *testing.T) {
+	origServer := globalFlags.Server
+	origAPIKey := globalFlags.APIKey
+	origClient := httpClient
+	globalFlags.Server = "http://example.com"
+	globalFlags.APIKey = ""
+	httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/health" {
+			t.Errorf("path = %q, want /health", r.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(errorReader{}),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+	t.Cleanup(func() {
+		globalFlags.Server = origServer
+		globalFlags.APIKey = origAPIKey
+		httpClient = origClient
+	})
+
+	err := cmdServer([]string{"health"})
+	if err == nil {
+		t.Fatal("expected body read error")
+	}
+	if !strings.Contains(err.Error(), "reading health response") {
+		t.Errorf("error = %q", err.Error())
+	}
 }
 
 func TestCmdServer_Unknown(t *testing.T) {
@@ -931,6 +1009,50 @@ func TestCmdDig_WithServer(t *testing.T) {
 	}
 }
 
+func TestPrintDigResponseHandlesMalformedSections(t *testing.T) {
+	name, err := protocol.ParseName("example.com.")
+	if err != nil {
+		t.Fatalf("parse name: %v", err)
+	}
+	var typedNilA *protocol.RDataA
+	resp := &protocol.Message{
+		Header: protocol.Header{
+			ID:      1234,
+			Flags:   protocol.NewResponseFlags(protocol.RcodeSuccess),
+			QDCount: 3,
+			ANCount: 3,
+			NSCount: 1,
+			ARCount: 1,
+		},
+		Questions: []*protocol.Question{
+			nil,
+			{QType: protocol.TypeA, QClass: protocol.ClassIN},
+			{Name: name, QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+		Answers: []*protocol.ResourceRecord{
+			nil,
+			{Name: nil, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: typedNilA},
+			{Name: name, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300},
+		},
+		Authorities: []*protocol.ResourceRecord{
+			{Name: nil, Type: protocol.TypeNS, Class: protocol.ClassIN, TTL: 300},
+		},
+		Additionals: []*protocol.ResourceRecord{
+			{Name: name, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: typedNilA},
+		},
+	}
+
+	output := captureOutput(func() {
+		printDigResponse("example.com.", "A", "127.0.0.1", "127.0.0.1:53", false, resp)
+	})
+	if !strings.Contains(output, "<nil>") {
+		t.Fatalf("output missing nil placeholder: %q", output)
+	}
+	if strings.Count(output, "; NODATA") < 4 {
+		t.Fatalf("output missing NODATA placeholders: %q", output)
+	}
+}
+
 func TestCmdDig_ConnectionError(t *testing.T) {
 	err := cmdDig([]string{"@999.999.999.999:53", "example.com", "A"})
 	if err == nil {
@@ -939,6 +1061,97 @@ func TestCmdDig_ConnectionError(t *testing.T) {
 	if !strings.Contains(err.Error(), "connecting to") {
 		t.Errorf("error = %q", err.Error())
 	}
+}
+
+func TestDigQueryTCPRejectsOversizedQueryBeforeDial(t *testing.T) {
+	_, err := digQueryTCP("198.51.100.1:53", make([]byte, 0x10000))
+	if err == nil {
+		t.Fatal("expected oversized TCP query to fail")
+	}
+	if !strings.Contains(err.Error(), "tcp query too large") {
+		t.Fatalf("error = %v, want tcp query too large", err)
+	}
+}
+
+func TestWriteFullRetriesPartialWrites(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	data := []byte{1, 2, 3, 4, 5}
+
+	if err := util.WriteFull(conn, data); err != nil {
+		t.Fatalf("WriteFull returned error: %v", err)
+	}
+	if string(conn.written) != string(data) {
+		t.Fatalf("written bytes = %v, want %v", conn.written, data)
+	}
+	if conn.calls <= 1 {
+		t.Fatalf("expected multiple partial writes, got %d call", conn.calls)
+	}
+}
+
+func TestWriteFullRejectsZeroByteWrite(t *testing.T) {
+	conn := &partialWriteConn{}
+	err := util.WriteFull(conn, []byte{1, 2, 3})
+	if err != io.ErrNoProgress {
+		t.Fatalf("WriteFull error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+func TestWritePacketRejectsPartialDatagramWrite(t *testing.T) {
+	conn := &partialWriteConn{maxWrite: 2}
+	_, err := writePacket(conn, []byte{1, 2, 3})
+	if err != io.ErrShortWrite {
+		t.Fatalf("writePacket error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if conn.calls != 1 {
+		t.Fatalf("writePacket should not retry datagram writes, got %d calls", conn.calls)
+	}
+}
+
+type partialWriteConn struct {
+	maxWrite int
+	written  []byte
+	calls    int
+}
+
+func (c *partialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *partialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(p) {
+		n = len(p)
+	}
+	c.written = append(c.written, p[:n]...)
+	return n, nil
+}
+
+func (c *partialWriteConn) Close() error {
+	return nil
+}
+
+func (c *partialWriteConn) LocalAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) RemoteAddr() net.Addr {
+	return &net.TCPAddr{}
+}
+
+func (c *partialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return nil
 }
 
 func TestCmdDig_DNSSEC(t *testing.T) {
@@ -1278,6 +1491,68 @@ example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 12345 example.com. %s
 	}
 }
 
+// TestCmdDNSSECSignThenValidateZoneRoundTrip signs a zone with dnsctl's own
+// signer and feeds the signed output (DNSKEY, RRSIG, NSEC or NSEC3 records in
+// presentation format) back into validate-zone. Every signature must verify,
+// which proves the delegated rdata parsing (protocol.ParseRDataText)
+// reconstructs RRSIG/DNSKEY/NSEC/NSEC3/SOA wire data byte-identically to what
+// the signer signed — any parsing drift breaks the signature check.
+func TestCmdDNSSECSignThenValidateZoneRoundTrip(t *testing.T) {
+	for _, mode := range []struct {
+		name      string
+		nsec3     bool
+		extraArgs []string
+	}{
+		{name: "NSEC"},
+		{name: "NSEC3", nsec3: true, extraArgs: []string{"--nsec3", "--iterations", "1", "--salt", "abcdef"}},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			zoneContent := `@	300	IN	SOA	ns1.example.com. admin.example.com. 2024010101 3600 900 604800 86400
+@	300	IN	NS	ns1.example.com.
+@	300	IN	A	192.0.2.1
+www	300	IN	A	192.0.2.10
+@	300	IN	MX	10 mail.example.com.
+@	300	IN	TXT	"v=spf1 +all"
+`
+			zoneFile := filepath.Join(tmpDir, "example.com.zone")
+			if err := os.WriteFile(zoneFile, []byte(zoneContent), 0644); err != nil {
+				t.Fatalf("failed to write zone file: %v", err)
+			}
+			signedFile := filepath.Join(tmpDir, "example.com.zone.signed")
+
+			args := []string{
+				"--zone", "example.com",
+				"--input", zoneFile,
+				"--output", signedFile,
+				"--algorithm", "13",
+				"--keydir", tmpDir,
+			}
+			args = append(args, mode.extraArgs...)
+			if err := cmdDNSSECSignZone(args); err != nil {
+				t.Fatalf("cmdDNSSECSignZone error: %v", err)
+			}
+
+			output := captureOutput(func() {
+				if err := cmdDNSSECValidateZone([]string{"--zone", signedFile}); err != nil {
+					t.Fatalf("cmdDNSSECValidateZone error: %v", err)
+				}
+			})
+			if !strings.Contains(output, "Invalid: 0") {
+				t.Errorf("expected zero invalid signatures, output:\n%s", output)
+			}
+			if strings.Contains(output, "Valid: 0\n") {
+				t.Errorf("expected at least one valid signature, output:\n%s", output)
+			}
+			if mode.nsec3 {
+				if !strings.Contains(strings.ToUpper(output), "NSEC3") && !strings.Contains(output, "type 50") {
+					t.Logf("note: no NSEC3 signature line in output:\n%s", output)
+				}
+			}
+		})
+	}
+}
+
 // ============================================================================
 // loadSigningKey and loadPrivateKey tests
 // ============================================================================
@@ -1564,6 +1839,41 @@ func TestCmdDNSSECSignZone_NSEC3(t *testing.T) {
 	}
 }
 
+func TestCmdDNSSECSignZoneRejectsInvalidNSEC3Iterations(t *testing.T) {
+	tests := []struct {
+		name       string
+		iterations string
+	}{
+		{name: "negative", iterations: "-1"},
+		{name: "overflow", iterations: "65536"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			zoneFile := filepath.Join(tmpDir, "example.com.zone")
+			if err := os.WriteFile(zoneFile, []byte("@ 300 IN A 192.0.2.1\n"), 0644); err != nil {
+				t.Fatalf("failed to write zone file: %v", err)
+			}
+
+			err := cmdDNSSECSignZone([]string{
+				"--zone", "example.com",
+				"--input", zoneFile,
+				"--output", filepath.Join(tmpDir, "signed.zone"),
+				"--algorithm", "13",
+				"--nsec3",
+				"--iterations", tt.iterations,
+			})
+			if err == nil {
+				t.Fatal("expected invalid NSEC3 iterations to return an error")
+			}
+			if !strings.Contains(err.Error(), "invalid NSEC3 iterations") {
+				t.Fatalf("error = %q, want invalid NSEC3 iterations", err.Error())
+			}
+		})
+	}
+}
+
 func TestCmdDNSSECSignZone_InvalidSalt(t *testing.T) {
 	tmpDir := t.TempDir()
 	zoneContent := `@ 300 IN SOA ns1.example.com. admin.example.com. 2024010101 3600 900 604800 86400
@@ -1652,12 +1962,26 @@ func TestAPIRequest_NewRequestError(t *testing.T) {
 
 func TestCmdServer_HealthConnectionError(t *testing.T) {
 	origServer := globalFlags.Server
-	globalFlags.Server = "http://127.0.0.1:1"
-	defer func() { globalFlags.Server = origServer }()
+	origAPIKey := globalFlags.APIKey
+	origClient := httpClient
+	globalFlags.Server = "http://example.com"
+	globalFlags.APIKey = ""
+	httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("dial failed")
+	})}
+	t.Cleanup(func() {
+		globalFlags.Server = origServer
+		globalFlags.APIKey = origAPIKey
+		httpClient = origClient
+	})
 
-	// cmdServer health does os.Exit on error, so we can't test it directly.
-	// We'll test the underlying behavior through a helper instead.
-	// Skip because os.Exit terminates the test process.
+	err := cmdServer([]string{"health"})
+	if err == nil {
+		t.Fatal("expected connection error")
+	}
+	if !strings.Contains(err.Error(), "server unhealthy") {
+		t.Errorf("error = %q", err.Error())
+	}
 }
 
 func TestCmdDig_DefaultType(t *testing.T) {
@@ -2120,7 +2444,7 @@ func TestCmdDNSSECDSFromDNSKEY_MissingKeyFile(t *testing.T) {
 
 func TestParseRDataFromZone_InvalidNS(t *testing.T) {
 	longLabel := "a" + strings.Repeat("b", 64) + ".com."
-	_, err := parseRDataFromZone(protocol.TypeNS, longLabel, "example.com.")
+	_, err := parseRDataFromZone(protocol.TypeNS, longLabel)
 	if err == nil {
 		t.Fatal("expected error for invalid NS name")
 	}
@@ -2128,7 +2452,7 @@ func TestParseRDataFromZone_InvalidNS(t *testing.T) {
 
 func TestParseRDataFromZone_InvalidMXExchange(t *testing.T) {
 	longLabel := "a" + strings.Repeat("b", 64) + ".com."
-	_, err := parseRDataFromZone(protocol.TypeMX, "10 "+longLabel, "example.com.")
+	_, err := parseRDataFromZone(protocol.TypeMX, "10 "+longLabel)
 	if err == nil {
 		t.Fatal("expected error for invalid MX exchange")
 	}
@@ -2137,7 +2461,7 @@ func TestParseRDataFromZone_InvalidMXExchange(t *testing.T) {
 func TestParseRDataFromZone_InvalidRRSIGSigner(t *testing.T) {
 	longLabel := "a" + strings.Repeat("b", 64) + ".com."
 	rdata := fmt.Sprintf("A 13 1 300 1609459200 1606780800 12345 %s fakesig", longLabel)
-	_, err := parseRDataFromZone(protocol.TypeRRSIG, rdata, "example.com.")
+	_, err := parseRDataFromZone(protocol.TypeRRSIG, rdata)
 	if err == nil {
 		t.Fatal("expected error for invalid RRSIG signer name")
 	}
@@ -2201,10 +2525,10 @@ func TestCmdDNSSECValidateZone_MismatchedKeyTag(t *testing.T) {
 	tmpDir := t.TempDir()
 	zoneFile := filepath.Join(tmpDir, "zone.zone")
 	pubKey := base64.StdEncoding.EncodeToString([]byte("fakepublickey12345"))
-	// RRSIG keytag 99999 doesn't match DNSKEY keytag
+	// RRSIG keytag 65535 is in range but doesn't match DNSKEY keytag.
 	content := fmt.Sprintf(`example.com. 300 IN DNSKEY 257 3 13 %s
 example.com. 300 IN A 192.0.2.1
-example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 99999 example.com. %s
+example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 65535 example.com. %s
 `, pubKey, base64.StdEncoding.EncodeToString([]byte("fakesig")))
 	if err := os.WriteFile(zoneFile, []byte(content), 0644); err != nil {
 		t.Fatalf("failed to write zone file: %v", err)
@@ -2217,6 +2541,30 @@ example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 99999 example.com. %s
 	})
 	if !strings.Contains(output, "No DNSKEY found for keytag") {
 		t.Errorf("output missing keytag error: %q", output)
+	}
+}
+
+func TestCmdDNSSECValidateZone_MalformedRRSIGReturnsParseError(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "zone.zone")
+	pubKey := base64.StdEncoding.EncodeToString([]byte("fakepublickey12345"))
+	content := fmt.Sprintf(`example.com. 300 IN DNSKEY 257 3 13 %s
+example.com. 300 IN A 192.0.2.1
+example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 99999 example.com. %s
+`, pubKey, base64.StdEncoding.EncodeToString([]byte("fakesig")))
+	if err := os.WriteFile(zoneFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write zone file: %v", err)
+	}
+
+	err := cmdDNSSECValidateZone([]string{"--zone", zoneFile, "--ignore-time"})
+	if err == nil {
+		t.Fatal("expected parse error for malformed RRSIG")
+	}
+	// The key tag 99999 overflows uint16; the shared protocol.ParseRDataText
+	// rejects the record as a whole (it does not report which field failed),
+	// so the error names the record type and line, not the field.
+	if !strings.Contains(err.Error(), "invalid RRSIG RDATA") || !strings.Contains(err.Error(), "line 3") {
+		t.Fatalf("error = %q, want line-3 invalid RRSIG RDATA parse error", err.Error())
 	}
 }
 

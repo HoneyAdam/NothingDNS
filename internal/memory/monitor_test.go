@@ -53,6 +53,28 @@ func TestNewMonitor(t *testing.T) {
 	}
 }
 
+func TestNewMonitorNormalizesInvalidConfig(t *testing.T) {
+	m := NewMonitor(Config{
+		LimitBytes:    1024 * 1024 * 1024,
+		WarningPct:    -1,
+		CriticalPct:   0,
+		CheckInterval: -time.Second,
+	}, nil)
+
+	if m.config.WarningPct != 80.0 {
+		t.Fatalf("WarningPct = %f, want 80.0", m.config.WarningPct)
+	}
+	if m.config.CriticalPct != 95.0 {
+		t.Fatalf("CriticalPct = %f, want 95.0", m.config.CriticalPct)
+	}
+	if m.config.CheckInterval != 10*time.Second {
+		t.Fatalf("CheckInterval = %v, want 10s", m.config.CheckInterval)
+	}
+
+	m.Start()
+	m.Stop()
+}
+
 func TestMonitorStartStop_NoLimit(t *testing.T) {
 	cfg := DefaultConfig()
 	// LimitBytes = 0 means Start should be a no-op
@@ -213,6 +235,28 @@ func TestMonitorDoubleStop(t *testing.T) {
 	m.Stop()
 	// Second stop should not panic
 	m.Stop()
+}
+
+func TestMonitorDoubleStartStopReturns(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LimitBytes = 1024 * 1024 * 1024
+	cfg.CheckInterval = 10 * time.Millisecond
+	m := NewMonitor(cfg, nil)
+
+	m.Start()
+	m.Start()
+
+	done := make(chan struct{})
+	go func() {
+		m.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Stop did not return after double Start")
+	}
 }
 
 func TestMonitorGCOnWarning(t *testing.T) {

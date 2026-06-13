@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 const (
@@ -95,11 +97,15 @@ func (s *RPCServer) Stop() {
 	if !closed {
 		return
 	}
-	s.listener.Close()
+	if err := s.listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		util.Warnf("raft rpc: failed to close listener: %v", err)
+	}
 
 	s.mu.Lock()
 	for _, conn := range s.conns {
-		conn.Close()
+		if err := closeRaftConn(conn); err != nil {
+			util.Warnf("raft rpc: failed to close tracked connection: %v", err)
+		}
 	}
 	s.mu.Unlock()
 
@@ -117,7 +123,8 @@ func (s *RPCServer) acceptLoop() {
 		default:
 		}
 
-		if err := s.listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		if err := setListenerDeadline(s.listener, time.Now().Add(100*time.Millisecond)); err != nil {
+			util.Warnf("raft rpc: failed to set listener deadline: %v", err)
 			return
 		}
 
@@ -142,10 +149,28 @@ func (s *RPCServer) acceptLoop() {
 	}
 }
 
+type listenerWithDeadline interface {
+	SetDeadline(time.Time) error
+}
+
+func setListenerDeadline(listener net.Listener, deadline time.Time) error {
+	if listener == nil {
+		return nil
+	}
+	if deadlineListener, ok := listener.(listenerWithDeadline); ok {
+		return deadlineListener.SetDeadline(deadline)
+	}
+	return nil
+}
+
 // handleConn handles a single connection.
 func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
 	defer s.wg.Done()
-	defer conn.Close()
+	defer func() {
+		if err := closeRaftConn(conn); err != nil {
+			util.Warnf("raft rpc: failed to close connection: %v", err)
+		}
+	}()
 	defer func() {
 		s.mu.Lock()
 		delete(s.conns, nodeID)
@@ -275,7 +300,9 @@ func (t *TCPTransport) dropConn(peerID NodeID, conn net.Conn) {
 		delete(t.conns, peerID)
 	}
 	t.mu.Unlock()
-	_ = conn.Close()
+	if err := closeRaftConn(conn); err != nil {
+		util.Warnf("raft rpc: failed to close dropped connection for peer %s: %v", peerID, err)
+	}
 }
 
 // exchange performs one request/response RPC over the peer's connection,
@@ -293,7 +320,10 @@ func (t *TCPTransport) exchange(ctx context.Context, peerID NodeID, reqType uint
 	}
 	if ctx != nil {
 		if deadline, ok := ctx.Deadline(); ok {
-			_ = conn.SetDeadline(deadline)
+			if err := conn.SetDeadline(deadline); err != nil {
+				t.dropConn(peerID, conn)
+				return fmt.Errorf("set deadline for peer %s: %w", peerID, err)
+			}
 		}
 	}
 
@@ -389,13 +419,26 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 		// Lost the race. Close our duplicate and return the winner so
 		// the rest of the transport doesn't see two live conns to one peer.
 		t.mu.Unlock()
-		_ = dialConn.Close()
+		if err := closeRaftConn(dialConn); err != nil {
+			util.Warnf("raft rpc: failed to close duplicate connection for peer %s: %v", peerID, err)
+		}
 		return existing, nil
 	}
 	t.conns[peerID] = dialConn
 	t.mu.Unlock()
 
 	return dialConn, nil
+}
+
+func closeRaftConn(conn net.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	err := conn.Close()
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
 
 // SetPeerAddr sets the address for a peer.

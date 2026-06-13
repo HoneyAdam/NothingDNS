@@ -65,6 +65,26 @@ func TestRateLimiter_TokenRefill(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_AllowFutureLastTimeDoesNotDrainTokens(t *testing.T) {
+	rl := NewRateLimiter(config.RRLConfig{Rate: 1, Burst: 2})
+	defer rl.Stop()
+
+	ip := net.ParseIP("10.0.0.90")
+	if !rl.Allow(ip) {
+		t.Fatal("first request should seed the bucket")
+	}
+
+	rl.mu.Lock()
+	b := rl.buckets[ip.String()]
+	b.tokens = 1
+	b.lastTime = time.Now().Add(time.Hour)
+	rl.mu.Unlock()
+
+	if !rl.Allow(ip) {
+		t.Fatal("future lastTime should not drain the remaining token")
+	}
+}
+
 func TestRateLimiter_DifferentClients(t *testing.T) {
 	rl := NewRateLimiter(config.RRLConfig{Rate: 1, Burst: 1})
 	defer rl.Stop()

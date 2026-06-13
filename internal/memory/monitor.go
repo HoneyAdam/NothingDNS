@@ -93,6 +93,20 @@ func DefaultConfig() Config {
 	}
 }
 
+func normalizeConfig(config Config) Config {
+	defaults := DefaultConfig()
+	if config.WarningPct <= 0 {
+		config.WarningPct = defaults.WarningPct
+	}
+	if config.CriticalPct <= 0 {
+		config.CriticalPct = defaults.CriticalPct
+	}
+	if config.CheckInterval <= 0 {
+		config.CheckInterval = defaults.CheckInterval
+	}
+	return config
+}
+
 // Monitor watches memory usage and triggers evictions when needed.
 type Monitor struct {
 	config  Config
@@ -102,13 +116,15 @@ type Monitor struct {
 	state State
 	stats Stats
 
-	enabled atomic.Bool
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	lifecycleMu sync.Mutex
+	enabled     atomic.Bool
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // NewMonitor creates a new memory monitor.
 func NewMonitor(config Config, evictor Evictor) *Monitor {
+	config = normalizeConfig(config)
 	return &Monitor{
 		config:  config,
 		evictor: evictor,
@@ -118,23 +134,43 @@ func NewMonitor(config Config, evictor Evictor) *Monitor {
 
 // Start begins monitoring memory usage.
 func (m *Monitor) Start() {
-	if m.config.LimitBytes == 0 {
+	if m == nil || m.config.LimitBytes == 0 {
 		return // No limit configured
 	}
-	m.enabled.Store(true)
+
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.enabled.Load() {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+	m.enabled.Store(true)
 	m.wg.Add(1)
 	go m.run(ctx)
 }
 
 // Stop stops the memory monitor.
 func (m *Monitor) Stop() {
-	if m.cancel != nil {
-		m.cancel()
-		m.wg.Wait()
+	if m == nil {
+		return
 	}
+
+	m.lifecycleMu.Lock()
+	if !m.enabled.Load() {
+		m.lifecycleMu.Unlock()
+		return
+	}
+	cancel := m.cancel
+	m.cancel = nil
+	m.enabled.Store(false)
+	m.lifecycleMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	m.wg.Wait()
 }
 
 // State returns the current memory pressure state.

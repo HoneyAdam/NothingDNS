@@ -17,12 +17,16 @@ import (
 // ---------------------------------------------------------------------------
 
 func newServerWithReverseZone(t *testing.T) (*Server, *auth.User) {
+	return newServerWithReverseZoneOrigin(t, "1.168.192.in-addr.arpa.")
+}
+
+func newServerWithReverseZoneOrigin(t *testing.T, origin string) (*Server, *auth.User) {
 	t.Helper()
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)
 	s.zoneManager = zone.NewManager()
 
-	// Create a reverse zone: 1.168.192.in-addr.arpa.
+	// Create a reverse zone for bulk PTR tests.
 	soa := &zone.SOARecord{
 		TTL:     3600,
 		MName:   "ns1.example.com.",
@@ -36,7 +40,7 @@ func newServerWithReverseZone(t *testing.T) (*Server, *auth.User) {
 	nsRecords := []zone.NSRecord{
 		{TTL: 3600, NSDName: "ns1.example.com."},
 	}
-	if err := s.zoneManager.CreateZone("1.168.192.in-addr.arpa.", 3600, soa, nsRecords); err != nil {
+	if err := s.zoneManager.CreateZone(origin, 3600, soa, nsRecords); err != nil {
 		t.Fatalf("CreateZone: %v", err)
 	}
 
@@ -96,6 +100,114 @@ func TestHandleBulkPTR_Apply(t *testing.T) {
 	}
 }
 
+func TestHandleBulkPTR_ApplyUsesReverseRelativeOwnerInParentZone(t *testing.T) {
+	s, user := newServerWithReverseZoneOrigin(t, "168.192.in-addr.arpa.")
+
+	body := `{"cidr":"192.168.1.0/30","pattern":"host-[A]-[B]-[C]-[D].example.com."}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	z, ok := s.zoneManager.Get("168.192.in-addr.arpa.")
+	if !ok {
+		t.Fatal("expected reverse zone")
+	}
+	z.RLock()
+	records := append([]zone.Record(nil), z.Records["0.1.168.192.in-addr.arpa."]...)
+	wrongRecords := append([]zone.Record(nil), z.Records["1.0.168.192.in-addr.arpa."]...)
+	z.RUnlock()
+
+	if len(records) != 1 {
+		t.Fatalf("expected PTR at 0.1.168.192.in-addr.arpa., got %d records", len(records))
+	}
+	if records[0].Type != "PTR" || records[0].RData != "host-192-168-1-0.example.com." {
+		t.Fatalf("unexpected PTR record: %+v", records[0])
+	}
+	if len(wrongRecords) != 0 {
+		t.Fatalf("unexpected PTR at old reversed owner 1.0.168.192.in-addr.arpa.: %+v", wrongRecords)
+	}
+}
+
+func TestHandleBulkPTR_PreviewFindsExistingPTRByOwner(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+	if err := s.zoneManager.AddRecord("1.168.192.in-addr.arpa.", zone.Record{
+		Name:  "0",
+		Type:  "PTR",
+		Class: "IN",
+		TTL:   3600,
+		RData: "existing.example.com.",
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	body := `{"cidr":"192.168.1.0/32","pattern":"host-[A]-[B]-[C]-[D].example.com.","preview":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp ReverseDNSPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("JSON parse: %v", err)
+	}
+	if resp.WillSkip != 1 || resp.WillAdd != 0 {
+		t.Fatalf("preview counts: willSkip=%d willAdd=%d, want 1/0", resp.WillSkip, resp.WillAdd)
+	}
+	if len(resp.Changes) != 1 || !resp.Changes[0].PTRExist || resp.Changes[0].OldPTR != "existing.example.com." {
+		t.Fatalf("preview change = %+v, want existing PTR details", resp.Changes)
+	}
+}
+
+func TestHandleBulkPTR_OverrideReplacesExistingPTRByOwner(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+	if err := s.zoneManager.AddRecord("1.168.192.in-addr.arpa.", zone.Record{
+		Name:  "0",
+		Type:  "PTR",
+		Class: "IN",
+		TTL:   3600,
+		RData: "old.example.com.",
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	body := `{"cidr":"192.168.1.0/32","pattern":"host-[A]-[B]-[C]-[D].example.com.","override":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	z, ok := s.zoneManager.Get("1.168.192.in-addr.arpa.")
+	if !ok {
+		t.Fatal("expected reverse zone")
+	}
+	z.RLock()
+	records := append([]zone.Record(nil), z.Records["0.1.168.192.in-addr.arpa."]...)
+	z.RUnlock()
+
+	if len(records) != 1 {
+		t.Fatalf("expected one PTR after override, got %+v", records)
+	}
+	if records[0].RData != "host-192-168-1-0.example.com." {
+		t.Fatalf("PTR RData = %q, want updated host", records[0].RData)
+	}
+}
+
 func TestHandleBulkPTR_WithAddA(t *testing.T) {
 	s, user := newServerWithReverseZone(t)
 
@@ -108,6 +220,133 @@ func TestHandleBulkPTR_WithAddA(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBulkPTR_AddAExistingADoesNotSkipPTR(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+	existingName := "host-192-168-1-0.example.com."
+	if err := s.zoneManager.AddRecord("1.168.192.in-addr.arpa.", zone.Record{
+		Name:  existingName,
+		Type:  "A",
+		Class: "IN",
+		TTL:   3600,
+		RData: "192.168.1.0",
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	body := `{"cidr":"192.168.1.0/32","pattern":"host-[A]-[B]-[C]-[D].example.com.","addA":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp BulkPTRResultResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("JSON parse: %v", err)
+	}
+	if resp.Added != 1 || resp.AddedA != 0 || resp.ExistsA != 1 || resp.Skipped != 0 {
+		t.Fatalf("bulk result = %+v, want added PTR and existing A", resp)
+	}
+
+	z, ok := s.zoneManager.Get("1.168.192.in-addr.arpa.")
+	if !ok {
+		t.Fatal("expected reverse zone")
+	}
+	z.RLock()
+	ptrRecords := append([]zone.Record(nil), z.Records["0.1.168.192.in-addr.arpa."]...)
+	aRecords := append([]zone.Record(nil), z.Records[existingName]...)
+	z.RUnlock()
+
+	if len(ptrRecords) != 1 || ptrRecords[0].Type != "PTR" {
+		t.Fatalf("PTR records = %+v, want one PTR", ptrRecords)
+	}
+	if len(aRecords) != 1 {
+		t.Fatalf("A records = %+v, want existing A without duplicate", aRecords)
+	}
+}
+
+// Regression test: in non-override mode, an entry whose PTR already exists is
+// reported as "skipped" and must not be mutated at all — in particular, no
+// forward A record may be created even when addA=true and the A is missing.
+func TestHandleBulkPTR_AddASkipEntryDoesNotCreateA(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+	if err := s.zoneManager.AddRecord("1.168.192.in-addr.arpa.", zone.Record{
+		Name:  "0",
+		Type:  "PTR",
+		Class: "IN",
+		TTL:   3600,
+		RData: "host-192-168-1-0.example.com.",
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	body := `{"cidr":"192.168.1.0/32","pattern":"host-[A]-[B]-[C]-[D].example.com.","addA":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp BulkPTRResultResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("JSON parse: %v", err)
+	}
+	if resp.Added != 0 || resp.AddedA != 0 || resp.Skipped != 1 {
+		t.Fatalf("bulk result = %+v, want skipped PTR and no A added", resp)
+	}
+
+	z, ok := s.zoneManager.Get("1.168.192.in-addr.arpa.")
+	if !ok {
+		t.Fatal("expected reverse zone")
+	}
+	z.RLock()
+	aRecords := append([]zone.Record(nil), z.Records["host-192-168-1-0.example.com."]...)
+	z.RUnlock()
+
+	if len(aRecords) != 0 {
+		t.Fatalf("A records = %+v, want no A record for a skipped entry", aRecords)
+	}
+}
+
+// Preview must agree with apply: a skip entry must not be counted in willAddA.
+func TestHandleBulkPTR_PreviewSkipEntryNotCountedInWillAddA(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+	if err := s.zoneManager.AddRecord("1.168.192.in-addr.arpa.", zone.Record{
+		Name:  "0",
+		Type:  "PTR",
+		Class: "IN",
+		TTL:   3600,
+		RData: "host-192-168-1-0.example.com.",
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
+
+	body := `{"cidr":"192.168.1.0/31","pattern":"host-[A]-[B]-[C]-[D].example.com.","addA":true,"preview":true}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader([]byte(body)))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ReverseDNSPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("JSON parse: %v", err)
+	}
+	// .0 has an existing PTR (skip, no A promised); .1 is a fresh add (PTR + A).
+	if resp.WillSkip != 1 || resp.WillAdd != 1 || resp.WillAddA != 1 {
+		t.Fatalf("preview counts: willSkip=%d willAdd=%d willAddA=%d, want 1/1/1", resp.WillSkip, resp.WillAdd, resp.WillAddA)
 	}
 }
 
@@ -211,12 +450,9 @@ func TestHandleBulkPTR_CDIRZoneMismatch(t *testing.T) {
 
 	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
 
-	// Should fail because the CIDR prefix /24 doesn't match zone prefix /24 for this zone
-	// The zone prefix for "1.168.192" is /24, but the CIDR 10.0.0.0/24 maps to "0.0.10" which
-	// wouldn't match the zone. However validateZoneCIDR only checks prefix length, not actual IPs.
-	// So it may pass validation and proceed to apply.
-	// We just verify it doesn't crash.
-	t.Logf("status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for CIDR outside reverse zone, got %d body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -324,21 +560,16 @@ func TestHandlePtr6Lookup_NotIPv6Zone(t *testing.T) {
 func TestHandlePtr6Lookup_Found(t *testing.T) {
 	s, user := newServerWithIPv6ReverseZone(t)
 
-	// Add a PTR record keyed under "PTR" — this is how handlePtr6Lookup accesses it.
-	// Note: Zone.Records is map[string][]Record keyed by domain name, but handlePtr6Lookup
-	// accesses z.Records["PTR"] which looks up the literal key "PTR". We insert there
-	// to exercise the found branch.
 	ptrName := "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
-	z, _ := s.zoneManager.Get("ip6.arpa.")
-	z.Lock()
-	z.Records["PTR"] = append(z.Records["PTR"], zone.Record{
+	if err := s.zoneManager.AddRecord("ip6.arpa.", zone.Record{
 		Name:  ptrName + ".",
 		TTL:   3600,
 		Class: "IN",
 		Type:  "PTR",
 		RData: "host.example.com.",
-	})
-	z.Unlock()
+	}); err != nil {
+		t.Fatalf("AddRecord: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/zones/ip6.arpa./ptr6-lookup?ip=2001:db8::1", nil)
 	req = req.WithContext(WithUser(req.Context(), user))

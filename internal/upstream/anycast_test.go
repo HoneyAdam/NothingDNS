@@ -1,7 +1,10 @@
 package upstream
 
 import (
+	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -72,6 +75,12 @@ func TestAnycastGroupAddBackend(t *testing.T) {
 		t.Errorf("Expected default weight 100, got %d", backend2.Weight)
 	}
 
+	// Test validation - nil backend
+	err = group.AddBackend(nil)
+	if err == nil {
+		t.Error("Expected error for nil backend, got nil")
+	}
+
 	// Test validation - empty physical IP
 	invalidBackend := &AnycastBackend{
 		Port: 53,
@@ -115,6 +124,23 @@ func TestAnycastGroupRemoveBackend(t *testing.T) {
 
 	if group.Backends[0].PhysicalIP != "10.0.1.2" {
 		t.Errorf("Expected remaining backend to be '10.0.1.2', got '%s'", group.Backends[0].PhysicalIP)
+	}
+}
+
+func TestAnycastGroupRemoveBackendSkipsNilBackends(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	group.Backends = []*AnycastBackend{
+		nil,
+		{PhysicalIP: "10.0.1.1", Port: 53},
+	}
+
+	group.RemoveBackend("10.0.1.2")
+
+	if len(group.Backends) != 1 {
+		t.Fatalf("expected nil backend to be discarded, got %d backends", len(group.Backends))
+	}
+	if group.Backends[0].PhysicalIP != "10.0.1.1" {
+		t.Fatalf("expected remaining backend 10.0.1.1, got %#v", group.Backends[0])
 	}
 }
 
@@ -273,6 +299,15 @@ func TestAnycastGroupStats(t *testing.T) {
 	if healthy != 1 {
 		t.Errorf("Expected 1 healthy, got %d", healthy)
 	}
+
+	group.Backends = append([]*AnycastBackend{nil}, group.Backends...)
+	total, healthy = group.Stats()
+	if total != 2 {
+		t.Errorf("Expected nil backend to be excluded from total, got %d", total)
+	}
+	if healthy != 1 {
+		t.Errorf("Expected nil backend to be excluded from healthy count, got %d", healthy)
+	}
 }
 
 func TestWeightedSelect(t *testing.T) {
@@ -353,6 +388,32 @@ func TestAnycastGroupFailover(t *testing.T) {
 	}
 }
 
+func TestAnycastGroupFailoverSkipsNilBackends(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	backend1 := &AnycastBackend{PhysicalIP: "10.0.1.1", Port: 53}
+	backend2 := &AnycastBackend{PhysicalIP: "10.0.1.2", Port: 53}
+	group.Backends = []*AnycastBackend{backend1, nil, backend2}
+
+	next := group.FailoverToNext()
+	if next != backend2 {
+		t.Fatalf("expected failover to skip nil backend, got %#v", next)
+	}
+	if idx := atomic.LoadUint32(&group.activeIndex); idx != 2 {
+		t.Fatalf("expected active index 2 after nil-skipping failover, got %d", idx)
+	}
+
+	next = group.FailoverToNext()
+	if next != backend1 {
+		t.Fatalf("expected failover to wrap to first non-nil backend, got %#v", next)
+	}
+
+	group.Backends = []*AnycastBackend{nil, backend1}
+	atomic.StoreUint32(&group.activeIndex, 0)
+	if next := group.FailoverToNext(); next != nil {
+		t.Fatalf("expected nil failover with only one non-nil backend, got %#v", next)
+	}
+}
+
 func TestAnycastBackendStats(t *testing.T) {
 	backend := &AnycastBackend{
 		PhysicalIP:   "10.0.1.1",
@@ -399,6 +460,21 @@ func TestAnycastGroupGetHealthyBackends(t *testing.T) {
 	if len(healthy) != 2 {
 		t.Errorf("Expected 2 healthy backends, got %d", len(healthy))
 	}
+
+	group.Backends = append([]*AnycastBackend{nil}, group.Backends...)
+	healthy = group.GetHealthyBackends()
+	if len(healthy) != 2 {
+		t.Errorf("Expected nil backend to be skipped, got %d healthy backends", len(healthy))
+	}
+
+	healthy[0].PhysicalIP = "203.0.113.1"
+	healthy[0].healthy = false
+	if backend1.PhysicalIP == "203.0.113.1" {
+		t.Fatal("GetHealthyBackends returned internal backend pointer")
+	}
+	if !backend1.IsHealthy() {
+		t.Fatal("GetHealthyBackends mutation changed internal backend health")
+	}
 }
 
 func TestAnycastGroupGetActiveBackendWithIndexReset(t *testing.T) {
@@ -432,6 +508,26 @@ func TestAnycastGroupGetActiveBackendEmpty(t *testing.T) {
 	backend := group.GetActiveBackend()
 	if backend != nil {
 		t.Error("Expected nil for empty group")
+	}
+}
+
+func TestAnycastGroupGetActiveBackendSkipsNilBackends(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	backend := &AnycastBackend{PhysicalIP: "10.0.1.1", Port: 53}
+	group.Backends = []*AnycastBackend{nil, backend}
+
+	active := group.GetActiveBackend()
+	if active != backend {
+		t.Fatalf("expected active backend to skip nil slot, got %#v", active)
+	}
+	if idx := atomic.LoadUint32(&group.activeIndex); idx != 1 {
+		t.Fatalf("expected active index 1 after nil skip, got %d", idx)
+	}
+
+	group.Backends = []*AnycastBackend{nil}
+	atomic.StoreUint32(&group.activeIndex, 0)
+	if active := group.GetActiveBackend(); active != nil {
+		t.Fatalf("expected nil when all active backends are nil, got %#v", active)
 	}
 }
 
@@ -563,6 +659,34 @@ func TestAnycastGroupSelectBackendNoPreferredRegion(t *testing.T) {
 	}
 }
 
+func TestAnycastGroupSelectBackendSkipsNilBackends(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	group.Backends = []*AnycastBackend{
+		nil,
+		{
+			PhysicalIP: "10.0.1.1",
+			Port:       53,
+			Region:     "us-east-1",
+			Zone:       "a",
+			Weight:     50,
+			healthy:    true,
+		},
+	}
+
+	selected := group.SelectBackend("us-east-1", "a")
+	if selected == nil {
+		t.Fatal("SelectBackend returned nil")
+	}
+	if selected.PhysicalIP != "10.0.1.1" {
+		t.Fatalf("expected non-nil backend, got %#v", selected)
+	}
+
+	group.Backends = []*AnycastBackend{nil}
+	if selected := group.SelectBackend("", ""); selected != nil {
+		t.Fatalf("expected nil when all backends are nil, got %#v", selected)
+	}
+}
+
 func TestWeightedSelectAllZeroWeights(t *testing.T) {
 	backends := []*AnycastBackend{
 		{PhysicalIP: "10.0.1.1", Weight: 0, healthy: true},
@@ -576,6 +700,66 @@ func TestWeightedSelectAllZeroWeights(t *testing.T) {
 		if selected == nil {
 			t.Error("Expected selection with all zero weights")
 		}
+	}
+}
+
+func TestWeightedSelectEmptyBackends(t *testing.T) {
+	if selected := weightedSelect(nil); selected != nil {
+		t.Fatalf("expected nil for nil backend slice, got %#v", selected)
+	}
+	if selected := weightedSelect([]*AnycastBackend{}); selected != nil {
+		t.Fatalf("expected nil for empty backend slice, got %#v", selected)
+	}
+}
+
+func TestWeightedSelectSkipsNilBackends(t *testing.T) {
+	backend := &AnycastBackend{PhysicalIP: "10.0.1.1", Weight: 100, healthy: true}
+
+	if selected := weightedSelect([]*AnycastBackend{nil, backend}); selected != backend {
+		t.Fatalf("expected non-nil backend, got %#v", selected)
+	}
+	if selected := weightedSelect([]*AnycastBackend{nil, nil}); selected != nil {
+		t.Fatalf("expected nil when all weighted backends are nil, got %#v", selected)
+	}
+}
+
+func TestWeightedSelectAllZeroWeightsRandFailureFallsBack(t *testing.T) {
+	originalRandInt := secureRandInt
+	secureRandInt = func(io.Reader, *big.Int) (*big.Int, error) {
+		return nil, errors.New("random unavailable")
+	}
+	t.Cleanup(func() {
+		secureRandInt = originalRandInt
+	})
+
+	backends := []*AnycastBackend{
+		{PhysicalIP: "10.0.1.1", Weight: 0, healthy: true},
+		{PhysicalIP: "10.0.1.2", Weight: 0, healthy: true},
+	}
+
+	selected := weightedSelect(backends)
+	if selected != backends[0] {
+		t.Fatalf("expected first backend fallback, got %#v", selected)
+	}
+}
+
+func TestWeightedSelectWeightedRandFailureFallsBack(t *testing.T) {
+	originalRandInt := secureRandInt
+	secureRandInt = func(io.Reader, *big.Int) (*big.Int, error) {
+		return nil, errors.New("random unavailable")
+	}
+	t.Cleanup(func() {
+		secureRandInt = originalRandInt
+	})
+
+	backends := []*AnycastBackend{
+		{PhysicalIP: "10.0.1.1", Weight: 10, healthy: true},
+		{PhysicalIP: "10.0.1.2", Weight: 90, healthy: true},
+	}
+
+	selected := weightedSelect(backends)
+	if selected != backends[0] {
+		t.Fatalf("expected first backend fallback, got %#v", selected)
 	}
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 )
 
 // DNSSECConfig contains DNSSEC settings.
@@ -116,7 +117,11 @@ func unmarshalDNSSEC(node *Node, cfg *DNSSECConfig) error {
 					var key KeyConfig
 					key.PrivateKey = keyNode.GetString("private_key")
 					key.Type = keyNode.GetString("type")
-					key.Algorithm = uint8(getInt(keyNode, "algorithm", 0))
+					algorithm, err := getUint(keyNode, "algorithm", 0, 8)
+					if err != nil {
+						return err
+					}
+					key.Algorithm = uint8(algorithm)
 					cfg.Signing.Keys = append(cfg.Signing.Keys, key)
 				}
 			}
@@ -124,8 +129,12 @@ func unmarshalDNSSEC(node *Node, cfg *DNSSECConfig) error {
 
 		// Parse NSEC3 configuration
 		if nsec3Node := signingNode.Get("nsec3"); nsec3Node != nil {
+			iterations, err := getUint(nsec3Node, "iterations", 0, 16)
+			if err != nil {
+				return err
+			}
 			cfg.Signing.NSEC3 = &NSEC3Config{
-				Iterations: uint16(getInt(nsec3Node, "iterations", 0)),
+				Iterations: uint16(iterations),
 				Salt:       nsec3Node.GetString("salt"),
 				OptOut:     getBool(nsec3Node, "opt_out", false),
 			}
@@ -135,19 +144,45 @@ func unmarshalDNSSEC(node *Node, cfg *DNSSECConfig) error {
 	return nil
 }
 
+func getUint(node *Node, key string, defaultValue uint64, bitSize int) (uint64, error) {
+	child := node.Get(key)
+	if child == nil {
+		return defaultValue, nil
+	}
+	if child.Type != NodeScalar {
+		return 0, fmt.Errorf("%s: expected scalar unsigned integer", key)
+	}
+	value, err := strconv.ParseUint(child.Value, 10, bitSize)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid unsigned integer %q: %w", key, child.Value, err)
+	}
+	return value, nil
+}
+
 func unmarshalRRL(node *Node, cfg *RRLConfig) error {
 	if node.Type != NodeMapping {
 		return fmt.Errorf("expected mapping")
 	}
 
 	cfg.Enabled = getBool(node, "enabled", cfg.Enabled)
-	cfg.Rate = getInt(node, "rate", cfg.Rate)
-	cfg.Burst = getInt(node, "burst", cfg.Burst)
-	cfg.MaxBuckets = getInt(node, "max_buckets", cfg.MaxBuckets)
+	var err error
+	if cfg.Rate, err = getRequiredInt(node, "rate", cfg.Rate); err != nil {
+		return err
+	}
+	if cfg.Burst, err = getRequiredInt(node, "burst", cfg.Burst); err != nil {
+		return err
+	}
+	if cfg.MaxBuckets, err = getRequiredInt(node, "max_buckets", cfg.MaxBuckets); err != nil {
+		return err
+	}
 
 	// Backward-compatible aliases used by earlier examples.
-	cfg.Rate = getInt(node, "rate_limit", cfg.Rate)
-	cfg.MaxBuckets = getInt(node, "max_table_size", cfg.MaxBuckets)
+	if cfg.Rate, err = getRequiredInt(node, "rate_limit", cfg.Rate); err != nil {
+		return err
+	}
+	if cfg.MaxBuckets, err = getRequiredInt(node, "max_table_size", cfg.MaxBuckets); err != nil {
+		return err
+	}
 
 	return nil
 }

@@ -357,25 +357,26 @@ func TestLoadBalancer_QueryTCP_PackError(t *testing.T) {
 func TestLoadBalancer_CheckHealth_StandaloneServers(t *testing.T) {
 	lb := &LoadBalancer{
 		servers: []*Server{
-			{Address: "198.51.100.1:53", healthy: true, Timeout: 200 * time.Millisecond},
+			{Address: "127.0.0.1:1", healthy: true, Timeout: 200 * time.Millisecond},
 		},
 		udpPool:     make(map[string]*sync.Pool),
 		tcpPool:     make(map[string]*sync.Pool),
 		healthCheck: 30 * time.Second,
 	}
 
-	lb.udpPool["198.51.100.1:53"] = &sync.Pool{
+	lb.udpPool["127.0.0.1:1"] = &sync.Pool{
 		New: func() interface{} { return make([]byte, 4096) },
 	}
-	lb.tcpPool["198.51.100.1:53"] = &sync.Pool{
+	lb.tcpPool["127.0.0.1:1"] = &sync.Pool{
 		New: func() interface{} { return make([]byte, 65535) },
 	}
 
-	// checkHealth fires goroutines that try to connect. Non-routable address will fail.
-	lb.checkHealth()
-	time.Sleep(500 * time.Millisecond)
-	// Server should still be in initial state since queryUDP/TCP don't call markFailure
-	// (only queryWithFailover does)
+	for i := 0; i < 3; i++ {
+		lb.checkHealth()
+	}
+	if lb.servers[0].IsHealthy() {
+		t.Fatal("standalone server should be unhealthy after repeated failed health checks")
+	}
 }
 
 // ---------------------------------------------------------------------------

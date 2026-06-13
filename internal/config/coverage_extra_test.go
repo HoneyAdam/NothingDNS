@@ -124,6 +124,34 @@ func TestUnmarshalGeoDNS_Basic(t *testing.T) {
 	}
 }
 
+func TestUnmarshalGeoDNSNestedRecords(t *testing.T) {
+	cfg, err := UnmarshalYAML(`
+geodns:
+  enabled: true
+  rules:
+    -
+      domain: cdn.example.com.
+      type: A
+      default: 203.0.113.10
+      records:
+        US: "192.0.2.1"
+        DE: "192.0.2.2"
+`)
+	if err != nil {
+		t.Fatalf("UnmarshalYAML: %v", err)
+	}
+	if len(cfg.GeoDNS.Rules) != 1 {
+		t.Fatalf("expected 1 GeoDNS rule, got %d", len(cfg.GeoDNS.Rules))
+	}
+	rule := cfg.GeoDNS.Rules[0]
+	if rule.Records["US"] != "192.0.2.1" {
+		t.Fatalf("US record = %q, want 192.0.2.1", rule.Records["US"])
+	}
+	if rule.Records["DE"] != "192.0.2.2" {
+		t.Fatalf("DE record = %q, want 192.0.2.2", rule.Records["DE"])
+	}
+}
+
 func TestUnmarshalGeoDNS_NotMapping(t *testing.T) {
 	node := &Node{Type: NodeScalar}
 	var cfg GeoDNSConfig

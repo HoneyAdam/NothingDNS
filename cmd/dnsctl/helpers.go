@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const maxAPIResponseBody = 10 << 20
+
 // ============================================================================
 // HTTP client helpers
 // ============================================================================
@@ -53,7 +55,7 @@ func doAPIRequest(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	respBody, err := readAPIResponseBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
@@ -67,6 +69,17 @@ func doAPIRequest(req *http.Request) ([]byte, error) {
 		return nil, fmt.Errorf("server error (%d): %s", resp.StatusCode, string(respBody))
 	}
 	return respBody, nil
+}
+
+func readAPIResponseBody(r io.Reader) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxAPIResponseBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > maxAPIResponseBody {
+		return nil, fmt.Errorf("response body exceeds %d byte limit", maxAPIResponseBody)
+	}
+	return body, nil
 }
 
 func apiRequest(method, path, body string) (map[string]interface{}, error) {

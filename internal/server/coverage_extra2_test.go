@@ -474,8 +474,7 @@ func TestUDPServerHandleRequestUnpackError(t *testing.T) {
 }
 
 // ==============================================================================
-// TCP Write - Pack error with oversized message
-// Line 269-271: msg.Pack returns error when message is too large
+// TCP Write - oversized message is truncated before write
 // ==============================================================================
 
 func TestTCPResponseWriterPackErrorOversized(t *testing.T) {
@@ -483,8 +482,23 @@ func TestTCPResponseWriterPackErrorOversized(t *testing.T) {
 	defer serverConn.Close()
 	defer clientConn.Close()
 
-	// Drain client side
-	go io.Copy(io.Discard, clientConn)
+	type readResult struct {
+		length  uint16
+		payload []byte
+		err     error
+	}
+	resultCh := make(chan readResult, 1)
+	go func() {
+		var lengthBuf [2]byte
+		if _, err := io.ReadFull(clientConn, lengthBuf[:]); err != nil {
+			resultCh <- readResult{err: err}
+			return
+		}
+		length := binary.BigEndian.Uint16(lengthBuf[:])
+		payload := make([]byte, length)
+		_, err := io.ReadFull(clientConn, payload)
+		resultCh <- readResult{length: length, payload: payload, err: err}
+	}()
 
 	rw := &tcpResponseWriter{
 		conn:    serverConn,
@@ -493,12 +507,6 @@ func TestTCPResponseWriterPackErrorOversized(t *testing.T) {
 		writeMu: &sync.Mutex{},
 	}
 
-	// Build a message so large that Pack will fail on the internal buffer.
-	// The Write method allocates buf := make([]byte, TCPMaxMessageSize) and calls
-	// msg.Pack(buf[2:]), leaving 65533 bytes. We need a message whose WireLength > 65533.
-	// Each A record is ~16 bytes (name compression + type + class + ttl + rdlength + addr).
-	// We need roughly 65533 / 16 ~ 4096 records. But the question section adds overhead.
-	// Let's add enough records to exceed the buffer.
 	msg := &protocol.Message{
 		Header: protocol.Header{
 			ID:    0x7777,
@@ -514,7 +522,6 @@ func TestTCPResponseWriterPackErrorOversized(t *testing.T) {
 	}
 
 	name := mustParseName("huge.example.com.")
-	// Add many A records to exceed 65533 bytes
 	for i := 0; i < 4500; i++ {
 		msg.AddAnswer(&protocol.ResourceRecord{
 			Name:  name,
@@ -527,15 +534,37 @@ func TestTCPResponseWriterPackErrorOversized(t *testing.T) {
 		})
 	}
 
-	_, err := rw.Write(msg)
-	if err == nil {
-		t.Error("Expected Pack error for oversized message, but Write succeeded")
+	written, err := rw.Write(msg)
+	if err != nil {
+		t.Fatalf("Write should truncate oversized response: %v", err)
+	}
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("client read failed: %v", result.err)
+	}
+	if int(result.length) > rw.maxSize {
+		t.Fatalf("TCP length prefix = %d, want <= %d", result.length, rw.maxSize)
+	}
+	if written != int(result.length)+2 {
+		t.Fatalf("Write returned %d bytes, want %d", written, int(result.length)+2)
+	}
+	if len(result.payload) < protocol.HeaderLen {
+		t.Fatalf("payload length = %d, want at least DNS header length %d", len(result.payload), protocol.HeaderLen)
+	}
+	var got protocol.Header
+	if err := got.Unpack(result.payload[:protocol.HeaderLen]); err != nil {
+		t.Fatalf("header unpack failed: %v", err)
+	}
+	if !got.Flags.TC {
+		t.Fatal("truncated response should set TC flag")
+	}
+	if got.ANCount == 0 || got.ANCount >= 4500 {
+		t.Fatalf("truncated answer count = %d, want between 1 and 4499", got.ANCount)
 	}
 }
 
 // ==============================================================================
-// TLS Write - Pack error with oversized message
-// Line 292-294: msg.Pack returns error when message is too large
+// TLS Write - oversized message is truncated before write
 // ==============================================================================
 
 func TestTLSResponseWriterPackErrorOversized(t *testing.T) {
@@ -548,14 +577,29 @@ func TestTLSResponseWriterPackErrorOversized(t *testing.T) {
 	}
 	defer ln.Close()
 
-	// Accept in background
+	type readResult struct {
+		length  uint16
+		payload []byte
+		err     error
+	}
+	resultCh := make(chan readResult, 1)
 	go func() {
 		conn, acceptErr := ln.Accept()
 		if acceptErr != nil {
+			resultCh <- readResult{err: acceptErr}
 			return
 		}
 		defer conn.Close()
-		io.Copy(io.Discard, conn)
+
+		var lengthBuf [2]byte
+		if _, err := io.ReadFull(conn, lengthBuf[:]); err != nil {
+			resultCh <- readResult{err: err}
+			return
+		}
+		length := binary.BigEndian.Uint16(lengthBuf[:])
+		payload := make([]byte, length)
+		_, err := io.ReadFull(conn, payload)
+		resultCh <- readResult{length: length, payload: payload, err: err}
 	}()
 
 	tlsClientConfig := &tls.Config{InsecureSkipVerify: true}
@@ -599,18 +643,40 @@ func TestTLSResponseWriterPackErrorOversized(t *testing.T) {
 		})
 	}
 
-	_, err = rw.Write(msg)
-	if err == nil {
-		t.Error("Expected Pack error for oversized message, but Write succeeded")
+	written, err := rw.Write(msg)
+	if err != nil {
+		t.Fatalf("Write should truncate oversized response: %v", err)
+	}
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("server read failed: %v", result.err)
+	}
+	if int(result.length) > rw.maxSize {
+		t.Fatalf("TLS length prefix = %d, want <= %d", result.length, rw.maxSize)
+	}
+	if written != int(result.length)+2 {
+		t.Fatalf("Write returned %d bytes, want %d", written, int(result.length)+2)
+	}
+	if len(result.payload) < protocol.HeaderLen {
+		t.Fatalf("payload length = %d, want at least DNS header length %d", len(result.payload), protocol.HeaderLen)
+	}
+	var got protocol.Header
+	if err := got.Unpack(result.payload[:protocol.HeaderLen]); err != nil {
+		t.Fatalf("header unpack failed: %v", err)
+	}
+	if !got.Flags.TC {
+		t.Fatal("truncated response should set TC flag")
+	}
+	if got.ANCount == 0 || got.ANCount >= 4500 {
+		t.Fatalf("truncated answer count = %d, want between 1 and 4499", got.ANCount)
 	}
 }
 
 // ==============================================================================
-// UDP Write - Pack error with oversized message
-// Line 276-278: msg.Pack returns error when message is too large
+// UDP Write - oversized message is truncated before send
 // ==============================================================================
 
-func TestUDPResponseWriterPackErrorOversized(t *testing.T) {
+func TestUDPResponseWriterTruncatesOversizedMessage(t *testing.T) {
 	server := NewUDPServerWithWorkers("127.0.0.1:0", HandlerFunc(func(w ResponseWriter, req *protocol.Message) {}), 1)
 	mockConn := &mockUDPConn{}
 	server.ListenWithConn(mockConn)
@@ -636,8 +702,9 @@ func TestUDPResponseWriterPackErrorOversized(t *testing.T) {
 	}
 
 	name := mustParseName("huge.example.com.")
-	// UDP Write allocates buf := make([]byte, MaxUDPPayloadSize) which is 4096 bytes
-	// We need enough records to exceed this buffer
+	// The untruncated response exceeds the pooled UDP buffer. Write should
+	// still send a record-boundary-truncated TC response instead of failing
+	// with ErrBufferTooSmall before truncation can run.
 	for i := 0; i < 500; i++ {
 		msg.AddAnswer(&protocol.ResourceRecord{
 			Name:  name,
@@ -650,9 +717,14 @@ func TestUDPResponseWriterPackErrorOversized(t *testing.T) {
 		})
 	}
 
-	_, err := rw.Write(msg)
-	if err == nil {
-		t.Error("Expected Pack error for oversized message, but Write succeeded")
+	if _, err := rw.Write(msg); err != nil {
+		t.Fatalf("Write failed for oversized UDP response: %v", err)
+	}
+	if !msg.Header.Flags.TC {
+		t.Fatal("expected TC bit after truncating oversized UDP response")
+	}
+	if len(msg.Answers) == 0 || len(msg.Answers) >= 500 {
+		t.Fatalf("answer count after truncation = %d, want record-boundary reduction", len(msg.Answers))
 	}
 }
 

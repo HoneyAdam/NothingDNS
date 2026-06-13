@@ -21,6 +21,10 @@ func (r *RDataNSEC3PARAM) Type() uint16 { return TypeNSEC3PARAM }
 
 // Pack serializes the NSEC3PARAM record to wire format.
 func (r *RDataNSEC3PARAM) Pack(buf []byte, offset int) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC3PARAM record")
+	}
+
 	startOffset := offset
 
 	// Hash Algorithm (1 byte)
@@ -67,6 +71,10 @@ func (r *RDataNSEC3PARAM) Pack(buf []byte, offset int) (int, error) {
 
 // Unpack deserializes the NSEC3PARAM record from wire format.
 func (r *RDataNSEC3PARAM) Unpack(buf []byte, offset int, rdlength uint16) (int, error) {
+	if r == nil {
+		return 0, fmt.Errorf("nil NSEC3PARAM record")
+	}
+
 	startOffset := offset
 	endOffset := offset + int(rdlength)
 
@@ -113,6 +121,10 @@ func (r *RDataNSEC3PARAM) Unpack(buf []byte, offset int, rdlength uint16) (int, 
 
 // String returns the NSEC3PARAM record in presentation format.
 func (r *RDataNSEC3PARAM) String() string {
+	if r == nil {
+		return ""
+	}
+
 	saltStr := "-"
 	if len(r.Salt) > 0 {
 		saltStr = hex.EncodeToString(r.Salt)
@@ -128,11 +140,19 @@ func (r *RDataNSEC3PARAM) String() string {
 
 // Len returns the wire length of the NSEC3PARAM record.
 func (r *RDataNSEC3PARAM) Len() int {
+	if r == nil {
+		return 0
+	}
+
 	return 1 + 1 + 2 + 1 + len(r.Salt)
 }
 
 // Copy creates a deep copy of the NSEC3PARAM record.
 func (r *RDataNSEC3PARAM) Copy() RData {
+	if r == nil {
+		return nil
+	}
+
 	saltCopy := make([]byte, len(r.Salt))
 	copy(saltCopy, r.Salt)
 	return &RDataNSEC3PARAM{
@@ -145,12 +165,20 @@ func (r *RDataNSEC3PARAM) Copy() RData {
 
 // IsOptOut returns true if the opt-out flag is set.
 func (r *RDataNSEC3PARAM) IsOptOut() bool {
+	if r == nil {
+		return false
+	}
+
 	return r.Flags&NSEC3FlagOptOut != 0
 }
 
 // ToNSEC3Params returns the hash parameters as an NSEC3Params struct.
 // This is useful for computing NSEC3 hashes.
 func (r *RDataNSEC3PARAM) ToNSEC3Params() NSEC3Params {
+	if r == nil {
+		return NSEC3Params{}
+	}
+
 	return NSEC3Params{
 		Algorithm:  r.HashAlgorithm,
 		Iterations: r.Iterations,
@@ -167,6 +195,10 @@ type NSEC3Params struct {
 
 // VerifyParams verifies that the parameters are valid per RFC 5155.
 func (r *RDataNSEC3PARAM) VerifyParams() error {
+	if r == nil {
+		return fmt.Errorf("nil NSEC3PARAM record")
+	}
+
 	// Check hash algorithm
 	if r.HashAlgorithm != NSEC3HashSHA1 {
 		return fmt.Errorf("unsupported NSEC3 hash algorithm: %d", r.HashAlgorithm)

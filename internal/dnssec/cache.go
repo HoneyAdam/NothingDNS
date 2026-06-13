@@ -37,6 +37,10 @@ type RRSIGCache struct {
 	ttl   time.Duration
 }
 
+func cacheExpiredAt(now, expiresAt time.Time) bool {
+	return !now.Before(expiresAt)
+}
+
 // NewValidationCache creates a new validation cache with the given TTL.
 func NewValidationCache(ttl time.Duration) *ValidationCache {
 	return &ValidationCache{
@@ -69,7 +73,7 @@ func (c *ValidationCache) Get(name string, qtype uint16) (ValidationResult, bool
 		return ValidationIndeterminate, false
 	}
 
-	if time.Now().After(entry.expiresAt) {
+	if cacheExpiredAt(time.Now(), entry.expiresAt) {
 		delete(c.items, key)
 		return ValidationIndeterminate, false
 	}
@@ -86,7 +90,7 @@ func (c *ValidationCache) Set(name string, qtype uint16, result ValidationResult
 	if len(c.items) > 10000 {
 		now := time.Now()
 		for key, entry := range c.items {
-			if now.After(entry.expiresAt) {
+			if cacheExpiredAt(now, entry.expiresAt) {
 				delete(c.items, key)
 			}
 		}
@@ -114,7 +118,7 @@ func (c *ValidationCache) Stats() (total, expired int) {
 	now := time.Now()
 	total = len(c.items)
 	for _, entry := range c.items {
-		if now.After(entry.expiresAt) {
+		if cacheExpiredAt(now, entry.expiresAt) {
 			expired++
 		}
 	}
@@ -129,7 +133,7 @@ func (c *ValidationCache) Purge() int {
 	now := time.Now()
 	var purged int
 	for key, entry := range c.items {
-		if now.After(entry.expiresAt) {
+		if cacheExpiredAt(now, entry.expiresAt) {
 			delete(c.items, key)
 			purged++
 		}
@@ -153,16 +157,24 @@ func (c *RRSIGCache) GetRRSIG(zone string, qtype uint16, dataHash [32]byte) (*pr
 		return nil, false
 	}
 
-	if time.Now().After(entry.expiresAt) {
+	if cacheExpiredAt(time.Now(), entry.expiresAt) {
+		delete(c.items, key)
+		return nil, false
+	}
+	if entry.rrsig == nil {
 		delete(c.items, key)
 		return nil, false
 	}
 
-	return entry.rrsig, true
+	return entry.rrsig.Copy(), true
 }
 
 // SetRRSIG stores an RRSIG in the cache.
 func (c *RRSIGCache) SetRRSIG(zone string, qtype uint16, data []byte, rrsig *protocol.ResourceRecord) {
+	if rrsig == nil {
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -170,7 +182,7 @@ func (c *RRSIGCache) SetRRSIG(zone string, qtype uint16, data []byte, rrsig *pro
 	if len(c.items) > 5000 {
 		now := time.Now()
 		for key, entry := range c.items {
-			if now.After(entry.expiresAt) {
+			if cacheExpiredAt(now, entry.expiresAt) {
 				delete(c.items, key)
 			}
 		}
@@ -178,7 +190,7 @@ func (c *RRSIGCache) SetRRSIG(zone string, qtype uint16, data []byte, rrsig *pro
 
 	dataHash := sha256.Sum256(data)
 	c.items[rrsigCacheKey(zone, qtype, dataHash)] = &rrsigCacheEntry{
-		rrsig:     rrsig,
+		rrsig:     rrsig.Copy(),
 		dataHash:  dataHash,
 		expiresAt: time.Now().Add(c.ttl),
 	}

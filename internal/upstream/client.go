@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +38,24 @@ func (s *Server) IsHealthy() bool {
 	return s.healthy
 }
 
+func (s *Server) snapshot() *Server {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return &Server{
+		Address:     s.Address,
+		Network:     s.Network,
+		Timeout:     s.Timeout,
+		HealthCheck: s.HealthCheck,
+		healthy:     s.healthy,
+		lastFailure: s.lastFailure,
+		failCount:   s.failCount,
+		latency:     s.latency,
+	}
+}
+
 // markFailure marks the server as having failed.
 func (s *Server) markFailure() {
 	s.mu.Lock()
@@ -60,9 +79,10 @@ func (s *Server) markSuccess(latency time.Duration) {
 // Client forwards DNS queries to upstream servers.
 type Client struct {
 	// Configuration
-	servers  []*Server
-	strategy Strategy
-	timeout  time.Duration
+	servers     []*Server
+	strategy    Strategy
+	timeout     time.Duration
+	healthCheck time.Duration
 
 	// Buffer pools
 	udpPool map[string]*sync.Pool // address -> buffer pool
@@ -120,7 +140,7 @@ type Config struct {
 
 // HealthCheckDuration returns the health check interval from the config.
 func (c *Config) HealthCheckDuration() time.Duration {
-	if c.HealthCheck == 0 {
+	if c.HealthCheck <= 0 {
 		return 30 * time.Second
 	}
 	return c.HealthCheck
@@ -141,11 +161,18 @@ func NewClient(config Config) (*Client, error) {
 	if len(config.Servers) == 0 {
 		return nil, fmt.Errorf("no upstream servers configured")
 	}
+	if config.Timeout <= 0 {
+		config.Timeout = 5 * time.Second
+	}
+	if config.HealthCheck <= 0 {
+		config.HealthCheck = 30 * time.Second
+	}
 
 	client := &Client{
 		servers:      make([]*Server, 0, len(config.Servers)),
 		strategy:     StrategyFromString(config.Strategy),
 		timeout:      config.Timeout,
+		healthCheck:  config.HealthCheck,
 		udpPool:      make(map[string]*sync.Pool),
 		tcpPool:      make(map[string]*sync.Pool),
 		tcpConnPools: make(map[string]*tcpConnPool),
@@ -196,12 +223,15 @@ func (c *Client) Close() error {
 
 	// Close all TCP connection pools
 	c.mu.Lock()
+	var closeErr error
 	for _, pool := range c.tcpConnPools {
-		pool.closeAll()
+		if err := pool.closeAll(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
 	}
 	c.mu.Unlock()
 
-	return nil
+	return closeErr
 }
 
 // RandomTXID generates a cryptographically random 16-bit transaction ID.
@@ -302,17 +332,14 @@ func (c *Client) selectRandom() *Server {
 	// Get list of healthy servers
 	var healthy []*Server
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			healthy = append(healthy, s)
 		}
 	}
 
 	if len(healthy) == 0 {
 		// Fallback to any server if none are healthy
-		if len(c.servers) > 0 {
-			return c.servers[0]
-		}
-		return nil
+		return firstClientServer(c.servers, 0)
 	}
 
 	// Simple round-robin via incrementing counter for now
@@ -338,13 +365,14 @@ func (c *Client) selectRoundRobin() *Server {
 	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(servers)
 	for i := 0; i < len(servers); i++ {
 		idx := (startIdx + i) % len(servers)
-		if servers[idx].IsHealthy() {
-			return servers[idx]
+		server := servers[idx]
+		if server != nil && server.IsHealthy() {
+			return server
 		}
 	}
 
 	// Fallback to starting position if no healthy servers
-	return servers[startIdx]
+	return firstClientServer(servers, startIdx)
 }
 
 // selectFastest selects the server with the lowest latency.
@@ -373,7 +401,7 @@ func (c *Client) selectFastest() *Server {
 	var lowestLatency time.Duration = -1
 
 	for _, s := range c.servers {
-		if !s.IsHealthy() {
+		if s == nil || !s.IsHealthy() {
 			continue
 		}
 
@@ -399,13 +427,26 @@ func (c *Client) selectFastest() *Server {
 	// No measured-healthy server — fall back to any healthy server
 	// so cold-start queries still get answered.
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return s
 		}
 	}
 
-	if len(c.servers) > 0 {
-		return c.servers[0]
+	return firstClientServer(c.servers, 0)
+}
+
+func firstClientServer(servers []*Server, start int) *Server {
+	if len(servers) == 0 {
+		return nil
+	}
+	if start < 0 || start >= len(servers) {
+		start = 0
+	}
+	for i := 0; i < len(servers); i++ {
+		idx := (start + i) % len(servers)
+		if servers[idx] != nil {
+			return servers[idx]
+		}
 	}
 	return nil
 }
@@ -484,7 +525,7 @@ func (c *Client) queryUDPBuf(server *Server, msg *protocol.Message, buf []byte) 
 
 	// Send query
 	start := time.Now()
-	if _, err := conn.Write(packed); err != nil {
+	if _, err := writePacket(conn, packed); err != nil {
 		return nil, fmt.Errorf("send query: %w", err)
 	}
 
@@ -599,9 +640,13 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 			return
 		}
 		if returnToPool && hasPool {
-			pool.put(tc)
+			if err := pool.put(tc); err != nil {
+				util.Warnf("upstream TCP pool: failed to return connection for %s: %v", server.Address, err)
+			}
 		} else {
-			_ = tc.close()
+			if err := tc.close(); err != nil {
+				util.Warnf("upstream TCP: failed to close connection for %s: %v", server.Address, err)
+			}
 		}
 	}()
 
@@ -613,15 +658,19 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Send length-prefixed query
 	length := uint16(len(packed))
 	lengthBuf := []byte{byte(length >> 8), byte(length)}
-	if _, err := tc.conn.Write(lengthBuf); err != nil {
-		_ = tc.close()
+	if err := util.WriteFull(tc.conn, lengthBuf); err != nil {
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil // don't return broken conn to pool
 		return nil, fmt.Errorf("send length: %w", err)
 	}
 
 	start := time.Now()
-	if _, err := tc.conn.Write(packed); err != nil {
-		_ = tc.close()
+	if err := util.WriteFull(tc.conn, packed); err != nil {
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("send query: %w", err)
 	}
@@ -629,7 +678,9 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read length prefix
 	respLenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(tc.conn, respLenBuf); err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("read length: %w", err)
 	}
@@ -642,7 +693,9 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read response
 	_, err = io.ReadFull(tc.conn, buf[:respLen])
 	if err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -650,7 +703,13 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	latency := time.Since(start)
 
 	// Clear deadline so connection can be reused
-	_ = tc.conn.SetDeadline(time.Time{})
+	if err := tc.conn.SetDeadline(time.Time{}); err != nil {
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close tcp connection after deadline reset failure: %w", closeErr))
+		}
+		tc = nil
+		return nil, fmt.Errorf("reset deadline: %w", err)
+	}
 
 	// Parse response
 	resp, err = protocol.UnpackMessage(buf[:respLen])
@@ -663,11 +722,22 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	return resp, nil
 }
 
+func writePacket(conn net.Conn, data []byte) (int, error) {
+	n, err := conn.Write(data)
+	if err != nil {
+		return n, err
+	}
+	if n != len(data) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
+}
+
 // healthCheckLoop periodically checks server health.
 func (c *Client) healthCheckLoop(ctx context.Context) {
 	defer c.wg.Done()
 
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(c.healthCheck)
 	defer ticker.Stop()
 
 	for {
@@ -697,7 +767,15 @@ func (c *Client) checkHealth() {
 	}
 
 	var healthWg sync.WaitGroup
-	for _, server := range c.servers {
+	c.mu.RLock()
+	servers := make([]*Server, len(c.servers))
+	copy(servers, c.servers)
+	c.mu.RUnlock()
+
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
 		healthWg.Add(1)
 		go func(s *Server) {
 			defer healthWg.Done()
@@ -736,7 +814,7 @@ func (c *Client) IsHealthy() bool {
 	defer c.mu.RUnlock()
 
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return true
 		}
 	}
@@ -745,7 +823,14 @@ func (c *Client) IsHealthy() bool {
 
 // Servers returns the list of upstream servers.
 func (c *Client) Servers() []*Server {
-	return c.servers
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	servers := make([]*Server, len(c.servers))
+	for i, server := range c.servers {
+		servers[i] = server.snapshot()
+	}
+	return servers
 }
 
 // AddServer adds a new upstream server dynamically.
@@ -755,7 +840,7 @@ func (c *Client) AddServer(addr string) error {
 
 	// Check if server already exists
 	for _, s := range c.servers {
-		if s.Address == addr {
+		if s != nil && s.Address == addr {
 			return fmt.Errorf("server %s already exists", addr)
 		}
 	}
@@ -796,6 +881,9 @@ func (c *Client) RemoveServer(addr string) error {
 	found := false
 	newServers := make([]*Server, 0, len(c.servers))
 	for _, s := range c.servers {
+		if s == nil {
+			continue
+		}
 		if s.Address == addr {
 			found = true
 			continue
@@ -813,7 +901,9 @@ func (c *Client) RemoveServer(addr string) error {
 	delete(c.udpPool, addr)
 	delete(c.tcpPool, addr)
 	if pool, ok := c.tcpConnPools[addr]; ok {
-		pool.closeAll()
+		if err := pool.closeAll(); err != nil {
+			return err
+		}
 		delete(c.tcpConnPools, addr)
 	}
 

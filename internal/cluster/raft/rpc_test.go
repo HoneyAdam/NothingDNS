@@ -2,6 +2,8 @@ package raft
 
 import (
 	"context"
+	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +114,75 @@ func TestInMemoryTransport_SelfRouting(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for self-routing, got nil")
 	}
+}
+
+type nonDeadlineListener struct{}
+
+func (nonDeadlineListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (nonDeadlineListener) Close() error              { return nil }
+func (nonDeadlineListener) Addr() net.Addr            { return dummyAddr("non-deadline") }
+
+type dummyAddr string
+
+func (a dummyAddr) Network() string { return "test" }
+func (a dummyAddr) String() string  { return string(a) }
+
+func TestSetListenerDeadlineHandlesWrappedListeners(t *testing.T) {
+	deadline := time.Now().Add(time.Second)
+	if err := setListenerDeadline(nonDeadlineListener{}, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(nonDeadlineListener) error = %v", err)
+	}
+	if err := setListenerDeadline(nil, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(nil) error = %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen: %v", err)
+	}
+	defer listener.Close()
+	if err := setListenerDeadline(listener, deadline); err != nil {
+		t.Fatalf("setListenerDeadline(tcp listener) error = %v", err)
+	}
+}
+
+func TestTCPTransportExchangeReturnsDeadlineErrorAndDropsConn(t *testing.T) {
+	deadlineErr := errors.New("deadline unavailable")
+	client, server := net.Pipe()
+	defer server.Close()
+
+	conn := &deadlineErrorConn{Conn: client, deadlineErr: deadlineErr}
+	transport := NewTCPTransport(nil, nil)
+	transport.conns["peer"] = conn
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Second))
+	defer cancel()
+
+	err := transport.exchange(ctx, "peer", msgTypeVoteRequest, VoteRequest{}, msgTypeVoteResponse, &VoteResponse{})
+	if !errors.Is(err, deadlineErr) {
+		t.Fatalf("exchange error = %v, want %v", err, deadlineErr)
+	}
+	if !conn.closed {
+		t.Fatal("deadline failure should close the cached connection")
+	}
+	if _, ok := transport.conns["peer"]; ok {
+		t.Fatal("deadline failure should remove the cached connection")
+	}
+}
+
+type deadlineErrorConn struct {
+	net.Conn
+	deadlineErr error
+	closed      bool
+}
+
+func (c *deadlineErrorConn) SetDeadline(time.Time) error {
+	return c.deadlineErr
+}
+
+func (c *deadlineErrorConn) Close() error {
+	c.closed = true
+	return c.Conn.Close()
 }
 
 // blockingHandler is an RPCHandler that responds with a zero response

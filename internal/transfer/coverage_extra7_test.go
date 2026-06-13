@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -389,4 +390,84 @@ func TestHandleIXFR_GetTSIGKeyNameDeadCode_Extra7(t *testing.T) {
 
 func TestHandleAXFR_GetTSIGKeyNameDeadCode_Extra7(t *testing.T) {
 	t.Skip("unreachable: getTSIGKeyName cannot fail after hasTSIG returns true")
+}
+
+type xotShortWriteConn struct {
+	maxWrite int
+	written  []byte
+}
+
+func (c *xotShortWriteConn) Read([]byte) (int, error) {
+	return 0, net.ErrClosed
+}
+
+func (c *xotShortWriteConn) Write(b []byte) (int, error) {
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	n := c.maxWrite
+	if n > len(b) {
+		n = len(b)
+	}
+	c.written = append(c.written, b[:n]...)
+	return n, nil
+}
+
+func (c *xotShortWriteConn) Close() error                     { return nil }
+func (c *xotShortWriteConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *xotShortWriteConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *xotShortWriteConn) SetDeadline(time.Time) error      { return nil }
+func (c *xotShortWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *xotShortWriteConn) SetWriteDeadline(time.Time) error { return nil }
+
+func TestWriteXoTFrameRetriesShortWrites_Extra7(t *testing.T) {
+	conn := &xotShortWriteConn{maxWrite: 1}
+	frame := []byte{0, 0, 0xaa, 0xbb, 0xcc}
+	if err := writeXoTFrame(conn, frame, 3); err != nil {
+		t.Fatalf("writeXoTFrame error: %v", err)
+	}
+
+	want := []byte{0, 3, 0xaa, 0xbb, 0xcc}
+	if len(conn.written) != len(want) {
+		t.Fatalf("written length = %d, want %d", len(conn.written), len(want))
+	}
+	for i := range want {
+		if conn.written[i] != want[i] {
+			t.Fatalf("written[%d] = %#x, want %#x", i, conn.written[i], want[i])
+		}
+	}
+}
+
+func TestWriteXoTFrameRejectsZeroProgress_Extra7(t *testing.T) {
+	conn := &xotShortWriteConn{maxWrite: 0}
+	err := writeXoTFrame(conn, []byte{0, 0, 0xaa}, 1)
+	if err != io.ErrShortWrite {
+		t.Fatalf("writeXoTFrame error = %v, want %v", err, io.ErrShortWrite)
+	}
+}
+
+func TestCloseXoTConnReturnsCloseError_Extra7(t *testing.T) {
+	closeErr := errors.New("close failed")
+	conn := &xotCloseErrorConn{err: closeErr}
+
+	if err := closeXoTConn(conn); !errors.Is(err, closeErr) {
+		t.Fatalf("closeXoTConn error = %v, want %v", err, closeErr)
+	}
+	if !conn.closed {
+		t.Fatal("closeXoTConn should call Close")
+	}
+	if err := closeXoTConn(nil); err != nil {
+		t.Fatalf("closeXoTConn(nil) = %v, want nil", err)
+	}
+}
+
+type xotCloseErrorConn struct {
+	xotShortWriteConn
+	err    error
+	closed bool
+}
+
+func (c *xotCloseErrorConn) Close() error {
+	c.closed = true
+	return c.err
 }

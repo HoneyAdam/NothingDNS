@@ -216,8 +216,7 @@ func TestRemainingTTL_ExactlyExpired(t *testing.T) {
 	}
 
 	remaining := entry.RemainingTTL(now)
-	// When now == ExpireTime, IsExpired returns false (now is not After ExpireTime).
-	// remaining = ExpireTime.Sub(now) = 0, which is >= 0, so result is 0.
+	// At the exact expiry boundary the entry is expired and has no TTL left.
 	if remaining != 0 {
 		t.Errorf("expected 0 remaining TTL when now == ExpireTime, got %d", remaining)
 	}

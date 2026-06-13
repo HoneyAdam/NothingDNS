@@ -454,6 +454,30 @@ func TestEntryRemainingTTL(t *testing.T) {
 	if remaining != 0 {
 		t.Errorf("expected 0 seconds remaining (expired), got %d", remaining)
 	}
+
+	entry.ExpireTime = now
+	if !entry.IsExpired(now) {
+		t.Error("expected entry to be expired exactly at ExpireTime")
+	}
+	remaining = entry.RemainingTTL(now)
+	if remaining != 0 {
+		t.Errorf("expected 0 seconds remaining at exact expiry, got %d", remaining)
+	}
+
+	var nilEntry *Entry
+	if !nilEntry.IsExpired(now) {
+		t.Error("expected nil entry to be treated as expired")
+	}
+	remaining = nilEntry.RemainingTTL(now)
+	if remaining != 0 {
+		t.Errorf("expected 0 seconds remaining for nil entry, got %d", remaining)
+	}
+
+	entry.ExpireTime = now.Add(time.Duration(int64(^uint32(0))+1) * time.Second)
+	remaining = entry.RemainingTTL(now)
+	if remaining != ^uint32(0) {
+		t.Errorf("expected saturated remaining TTL %d, got %d", ^uint32(0), remaining)
+	}
 }
 
 func TestMakeKey(t *testing.T) {
@@ -661,6 +685,50 @@ func TestCacheInvalidatePattern(t *testing.T) {
 	}
 }
 
+func TestCacheInvalidatePatternRequiresLabelBoundary(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = 128
+	c := New(config)
+
+	exampleKey := MakeKey("www.example.com", 1, false)
+	partialSuffixKey := MakeKey("www.badexample.com", 1, false)
+	substringKey := MakeKey("www.sample.com", 1, false)
+	c.SetNegative(exampleKey, 3)
+	c.SetNegative(partialSuffixKey, 3)
+	c.SetNegative(substringKey, 3)
+
+	invalidated := c.InvalidatePattern("example.com.")
+	if len(invalidated) != 1 || invalidated[0] != exampleKey {
+		t.Fatalf("InvalidatePattern invalidated %v, want only %q", invalidated, exampleKey)
+	}
+
+	if c.Get(exampleKey) != nil {
+		t.Error("expected www.example.com to be invalidated")
+	}
+	if c.Get(partialSuffixKey) == nil {
+		t.Error("expected www.badexample.com to survive partial-label suffix pattern")
+	}
+	if c.Get(substringKey) == nil {
+		t.Error("expected www.sample.com to survive substring pattern")
+	}
+}
+
+func TestCacheInvalidatePatternEmptyNoop(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = 128
+	c := New(config)
+
+	key := MakeKey("example.com", 1, false)
+	c.SetNegative(key, 3)
+
+	if invalidated := c.InvalidatePattern("  .  "); len(invalidated) != 0 {
+		t.Fatalf("empty pattern invalidated %v, want none", invalidated)
+	}
+	if c.Get(key) == nil {
+		t.Error("expected cache entry to survive empty invalidation pattern")
+	}
+}
+
 func TestCacheGetPrefetchable(t *testing.T) {
 	config := DefaultConfig()
 	config.Capacity = 128
@@ -821,6 +889,11 @@ func TestEntryShouldPrefetch(t *testing.T) {
 		t.Error("should not prefetch before prefetch time")
 	}
 
+	// Exactly at prefetch time
+	if !entry.ShouldPrefetch(now.Add(30 * time.Second)) {
+		t.Error("should prefetch exactly at prefetch time")
+	}
+
 	// After prefetch time
 	if !entry.ShouldPrefetch(now.Add(35 * time.Second)) {
 		t.Error("should prefetch after prefetch time")
@@ -835,6 +908,11 @@ func TestEntryShouldPrefetch(t *testing.T) {
 
 	if entry2.ShouldPrefetch(now.Add(35 * time.Second)) {
 		t.Error("should not prefetch when CanPrefetch is false")
+	}
+
+	var nilEntry *Entry
+	if nilEntry.ShouldPrefetch(now) {
+		t.Error("nil entry should not prefetch")
 	}
 }
 
@@ -996,6 +1074,31 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSetCopiesMessage(t *testing.T) {
+	cache := New(Config{Capacity: 100, MinTTL: time.Second, MaxTTL: time.Hour})
+	msg := newTestMessage()
+
+	cache.Set("test.com:1", msg, 300)
+
+	msg.Header.ID = 0xBEEF
+	msg.Questions[0].QType = protocol.TypeAAAA
+	msg.Answers[0].TTL = 1
+
+	entry := cache.Get("test.com:1")
+	if entry == nil || entry.Message == nil {
+		t.Fatal("expected cached message")
+	}
+	if entry.Message.Header.ID != 1234 {
+		t.Fatalf("cached header ID mutated through Set input: got %#x", entry.Message.Header.ID)
+	}
+	if entry.Message.Questions[0].QType != protocol.TypeA {
+		t.Fatalf("cached question mutated through Set input: got %d", entry.Message.Questions[0].QType)
+	}
+	if entry.Message.Answers[0].TTL != 300 {
+		t.Fatalf("cached answer TTL mutated through Set input: got %d", entry.Message.Answers[0].TTL)
+	}
+}
+
 func TestSave_SkipsNegative(t *testing.T) {
 	cache := New(Config{Capacity: 100, MinTTL: 60 * time.Second, NegativeTTL: 30 * time.Second})
 
@@ -1044,6 +1147,30 @@ func TestLoad_InvalidWire(t *testing.T) {
 	}
 }
 
+func TestLoad_ClampsFarFutureExpiry(t *testing.T) {
+	cache := New(Config{Capacity: 100, MinTTL: time.Second, MaxTTL: time.Hour})
+	entries := []CacheEntryJSON{
+		{
+			Key:        "future.com:1",
+			WireBytes:  validWireMessage(t),
+			TTL:        300,
+			ExpireTime: time.Now().Add(time.Duration(int64(^uint32(0))+1) * time.Second),
+		},
+	}
+
+	restored := cache.Load(entries)
+	if restored != 1 {
+		t.Fatalf("Load restored %d entries, want 1", restored)
+	}
+	entry := cache.Get("future.com:1")
+	if entry == nil {
+		t.Fatal("future.com:1 should be restored")
+	}
+	if entry.RemainingTTL(time.Now()) > uint32(time.Hour/time.Second) {
+		t.Errorf("restored TTL = %d, want <= 3600 after cache maxTTL clamp", entry.RemainingTTL(time.Now()))
+	}
+}
+
 func validWireMessage(t *testing.T) []byte {
 	t.Helper()
 	msg := &protocol.Message{
@@ -1056,4 +1183,36 @@ func validWireMessage(t *testing.T) []byte {
 		t.Fatalf("Failed to pack test message: %v", err)
 	}
 	return buf[:n]
+}
+
+// TestSetNegativeWithTTLCeiling verifies the operator-configured negative TTL
+// acts as a ceiling on RFC 2308 SOA-derived negative TTLs: a hostile or
+// misconfigured upstream SOA can shorten negative caching but never extend it
+// past cache.negative_ttl.
+func TestSetNegativeWithTTLCeiling(t *testing.T) {
+	c := New(Config{
+		Capacity:    16,
+		NegativeTTL: 60 * time.Second,
+		MaxTTL:      24 * time.Hour,
+	})
+
+	// SOA-derived TTL far above the configured ceiling → clamped to 60s.
+	c.SetNegativeWithTTL("pinned.example.|1|0", 3, 86400)
+	entry := c.Get("pinned.example.|1|0")
+	if entry == nil || !entry.IsNegative {
+		t.Fatal("expected negative cache entry")
+	}
+	if remaining := time.Until(entry.ExpireTime); remaining > 61*time.Second {
+		t.Fatalf("negative TTL = %v, want <= configured negative_ttl (60s)", remaining)
+	}
+
+	// SOA-derived TTL below the ceiling → honored as-is (RFC 2308).
+	c.SetNegativeWithTTL("short.example.|1|0", 3, 5)
+	entry = c.Get("short.example.|1|0")
+	if entry == nil || !entry.IsNegative {
+		t.Fatal("expected negative cache entry")
+	}
+	if remaining := time.Until(entry.ExpireTime); remaining > 6*time.Second {
+		t.Fatalf("negative TTL = %v, want SOA-derived ~5s", remaining)
+	}
 }

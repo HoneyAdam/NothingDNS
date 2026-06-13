@@ -83,6 +83,14 @@ func TestParseDNSKEYPublicKeyEd25519(t *testing.T) {
 	if parsedKey.Algorithm != protocol.AlgorithmED25519 {
 		t.Errorf("Algorithm mismatch: got %d, want %d", parsedKey.Algorithm, protocol.AlgorithmED25519)
 	}
+	parsedEdKey, ok := parsedKey.Key.(ed25519.PublicKey)
+	if !ok {
+		t.Fatalf("Parsed key type = %T, want ed25519.PublicKey", parsedKey.Key)
+	}
+	pubKey[0] ^= 0xFF
+	if parsedEdKey[0] == pubKey[0] {
+		t.Fatal("ParseDNSKEYPublicKey should copy Ed25519 public key bytes")
+	}
 }
 
 func TestParseDNSKEYPublicKeyInvalid(t *testing.T) {
@@ -228,6 +236,13 @@ func TestVerifySignatureInvalid(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for algorithm mismatch")
 	}
+
+	if err := VerifySignature(nil, []byte("data"), pub); err == nil {
+		t.Error("Expected error for nil signature")
+	}
+	if err := VerifySignature(sig, []byte("data"), nil); err == nil {
+		t.Error("Expected error for nil public key")
+	}
 }
 
 func TestGenerateKeyPairRSA(t *testing.T) {
@@ -316,6 +331,9 @@ func TestSignDataAlgorithmMismatch(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for algorithm mismatch")
 	}
+	if _, err = SignData(protocol.AlgorithmRSASHA256, nil, []byte("data")); err == nil {
+		t.Error("Expected error for nil private key")
+	}
 }
 
 func TestPackDNSKEYPublicKey(t *testing.T) {
@@ -343,6 +361,82 @@ func TestPackDNSKEYPublicKeyInvalid(t *testing.T) {
 	_, err := PackDNSKEYPublicKey(key)
 	if err == nil {
 		t.Error("Expected error for invalid algorithm")
+	}
+	if _, err := PackDNSKEYPublicKey(nil); err == nil {
+		t.Error("Expected error for nil public key")
+	}
+}
+
+func TestPackDNSKEYPublicKeyRejectsInvalidTypedKeys(t *testing.T) {
+	p384Priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate P-384 key: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		key  *PublicKey
+	}{
+		{
+			name: "nil RSA public key",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmRSASHA256,
+				Key:       (*rsa.PublicKey)(nil),
+			},
+		},
+		{
+			name: "zero RSA modulus",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmRSASHA256,
+				Key:       &rsa.PublicKey{N: new(big.Int), E: 65537},
+			},
+		},
+		{
+			name: "incomplete ECDSA public key",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmECDSAP256SHA256,
+				Key:       &ecdsa.PublicKey{},
+			},
+		},
+		{
+			name: "off-curve ECDSA public key",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmECDSAP256SHA256,
+				Key:       &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)},
+			},
+		},
+		{
+			name: "wrong ECDSA curve for algorithm",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmECDSAP256SHA256,
+				Key:       &p384Priv.PublicKey,
+			},
+		},
+		{
+			name: "short Ed25519 public key",
+			key: &PublicKey{
+				Algorithm: protocol.AlgorithmED25519,
+				Key:       ed25519.PublicKey([]byte("short")),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := PackDNSKEYPublicKey(tt.key); err == nil {
+				t.Fatal("Expected error for invalid typed public key")
+			}
+		})
+	}
+}
+
+func TestParseECDSAPublicKeyRejectsOffCurvePoint(t *testing.T) {
+	keyData := make([]byte, 64)
+	keyData[31] = 1
+	keyData[63] = 1
+
+	if _, err := parseECDSAPublicKey(protocol.AlgorithmECDSAP256SHA256, keyData); err == nil {
+		t.Fatal("Expected error for off-curve ECDSA public key")
 	}
 }
 
@@ -497,6 +591,10 @@ func TestPackEd25519PublicKey(t *testing.T) {
 	if len(data) != 32 {
 		t.Errorf("Packed key length: got %d, want 32", len(data))
 	}
+	data[0] ^= 0xFF
+	if pubKey[0] == data[0] {
+		t.Fatal("PackDNSKEYPublicKey should copy Ed25519 public key bytes")
+	}
 }
 
 func TestSignDataInvalidAlgorithm(t *testing.T) {
@@ -564,6 +662,45 @@ func TestParseRSAPublicKeyExponentTooLong(t *testing.T) {
 	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
 	if err == nil {
 		t.Error("Expected error for exponent extending beyond key data")
+	}
+}
+
+func TestParseRSAPublicKeyRejectsOversizedExponent(t *testing.T) {
+	keyData := []byte{
+		0x05,                         // exponent length = 5 bytes
+		0x01, 0x00, 0x00, 0x00, 0x01, // exponent = 2^32 + 1
+		0x03, // minimal modulus byte so failure is specifically exponent validation
+	}
+
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
+	if err == nil {
+		t.Fatal("Expected error for oversized RSA exponent")
+	}
+}
+
+func TestParseRSAPublicKeyRejectsZeroExponent(t *testing.T) {
+	keyData := []byte{
+		0x01, // exponent length = 1 byte
+		0x00, // exponent = 0
+		0x03, // modulus
+	}
+
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
+	if err == nil {
+		t.Fatal("Expected error for zero RSA exponent")
+	}
+}
+
+func TestParseRSAPublicKeyRejectsZeroModulus(t *testing.T) {
+	keyData := []byte{
+		0x01, // exponent length = 1 byte
+		0x03, // exponent = 3
+		0x00, // modulus = 0
+	}
+
+	_, err := parseRSAPublicKey(protocol.AlgorithmRSASHA256, keyData)
+	if err == nil {
+		t.Fatal("Expected error for zero RSA modulus")
 	}
 }
 
@@ -779,6 +916,42 @@ func TestSignEd25519WrongKeyType(t *testing.T) {
 	}
 }
 
+func TestSignRejectsInvalidTypedKeys(t *testing.T) {
+	if _, err := signRSASHA256([]byte("data"), &PrivateKey{
+		Algorithm: protocol.AlgorithmRSASHA256,
+		Key:       (*rsa.PrivateKey)(nil),
+	}); err == nil {
+		t.Fatal("Expected error for nil RSA private key")
+	}
+	if _, err := signRSASHA256([]byte("data"), &PrivateKey{
+		Algorithm: protocol.AlgorithmRSASHA256,
+		Key:       &rsa.PrivateKey{PublicKey: rsa.PublicKey{N: new(big.Int), E: 65537}, D: big.NewInt(1)},
+	}); err == nil {
+		t.Fatal("Expected error for zero RSA modulus")
+	}
+	if _, err := signECDSA([]byte("data"), &PrivateKey{
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		Key:       &ecdsa.PrivateKey{},
+	}); err == nil {
+		t.Fatal("Expected error for incomplete ECDSA private key")
+	}
+	if _, err := signECDSA([]byte("data"), &PrivateKey{
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		Key: &ecdsa.PrivateKey{
+			PublicKey: ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)},
+			D:         big.NewInt(1),
+		},
+	}); err == nil {
+		t.Fatal("Expected error for off-curve ECDSA private key")
+	}
+	if _, err := signEd25519([]byte("data"), &PrivateKey{
+		Algorithm: protocol.AlgorithmED25519,
+		Key:       ed25519.PrivateKey([]byte("short")),
+	}); err == nil {
+		t.Fatal("Expected error for short Ed25519 private key")
+	}
+}
+
 func TestVerifyRSASHA256KeyNotRSA(t *testing.T) {
 	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -812,6 +985,39 @@ func TestVerifyRSASHA512KeyNotRSA(t *testing.T) {
 	err = VerifySignature(sig, []byte("data"), pub)
 	if err == nil {
 		t.Error("Expected error when key is not RSA for SHA-512")
+	}
+}
+
+func TestVerifyRejectsInvalidTypedKeys(t *testing.T) {
+	if err := verifyRSASHA256(make([]byte, 128), []byte("data"), &PublicKey{
+		Algorithm: protocol.AlgorithmRSASHA256,
+		Key:       (*rsa.PublicKey)(nil),
+	}); err == nil {
+		t.Fatal("Expected error for nil RSA public key")
+	}
+	if err := verifyRSASHA256(make([]byte, 128), []byte("data"), &PublicKey{
+		Algorithm: protocol.AlgorithmRSASHA256,
+		Key:       &rsa.PublicKey{N: new(big.Int), E: 65537},
+	}); err == nil {
+		t.Fatal("Expected error for zero RSA modulus")
+	}
+	if err := verifyECDSA(make([]byte, 64), []byte("data"), &PublicKey{
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		Key:       &ecdsa.PublicKey{},
+	}); err == nil {
+		t.Fatal("Expected error for incomplete ECDSA public key")
+	}
+	if err := verifyECDSA(make([]byte, 64), []byte("data"), &PublicKey{
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		Key:       &ecdsa.PublicKey{Curve: elliptic.P256(), X: big.NewInt(1), Y: big.NewInt(1)},
+	}); err == nil {
+		t.Fatal("Expected error for off-curve ECDSA public key")
+	}
+	if err := verifyEd25519(make([]byte, 64), []byte("data"), &PublicKey{
+		Algorithm: protocol.AlgorithmED25519,
+		Key:       ed25519.PublicKey([]byte("short")),
+	}); err == nil {
+		t.Fatal("Expected error for short Ed25519 public key")
 	}
 }
 

@@ -61,8 +61,9 @@ func (zs *ZoneStore) SaveZone(origin string, meta ZoneMeta, records map[string][
 			return fmt.Errorf("create zones bucket: %w", err)
 		}
 
-		// Delete existing zone bucket (ignore error if not found)
-		_ = zones.DeleteBucket([]byte(origin))
+		if err := deleteExistingZoneBucket(zones, origin); err != nil {
+			return err
+		}
 		zoneBucket, err := zones.CreateBucket([]byte(origin))
 		if err != nil {
 			return fmt.Errorf("create zone bucket %s: %w", origin, err)
@@ -76,7 +77,10 @@ func (zs *ZoneStore) SaveZone(origin string, meta ZoneMeta, records map[string][
 
 		// Store records grouped by name
 		for name, recs := range records {
-			encoded := encodeRecords(recs)
+			encoded, err := encodeRecords(recs)
+			if err != nil {
+				return fmt.Errorf("encode records for %s: %w", name, err)
+			}
 			if err := zoneBucket.Put([]byte(name), encoded); err != nil {
 				return fmt.Errorf("put records for %s: %w", name, err)
 			}
@@ -84,6 +88,13 @@ func (zs *ZoneStore) SaveZone(origin string, meta ZoneMeta, records map[string][
 
 		return nil
 	})
+}
+
+func deleteExistingZoneBucket(zones *KVBucket, origin string) error {
+	if err := zones.DeleteBucket([]byte(origin)); err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return fmt.Errorf("delete existing zone bucket %s: %w", origin, err)
+	}
+	return nil
 }
 
 // LoadZone loads a zone's records from the KV store.
@@ -193,7 +204,10 @@ func (zs *ZoneStore) SaveRecords(origin, name string, records []StoredRecord) er
 		if len(records) == 0 {
 			return zoneBucket.Delete([]byte(name))
 		}
-		encoded := encodeRecords(records)
+		encoded, err := encodeRecords(records)
+		if err != nil {
+			return fmt.Errorf("encode records for %s: %w", name, err)
+		}
 		return zoneBucket.Put([]byte(name), encoded)
 	})
 }
@@ -233,9 +247,12 @@ func decodeZoneMeta(data []byte) (ZoneMeta, error) {
 //
 //	[2 bytes nameLen][name][4 bytes TTL][1 byte classLen][class]
 //	[1 byte typeLen][type][2 bytes rdataLen][rdata]
-func encodeRecords(records []StoredRecord) []byte {
+func encodeRecords(records []StoredRecord) ([]byte, error) {
 	size := 4
 	for _, r := range records {
+		if err := validateStoredRecord(r); err != nil {
+			return nil, err
+		}
 		size += 2 + len(r.Name) + 4 + 1 + len(r.Class) + 1 + len(r.Type) + 2 + len(r.RData)
 	}
 
@@ -270,7 +287,23 @@ func encodeRecords(records []StoredRecord) []byte {
 		offset += len(r.RData)
 	}
 
-	return buf
+	return buf, nil
+}
+
+func validateStoredRecord(r StoredRecord) error {
+	if len(r.Name) > 0xffff {
+		return fmt.Errorf("record name too long: %d bytes", len(r.Name))
+	}
+	if len(r.Class) > 0xff {
+		return fmt.Errorf("record class too long: %d bytes", len(r.Class))
+	}
+	if len(r.Type) > 0xff {
+		return fmt.Errorf("record type too long: %d bytes", len(r.Type))
+	}
+	if len(r.RData) > 0xffff {
+		return fmt.Errorf("record rdata too long: %d bytes", len(r.RData))
+	}
+	return nil
 }
 
 // maxStoredRecordsPerZone caps the per-zone record count we'll accept
@@ -281,6 +314,7 @@ func encodeRecords(records []StoredRecord) []byte {
 // across multiple ZoneStore entries before reaching this many
 // records in one blob.
 const maxStoredRecordsPerZone = 5_000_000
+const minStoredRecordWireSize = 2 + 4 + 1 + 1 + 2
 
 func decodeRecords(data []byte) ([]StoredRecord, error) {
 	if len(data) < 4 {
@@ -290,6 +324,10 @@ func decodeRecords(data []byte) ([]StoredRecord, error) {
 	count := binary.BigEndian.Uint32(data[0:4])
 	if count > maxStoredRecordsPerZone {
 		return nil, fmt.Errorf("stored record count %d exceeds max %d", count, maxStoredRecordsPerZone)
+	}
+	maxPossible := (len(data) - 4) / minStoredRecordWireSize
+	if uint64(count) > uint64(maxPossible) {
+		return nil, fmt.Errorf("stored record count %d exceeds data capacity %d", count, maxPossible)
 	}
 	offset := 4
 	records := make([]StoredRecord, 0, count)
@@ -348,6 +386,10 @@ func decodeRecords(data []byte) ([]StoredRecord, error) {
 		offset += rdataLen
 
 		records = append(records, r)
+	}
+
+	if offset != len(data) {
+		return nil, fmt.Errorf("trailing data after records: %d bytes", len(data)-offset)
 	}
 
 	return records, nil

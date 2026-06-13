@@ -2,6 +2,7 @@ package audit
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,12 +10,20 @@ import (
 	"time"
 )
 
+var errAuditWrite = errors.New("audit write failed")
+
+type failingAuditWriter struct{}
+
+func (failingAuditWriter) Write([]byte) (int, error) {
+	return 0, errAuditWrite
+}
+
 func TestNewAuditLogger_Disabled(t *testing.T) {
 	al, err := NewAuditLogger(false, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if al.enabled {
+	if al.enabled.Load() {
 		t.Error("logger should be disabled")
 	}
 }
@@ -27,6 +36,91 @@ func TestAuditLogger_LogQuery_Disabled(t *testing.T) {
 		ClientIP:  "10.0.0.1",
 		QueryName: "example.com",
 		QueryType: "A",
+	})
+}
+
+// TestAuditLogger_Disabled_NoWrite asserts that a disabled logger never
+// touches its output writer, even if one is wired up, for every Log* entry
+// point. Extreme inputs (huge strings, control characters) must neither
+// panic nor produce output.
+func TestAuditLogger_Disabled_NoWrite(t *testing.T) {
+	al, err := NewAuditLogger(false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var buf bytes.Buffer
+	al.output = &buf
+
+	huge := strings.Repeat("x", 1<<16) + "\n\r\x00"
+	al.LogQuery(QueryAuditEntry{ClientIP: huge, QueryName: huge, QueryType: huge})
+	al.LogAXFR(AXFRAuditEntry{ClientIP: huge, Zone: huge})
+	al.LogIXFR(IXFRAuditEntry{ClientIP: huge, Zone: huge})
+	al.LogNOTIFY(NOTIFYAuditEntry{ClientIP: huge, Zone: huge})
+	al.LogUpdate(UpdateAuditEntry{ClientIP: huge, Zone: huge})
+	al.LogReload(ReloadAuditEntry{Error: huge})
+
+	if buf.Len() != 0 {
+		t.Errorf("disabled logger wrote %d bytes, want 0", buf.Len())
+	}
+	if al.LastError() != nil {
+		t.Errorf("disabled logger recorded error: %v", al.LastError())
+	}
+}
+
+// TestAuditLogger_LogQuery_Disabled_NoFormatting asserts the disabled
+// fast path does no formatting work: formatQueryAuditLine allocates
+// (fmt.Sprintf + sanitizeLogField), so zero allocations proves it was
+// never called.
+func TestAuditLogger_LogQuery_Disabled_NoFormatting(t *testing.T) {
+	al, _ := NewAuditLogger(false, "")
+	entry := QueryAuditEntry{
+		Timestamp: "2026-01-01T00:00:00Z",
+		ClientIP:  "10.0.0.1\nfake line",
+		QueryName: strings.Repeat("a", 4096) + ".example.com",
+		QueryType: "A",
+		Rcode:     "0",
+		Latency:   5 * time.Millisecond,
+		Upstream:  "8.8.8.8:53",
+	}
+
+	allocs := testing.AllocsPerRun(100, func() {
+		al.LogQuery(entry)
+	})
+	if allocs != 0 {
+		t.Errorf("LogQuery on disabled logger allocated %v times per run, want 0 (formatting must be skipped)", allocs)
+	}
+}
+
+// TestAuditLogger_LogAfterClose asserts that Log* calls after Close are
+// silent no-ops (Close flips the enabled flag).
+func TestAuditLogger_LogAfterClose(t *testing.T) {
+	al, _ := NewAuditLogger(true, "")
+	var buf bytes.Buffer
+	al.output = &buf
+	al.Close()
+
+	al.LogQuery(QueryAuditEntry{QueryName: "after-close.example.com", QueryType: "A"})
+	if buf.Len() != 0 {
+		t.Errorf("logger wrote %d bytes after Close, want 0", buf.Len())
+	}
+}
+
+func BenchmarkLogQuery_Disabled(b *testing.B) {
+	al, _ := NewAuditLogger(false, "")
+	entry := QueryAuditEntry{
+		Timestamp: "2026-01-01T00:00:00Z",
+		ClientIP:  "10.0.0.1",
+		QueryName: "example.com",
+		QueryType: "A",
+		Rcode:     "0",
+		Latency:   5 * time.Millisecond,
+		Upstream:  "8.8.8.8:53",
+	}
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			al.LogQuery(entry)
+		}
 	})
 }
 
@@ -113,6 +207,24 @@ func TestAuditLogger_LogQuery_NoUpstream(t *testing.T) {
 	}
 }
 
+func TestAuditLogger_LogQuery_RecordsWriteError(t *testing.T) {
+	al, _ := NewAuditLogger(true, "")
+	defer al.Close()
+	al.output = failingAuditWriter{}
+
+	al.LogQuery(QueryAuditEntry{
+		Timestamp: "2026-01-01T00:00:00Z",
+		ClientIP:  "10.0.0.1",
+		QueryName: "example.com",
+		QueryType: "A",
+		Rcode:     "0",
+	})
+
+	if !errors.Is(al.LastError(), errAuditWrite) {
+		t.Fatalf("LastError() = %v, want %v", al.LastError(), errAuditWrite)
+	}
+}
+
 func TestAuditLogger_LogQuery_FileOutput(t *testing.T) {
 	tmpDir := t.TempDir()
 	logFile := filepath.Join(tmpDir, "query.log")
@@ -139,6 +251,42 @@ func TestAuditLogger_LogQuery_FileOutput(t *testing.T) {
 
 	if !strings.Contains(string(data), "client=10.0.0.1") {
 		t.Errorf("expected client IP in file output, got: %s", string(data))
+	}
+}
+
+func TestNewAuditLogger_FilePermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "query.log")
+
+	al, err := NewAuditLogger(true, logFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	al.Close()
+
+	info, err := os.Stat(logFile)
+	if err != nil {
+		t.Fatalf("stat log file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("new log file mode = %o, want 0600", got)
+	}
+
+	if err := os.Chmod(logFile, 0644); err != nil {
+		t.Fatalf("chmod log file: %v", err)
+	}
+	al, err = NewAuditLogger(true, logFile)
+	if err != nil {
+		t.Fatalf("unexpected error reopening log file: %v", err)
+	}
+	al.Close()
+
+	info, err = os.Stat(logFile)
+	if err != nil {
+		t.Fatalf("stat reopened log file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0600 {
+		t.Fatalf("reopened log file mode = %o, want 0600", got)
 	}
 }
 

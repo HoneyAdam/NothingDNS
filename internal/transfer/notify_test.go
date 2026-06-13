@@ -1,8 +1,11 @@
 package transfer
 
 import (
+	"bytes"
+	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,6 +105,21 @@ func TestNewNOTIFYSlaveHandler(t *testing.T) {
 
 	if handler.notifyChan == nil {
 		t.Error("notifyChan not initialized")
+	}
+}
+
+func TestNOTIFYSlaveHandler_SetZonesMu(t *testing.T) {
+	handler := NewNOTIFYSlaveHandler(make(map[string]*zone.Zone))
+	original := handler.zonesMu
+	mu := &sync.RWMutex{}
+
+	handler.SetZonesMu(mu)
+
+	if handler.zonesMu != mu {
+		t.Error("expected zonesMu to be replaced")
+	}
+	if handler.zonesMu == original {
+		t.Error("expected zonesMu to differ from original")
 	}
 }
 
@@ -301,6 +319,10 @@ func TestNOTIFYSlaveHandler_HandleNOTIFY_WrongQType(t *testing.T) {
 }
 
 func TestIsNOTIFYRequest(t *testing.T) {
+	if IsNOTIFYRequest(nil) {
+		t.Fatal("IsNOTIFYRequest(nil) = true, want false")
+	}
+
 	tests := []struct {
 		name     string
 		opcode   uint8
@@ -332,6 +354,10 @@ func TestIsNOTIFYRequest(t *testing.T) {
 }
 
 func TestIsNOTIFYResponse(t *testing.T) {
+	if IsNOTIFYResponse(nil) {
+		t.Fatal("IsNOTIFYResponse(nil) = true, want false")
+	}
+
 	tests := []struct {
 		name     string
 		opcode   uint8
@@ -726,6 +752,81 @@ func TestNOTIFYSender_SendNOTIFY_Timeout(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for timeout")
 	}
+}
+
+func TestWritePacketRetriesPartialWrites(t *testing.T) {
+	conn := &notifyPartialWriteConn{maxWrite: 2}
+	written, err := writePacket(conn, []byte{1, 2, 3})
+	if err != nil {
+		t.Fatalf("writePacket error = %v", err)
+	}
+	if written != 3 {
+		t.Fatalf("writePacket wrote %d bytes, want 3", written)
+	}
+	if conn.calls != 2 {
+		t.Fatalf("writePacket should retry partial writes, got %d calls", conn.calls)
+	}
+	if !bytes.Equal(conn.written.Bytes(), []byte{1, 2, 3}) {
+		t.Fatalf("writePacket wrote %v, want [1 2 3]", conn.written.Bytes())
+	}
+}
+
+func TestWritePacketRejectsZeroByteWrite(t *testing.T) {
+	conn := &notifyPartialWriteConn{maxWrite: 0}
+	written, err := writePacket(conn, []byte{1, 2, 3})
+	if err != io.ErrShortWrite {
+		t.Fatalf("writePacket error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if written != 0 {
+		t.Fatalf("writePacket wrote %d bytes, want 0", written)
+	}
+}
+
+type notifyPartialWriteConn struct {
+	maxWrite int
+	calls    int
+	written  bytes.Buffer
+}
+
+func (c *notifyPartialWriteConn) Read(_ []byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (c *notifyPartialWriteConn) Write(p []byte) (int, error) {
+	c.calls++
+	if c.maxWrite <= 0 {
+		return 0, nil
+	}
+	if c.maxWrite < len(p) {
+		c.written.Write(p[:c.maxWrite])
+		return c.maxWrite, nil
+	}
+	c.written.Write(p)
+	return len(p), nil
+}
+
+func (c *notifyPartialWriteConn) Close() error {
+	return nil
+}
+
+func (c *notifyPartialWriteConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{}
+}
+
+func (c *notifyPartialWriteConn) RemoteAddr() net.Addr {
+	return &net.UDPAddr{}
+}
+
+func (c *notifyPartialWriteConn) SetDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *notifyPartialWriteConn) SetReadDeadline(_ time.Time) error {
+	return nil
+}
+
+func (c *notifyPartialWriteConn) SetWriteDeadline(_ time.Time) error {
+	return nil
 }
 
 // ---------------------------------------------------------------------------

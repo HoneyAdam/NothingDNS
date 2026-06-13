@@ -35,6 +35,11 @@ func TestDomainIsRoot(t *testing.T) {
 			t.Errorf("Domain(%q).IsRoot() = %v, want %v", tt.domain, got, tt.want)
 		}
 	}
+
+	var nilDomain *Domain
+	if !nilDomain.IsRoot() {
+		t.Error("nil Domain.IsRoot() should return true")
+	}
 }
 
 // ============================================================================
@@ -84,6 +89,33 @@ func TestDomainParent(t *testing.T) {
 	if !rootParent.IsRoot() {
 		t.Error("Root Parent() should be root")
 	}
+
+	var nilDomain *Domain
+	nilParent := nilDomain.Parent()
+	if nilParent == nil {
+		t.Fatal("nil Domain.Parent() should return root domain")
+	}
+	if !nilParent.IsRoot() {
+		t.Error("nil Domain.Parent() should return root domain")
+	}
+}
+
+func TestDomainParentReturnsCopy(t *testing.T) {
+	d, _ := ParseDomain("www.example.com")
+	parent := d.Parent()
+	if parent.String() != "example.com" {
+		t.Fatalf("Parent() = %q, want example.com", parent.String())
+	}
+
+	parent.Labels[0] = "modified"
+	if d.Labels[1] == "modified" {
+		t.Fatal("Parent() labels alias child domain labels")
+	}
+
+	d.Labels[2] = "changed"
+	if parent.Labels[1] == "changed" {
+		t.Fatal("child domain labels alias Parent() labels")
+	}
 }
 
 // ============================================================================
@@ -107,6 +139,11 @@ func TestDomainWireLabels(t *testing.T) {
 	wl[0] = "modified"
 	if d.Labels[0] == "modified" {
 		t.Error("WireLabels should return a copy, not reference original")
+	}
+
+	var nilDomain *Domain
+	if got := nilDomain.WireLabels(); got != nil {
+		t.Errorf("nil Domain.WireLabels() = %#v, want nil", got)
 	}
 }
 
@@ -132,6 +169,11 @@ func TestDomainReverseLabels(t *testing.T) {
 	rlRoot := root.ReverseLabels()
 	if len(rlRoot) != 0 {
 		t.Errorf("Root ReverseLabels length = %d, want 0", len(rlRoot))
+	}
+
+	var nilDomain *Domain
+	if got := nilDomain.ReverseLabels(); got != nil {
+		t.Errorf("nil Domain.ReverseLabels() = %#v, want nil", got)
 	}
 }
 
@@ -200,6 +242,7 @@ func TestIPFamilyString(t *testing.T) {
 	}{
 		{IPv4, "IPv4"},
 		{IPv6, "IPv6"},
+		{UnknownIPFamily, "Unknown"},
 		{IPFamily(99), "Unknown"},
 	}
 	for _, tt := range tests {
@@ -326,6 +369,14 @@ func TestDomainEqualEdgeCases(t *testing.T) {
 	root2, _ := ParseDomain(".")
 	if !root1.Equal(root2) {
 		t.Error("Two root domains should be equal")
+	}
+	if root1.Equal(nil) {
+		t.Error("Domain.Equal(nil) should return false")
+	}
+
+	var nilDomain *Domain
+	if nilDomain.Equal(root1) {
+		t.Error("nil receiver Domain.Equal should return false")
 	}
 
 	// Different number of labels

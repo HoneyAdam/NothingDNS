@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+var secureRandInt = rand.Int
+
 // AnycastGroup represents a group of servers that share the same anycast IP.
 // Anycast allows multiple servers to advertise the same IP address for
 // high availability and geographic distribution.
@@ -63,6 +65,26 @@ func (b *AnycastBackend) IsHealthy() bool {
 	return b.healthy
 }
 
+func (b *AnycastBackend) snapshot() *AnycastBackend {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return &AnycastBackend{
+		PhysicalIP:   b.PhysicalIP,
+		Port:         b.Port,
+		Region:       b.Region,
+		Zone:         b.Zone,
+		Weight:       b.Weight,
+		healthy:      b.healthy,
+		lastCheck:    b.lastCheck,
+		latency:      b.latency,
+		failCount:    b.failCount,
+		successCount: b.successCount,
+	}
+}
+
 // markFailure marks the backend as having failed.
 func (b *AnycastBackend) markFailure() {
 	b.mu.Lock()
@@ -114,6 +136,9 @@ func NewAnycastGroup(anycastIP string, healthCheck, failoverTimeout time.Duratio
 
 // AddBackend adds a backend server to the anycast group.
 func (g *AnycastGroup) AddBackend(backend *AnycastBackend) error {
+	if backend == nil {
+		return fmt.Errorf("backend cannot be nil")
+	}
 	if backend.PhysicalIP == "" {
 		return fmt.Errorf("backend physical IP cannot be empty")
 	}
@@ -145,7 +170,7 @@ func (g *AnycastGroup) RemoveBackend(physicalIP string) {
 
 	filtered := make([]*AnycastBackend, 0, len(g.Backends))
 	for _, b := range g.Backends {
-		if b.PhysicalIP != physicalIP {
+		if b != nil && b.PhysicalIP != physicalIP {
 			filtered = append(filtered, b)
 		}
 	}
@@ -167,7 +192,14 @@ func (g *AnycastGroup) GetActiveBackend() *AnycastBackend {
 		atomic.StoreUint32(&g.activeIndex, idx)
 	}
 
-	return g.Backends[idx]
+	nextIdx, backend := firstBackendIndex(g.Backends, int(idx))
+	if backend == nil {
+		return nil
+	}
+	if uint32(nextIdx) != idx {
+		atomic.StoreUint32(&g.activeIndex, uint32(nextIdx))
+	}
+	return backend
 }
 
 // SelectBackend selects a backend based on health, region, and weight.
@@ -182,6 +214,9 @@ func (g *AnycastGroup) SelectBackend(preferredRegion, preferredZone string) *Any
 	// First, try to find a healthy backend in the preferred region and zone
 	if preferredRegion != "" {
 		for _, b := range g.Backends {
+			if b == nil {
+				continue
+			}
 			if b.IsHealthy() && b.Region == preferredRegion {
 				if preferredZone == "" || b.Zone == preferredZone {
 					return b
@@ -191,6 +226,9 @@ func (g *AnycastGroup) SelectBackend(preferredRegion, preferredZone string) *Any
 
 		// Try any healthy backend in the preferred region
 		for _, b := range g.Backends {
+			if b == nil {
+				continue
+			}
 			if b.IsHealthy() && b.Region == preferredRegion {
 				return b
 			}
@@ -200,14 +238,14 @@ func (g *AnycastGroup) SelectBackend(preferredRegion, preferredZone string) *Any
 	// Get all healthy backends
 	var healthy []*AnycastBackend
 	for _, b := range g.Backends {
-		if b.IsHealthy() {
+		if b != nil && b.IsHealthy() {
 			healthy = append(healthy, b)
 		}
 	}
 
 	if len(healthy) == 0 {
 		// Fallback to first backend even if unhealthy
-		return g.Backends[0]
+		return firstBackend(g.Backends)
 	}
 
 	// Weighted selection from healthy backends
@@ -216,6 +254,10 @@ func (g *AnycastGroup) SelectBackend(preferredRegion, preferredZone string) *Any
 
 // weightedSelect selects a backend using weighted random selection.
 func weightedSelect(backends []*AnycastBackend) *AnycastBackend {
+	backends = nonNilBackends(backends)
+	if len(backends) == 0 {
+		return nil
+	}
 	if len(backends) == 1 {
 		return backends[0]
 	}
@@ -227,14 +269,19 @@ func weightedSelect(backends []*AnycastBackend) *AnycastBackend {
 	}
 
 	if totalWeight == 0 {
-		// All weights are 0, pick randomly using crypto/rand
-		n, _ := rand.Int(rand.Reader, big.NewInt(int64(len(backends))))
-		return backends[n.Int64()]
+		// All weights are 0, pick randomly using crypto/rand.
+		idx, ok := randomInt(int64(len(backends)))
+		if !ok {
+			return backends[0]
+		}
+		return backends[idx]
 	}
 
 	// Weighted random selection for load balancing
-	selector, _ := rand.Int(rand.Reader, big.NewInt(int64(totalWeight)))
-	selectorVal := selector.Int64()
+	selectorVal, ok := randomInt(int64(totalWeight))
+	if !ok {
+		return backends[0]
+	}
 	currentWeight := 0
 
 	for _, b := range backends {
@@ -248,6 +295,61 @@ func weightedSelect(backends []*AnycastBackend) *AnycastBackend {
 	return backends[len(backends)-1]
 }
 
+func randomInt(max int64) (int64, bool) {
+	if max <= 0 {
+		return 0, false
+	}
+	n, err := secureRandInt(rand.Reader, big.NewInt(max))
+	if err != nil {
+		return 0, false
+	}
+	return n.Int64(), true
+}
+
+func firstBackend(backends []*AnycastBackend) *AnycastBackend {
+	_, backend := firstBackendIndex(backends, 0)
+	return backend
+}
+
+func firstBackendIndex(backends []*AnycastBackend, start int) (int, *AnycastBackend) {
+	if len(backends) == 0 {
+		return -1, nil
+	}
+	if start < 0 || start >= len(backends) {
+		start = 0
+	}
+	for i := 0; i < len(backends); i++ {
+		idx := (start + i) % len(backends)
+		if backends[idx] != nil {
+			return idx, backends[idx]
+		}
+	}
+	return -1, nil
+}
+
+func nonNilBackendCount(backends []*AnycastBackend) int {
+	count := 0
+	for _, b := range backends {
+		if b != nil {
+			count++
+		}
+	}
+	return count
+}
+
+func nonNilBackends(backends []*AnycastBackend) []*AnycastBackend {
+	if len(backends) == 0 {
+		return nil
+	}
+	filtered := make([]*AnycastBackend, 0, len(backends))
+	for _, b := range backends {
+		if b != nil {
+			filtered = append(filtered, b)
+		}
+	}
+	return filtered
+}
+
 // FailoverToNext switches to the next backend in the group.
 func (g *AnycastGroup) FailoverToNext() *AnycastBackend {
 	g.mu.RLock()
@@ -256,12 +358,18 @@ func (g *AnycastGroup) FailoverToNext() *AnycastBackend {
 	if len(g.Backends) <= 1 {
 		return nil
 	}
+	if nonNilBackendCount(g.Backends) <= 1 {
+		return nil
+	}
 
 	currentIdx := atomic.LoadUint32(&g.activeIndex)
-	nextIdx := (int(currentIdx) + 1) % len(g.Backends)
+	nextIdx, backend := firstBackendIndex(g.Backends, int(currentIdx)+1)
+	if backend == nil {
+		return nil
+	}
 	atomic.StoreUint32(&g.activeIndex, uint32(nextIdx))
 
-	return g.Backends[nextIdx]
+	return backend
 }
 
 // GetHealthyBackends returns all healthy backends.
@@ -271,11 +379,31 @@ func (g *AnycastGroup) GetHealthyBackends() []*AnycastBackend {
 
 	var healthy []*AnycastBackend
 	for _, b := range g.Backends {
-		if b.IsHealthy() {
-			healthy = append(healthy, b)
+		if b != nil && b.IsHealthy() {
+			healthy = append(healthy, b.snapshot())
 		}
 	}
 	return healthy
+}
+
+func (g *AnycastGroup) snapshot() *AnycastGroup {
+	if g == nil {
+		return nil
+	}
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	backends := make([]*AnycastBackend, len(g.Backends))
+	for i, backend := range g.Backends {
+		backends[i] = backend.snapshot()
+	}
+	return &AnycastGroup{
+		AnycastIP:       g.AnycastIP,
+		Backends:        backends,
+		HealthCheck:     g.HealthCheck,
+		FailoverTimeout: g.FailoverTimeout,
+		activeIndex:     atomic.LoadUint32(&g.activeIndex),
+	}
 }
 
 // Stats returns statistics for the anycast group.
@@ -283,8 +411,11 @@ func (g *AnycastGroup) Stats() (total, healthy int) {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
-	total = len(g.Backends)
 	for _, b := range g.Backends {
+		if b == nil {
+			continue
+		}
+		total++
 		if b.IsHealthy() {
 			healthy++
 		}

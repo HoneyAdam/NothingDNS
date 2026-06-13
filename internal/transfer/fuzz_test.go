@@ -22,7 +22,9 @@ func FuzzDecodeJournalEntry(f *testing.F) {
 	// Seed: empty, undersized, a valid round-trip entry.
 	f.Add([]byte{})
 	f.Add(make([]byte, 15)) // one byte short of the 16-byte minimum
-	f.Add(EncodeJournalEntry(&IXFRJournalEntry{Serial: 42}))
+	if seed, err := EncodeJournalEntry(&IXFRJournalEntry{Serial: 42}); err == nil {
+		f.Add(seed)
+	}
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		_, _ = DecodeJournalEntry(data)

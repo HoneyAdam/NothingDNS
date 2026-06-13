@@ -53,12 +53,19 @@ data:
       format: {{ .Values.config.logging.format }}
       output: {{ .Values.config.logging.output }}
 
+    storage:
+      data_dir: {{ .Values.config.storage.data_dir | quote }}
+      encryption_key: "${NOTHINGDNS_STORAGE_ENCRYPTION_KEY}"
+
     cache:
       enabled: {{ .Values.config.cache.enabled }}
       size: {{ .Values.config.cache.size }}
-      ttl: {{ .Values.config.cache.ttl }}
+      default_ttl: {{ .Values.config.cache.default_ttl }}
+      max_ttl: {{ .Values.config.cache.max_ttl }}
+      min_ttl: {{ .Values.config.cache.min_ttl }}
       negative_ttl: {{ .Values.config.cache.negative_ttl }}
-      stale_ttl: {{ .Values.config.cache.stale_ttl }}
+      serve_stale: {{ .Values.config.cache.serve_stale }}
+      stale_grace_secs: {{ .Values.config.cache.stale_grace_secs }}
       prefetch: {{ .Values.config.cache.prefetch }}
       prefetch_threshold: {{ .Values.config.cache.prefetch_threshold }}
 
@@ -70,15 +77,16 @@ data:
 
     upstream:
       servers: {{ .Values.config.upstream.servers | toYaml | nindent 8 }}
-      timeout: {{ .Values.config.upstream.timeout }}
-      attempts: {{ .Values.config.upstream.attempts }}
-      health_check_interval: {{ .Values.config.upstream.health_check_interval }}
+      strategy: {{ .Values.config.upstream.strategy }}
+      health_check: {{ .Values.config.upstream.health_check }}
+      failover_timeout: {{ .Values.config.upstream.failover_timeout }}
 
     dnssec:
       enabled: {{ .Values.config.dnssec.enabled }}
-      validation: {{ .Values.config.dnssec.validation }}
-      {{- if .Values.config.dnssec.trust_anchor_file }}
-      trust_anchor_file: {{ .Values.config.dnssec.trust_anchor_file }}
+      ignore_time: {{ .Values.config.dnssec.ignore_time }}
+      require_dnssec: {{ .Values.config.dnssec.require_dnssec }}
+      {{- if .Values.config.dnssec.trust_anchor }}
+      trust_anchor: {{ .Values.config.dnssec.trust_anchor }}
       {{- end }}
 
     {{- if .Values.config.cluster.enabled }}
@@ -86,7 +94,8 @@ data:
       enabled: {{ .Values.config.cluster.enabled }}
       node_id: {{ .Values.config.cluster.node_id | default "${POD_NAME}" | quote }}
       bind_addr: {{ .Values.config.cluster.bind_addr | default "${POD_IP}" | quote }}
-      bind_port: {{ .Values.config.cluster.bind_port }}
+      gossip_port: {{ .Values.config.cluster.gossip_port }}
+      consensus_mode: {{ .Values.config.cluster.consensus_mode | quote }}
       encryption_key: "${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}"
       peers: {{ .Values.config.cluster.peers | toYaml | nindent 8 }}
     {{- end }}
@@ -104,10 +113,11 @@ data:
       urls: {{ .Values.config.blocklist.urls | toYaml | nindent 8 }}
     {{- end }}
 
-    {{- if .Values.config.geoip.enabled }}
-    geoip:
-      enabled: {{ .Values.config.geoip.enabled }}
-      database_path: {{ .Values.config.geoip.database_path }}
+    {{- if .Values.config.geodns.enabled }}
+    geodns:
+      enabled: {{ .Values.config.geodns.enabled }}
+      mmdb_file: {{ .Values.config.geodns.mmdb_file }}
+      rules: {{ .Values.config.geodns.rules | toYaml | nindent 8 }}
     {{- end }}
 
     {{- if .Values.config.slave_zones }}

@@ -22,6 +22,7 @@ const (
 var (
 	ErrBufferTooSmall = errors.New("buffer too small")
 	ErrInvalidOffset  = errors.New("invalid buffer offset")
+	ErrNilBuffer      = errors.New("nil buffer")
 )
 
 // Buffer is a wrapper around a byte slice for DNS wire format operations.
@@ -45,46 +46,68 @@ func NewBuffer(size int) *Buffer {
 
 // NewBufferFromData creates a Buffer from existing data.
 func NewBufferFromData(data []byte) *Buffer {
+	dataCopy := append([]byte(nil), data...)
 	return &Buffer{
-		data:   data,
+		data:   dataCopy,
 		offset: 0,
-		length: len(data),
+		length: len(dataCopy),
 	}
 }
 
 // Reset resets the buffer for reuse.
 func (b *Buffer) Reset() {
+	if b == nil {
+		return
+	}
 	b.offset = 0
 	b.length = 0
 }
 
 // Data returns the underlying byte slice.
 func (b *Buffer) Data() []byte {
+	if b == nil {
+		return nil
+	}
 	return b.data
 }
 
 // Bytes returns a slice of the valid data in the buffer.
 func (b *Buffer) Bytes() []byte {
+	if b == nil {
+		return nil
+	}
 	return b.data[:b.length]
 }
 
 // Length returns the length of valid data.
 func (b *Buffer) Length() int {
+	if b == nil {
+		return 0
+	}
 	return b.length
 }
 
 // Capacity returns the capacity of the buffer.
 func (b *Buffer) Capacity() int {
+	if b == nil {
+		return 0
+	}
 	return len(b.data)
 }
 
 // Offset returns the current read/write offset.
 func (b *Buffer) Offset() int {
+	if b == nil {
+		return 0
+	}
 	return b.offset
 }
 
 // SetOffset sets the current offset.
 func (b *Buffer) SetOffset(offset int) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
 	if offset < 0 || offset > len(b.data) {
 		return ErrInvalidOffset
 	}
@@ -94,16 +117,25 @@ func (b *Buffer) SetOffset(offset int) error {
 
 // Remaining returns the number of bytes remaining from current offset.
 func (b *Buffer) Remaining() int {
+	if b == nil {
+		return 0
+	}
 	return b.length - b.offset
 }
 
 // Available returns the number of bytes available for writing.
 func (b *Buffer) Available() int {
+	if b == nil {
+		return 0
+	}
 	return len(b.data) - b.offset
 }
 
 // WriteUint8 writes a single byte.
 func (b *Buffer) WriteUint8(v uint8) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
 	if b.offset >= len(b.data) {
 		return ErrBufferTooSmall
 	}
@@ -117,6 +149,9 @@ func (b *Buffer) WriteUint8(v uint8) error {
 
 // WriteUint16 writes a 16-bit value in big-endian format.
 func (b *Buffer) WriteUint16(v uint16) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
 	if b.offset+2 > len(b.data) {
 		return ErrBufferTooSmall
 	}
@@ -130,6 +165,9 @@ func (b *Buffer) WriteUint16(v uint16) error {
 
 // WriteUint32 writes a 32-bit value in big-endian format.
 func (b *Buffer) WriteUint32(v uint32) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
 	if b.offset+4 > len(b.data) {
 		return ErrBufferTooSmall
 	}
@@ -143,6 +181,9 @@ func (b *Buffer) WriteUint32(v uint32) error {
 
 // WriteBytes writes a byte slice.
 func (b *Buffer) WriteBytes(data []byte) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
 	if b.offset+len(data) > len(b.data) {
 		return ErrBufferTooSmall
 	}
@@ -156,6 +197,9 @@ func (b *Buffer) WriteBytes(data []byte) error {
 
 // ReadUint8 reads a single byte.
 func (b *Buffer) ReadUint8() (uint8, error) {
+	if b == nil {
+		return 0, ErrNilBuffer
+	}
 	if b.offset >= b.length {
 		return 0, ErrBufferTooSmall
 	}
@@ -166,6 +210,9 @@ func (b *Buffer) ReadUint8() (uint8, error) {
 
 // ReadUint16 reads a 16-bit value in big-endian format.
 func (b *Buffer) ReadUint16() (uint16, error) {
+	if b == nil {
+		return 0, ErrNilBuffer
+	}
 	if b.offset+2 > b.length {
 		return 0, ErrBufferTooSmall
 	}
@@ -176,6 +223,9 @@ func (b *Buffer) ReadUint16() (uint16, error) {
 
 // ReadUint32 reads a 32-bit value in big-endian format.
 func (b *Buffer) ReadUint32() (uint32, error) {
+	if b == nil {
+		return 0, ErrNilBuffer
+	}
 	if b.offset+4 > b.length {
 		return 0, ErrBufferTooSmall
 	}
@@ -186,6 +236,12 @@ func (b *Buffer) ReadUint32() (uint32, error) {
 
 // ReadBytes reads n bytes.
 func (b *Buffer) ReadBytes(n int) ([]byte, error) {
+	if b == nil {
+		return nil, ErrNilBuffer
+	}
+	if n < 0 {
+		return nil, ErrInvalidOffset
+	}
 	if b.offset+n > b.length {
 		return nil, ErrBufferTooSmall
 	}
@@ -197,6 +253,9 @@ func (b *Buffer) ReadBytes(n int) ([]byte, error) {
 
 // PeekUint16 reads a 16-bit value without advancing offset.
 func (b *Buffer) PeekUint16() (uint16, error) {
+	if b == nil {
+		return 0, ErrNilBuffer
+	}
 	if b.offset+2 > b.length {
 		return 0, ErrBufferTooSmall
 	}
@@ -205,6 +264,12 @@ func (b *Buffer) PeekUint16() (uint16, error) {
 
 // Skip advances the offset by n bytes.
 func (b *Buffer) Skip(n int) error {
+	if b == nil {
+		return ErrNilBuffer
+	}
+	if n < 0 {
+		return ErrInvalidOffset
+	}
 	if b.offset+n > b.length {
 		return ErrBufferTooSmall
 	}
@@ -283,21 +348,33 @@ func PutSliceSized(b *[]byte, maxSize int) {
 
 // PutUint16 writes a uint16 to a byte slice in big-endian format.
 func PutUint16(b []byte, v uint16) {
+	if len(b) < 2 {
+		return
+	}
 	binary.BigEndian.PutUint16(b, v)
 }
 
 // PutUint32 writes a uint32 to a byte slice in big-endian format.
 func PutUint32(b []byte, v uint32) {
+	if len(b) < 4 {
+		return
+	}
 	binary.BigEndian.PutUint32(b, v)
 }
 
 // Uint16 reads a uint16 from a byte slice in big-endian format.
 func Uint16(b []byte) uint16 {
+	if len(b) < 2 {
+		return 0
+	}
 	return binary.BigEndian.Uint16(b)
 }
 
 // Uint32 reads a uint32 from a byte slice in big-endian format.
 func Uint32(b []byte) uint32 {
+	if len(b) < 4 {
+		return 0
+	}
 	return binary.BigEndian.Uint32(b)
 }
 

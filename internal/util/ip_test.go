@@ -140,6 +140,14 @@ func TestCIDRContains(t *testing.T) {
 			t.Errorf("CIDR(192.168.1.0/24).Contains(%q) = %v, want %v", tc.ip, result, tc.expected)
 		}
 	}
+
+	var nilCIDR *CIDR
+	if nilCIDR.Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("nil CIDR should not contain any IP")
+	}
+	if cidr.Contains(nil) {
+		t.Error("CIDR should not contain nil IP")
+	}
 }
 
 func TestCIDRList(t *testing.T) {
@@ -161,6 +169,11 @@ func TestCIDRList(t *testing.T) {
 	}
 	if list.Contains(net.ParseIP("172.16.0.1")) {
 		t.Error("List should not contain 172.16.0.1")
+	}
+
+	list = append(CIDRList{nil}, list...)
+	if !list.Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("List should skip nil CIDR entries and still match valid entries")
 	}
 }
 
@@ -354,6 +367,26 @@ func TestIPRangeContains(t *testing.T) {
 	if r6.Contains(net.ParseIP("192.168.1.1")) {
 		t.Error("IPv6 range should not contain IPv4 address")
 	}
+	if !r4.Contains(net.IP{192, 168, 1, 1}) {
+		t.Error("IPv4 range should contain 4-byte IPv4 representation")
+	}
+
+	var nilRange *IPRange
+	if nilRange.Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("nil range should not contain any IP")
+	}
+	if r4.Contains(nil) {
+		t.Error("range should not contain nil IP")
+	}
+	if (&IPRange{Start: net.ParseIP("192.168.1.0")}).Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("range with nil end should not contain any IP")
+	}
+	if (&IPRange{End: net.ParseIP("192.168.1.255")}).Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("range with nil start should not contain any IP")
+	}
+	if (&IPRange{Start: net.ParseIP("192.168.1.255"), End: net.ParseIP("192.168.1.0")}).Contains(net.ParseIP("192.168.1.1")) {
+		t.Error("inverted range should not contain any IP")
+	}
 }
 
 // TestBytesCompare tests the bytesCompare function
@@ -388,6 +421,11 @@ func TestCIDRString(t *testing.T) {
 	if result != "192.168.1.0/24" {
 		t.Errorf("CIDR.String() = %q, want %q", result, "192.168.1.0/24")
 	}
+
+	var nilCIDR *CIDR
+	if got := nilCIDR.String(); got != "" {
+		t.Errorf("nil CIDR.String() = %q, want empty", got)
+	}
 }
 
 // TestIsMulticast tests the IsMulticast function
@@ -416,19 +454,21 @@ func TestIsMulticast(t *testing.T) {
 // TestGetIPFamily tests the GetIPFamily function
 func TestGetIPFamily(t *testing.T) {
 	tests := []struct {
-		ip       string
+		name     string
+		ip       net.IP
 		expected IPFamily
 	}{
-		{"192.168.1.1", IPv4},
-		{"::1", IPv6},
-		{"2001:db8::1", IPv6},
+		{"IPv4", net.ParseIP("192.168.1.1"), IPv4},
+		{"IPv6 loopback", net.ParseIP("::1"), IPv6},
+		{"IPv6 documentation", net.ParseIP("2001:db8::1"), IPv6},
+		{"nil", nil, UnknownIPFamily},
+		{"invalid length", net.IP{1, 2, 3}, UnknownIPFamily},
 	}
 
 	for _, tc := range tests {
-		ip := net.ParseIP(tc.ip)
-		result := GetIPFamily(ip)
+		result := GetIPFamily(tc.ip)
 		if result != tc.expected {
-			t.Errorf("GetIPFamily(%q) = %d, want %d", tc.ip, result, tc.expected)
+			t.Errorf("GetIPFamily(%s) = %d, want %d", tc.name, result, tc.expected)
 		}
 	}
 }

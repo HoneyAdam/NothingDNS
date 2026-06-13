@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -172,10 +173,19 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 	cfg.Bind = getStringSlice(node, "bind", cfg.Bind)
 	cfg.TCPBind = getStringSlice(node, "tcp_bind", cfg.TCPBind)
 	cfg.UDPBind = getStringSlice(node, "udp_bind", cfg.UDPBind)
-	cfg.Port = getInt(node, "port", cfg.Port)
-	cfg.UDPWorkers = getInt(node, "udp_workers", cfg.UDPWorkers)
-	cfg.TCPWorkers = getInt(node, "tcp_workers", cfg.TCPWorkers)
+	var err error
+	if cfg.Port, err = getRequiredInt(node, "port", cfg.Port); err != nil {
+		return err
+	}
+	if cfg.UDPWorkers, err = getRequiredInt(node, "udp_workers", cfg.UDPWorkers); err != nil {
+		return err
+	}
+	if cfg.TCPWorkers, err = getRequiredInt(node, "tcp_workers", cfg.TCPWorkers); err != nil {
+		return err
+	}
 	cfg.PIDFile = node.GetString("pid_file")
+	cfg.SystemdNotify = node.GetString("systemd_notify")
+	cfg.ACLAllowUnrestrictedRecursion = getBool(node, "acl_allow_unrestricted_recursion", cfg.ACLAllowUnrestrictedRecursion)
 
 	if tlsNode := node.Get("tls"); tlsNode != nil {
 		cfg.TLS.Enabled = getBool(tlsNode, "enabled", cfg.TLS.Enabled)
@@ -197,7 +207,9 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.XoT.KeyFile = xotNode.GetString("key_file")
 		cfg.XoT.CAFile = xotNode.GetString("ca_file")
 		cfg.XoT.Bind = xotNode.GetString("bind")
-		cfg.XoT.MinTLSVersion = getInt(xotNode, "min_tls_version", 12)
+		if cfg.XoT.MinTLSVersion, err = getRequiredInt(xotNode, "min_tls_version", 12); err != nil {
+			return fmt.Errorf("xot: %w", err)
+		}
 	}
 
 	if httpNode := node.Get("http"); httpNode != nil {
@@ -209,7 +221,9 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.HTTP.AuthTokenRole = httpNode.GetString("auth_token_role")
 		cfg.HTTP.AuthSecret = httpNode.GetString("auth_secret")
 		cfg.HTTP.TokenPersistencePath = httpNode.GetString("token_persistence_path")
-		cfg.HTTP.MaxSessionsPerUser = getInt(httpNode, "max_sessions_per_user", cfg.HTTP.MaxSessionsPerUser)
+		if cfg.HTTP.MaxSessionsPerUser, err = getRequiredInt(httpNode, "max_sessions_per_user", cfg.HTTP.MaxSessionsPerUser); err != nil {
+			return fmt.Errorf("http: %w", err)
+		}
 		cfg.HTTP.AllowedOrigins = getStringSlice(httpNode, "allowed_origins", cfg.HTTP.AllowedOrigins)
 		cfg.HTTP.DoHEnabled = getBool(httpNode, "doh_enabled", cfg.HTTP.DoHEnabled)
 		cfg.HTTP.DoHPath = httpNode.GetString("doh_path")
@@ -226,15 +240,21 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		if cfg.HTTP.ODoHPath == "" {
 			cfg.HTTP.ODoHPath = "/odoh"
 		}
-		cfg.HTTP.ODoHKEM = getInt(httpNode, "odoh_kem", cfg.HTTP.ODoHKEM)
+		if cfg.HTTP.ODoHKEM, err = getRequiredInt(httpNode, "odoh_kem", cfg.HTTP.ODoHKEM); err != nil {
+			return fmt.Errorf("http: %w", err)
+		}
 		if cfg.HTTP.ODoHKEM == 0 {
 			cfg.HTTP.ODoHKEM = 4 // X25519
 		}
-		cfg.HTTP.ODoHKDF = getInt(httpNode, "odoh_kdf", cfg.HTTP.ODoHKDF)
+		if cfg.HTTP.ODoHKDF, err = getRequiredInt(httpNode, "odoh_kdf", cfg.HTTP.ODoHKDF); err != nil {
+			return fmt.Errorf("http: %w", err)
+		}
 		if cfg.HTTP.ODoHKDF == 0 {
 			cfg.HTTP.ODoHKDF = 1 // HKDF-SHA256
 		}
-		cfg.HTTP.ODoHAEAD = getInt(httpNode, "odoh_aead", cfg.HTTP.ODoHAEAD)
+		if cfg.HTTP.ODoHAEAD, err = getRequiredInt(httpNode, "odoh_aead", cfg.HTTP.ODoHAEAD); err != nil {
+			return fmt.Errorf("http: %w", err)
+		}
 		if cfg.HTTP.ODoHAEAD == 0 {
 			cfg.HTTP.ODoHAEAD = 1 // AES-256-GCM
 		}
@@ -257,4 +277,19 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 	}
 
 	return nil
+}
+
+func getRequiredInt(node *Node, key string, defaultValue int) (int, error) {
+	child := node.Get(key)
+	if child == nil {
+		return defaultValue, nil
+	}
+	if child.Type != NodeScalar {
+		return 0, fmt.Errorf("%s: expected scalar integer", key)
+	}
+	value, err := strconv.Atoi(child.Value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid integer %q: %w", key, child.Value, err)
+	}
+	return value, nil
 }

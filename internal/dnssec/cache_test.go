@@ -134,6 +134,33 @@ func TestCacheExpiration(t *testing.T) {
 	}
 }
 
+func TestCacheExpirationBoundary(t *testing.T) {
+	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
+	if !cacheExpiredAt(now, now) {
+		t.Fatal("cache entry should be expired exactly at expiresAt")
+	}
+	if cacheExpiredAt(now, now.Add(time.Nanosecond)) {
+		t.Fatal("cache entry should not be expired before expiresAt")
+	}
+
+	cache := NewValidationCache(5 * time.Minute)
+	cache.items[cacheKey("boundary.example.com", protocol.TypeA)] = &cacheEntry{
+		result:    ValidationSecure,
+		expiresAt: time.Now(),
+	}
+
+	result, ok := cache.Get("boundary.example.com", protocol.TypeA)
+	if ok {
+		t.Fatalf("Get at exact expiry returned ok=true result=%v, want expired", result)
+	}
+	if result != ValidationIndeterminate {
+		t.Fatalf("Get at exact expiry result=%v, want %v", result, ValidationIndeterminate)
+	}
+	if _, exists := cache.items[cacheKey("boundary.example.com", protocol.TypeA)]; exists {
+		t.Fatal("Get should remove entry at exact expiry boundary")
+	}
+}
+
 func TestCacheClear(t *testing.T) {
 	cache := NewValidationCache(5 * time.Minute)
 
@@ -415,8 +442,29 @@ func TestRRSIGCache_SetGet(t *testing.T) {
 	if !ok {
 		t.Fatal("GetRRSIG should find the cached RRSIG")
 	}
-	if got != rrsig {
-		t.Error("GetRRSIG should return the same RRSIG pointer")
+	if got == rrsig {
+		t.Error("GetRRSIG should return an isolated RRSIG copy")
+	}
+	if got.TTL != 300 {
+		t.Errorf("GetRRSIG TTL = %d, want 300", got.TTL)
+	}
+
+	rrsig.TTL = 100
+	got, ok = cache.GetRRSIG("example.com.", protocol.TypeA, dataHash)
+	if !ok {
+		t.Fatal("GetRRSIG should still find cached RRSIG after source mutation")
+	}
+	if got.TTL != 300 {
+		t.Errorf("cached RRSIG changed after source mutation: TTL=%d, want 300", got.TTL)
+	}
+
+	got.TTL = 50
+	got, ok = cache.GetRRSIG("example.com.", protocol.TypeA, dataHash)
+	if !ok {
+		t.Fatal("GetRRSIG should still find cached RRSIG after returned copy mutation")
+	}
+	if got.TTL != 300 {
+		t.Errorf("cached RRSIG changed after returned copy mutation: TTL=%d, want 300", got.TTL)
 	}
 }
 
@@ -427,6 +475,29 @@ func TestRRSIGCache_GetMiss(t *testing.T) {
 	_, ok := cache.GetRRSIG("example.com.", protocol.TypeA, hash)
 	if ok {
 		t.Error("GetRRSIG should return false for empty cache")
+	}
+}
+
+func TestRRSIGCache_NilRRSIGIsMiss(t *testing.T) {
+	cache := NewRRSIGCache(5 * time.Minute)
+	data := []byte("data")
+	dataHash := sha256.Sum256(data)
+
+	cache.SetRRSIG("example.com.", protocol.TypeA, data, nil)
+	if got, ok := cache.GetRRSIG("example.com.", protocol.TypeA, dataHash); ok || got != nil {
+		t.Fatalf("GetRRSIG after nil SetRRSIG = (%v, %v), want (nil, false)", got, ok)
+	}
+
+	key := rrsigCacheKey("example.com.", protocol.TypeA, dataHash)
+	cache.items[key] = &rrsigCacheEntry{
+		dataHash:  dataHash,
+		expiresAt: time.Now().Add(time.Minute),
+	}
+	if got, ok := cache.GetRRSIG("example.com.", protocol.TypeA, dataHash); ok || got != nil {
+		t.Fatalf("GetRRSIG for nil stored RRSIG = (%v, %v), want (nil, false)", got, ok)
+	}
+	if _, exists := cache.items[key]; exists {
+		t.Fatal("GetRRSIG should remove nil stored RRSIG entries")
 	}
 }
 
@@ -449,6 +520,25 @@ func TestRRSIGCache_GetExpired(t *testing.T) {
 	_, ok := cache.GetRRSIG("example.com.", protocol.TypeA, dataHash)
 	if ok {
 		t.Error("GetRRSIG should not return expired entries")
+	}
+}
+
+func TestRRSIGCache_GetExactExpiry(t *testing.T) {
+	cache := NewRRSIGCache(5 * time.Minute)
+	data := []byte("data")
+	dataHash := sha256.Sum256(data)
+	key := rrsigCacheKey("example.com.", protocol.TypeA, dataHash)
+	cache.items[key] = &rrsigCacheEntry{
+		rrsig:     &protocol.ResourceRecord{Type: protocol.TypeRRSIG, Class: protocol.ClassIN},
+		dataHash:  dataHash,
+		expiresAt: time.Now(),
+	}
+
+	if rrsig, ok := cache.GetRRSIG("example.com.", protocol.TypeA, dataHash); ok {
+		t.Fatalf("GetRRSIG at exact expiry returned ok=true rrsig=%v, want expired", rrsig)
+	}
+	if _, exists := cache.items[key]; exists {
+		t.Fatal("GetRRSIG should remove entry at exact expiry boundary")
 	}
 }
 
@@ -496,14 +586,14 @@ func TestRRSIGCache_DifferentData(t *testing.T) {
 	// Get first
 	hash1 := sha256.Sum256(data1)
 	got1, ok := cache.GetRRSIG("example.com.", protocol.TypeA, hash1)
-	if !ok || got1 != rrsig1 {
+	if !ok || got1.TTL != rrsig1.TTL {
 		t.Error("Should get rrsig1 for data1")
 	}
 
 	// Get second
 	hash2 := sha256.Sum256(data2)
 	got2, ok := cache.GetRRSIG("example.com.", protocol.TypeA, hash2)
-	if !ok || got2 != rrsig2 {
+	if !ok || got2.TTL != rrsig2.TTL {
 		t.Error("Should get rrsig2 for data2")
 	}
 }

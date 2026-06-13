@@ -66,7 +66,6 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 - **Web Dashboard** - React 19 SPA with real-time WebSocket query streaming
 - **Web Zone Manager** - Browser-based CRUD for zones and DNS records
 - **HTTP API** - RESTful API with OpenAPI 3.0 specification and Swagger UI
-- **MCP Server** - Model Context Protocol for AI assistant integration
 - **Prometheus Metrics** - Export metrics for monitoring
 - **Audit Logging** - Structured query audit trail with client IP, latency, and cache status
 - **Management CLI** - `dnsctl` tool for zone and server management
@@ -754,7 +753,7 @@ cluster:
 │                 │   (Gossip / Cache Sync)      │                        │
 │                 └──────────────────────────────┘                        │
 ├─────────────────────────────────────────────────────────────────────────┤
-│                    API Layer (HTTP + MCP)                                │
+│                    API Layer (HTTP)                                      │
 ├─────────────────────────────────────────────────────────────────────────┤
 │                    Config Parser (YAML) + Hot Reload                     │
 └─────────────────────────────────────────────────────────────────────────┘
@@ -769,7 +768,6 @@ cluster:
 │   └── dnsctl/         # CLI management tool
 ├── internal/
 │   ├── api/            # HTTP API with OpenAPI 3.0 / Swagger
-│   │   └── mcp/        # MCP server for AI integration
 │   ├── audit/          # Structured query audit logging
 │   ├── auth/           # Authentication middleware
 │   ├── blocklist/      # Domain blocklist engine
@@ -933,34 +931,6 @@ Access the dashboard at `http://localhost:8080/`
 - Live query visualization with status badges
 - Auto-reconnecting WebSocket connection
 
-## MCP Server (AI Integration)
-
-NothingDNS provides a Model Context Protocol (MCP) server for AI assistant integration:
-
-```yaml
-server:
-  http:
-    enabled: true
-    bind: "0.0.0.0:8080"
-```
-
-### Available MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `dns_query` | Query DNS records for a domain |
-| `zone_list` | List all configured zones |
-| `zone_get` | Get details of a specific zone |
-| `zone_create` | Create a new zone |
-| `zone_delete` | Delete a zone |
-| `record_add` | Add a DNS record to a zone |
-| `record_delete` | Delete a DNS record |
-| `record_list` | List records in a zone |
-| `cache_stats` | Get cache statistics |
-| `cache_flush` | Flush the DNS cache |
-| `blocklist_check` | Check if a domain is blocked |
-| `server_stats` | Get server statistics |
-
 ## Storage & Persistence
 
 NothingDNS includes a built-in key-value store with WAL support.
@@ -1010,7 +980,6 @@ dnsctl config reload
 | GeoIP DNS | ✅ | ✅ | ✅ | ❌ |
 | Split-Horizon | ✅ | ✅ | ✅ | ❌ |
 | Web Dashboard | ✅ | ❌ | ✅ | ❌ |
-| MCP/AI Integration | ✅ | ❌ | ❌ | ❌ |
 | Built-in Clustering | ✅ | ✅ | ✅ | ❌ |
 | Zone Transfer (AXFR) | ✅ | ✅ | ✅ | ❌ |
 | Anycast LB | ✅ | ❌ | ❌ | ❌ |
@@ -1091,7 +1060,6 @@ guide (development environment, build/test commands, PR checklist).
 - [x] DNS over QUIC (DoQ) transport
 - [x] Web dashboard (React 19 SPA)
 - [x] Web GUI for zone management
-- [x] MCP server for AI integration
 - [x] Storage & persistence (KV store + WAL)
 - [x] Anycast/Load balancing
 - [x] Slave zone support (AXFR/IXFR)

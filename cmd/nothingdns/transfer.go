@@ -470,12 +470,11 @@ func (h *integratedHandler) processUpdateEvents() {
 			})
 		}
 
-		// Persist zone to KV store if KVPersistence is available
-		if h.kvPersistence != nil {
-			if err := h.kvPersistence.PersistZone(req.ZoneName); err != nil {
-				h.logger.Warnf("Failed to persist zone %s to KV store: %v", req.ZoneName, err)
-			}
-		}
+		// DDNS mutates the *zone.Zone directly (transfer.ApplyUpdate above),
+		// bypassing the Manager's mutation methods — fire the mutation hook
+		// manually so KV persistence (and any future hook consumer) sees the
+		// change. All other mutation paths persist automatically via the hook.
+		h.zoneManager.NotifyMutated(req.ZoneName)
 
 		// Persist zone file to disk if zoneDir is configured
 		if err := h.zoneManager.PersistZone(req.ZoneName); err != nil {

@@ -39,6 +39,7 @@ import (
 // integratedHandler is the DNS request handler that uses all components.
 type integratedHandler struct {
 	config        *config.Config
+	runtimeMu     sync.RWMutex
 	logger        *util.Logger
 	cache         *cache.Cache
 	upstream      *upstream.Client
@@ -91,10 +92,21 @@ type integratedHandler struct {
 
 // ServeDNS implements the server.Handler interface.
 func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Message) {
-	if h.pipeline == nil {
-		h.pipeline = NewPipeline(h)
+	h.runtimeMu.RLock()
+	pipeline := h.pipeline
+	h.runtimeMu.RUnlock()
+	if pipeline == nil {
+		h.runtimeMu.Lock()
+		if h.pipeline == nil {
+			h.pipeline = NewPipeline(h)
+		}
+		pipeline = h.pipeline
+		h.runtimeMu.Unlock()
 	}
-	h.pipeline.ServeDNS(h, w, r)
+
+	h.runtimeMu.RLock()
+	defer h.runtimeMu.RUnlock()
+	pipeline.ServeDNS(h, w, r)
 }
 
 // tryDNS64Synthesis checks whether DNS64 synthesis is needed for an AAAA query
@@ -152,31 +164,41 @@ func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protoc
 	return true
 }
 
-// applyRPZResponsePolicy applies RPZ response-IP and NSDNAME policies to resp.
+func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) bool {
+	handled, err := h.applyRPZResponsePolicyWithError(w, r, q, resp, label)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+	}
+	return handled
+}
+
+// applyRPZResponsePolicyWithError applies RPZ response-IP and NSDNAME policies to resp.
 // Returns true if RPZ triggered (caller should return); false to continue.
 // This consolidates the 3× duplicated RPZ response-check blocks in ServeDNS.
-func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) bool {
+func (h *integratedHandler) applyRPZResponsePolicyWithError(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) (bool, error) {
 	if h.rpzEngine == nil {
-		return false
+		return false, nil
 	}
 	respIPs := extractResponseIPs(resp)
 	if len(respIPs) > 0 {
 		if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
 			h.logger.Debugf("RPZ response IP match for %s (policy: %s)", label, rule.PolicyName)
-			if h.applyRPZRule(w, r, q, rule) {
-				return true
+			handled, err := h.applyRPZRuleWithError(w, r, q, rule)
+			if handled || err != nil {
+				return handled, err
 			}
 		}
 	}
 	for _, nsName := range extractNSNames(resp) {
 		if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
 			h.logger.Debugf("RPZ NSDNAME match for %s (policy: %s)", nsName, rule.PolicyName)
-			if h.applyRPZRule(w, r, q, rule) {
-				return true
+			handled, err := h.applyRPZRuleWithError(w, r, q, rule)
+			if handled || err != nil {
+				return handled, err
 			}
 		}
 	}
-	return false
+	return false, nil
 }
 
 // checkRPZResponseIP checks a DNS response against RPZ response-IP policy.
@@ -186,18 +208,26 @@ func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *p
 // This ensures authoritative zone responses are also subject to RPZ filtering,
 // closing VULN-064 where the authoritative path bypassed RPZ response-IP checks.
 func (h *integratedHandler) checkRPZResponseIP(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
+	handled, err := h.checkRPZResponseIPWithError(w, r, q, resp)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+	}
+	return handled
+}
+
+func (h *integratedHandler) checkRPZResponseIPWithError(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) (bool, error) {
 	if h.rpzEngine == nil {
-		return false
+		return false, nil
 	}
 	respIPs := extractResponseIPs(resp)
 	if len(respIPs) == 0 {
-		return false
+		return false, nil
 	}
 	if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
 		h.logger.Debugf("RPZ response IP match for %s (policy: %s)", q.Name.String(), rule.PolicyName)
-		return h.applyRPZRule(w, r, q, rule)
+		return h.applyRPZRuleWithError(w, r, q, rule)
 	}
-	return false
+	return false, nil
 }
 
 // sendRefused returns a REFUSED response without forwarding to upstream.
@@ -224,12 +254,18 @@ func reply(w server.ResponseWriter, query, response *protocol.Message) {
 
 // sendError sends an error response.
 func sendError(w server.ResponseWriter, query *protocol.Message, rcode uint8) {
+	id := uint16(0)
+	var questions []*protocol.Question
+	if query != nil {
+		id = query.Header.ID
+		questions = query.Questions
+	}
 	resp := &protocol.Message{
 		Header: protocol.Header{
-			ID:    query.Header.ID,
+			ID:    id,
 			Flags: protocol.NewResponseFlags(rcode),
 		},
-		Questions: query.Questions,
+		Questions: questions,
 	}
 	if _, err := w.Write(resp); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to write error response: %v\n", err)
@@ -257,15 +293,21 @@ func (h *integratedHandler) handleANYTruncated(w server.ResponseWriter, r *proto
 // sendErrorWithEDE sends an error response with Extended DNS Error (RFC 8914).
 // infoCode is the EDE info code (0-65535), extraText is optional context.
 func sendErrorWithEDE(w server.ResponseWriter, query *protocol.Message, rcode uint8, infoCode uint16, extraText string) {
+	id := uint16(0)
+	var questions []*protocol.Question
+	if query != nil {
+		id = query.Header.ID
+		questions = query.Questions
+	}
 	resp := &protocol.Message{
 		Header: protocol.Header{
-			ID:    query.Header.ID,
+			ID:    id,
 			Flags: protocol.NewResponseFlags(rcode),
 		},
-		Questions: query.Questions,
+		Questions: questions,
 	}
 	// Add EDNS0 OPT record with EDE if client sent EDNS0
-	if query.GetOPT() != nil {
+	if query != nil && query.GetOPT() != nil {
 		// Get UDP payload size from client's OPT record
 		udpPayload := uint16(4096)
 		if opt := query.GetOPT(); opt != nil {
@@ -356,15 +398,23 @@ func (h *integratedHandler) buildSignedResponse(query *protocol.Message, records
 		return resp
 	}
 
-	// Convert zone records to protocol.ResourceRecord for signing
+	// Convert zone records to protocol.ResourceRecord for signing.
+	// Skip records with unparseable RData, mirroring buildResponse: they are
+	// not in the answer section, and a single nil-Data record would make
+	// SignRRSet reject the whole RRset, silently stripping the RRSIG from
+	// the otherwise-valid answers.
 	var rrs []*protocol.ResourceRecord
 	for _, rec := range records {
+		data := parseRData(rec.Type, rec.RData)
+		if data == nil {
+			continue
+		}
 		rr := &protocol.ResourceRecord{
 			Name:  query.Questions[0].Name,
 			Type:  stringToType(rec.Type),
 			Class: protocol.ClassIN,
 			TTL:   rec.TTL,
-			Data:  parseRData(rec.Type, rec.RData),
+			Data:  data,
 		}
 		rrs = append(rrs, rr)
 	}
@@ -387,17 +437,32 @@ func (h *integratedHandler) buildSignedResponse(query *protocol.Message, records
 			rrsig, err := signer.SignRRSet(
 				rrs,
 				zsk,
-				uint32(inception.Unix()),
-				uint32(expiration.Unix()),
+				dnssecSignatureUnixTime(inception),
+				dnssecSignatureUnixTime(expiration),
 			)
 			if err == nil && rrsig != nil {
 				resp.AddAnswer(rrsig)
 				h.logger.Debugf("Added RRSIG for %s", query.Questions[0].Name.String())
+			} else if err != nil {
+				// Answer still goes out, but unsigned — validating resolvers
+				// will treat it as Bogus, so make the cause visible.
+				h.logger.Warnf("Failed to sign RRset for %s: %v", query.Questions[0].Name.String(), err)
 			}
 		}
 	}
 
 	return resp
+}
+
+func dnssecSignatureUnixTime(t time.Time) uint32 {
+	sec := t.Unix()
+	if sec <= 0 {
+		return 0
+	}
+	if sec > int64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(sec)
 }
 
 // minimizeResponse strips unnecessary authority and additional section records
@@ -427,7 +492,7 @@ func minimizeResponse(resp *protocol.Message) {
 			hasSOA = true
 		case protocol.TypeNS:
 			hasNS = true
-			if ns, ok := rr.Data.(*protocol.RDataNS); ok && ns.NSDName != nil {
+			if ns, ok := rr.Data.(*protocol.RDataNS); ok && ns != nil && ns.NSDName != nil {
 				nsNames[strings.ToLower(ns.NSDName.String())] = struct{}{}
 			}
 		}
@@ -504,7 +569,7 @@ func (h *integratedHandler) processCookies(r *protocol.Message, clientIP net.IP)
 	}
 
 	optData, ok := opt.Data.(*protocol.RDataOPT)
-	if !ok {
+	if !ok || optData == nil {
 		return nil, true
 	}
 
@@ -557,7 +622,7 @@ func (cw *cookieResponseWriter) Write(msg *protocol.Message) (int, error) {
 			opt = msg.GetOPT()
 		}
 		if opt != nil {
-			if optData, ok := opt.Data.(*protocol.RDataOPT); ok {
+			if optData, ok := opt.Data.(*protocol.RDataOPT); ok && optData != nil {
 				// Remove any existing cookie option to avoid duplicates
 				optData.RemoveOption(protocol.OptionCodeCookie)
 				optData.AddOption(protocol.OptionCodeCookie, cw.cookieData)
@@ -577,44 +642,66 @@ func (cw *cookieResponseWriter) MaxSize() int {
 	return cw.inner.MaxSize()
 }
 
-// applyRPZRule applies an RPZ rule action and returns true if the query was handled.
-// This handles all RPZ policy actions consistently.
 func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, rule *rpz.Rule) bool {
+	handled, err := h.applyRPZRuleWithError(w, r, q, rule)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+	}
+	return handled
+}
+
+// applyRPZRuleWithError applies an RPZ rule action and returns true if the query was handled.
+// This handles all RPZ policy actions consistently.
+func (h *integratedHandler) applyRPZRuleWithError(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, rule *rpz.Rule) (bool, error) {
 	switch rule.Action {
 	case rpz.ActionNXDOMAIN:
 		h.logger.Debugf("RPZ NXDOMAIN for %s (policy: %s)", q.Name.String(), rule.PolicyName)
 		if h.metrics != nil {
 			h.metrics.RecordBlocklistBlock()
 		}
-		sendError(w, r, protocol.RcodeNameError)
-		return true
+		resp := &protocol.Message{
+			Header: protocol.Header{
+				ID:    r.Header.ID,
+				Flags: protocol.NewResponseFlags(protocol.RcodeNameError),
+			},
+			Questions: r.Questions,
+		}
+		_, err := w.Write(resp)
+		return true, err
 	case rpz.ActionNODATA:
 		h.logger.Debugf("RPZ NODATA for %s (policy: %s)", q.Name.String(), rule.PolicyName)
 		if h.metrics != nil {
 			h.metrics.RecordBlocklistBlock()
 		}
-		sendError(w, r, protocol.RcodeSuccess)
-		return true
+		resp := &protocol.Message{
+			Header: protocol.Header{
+				ID:    r.Header.ID,
+				Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+			},
+			Questions: r.Questions,
+		}
+		_, err := w.Write(resp)
+		return true, err
 	case rpz.ActionDrop:
 		h.logger.Debugf("RPZ DROP for %s (policy: %s)", q.Name.String(), rule.PolicyName)
-		return true // silently drop
+		return true, nil // silently drop
 	case rpz.ActionPassThrough:
 		// Allow the query to proceed normally
-		return false
+		return false, nil
 	case rpz.ActionTCPOnly:
 		// Set TC bit to force TCP retry
 		resp := r.Copy()
 		resp.Header.Flags.TC = true
 		resp.Header.Flags.QR = true
 		resp.Header.Flags.RCODE = protocol.RcodeSuccess
-		_, _ = w.Write(resp)
-		return true
+		_, err := w.Write(resp)
+		return true, err
 	case rpz.ActionOverride:
 		// Return override IP
 		overrideIP := net.ParseIP(rule.OverrideData)
 		if overrideIP == nil {
 			h.logger.Warnf("RPZ override invalid IP: %s", rule.OverrideData)
-			return false
+			return false, nil
 		}
 		resp := &protocol.Message{
 			Header: protocol.Header{
@@ -644,13 +731,13 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 				Data:  &protocol.RDataAAAA{Address: addr},
 			})
 		}
-		_, _ = w.Write(resp)
-		return true
+		_, err := w.Write(resp)
+		return true, err
 	case rpz.ActionCNAME:
 		targetName, err := protocol.ParseName(rule.OverrideData)
 		if err != nil {
 			h.logger.Warnf("RPZ CNAME invalid target: %s", rule.OverrideData)
-			return false
+			return false, nil
 		}
 		resp := &protocol.Message{
 			Header: protocol.Header{
@@ -666,10 +753,10 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 			TTL:   rule.TTL,
 			Data:  &protocol.RDataCNAME{CName: targetName},
 		})
-		_, _ = w.Write(resp)
-		return true
+		_, err = w.Write(resp)
+		return true, err
 	default:
-		return false
+		return false, nil
 	}
 }
 
@@ -677,7 +764,13 @@ func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Me
 // This is used for RPZ response IP policy checking (TriggerResponseIP and TriggerNSIP).
 func extractResponseIPs(resp *protocol.Message) []net.IP {
 	var ips []net.IP
+	if resp == nil {
+		return ips
+	}
 	for _, rr := range resp.Answers {
+		if rr == nil {
+			continue
+		}
 		switch rdata := rr.Data.(type) {
 		case *protocol.RDataA:
 			if rdata != nil {
@@ -690,6 +783,9 @@ func extractResponseIPs(resp *protocol.Message) []net.IP {
 		}
 	}
 	for _, rr := range resp.Authorities {
+		if rr == nil {
+			continue
+		}
 		switch rdata := rr.Data.(type) {
 		case *protocol.RDataA:
 			if rdata != nil {
@@ -703,6 +799,9 @@ func extractResponseIPs(resp *protocol.Message) []net.IP {
 	}
 	// Additional section contains glue A/AAAA records for nameservers (NSIP matching)
 	for _, rr := range resp.Additionals {
+		if rr == nil {
+			continue
+		}
 		switch rdata := rr.Data.(type) {
 		case *protocol.RDataA:
 			if rdata != nil {
@@ -721,7 +820,13 @@ func extractResponseIPs(resp *protocol.Message) []net.IP {
 // This is used for RPZ TriggerNSDNAME policy checking.
 func extractNSNames(resp *protocol.Message) []string {
 	var nsNames []string
+	if resp == nil {
+		return nsNames
+	}
 	for _, rr := range resp.Authorities {
+		if rr == nil {
+			continue
+		}
 		if ns, ok := rr.Data.(*protocol.RDataNS); ok && ns != nil && ns.NSDName != nil {
 			nsNames = append(nsNames, ns.NSDName.String())
 		}
@@ -764,32 +869,54 @@ func (h *integratedHandler) RebuildZoneTree() {
 // ReloadViews reloads split-horizon view configuration and zone files.
 // Called during config reload to pick up view changes without restart.
 func (h *integratedHandler) ReloadViews(viewConfigs []filter.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error)) error {
+	plan, err := h.prepareReloadViews(viewConfigs, loadZoneFileFunc)
+	if err != nil {
+		return err
+	}
+	h.applyReloadViews(plan)
+	return nil
+}
+
+type viewReloadPlan struct {
+	splitHorizon *filter.SplitHorizon
+	viewZones    map[string]map[string]*zone.Zone
+}
+
+func (h *integratedHandler) prepareReloadViews(viewConfigs []filter.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error)) (*viewReloadPlan, error) {
 	if len(viewConfigs) == 0 {
-		h.splitHorizon = nil
-		h.viewZones = nil
-		return nil
+		return &viewReloadPlan{}, nil
 	}
 
 	newSH, err := filter.NewSplitHorizon(viewConfigs)
 	if err != nil {
-		return fmt.Errorf("reloading split-horizon: %w", err)
+		return nil, fmt.Errorf("reloading split-horizon: %w", err)
 	}
 
 	newViewZones := make(map[string]map[string]*zone.Zone)
 	for _, v := range viewConfigs {
 		vzMap := make(map[string]*zone.Zone)
 		for _, zf := range v.ZoneFiles {
+			if loadZoneFileFunc == nil {
+				return nil, fmt.Errorf("loading zone file %q for view %q: no loader configured", zf, v.Name)
+			}
 			vz, err := loadZoneFileFunc(zf)
 			if err != nil {
-				h.logger.Warnf("Failed to load zone file %q for view %q: %v", zf, v.Name, err)
-				continue
+				return nil, fmt.Errorf("loading zone file %q for view %q: %w", zf, v.Name, err)
 			}
 			vzMap[vz.Origin] = vz
 		}
 		newViewZones[v.Name] = vzMap
 	}
 
-	h.splitHorizon = newSH
-	h.viewZones = newViewZones
-	return nil
+	return &viewReloadPlan{splitHorizon: newSH, viewZones: newViewZones}, nil
+}
+
+func (h *integratedHandler) applyReloadViews(plan *viewReloadPlan) {
+	if plan == nil {
+		return
+	}
+	h.runtimeMu.Lock()
+	defer h.runtimeMu.Unlock()
+	h.splitHorizon = plan.splitHorizon
+	h.viewZones = plan.viewZones
 }

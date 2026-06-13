@@ -49,7 +49,7 @@ function AppContent() {
   const setStreamConnected = useQueryStream((s) => s.setConnected);
   // The app's single shared WebSocket. Pages subscribe to events via the
   // queryStream store rather than opening their own socket.
-  const { connected } = useWebSocket('/ws', { enabled: isAuthenticated, onQuery: pushEvent });
+  const { connected, error: streamError } = useWebSocket('/ws', { enabled: isAuthenticated, onQuery: pushEvent });
 
   useEffect(() => { setStreamConnected(connected); }, [connected, setStreamConnected]);
 
@@ -67,7 +67,7 @@ function AppContent() {
   return (
     <BrowserRouter>
       <div className="flex min-h-screen bg-background text-foreground">
-        <Sidebar connected={connected} />
+        <Sidebar connected={connected} streamError={streamError} />
         <main className="flex-1 overflow-y-auto h-screen">
           <div className="p-6 max-w-6xl mx-auto">
             <Suspense fallback={<PageFallback />}>
