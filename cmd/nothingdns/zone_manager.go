@@ -65,7 +65,10 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 		err      error
 	}
 
-	zoneFiles := discoverStartupZoneFiles(cfg, logger)
+	zoneFiles, err := discoverStartupZoneFiles(cfg)
+	if err != nil {
+		return nil, err
+	}
 	zoneChans := make([]chan zoneResult, len(zoneFiles))
 	for i, zoneFile := range zoneFiles {
 		zoneChans[i] = make(chan zoneResult, 1)
@@ -78,8 +81,7 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 	for _, ch := range zoneChans {
 		result := <-ch
 		if result.err != nil {
-			logger.Warnf("Failed to load zone file %s: %v", result.zoneFile, result.err)
-			continue
+			return nil, fmt.Errorf("loading zone file %s: %w", result.zoneFile, result.err)
 		}
 		if result.zone != nil {
 			// Results are drained in discovery order (configured zones first,
@@ -103,8 +105,7 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 		for origin, z := range mgr.result.Zones {
 			signer, err := loadZoneSigner(z, cfg.DNSSEC.Signing)
 			if err != nil {
-				logger.Warnf("Failed to load zone signer for %s: %v", origin, err)
-				continue
+				return nil, fmt.Errorf("loading zone signer for %s: %w", origin, err)
 			}
 			if signer != nil {
 				mgr.result.Signers[origin] = signer
@@ -133,6 +134,9 @@ func NewZoneManager(cfg *config.Config, logger *util.Logger) (*ZoneManager, erro
 	}
 	kvStore, err := storage.OpenKVStoreEncrypted(dbDataDir, nil, aeadKey)
 	if err != nil {
+		if cfg.Storage.DataDir != "" || cfg.Storage.EncryptionKey != "" {
+			return nil, fmt.Errorf("initializing persistent zone database at %s: %w", filepath.Join(dbDataDir, storage.DataFile), err)
+		}
 		logger.Warnf("Failed to initialize persistent zone database: %v", err)
 	} else {
 		mgr.result.KVStore = kvStore
@@ -191,7 +195,7 @@ func synchronizeKVZones(mgr *ZoneManager, zoneManager *zone.Manager, kvPersisten
 	// are persisted explicitly at mutation time by the API handlers.
 }
 
-func discoverStartupZoneFiles(cfg *config.Config, logger *util.Logger) []string {
+func discoverStartupZoneFiles(cfg *config.Config) ([]string, error) {
 	zoneFiles := make([]string, 0, len(cfg.Zones))
 	seen := make(map[string]struct{}, len(cfg.Zones))
 	for _, zoneFile := range cfg.Zones {
@@ -199,13 +203,12 @@ func discoverStartupZoneFiles(cfg *config.Config, logger *util.Logger) []string 
 	}
 
 	if cfg.ZoneDir == "" {
-		return zoneFiles
+		return zoneFiles, nil
 	}
 
 	entries, err := os.ReadDir(cfg.ZoneDir)
 	if err != nil {
-		logger.Warnf("Failed to scan zone_dir %s: %v", cfg.ZoneDir, err)
-		return zoneFiles
+		return nil, fmt.Errorf("scanning zone_dir %s: %w", cfg.ZoneDir, err)
 	}
 
 	names := make([]string, 0, len(entries))
@@ -221,7 +224,7 @@ func discoverStartupZoneFiles(cfg *config.Config, logger *util.Logger) []string 
 		addStartupZoneFile(&zoneFiles, seen, filepath.Join(cfg.ZoneDir, name))
 	}
 
-	return zoneFiles
+	return zoneFiles, nil
 }
 
 func addStartupZoneFile(zoneFiles *[]string, seen map[string]struct{}, zoneFile string) {

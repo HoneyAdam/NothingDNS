@@ -88,6 +88,11 @@ spec:
                   name: {{ $secretName }}
                   key: metrics-auth-token
             {{- end }}
+            - name: NOTHINGDNS_STORAGE_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: storage-encryption-key
             {{- if .Values.config.cluster.enabled }}
             - name: NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
               valueFrom:

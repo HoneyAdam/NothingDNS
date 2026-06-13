@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/api"
 	"github.com/nothingdns/nothingdns/internal/audit"
 	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/dashboard"
@@ -32,6 +34,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/odoh"
 	"github.com/nothingdns/nothingdns/internal/quic"
 	"github.com/nothingdns/nothingdns/internal/resolver"
+	"github.com/nothingdns/nothingdns/internal/rpz"
 	"github.com/nothingdns/nothingdns/internal/server"
 	"github.com/nothingdns/nothingdns/internal/transfer"
 	"github.com/nothingdns/nothingdns/internal/util"
@@ -47,7 +50,18 @@ var (
 	showVersion    = flag.Bool("version", false, "Show version and exit")
 	showHelp       = flag.Bool("help", false, "Show help and exit")
 	validateConfig = flag.Bool("validate-config", false, "Validate configuration file and exit")
+	validateProd   = flag.Bool("validate-production-config", false, "Validate production configuration file and exit")
 )
+
+type blocklistReloader interface {
+	Reload() error
+	Stats() blocklist.Stats
+}
+
+type rpzReloader interface {
+	Reload() error
+	Stats() rpz.Stats
+}
 
 func effectiveHTTPConfig(cfg *config.Config) config.HTTPConfig {
 	httpCfg := cfg.Server.HTTP
@@ -91,6 +105,218 @@ func buildODoHConfig(cfg *config.Config, httpCfg config.HTTPConfig) *odoh.ODoHCo
 	return odohCfg
 }
 
+func reloadConfiguredZoneFiles(handler *integratedHandler, zoneManager *zone.Manager, zoneFiles map[string]string, configuredZoneFiles []string, loadZoneFileFunc func(string) (*zone.Zone, error), logger *util.Logger) (int, error) {
+	loaded, err := prepareConfiguredZoneFiles(configuredZoneFiles, loadZoneFileFunc)
+	if err != nil {
+		return 0, err
+	}
+	applyConfiguredZoneFiles(handler, zoneManager, zoneFiles, loaded, logger)
+	return len(loaded), nil
+}
+
+type loadedZoneFile struct {
+	zone *zone.Zone
+	file string
+}
+
+func prepareConfiguredZoneFiles(configuredZoneFiles []string, loadZoneFileFunc func(string) (*zone.Zone, error)) ([]loadedZoneFile, error) {
+	loaded := make([]loadedZoneFile, 0, len(configuredZoneFiles))
+	for _, zoneFile := range configuredZoneFiles {
+		z, err := loadZoneFileFunc(zoneFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading zone file %s: %w", zoneFile, err)
+		}
+		loaded = append(loaded, loadedZoneFile{zone: z, file: zoneFile})
+	}
+	return loaded, nil
+}
+
+func applyConfiguredZoneFiles(handler *integratedHandler, zoneManager *zone.Manager, zoneFiles map[string]string, loaded []loadedZoneFile, logger *util.Logger) {
+	for _, item := range loaded {
+		handler.zonesMu.Lock()
+		handler.zones[item.zone.Origin] = item.zone
+		handler.zonesMu.Unlock()
+		zoneFiles[item.zone.Origin] = item.file
+		zoneManager.LoadZone(item.zone, item.file)
+		logger.Infof("Reloaded zone %s", item.zone.Origin)
+		// Do NOT mirror file-backed zones into the KV store: the zone
+		// file is their durable source, and a KV copy would resurrect
+		// the zone after the operator removes it from the config.
+	}
+
+	handler.RebuildZoneTree()
+}
+
+func reloadConfiguredViews(handler *integratedHandler, views []config.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error), logger *util.Logger) error {
+	plan, count, err := prepareConfiguredViews(handler, views, loadZoneFileFunc)
+	if err != nil {
+		return err
+	}
+	applyConfiguredViews(handler, plan, count, logger)
+	return nil
+}
+
+func prepareConfiguredViews(handler *integratedHandler, views []config.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error)) (*viewReloadPlan, int, error) {
+	viewConfigs := make([]filter.ViewConfig, len(views))
+	for i, v := range views {
+		viewConfigs[i] = filter.ViewConfig{
+			Name:         v.Name,
+			MatchClients: v.MatchClients,
+			ZoneFiles:    v.ZoneFiles,
+		}
+	}
+	plan, err := handler.prepareReloadViews(viewConfigs, loadZoneFileFunc)
+	if err != nil {
+		return nil, len(viewConfigs), fmt.Errorf("reloading configured split-horizon views: %w", err)
+	}
+	return plan, len(viewConfigs), nil
+}
+
+func applyConfiguredViews(handler *integratedHandler, plan *viewReloadPlan, count int, logger *util.Logger) {
+	handler.applyReloadViews(plan)
+	if count == 0 {
+		logger.Info("Cleared split-horizon views")
+	} else {
+		logger.Infof("Reloaded split-horizon views")
+	}
+}
+
+type upstreamReloadPlan struct {
+	upstreamManager *UpstreamManager
+	dnssecManager   *DNSSECManager
+}
+
+func prepareUpstreamComponents(cfg *config.Config, logger *util.Logger) (*upstreamReloadPlan, error) {
+	nextUpstreamManager, err := NewUpstreamManager(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	nextDNSSECManager, err := NewDNSSECManager(cfg, nextUpstreamManager.Resolver(), logger)
+	if err != nil {
+		nextUpstreamManager.Stop()
+		return nil, err
+	}
+	return &upstreamReloadPlan{
+		upstreamManager: nextUpstreamManager,
+		dnssecManager:   nextDNSSECManager,
+	}, nil
+}
+
+func applyUpstreamComponents(plan *upstreamReloadPlan, current *UpstreamManager, handler *integratedHandler, apiServer *api.Server) {
+	if plan == nil || plan.upstreamManager == nil || plan.dnssecManager == nil {
+		return
+	}
+	if handler != nil {
+		handler.runtimeMu.Lock()
+		handler.upstream = plan.upstreamManager.Client
+		handler.loadBalancer = plan.upstreamManager.LoadBalancer
+		handler.validator = plan.dnssecManager.Validator
+		handler.runtimeMu.Unlock()
+	}
+	if apiServer != nil {
+		apiServer.
+			WithUpstream(plan.upstreamManager.Client, plan.upstreamManager.LoadBalancer).
+			WithDNSSEC(plan.dnssecManager.Validator)
+	}
+	if current != nil && current != plan.upstreamManager {
+		current.Stop()
+	}
+}
+
+func reloadSecurityPolicy(bl blocklistReloader, rpzEngine rpzReloader, logger *util.Logger) error {
+	var errs []error
+	if bl != nil {
+		if err := bl.Reload(); err != nil {
+			wrapped := fmt.Errorf("reloading blocklist: %w", err)
+			logger.Warnf("Failed to reload blocklist: %v", err)
+			errs = append(errs, wrapped)
+		} else {
+			stats := bl.Stats()
+			logger.Infof("Reloaded blocklist with %d entries from %d files", stats.TotalBlocks, stats.Files)
+		}
+	}
+	if rpzEngine != nil {
+		if err := rpzEngine.Reload(); err != nil {
+			wrapped := fmt.Errorf("reloading RPZ zones: %w", err)
+			logger.Warnf("Failed to reload RPZ zones: %v", err)
+			errs = append(errs, wrapped)
+		} else {
+			stats := rpzEngine.Stats()
+			logger.Infof("Reloaded RPZ with %d rules from %d files", stats.TotalRules, stats.Files)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func reloadSecurityComponents(cfg *config.Config, current *SecurityManager, handler *integratedHandler, apiServer *api.Server, logger *util.Logger) (*SecurityManager, *SecurityManagerResult, error) {
+	next, err := NewSecurityManager(cfg, logger)
+	if err != nil {
+		return nil, nil, err
+	}
+	result := next.Result()
+	if handler != nil {
+		handler.runtimeMu.Lock()
+		handler.blocklist = result.Blocklist
+		handler.rpzEngine = result.RPZEngine
+		handler.geoEngine = result.GeoEngine
+		handler.dns64Synth = result.DNS64Synth
+		handler.aclChecker = result.ACLChecher
+		handler.rateLimiter = result.RateLimiter
+		handler.rrl = result.RRL
+		handler.runtimeMu.Unlock()
+	}
+	if apiServer != nil {
+		apiServer.
+			WithBlocklist(result.Blocklist).
+			WithRPZ(result.RPZEngine).
+			WithGeoDNS(result.GeoEngine).
+			WithACL(result.ACLChecher).
+			WithRateLimiter(result.RateLimiter)
+	}
+	if current != nil {
+		current.Stop()
+	}
+	return next, result, nil
+}
+
+func loadReloadConfig(path string) (*config.Config, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("config file %s not accessible: %w", path, err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	if err := validateRuntimeAssets(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func storeReloadConfig(path string, cfgMu *sync.RWMutex, cfgRef **config.Config) (*config.Config, error) {
+	newCfg, err := loadReloadConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	storeLoadedConfig(newCfg, cfgMu, cfgRef)
+	return newCfg, nil
+}
+
+func storeLoadedConfig(newCfg *config.Config, cfgMu *sync.RWMutex, cfgRef **config.Config) {
+	cfgMu.Lock()
+	*cfgRef = newCfg
+	cfgMu.Unlock()
+}
+
+func commitLoadedConfig(newCfg *config.Config, cfgMu *sync.RWMutex, cfgRef **config.Config, handler *integratedHandler) {
+	storeLoadedConfig(newCfg, cfgMu, cfgRef)
+	if handler != nil {
+		handler.runtimeMu.Lock()
+		handler.config = newCfg
+		handler.runtimeMu.Unlock()
+	}
+}
+
 func main() {
 	flag.Parse()
 
@@ -100,6 +326,15 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("Config file %s is valid\n", *configPath)
+		os.Exit(0)
+	}
+
+	if *validateProd {
+		if err := validateProductionConfigOnly(*configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Production config validation failed: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Production config file %s is valid\n", *configPath)
 		os.Exit(0)
 	}
 
@@ -189,6 +424,9 @@ func run() error {
 		AuthToken: cfg.Metrics.AuthToken,
 	})
 	if err := metricsCollector.Start(); err != nil {
+		if cfg.Metrics.Enabled {
+			return fmt.Errorf("starting metrics server: %w", err)
+		}
 		logger.Warnf("Failed to start metrics server: %v", err)
 	} else if cfg.Metrics.Enabled {
 		logger.Infof("Metrics server listening on %s%s", cfg.Metrics.Bind, cfg.Metrics.Path)
@@ -228,7 +466,7 @@ func run() error {
 		}
 		mdnsResponder = mdns.NewResponder(mdnsConfig, logger)
 		if err := mdnsResponder.Start(); err != nil {
-			logger.Warnf("Failed to start mDNS responder: %v", err)
+			return fmt.Errorf("starting mDNS responder: %w", err)
 		} else {
 			logger.Infof("mDNS responder started on %s:%d", mdnsConfig.MulticastIP, mdnsConfig.Port)
 		}
@@ -274,7 +512,11 @@ func run() error {
 		}
 		// Hash plaintext password and zero it from memory
 		if authUsers[i].Password != "" {
-			authUsers[i].Hash = auth.HashPassword(authUsers[i].Password, nil)
+			hash, err := auth.HashPasswordWithError(authUsers[i].Password, nil)
+			if err != nil {
+				return fmt.Errorf("hashing configured password for user %q: %w", authUsers[i].Username, err)
+			}
+			authUsers[i].Hash = hash
 			authUsers[i].Password = strings.Repeat("\x00", len(authUsers[i].Password))
 		}
 		// Zero plaintext in the raw config struct as well
@@ -457,11 +699,10 @@ func run() error {
 		if cfg.Resolution.RootHints != "" {
 			hints, err := loadRootHintsFile(cfg.Resolution.RootHints)
 			if err != nil {
-				logger.Warnf("Failed to load root hints file %s: %v", cfg.Resolution.RootHints, err)
-			} else {
-				resolverConfig.Hints = hints
-				logger.Infof("Loaded %d custom root hints from %s", len(hints), cfg.Resolution.RootHints)
+				return fmt.Errorf("loading root hints file %s: %w", cfg.Resolution.RootHints, err)
 			}
+			resolverConfig.Hints = hints
+			logger.Infof("Loaded %d custom root hints from %s", len(hints), cfg.Resolution.RootHints)
 		}
 		handler.resolver = resolver.NewResolver(resolverConfig, &resolverCacheAdapter{cache: dnsCache}, resolverTransport)
 		logger.Info("Iterative recursive resolver enabled")
@@ -491,11 +732,9 @@ func run() error {
 	// Feed per-query events into the dashboard (Query Log page + live stream).
 	handler.dashboardServer = dashboardServer
 	httpConfig := effectiveHTTPConfig(cfg)
-	apiServer := api.NewServer(httpConfig, zoneManagerInstance, dnsCache, func() error {
+	var apiServer *api.Server
+	apiServer = api.NewServer(httpConfig, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")
-		cfgMu.RLock()
-		reloadCfg := cfg
-		cfgMu.RUnlock()
 		now := time.Now().UTC().Format(time.RFC3339)
 		if auditLogger != nil {
 			auditLogger.LogReload(audit.ReloadAuditEntry{
@@ -503,56 +742,87 @@ func run() error {
 				Action:    "start",
 			})
 		}
-		reloadedZones := 0
-		// Reload zone files
-		for _, zoneFile := range reloadCfg.Zones {
-			z, err := loadZoneFile(zoneFile)
-			if err != nil {
-				logger.Warnf("Failed to reload zone file %s: %v", zoneFile, err)
-				continue
+		reloadCfg, cfgErr := loadReloadConfig(*configPath)
+		if cfgErr != nil {
+			logger.Warnf("Failed to reload config: %v", cfgErr)
+			if auditLogger != nil {
+				auditLogger.LogReload(audit.ReloadAuditEntry{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Action:    "complete",
+					Error:     cfgErr.Error(),
+				})
 			}
-			handler.zonesMu.Lock()
-			zones[z.Origin] = z
-			handler.zonesMu.Unlock()
-			zoneFiles[z.Origin] = zoneFile
-			zoneManagerInstance.LoadZone(z, zoneFile)
-			logger.Infof("Reloaded zone %s", z.Origin)
-			reloadedZones++
-			// Do NOT mirror file-backed zones into the KV store: the zone
-			// file is their durable source, and a KV copy would resurrect
-			// the zone after the operator removes it from the config.
+			return cfgErr
 		}
-		// Reload blocklist
-		if bl != nil {
-			if err := bl.Reload(); err != nil {
-				logger.Warnf("Failed to reload blocklist: %v", err)
+		zonePlan, reloadZonesErr := prepareConfiguredZoneFiles(reloadCfg.Zones, loadZoneFile)
+		reloadedZones := len(zonePlan)
+		if reloadZonesErr != nil {
+			logger.Warnf("Failed to reload configured zone files: %v", reloadZonesErr)
+			if auditLogger != nil {
+				auditLogger.LogReload(audit.ReloadAuditEntry{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Action:    "complete",
+					Zones:     reloadedZones,
+					Error:     reloadZonesErr.Error(),
+				})
 			}
+			return reloadZonesErr
 		}
-		// Reload RPZ
-		if rpzEngine != nil {
-			if err := rpzEngine.Reload(); err != nil {
-				logger.Warnf("Failed to reload RPZ zones: %v", err)
-			} else {
-				stats := rpzEngine.Stats()
-				logger.Infof("Reloaded RPZ with %d rules from %d files", stats.TotalRules, stats.Files)
+		viewPlan, viewCount, reloadViewsErr := prepareConfiguredViews(handler, reloadCfg.Views, loadZoneFile)
+		if reloadViewsErr != nil {
+			logger.Warnf("Failed to reload split-horizon views: %v", reloadViewsErr)
+			if auditLogger != nil {
+				auditLogger.LogReload(audit.ReloadAuditEntry{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Action:    "complete",
+					Zones:     reloadedZones,
+					Error:     reloadViewsErr.Error(),
+				})
 			}
+			return reloadViewsErr
 		}
-		// Reload split-horizon views
-		if len(reloadCfg.Views) > 0 {
-			viewConfigs := make([]filter.ViewConfig, len(reloadCfg.Views))
-			for i, v := range reloadCfg.Views {
-				viewConfigs[i] = filter.ViewConfig{
-					Name:         v.Name,
-					MatchClients: v.MatchClients,
-					ZoneFiles:    v.ZoneFiles,
-				}
+		upstreamPlan, reloadUpstreamErr := prepareUpstreamComponents(reloadCfg, logger)
+		if reloadUpstreamErr != nil {
+			logger.Warnf("Failed to reload upstream components: %v", reloadUpstreamErr)
+			if auditLogger != nil {
+				auditLogger.LogReload(audit.ReloadAuditEntry{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Action:    "complete",
+					Zones:     reloadedZones,
+					Error:     reloadUpstreamErr.Error(),
+				})
 			}
-			if err := handler.ReloadViews(viewConfigs, loadZoneFile); err != nil {
-				logger.Warnf("Failed to reload split-horizon views: %v", err)
-			} else {
-				logger.Infof("Reloaded split-horizon views")
-			}
+			return reloadUpstreamErr
 		}
+		nextSecurityManager, securityResult, reloadSecurityErr := reloadSecurityComponents(reloadCfg, securityManager, handler, apiServer, logger)
+		if reloadSecurityErr != nil {
+			upstreamPlan.upstreamManager.Stop()
+			if auditLogger != nil {
+				auditLogger.LogReload(audit.ReloadAuditEntry{
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Action:    "complete",
+					Zones:     reloadedZones,
+					Error:     reloadSecurityErr.Error(),
+				})
+			}
+			return reloadSecurityErr
+		}
+		securityManager = nextSecurityManager
+		bl = securityResult.Blocklist
+		rpzEngine = securityResult.RPZEngine
+		geoEngine = securityResult.GeoEngine
+		dns64Synth = securityResult.DNS64Synth
+		aclChecker = securityResult.ACLChecher
+		rateLimiter = securityResult.RateLimiter
+		applyConfiguredZoneFiles(handler, zoneManagerInstance, zoneFiles, zonePlan, logger)
+		applyConfiguredViews(handler, viewPlan, viewCount, logger)
+		applyUpstreamComponents(upstreamPlan, upstreamManager, handler, apiServer)
+		upstreamManager = upstreamPlan.upstreamManager
+		dnssecManager = upstreamPlan.dnssecManager
+		client = upstreamManager.Client
+		loadBalancer = upstreamManager.LoadBalancer
+		validator = dnssecManager.Validator
+		commitLoadedConfig(reloadCfg, &cfgMu, &cfg, handler)
 		if auditLogger != nil {
 			auditLogger.LogReload(audit.ReloadAuditEntry{
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -591,7 +861,7 @@ func run() error {
 			odohConfig.ProxyURL = cfg.ODoH.ProxyURL
 			odohProxy, err := odoh.NewObliviousProxy(odohConfig)
 			if err != nil {
-				logger.Warnf("Failed to create ODoH proxy: %v", err)
+				return fmt.Errorf("creating ODoH proxy: %w", err)
 			} else {
 				logger.Infof("ODoH proxy configured (target: %s)", cfg.ODoH.TargetURL)
 				apiServer = apiServer.WithODoH(odohProxy)
@@ -600,7 +870,7 @@ func run() error {
 			// Running as ODoH target resolver with local DNS handler
 			odohTarget, err := odoh.NewObliviousTarget(odohConfig, handler)
 			if err != nil {
-				logger.Warnf("Failed to create ODoH target: %v", err)
+				return fmt.Errorf("creating ODoH target: %w", err)
 			} else {
 				logger.Infof("ODoH target configured (KEM=%d, KDF=%d, AEAD=%d)",
 					odohConfig.HPKEKEM, odohConfig.HPKEKDF, odohConfig.HPKEAEAD)
@@ -610,6 +880,9 @@ func run() error {
 	}
 
 	if err := apiServer.Start(); err != nil {
+		if httpConfig.Enabled {
+			return fmt.Errorf("starting API server: %w", err)
+		}
 		logger.Warnf("Failed to start API server: %v", err)
 	} else if httpConfig.Enabled {
 		logger.Infof("API server listening on %s", httpConfig.Bind)
@@ -724,36 +997,35 @@ func run() error {
 			keyFile = cfg.Server.TLS.KeyFile
 		}
 
-		if certFile != "" {
-			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-			if err != nil {
-				return fmt.Errorf("loading QUIC certificate: %w", err)
-			}
-
-			quicTLSConfig := &tls.Config{
-				Certificates: []tls.Certificate{cert},
-				NextProtos:   []string{"doq"},
-				MinVersion:   tls.VersionTLS13,
-				CurvePreferences: []tls.CurveID{
-					tls.CurveP256,
-					tls.X25519,
-				},
-			}
-
-			doqHandler := &doqHandlerAdapter{handler: handler}
-			doqServer = quic.NewDoQServer(doqAddr, doqHandler, quicTLSConfig)
-			if err := doqServer.Listen(); err != nil {
-				return fmt.Errorf("starting DoQ server: %w", err)
-			}
-			go func() {
-				if err := doqServer.Serve(); err != nil {
-					logger.Errorf("DoQ server error: %v", err)
-				}
-			}()
-			logger.Infof("DoQ server listening on %s (DNS over QUIC)", doqAddr)
-		} else {
-			logger.Warn("QUIC enabled but no certificate configured; skipping DoQ server")
+		if certFile == "" || keyFile == "" {
+			return fmt.Errorf("QUIC enabled but cert_file/key_file not configured")
 		}
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("loading QUIC certificate: %w", err)
+		}
+
+		quicTLSConfig := &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			NextProtos:   []string{"doq"},
+			MinVersion:   tls.VersionTLS13,
+			CurvePreferences: []tls.CurveID{
+				tls.CurveP256,
+				tls.X25519,
+			},
+		}
+
+		doqHandler := &doqHandlerAdapter{handler: handler}
+		doqServer = quic.NewDoQServer(doqAddr, doqHandler, quicTLSConfig)
+		if err := doqServer.Listen(); err != nil {
+			return fmt.Errorf("starting DoQ server: %w", err)
+		}
+		go func() {
+			if err := doqServer.Serve(); err != nil {
+				logger.Errorf("DoQ server error: %v", err)
+			}
+		}()
+		logger.Infof("DoQ server listening on %s (DNS over QUIC)", doqAddr)
 	}
 
 	// Start XoT server (DNS Zone Transfer over TLS, RFC 9103) if enabled
@@ -778,22 +1050,21 @@ func run() error {
 			xotConfig.KeyFile = cfg.Server.TLS.KeyFile
 		}
 
-		if xotConfig.CertFile != "" && xotConfig.KeyFile != "" {
-			xotServer, err = transfer.NewXoTServer(zones, xotConfig, logger)
-			if err != nil {
-				return fmt.Errorf("creating XoT server: %w", err)
-			}
-			xotServer.SetJournalStore(transferManager.Result().JournalStore)
-
-			if err := xotServer.Serve(xotAddr); err != nil {
-				return fmt.Errorf("starting XoT server: %w", err)
-			}
-
-			go xotServer.AcceptLoop()
-			logger.Infof("XoT server listening on %s (DNS Zone Transfer over TLS, RFC 9103)", xotServer.Addr())
-		} else {
-			logger.Warn("XoT enabled but no certificate configured; skipping XoT server")
+		if xotConfig.CertFile == "" || xotConfig.KeyFile == "" {
+			return fmt.Errorf("XoT enabled but cert_file/key_file not configured")
 		}
+		xotServer, err = transfer.NewXoTServer(zones, xotConfig, logger)
+		if err != nil {
+			return fmt.Errorf("creating XoT server: %w", err)
+		}
+		xotServer.SetJournalStore(transferManager.Result().JournalStore)
+
+		if err := xotServer.Serve(xotAddr); err != nil {
+			return fmt.Errorf("starting XoT server: %w", err)
+		}
+
+		go xotServer.AcceptLoop()
+		logger.Infof("XoT server listening on %s (DNS Zone Transfer over TLS, RFC 9103)", xotServer.Addr())
 	}
 
 	// Periodically collect transport stats
@@ -865,16 +1136,26 @@ func run() error {
 
 				// Stop servers
 				cancelServer() // Cancel in-flight queries before stopping transports
-				_ = udpServer.Stop()
-				_ = tcpServer.Stop()
+				if err := udpServer.Stop(); err != nil {
+					logger.Warnf("Failed to stop UDP server cleanly: %v", err)
+				}
+				if err := tcpServer.Stop(); err != nil {
+					logger.Warnf("Failed to stop TCP server cleanly: %v", err)
+				}
 				if tlsServer != nil {
-					_ = tlsServer.Stop()
+					if err := tlsServer.Stop(); err != nil {
+						logger.Warnf("Failed to stop TLS server cleanly: %v", err)
+					}
 				}
 				if doqServer != nil {
-					_ = doqServer.Stop()
+					if err := doqServer.Stop(); err != nil {
+						logger.Warnf("Failed to stop DoQ server cleanly: %v", err)
+					}
 				}
 				if xotServer != nil {
-					_ = xotServer.Close()
+					if err := xotServer.Close(); err != nil {
+						logger.Warnf("Failed to close XoT server cleanly: %v", err)
+					}
 				}
 
 				// Close upstream client and load balancer
@@ -882,12 +1163,16 @@ func run() error {
 
 				// Stop metrics server
 				if metricsCollector != nil {
-					_ = metricsCollector.Stop()
+					if err := metricsCollector.Stop(); err != nil {
+						logger.Warnf("Failed to stop metrics collector cleanly: %v", err)
+					}
 				}
 
 				// Stop API server
 				if apiServer != nil {
-					_ = apiServer.Stop()
+					if err := apiServer.Stop(); err != nil {
+						logger.Warnf("Failed to stop API server cleanly: %v", err)
+					}
 				}
 
 				// Stop cluster manager
@@ -934,7 +1219,9 @@ func run() error {
 
 			// Clean up PID file
 			if cfg.Server.PIDFile != "" {
-				os.Remove(cfg.Server.PIDFile)
+				if err := os.Remove(cfg.Server.PIDFile); err != nil && !os.IsNotExist(err) {
+					logger.Warnf("Failed to remove PID file %s: %v", cfg.Server.PIDFile, err)
+				}
 			}
 
 			return nil
@@ -949,93 +1236,77 @@ func run() error {
 				})
 			}
 			// Reload the config file to pick up changes
-			newCfg, cfgErr := loadConfig(*configPath)
+			reloadCfg, cfgErr := loadReloadConfig(*configPath)
 			if cfgErr != nil {
 				logger.Warnf("Failed to reload config: %v", cfgErr)
-			} else {
-				cfgMu.Lock()
-				cfg = newCfg
-				cfgMu.Unlock()
 			}
 			// Reload zone files
-			cfgMu.RLock()
-			reloadCfg := cfg
-			cfgMu.RUnlock()
 			if cfgErr != nil {
+				cfgMu.RLock()
 				reloadCfg = cfg // keep current config on error
+				cfgMu.RUnlock()
 			}
-			reloadedZones := 0
-			for _, zoneFile := range reloadCfg.Zones {
-				z, err := loadZoneFile(zoneFile)
-				if err != nil {
-					logger.Warnf("Failed to reload zone file %s: %v", zoneFile, err)
-					continue
-				}
-				handler.zonesMu.Lock()
-				zones[z.Origin] = z
-				handler.zonesMu.Unlock()
-				zoneFiles[z.Origin] = zoneFile
-				zoneManagerInstance.LoadZone(z, zoneFile)
-				logger.Infof("Reloaded zone %s", z.Origin)
-				reloadedZones++
-				// Do NOT mirror file-backed zones into the KV store: the
-				// zone file is their durable source, and a KV copy would
-				// resurrect the zone after the operator removes it from
-				// the config.
+			zonePlan, reloadZonesErr := prepareConfiguredZoneFiles(reloadCfg.Zones, loadZoneFile)
+			reloadedZones := len(zonePlan)
+			if reloadZonesErr != nil {
+				logger.Warnf("Failed to reload configured zone files: %v", reloadZonesErr)
 			}
-			// Rebuild zone radix tree after zone changes
-			handler.RebuildZoneTree()
-			// Reload blocklist
-			if bl != nil {
-				if err := bl.Reload(); err != nil {
-					logger.Warnf("Failed to reload blocklist: %v", err)
-				} else {
-					stats := bl.Stats()
-					logger.Infof("Reloaded blocklist with %d entries from %d files", stats.TotalBlocks, stats.Files)
-				}
+			viewPlan, viewCount, reloadViewsErr := prepareConfiguredViews(handler, reloadCfg.Views, loadZoneFile)
+			if reloadViewsErr != nil {
+				logger.Warnf("Failed to reload split-horizon views: %v", reloadViewsErr)
 			}
-			// Reload RPZ
-			if rpzEngine != nil {
-				if err := rpzEngine.Reload(); err != nil {
-					logger.Warnf("Failed to reload RPZ zones: %v", err)
-				} else {
-					stats := rpzEngine.Stats()
-					logger.Infof("Reloaded RPZ with %d rules from %d files", stats.TotalRules, stats.Files)
-				}
+			var upstreamPlan *upstreamReloadPlan
+			var reloadUpstreamErr error
+			if reloadZonesErr == nil && reloadViewsErr == nil {
+				upstreamPlan, reloadUpstreamErr = prepareUpstreamComponents(reloadCfg, logger)
 			}
-			// Reload ACL rules
-			if aclChecker != nil {
-				if err := aclChecker.Reload(reloadCfg.ACL); err != nil {
-					logger.Warnf("Failed to reload ACL rules: %v", err)
-				} else {
-					logger.Infof("Reloaded ACL with %d rules", len(reloadCfg.ACL))
+			if reloadUpstreamErr != nil {
+				logger.Warnf("Failed to reload upstream components: %v", reloadUpstreamErr)
+			}
+			var reloadSecurityErr error
+			if reloadZonesErr == nil && reloadViewsErr == nil && reloadUpstreamErr == nil {
+				var nextSecurityManager *SecurityManager
+				var securityResult *SecurityManagerResult
+				nextSecurityManager, securityResult, reloadSecurityErr = reloadSecurityComponents(reloadCfg, securityManager, handler, apiServer, logger)
+				if reloadSecurityErr == nil {
+					securityManager = nextSecurityManager
+					bl = securityResult.Blocklist
+					rpzEngine = securityResult.RPZEngine
+					geoEngine = securityResult.GeoEngine
+					dns64Synth = securityResult.DNS64Synth
+					aclChecker = securityResult.ACLChecher
+					rateLimiter = securityResult.RateLimiter
+					applyConfiguredZoneFiles(handler, zoneManagerInstance, zoneFiles, zonePlan, logger)
+					applyConfiguredViews(handler, viewPlan, viewCount, logger)
+					applyUpstreamComponents(upstreamPlan, upstreamManager, handler, apiServer)
+					upstreamManager = upstreamPlan.upstreamManager
+					dnssecManager = upstreamPlan.dnssecManager
+					client = upstreamManager.Client
+					loadBalancer = upstreamManager.LoadBalancer
+					validator = dnssecManager.Validator
 				}
 			}
-			// Reload rate limiter
-			if rateLimiter != nil {
-				rateLimiter.Reload(reloadCfg.RRL)
-				logger.Infof("Reloaded rate limiter: %d qps, burst %d", reloadCfg.RRL.Rate, reloadCfg.RRL.Burst)
+			if reloadSecurityErr != nil {
+				if upstreamPlan != nil && upstreamPlan.upstreamManager != nil {
+					upstreamPlan.upstreamManager.Stop()
+				}
+				logger.Warnf("Failed to reload security components: %v", reloadSecurityErr)
 			}
-			// Reload split-horizon views from the new config
-			if len(reloadCfg.Views) > 0 {
-				viewConfigs := make([]filter.ViewConfig, len(reloadCfg.Views))
-				for i, v := range reloadCfg.Views {
-					viewConfigs[i] = filter.ViewConfig{
-						Name:         v.Name,
-						MatchClients: v.MatchClients,
-						ZoneFiles:    v.ZoneFiles,
-					}
-				}
-				if err := handler.ReloadViews(viewConfigs, loadZoneFile); err != nil {
-					logger.Warnf("Failed to reload split-horizon views: %v", err)
-				} else {
-					logger.Infof("Reloaded split-horizon views")
-				}
+			if cfgErr == nil && reloadZonesErr == nil && reloadSecurityErr == nil && reloadViewsErr == nil && reloadUpstreamErr == nil {
+				commitLoadedConfig(reloadCfg, &cfgMu, &cfg, handler)
 			}
 			if auditLogger != nil {
 				errStr := ""
 				if cfgErr != nil {
 					errStr = cfgErr.Error()
+				} else if reloadZonesErr != nil {
+					errStr = reloadZonesErr.Error()
+				} else if reloadViewsErr != nil {
+					errStr = reloadViewsErr.Error()
+				} else if reloadUpstreamErr != nil {
+					errStr = reloadUpstreamErr.Error()
+				} else if reloadSecurityErr != nil {
+					errStr = reloadSecurityErr.Error()
 				}
 				auditLogger.LogReload(audit.ReloadAuditEntry{
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -1159,6 +1430,61 @@ func validateConfigOnly(path string) error {
 	if errs := cfg.Validate(); len(errs) > 0 {
 		return fmt.Errorf("config validation failed: %s", strings.Join(errs, "; "))
 	}
+	if err := validateRuntimeAssets(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateProductionConfigOnly(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("config file %s not accessible: %w", path, err)
+	}
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	if errs := cfg.ValidateProduction(); len(errs) > 0 {
+		return fmt.Errorf("production config validation failed: %s", strings.Join(errs, "; "))
+	}
+	if err := validateRuntimeAssets(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRuntimeAssets(cfg *config.Config) error {
+	zoneFiles, err := discoverStartupZoneFiles(cfg)
+	if err != nil {
+		return err
+	}
+	loadedZones := make([]*zone.Zone, 0, len(zoneFiles))
+	for _, zoneFile := range zoneFiles {
+		z, err := loadZoneFile(zoneFile)
+		if err != nil {
+			return fmt.Errorf("validating zone file %s: %w", zoneFile, err)
+		}
+		loadedZones = append(loadedZones, z)
+	}
+	if cfg.DNSSEC.Enabled && cfg.DNSSEC.Signing.Enabled {
+		for _, z := range loadedZones {
+			if _, err := loadZoneSigner(z, cfg.DNSSEC.Signing); err != nil {
+				return fmt.Errorf("validating DNSSEC signer for %s: %w", z.Origin, err)
+			}
+		}
+	}
+	for _, view := range cfg.Views {
+		for _, zoneFile := range view.ZoneFiles {
+			if _, err := loadZoneFile(zoneFile); err != nil {
+				return fmt.Errorf("validating zone file %s for view %s: %w", zoneFile, view.Name, err)
+			}
+		}
+	}
+	if cfg.Resolution.Recursive && cfg.Resolution.RootHints != "" {
+		if _, err := loadRootHintsFile(cfg.Resolution.RootHints); err != nil {
+			return fmt.Errorf("validating root hints file %s: %w", cfg.Resolution.RootHints, err)
+		}
+	}
 	return nil
 }
 
@@ -1220,6 +1546,8 @@ Options:
         Path to configuration file (default "/etc/nothingdns/nothingdns.yaml")
   -validate-config
         Validate configuration file and exit
+  -validate-production-config
+        Validate production configuration file and exit
   -version
         Show version and exit
   -help
@@ -1233,11 +1561,14 @@ Examples:
   %s -config /path/to/config.yaml
 
   # Validate configuration
-  %s -validate-config /path/to/config.yaml
+  %s -config /path/to/config.yaml -validate-config
+
+  # Validate production configuration
+  %s -config /path/to/config.yaml -validate-production-config
 
   # Show version
   %s -version
 
 For more information, visit: https://github.com/nothingdns/nothingdns
-`, Name, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+`, Name, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 }

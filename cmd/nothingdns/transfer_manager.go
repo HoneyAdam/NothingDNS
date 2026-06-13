@@ -51,8 +51,13 @@ func NewTransferManager(cfg *config.Config, zones map[string]*zone.Zone, zonesMu
 	mgr.result.IXFRServer = transfer.NewIXFRServer(mgr.result.AXFRServer)
 	logger.Infof("IXFR server initialized for incremental transfers")
 
-	// Wire KV journal store for persistent IXFR journals
-	journalDataDir := cfg.ZoneDir
+	// Wire KV journal store for persistent IXFR journals. Prefer the same
+	// explicit data directory used by the embedded zone DB so production does
+	// not depend on the daemon's working directory when zone_dir is unset.
+	journalDataDir := cfg.Storage.DataDir
+	if journalDataDir == "" {
+		journalDataDir = cfg.ZoneDir
+	}
 	if journalDataDir == "" {
 		journalDataDir = "."
 	}

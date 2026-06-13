@@ -16,8 +16,24 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 	if s.requireOperator(w, r) {
 		return
 	}
+	if r.Method == http.MethodPost {
+		// URL-based blocklist sources trigger an outbound HTTP fetch, giving
+		// the caller cross-site request primitives even with the allowlist
+		// (cf. VULN-004); and file-based sources can read arbitrary process-
+		// visible paths. Admin-only (VULN-009).
+		if s.requireAdmin(w, r) {
+			return
+		}
+	}
 
-	if !s.blocklistService.Available() {
+	s.runtimeMu.RLock()
+	blocklistService := s.blocklistService
+	s.runtimeMu.RUnlock()
+	if blocklistService == nil || !blocklistService.Available() {
+		if r.Method == http.MethodPost {
+			s.writeError(w, http.StatusServiceUnavailable, "Blocklist not available")
+			return
+		}
 		s.writeJSON(w, http.StatusOK, &BlocklistResponse{
 			Enabled:    false,
 			TotalRules: 0,
@@ -29,29 +45,22 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		stats := s.blocklistService.GetStats()
+		stats := blocklistService.GetStats()
 		s.writeJSON(w, http.StatusOK, stats)
 	case http.MethodPost:
-		// URL-based blocklist sources trigger an outbound HTTP fetch, giving
-		// the caller cross-site request primitives even with the allowlist
-		// (cf. VULN-004); and file-based sources can read arbitrary process-
-		// visible paths. Admin-only (VULN-009).
-		if s.requireAdmin(w, r) {
-			return
-		}
 		var req BlocklistAddRequest
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 			s.writeError(w, http.StatusBadRequest, "Invalid request body")
 			return
 		}
 		if req.File != "" {
-			if err := s.blocklistService.AddFile(req.File); err != nil {
+			if err := blocklistService.AddFile(req.File); err != nil {
 				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to load blocklist file"))
 				return
 			}
 			s.writeJSON(w, http.StatusCreated, &MessageResponse{Message: "Blocklist file added"})
 		} else if req.URL != "" {
-			if err := s.blocklistService.AddURL(req.URL); err != nil {
+			if err := blocklistService.AddURL(req.URL); err != nil {
 				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to load blocklist from URL"))
 				return
 			}
@@ -67,7 +76,10 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 	if s.requireOperator(w, r) {
 		return
 	}
-	if !s.blocklistService.Available() {
+	s.runtimeMu.RLock()
+	blocklistService := s.blocklistService
+	s.runtimeMu.RUnlock()
+	if blocklistService == nil || !blocklistService.Available() {
 		s.writeError(w, http.StatusServiceUnavailable, "Blocklist not available")
 		return
 	}
@@ -89,7 +101,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		// resulting value. Replaces the TOCTOU Stats()+SetEnabled
 		// pattern that could silently lose one of two simultaneous
 		// toggle clicks and report the wrong state back to the operator.
-		nowEnabled := s.blocklistService.Toggle()
+		nowEnabled := blocklistService.Toggle()
 		s.writeJSON(w, http.StatusOK, &MessageResponse{
 			Message: fmt.Sprintf("Blocklist %s", map[bool]string{true: "enabled", false: "disabled"}[nowEnabled]),
 		})
@@ -98,7 +110,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 
 	// List sources: GET /api/v1/blocklists/sources
 	if path == "sources" && r.Method == http.MethodGet {
-		sources := s.blocklistService.GetSources()
+		sources := blocklistService.GetSources()
 		s.writeJSON(w, http.StatusOK, sources)
 		return
 	}
@@ -117,7 +129,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			decodedID = id
 		}
-		enabled, err := s.blocklistService.ToggleSource(decodedID)
+		enabled, err := blocklistService.ToggleSource(decodedID)
 		if err != nil {
 			s.writeError(w, http.StatusNotFound, "Source not found")
 			return
@@ -137,7 +149,7 @@ func (s *Server) handleBlocklistActions(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			decodedPath = path
 		}
-		if err := s.blocklistService.RemoveSource(decodedPath); err != nil {
+		if err := blocklistService.RemoveSource(decodedPath); err != nil {
 			s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Failed to remove blocklist source"))
 			return
 		}

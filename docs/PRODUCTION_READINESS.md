@@ -1,6 +1,6 @@
 # NothingDNS Production Readiness Report
 
-Last updated: 2026-05-24
+Last updated: 2026-06-11
 
 ## Verdict
 
@@ -27,6 +27,7 @@ go vet ./...
   --set-string auth.adminPassword='AdminPassword-1234567890-ABCDE'
 
 go test ./... -count=1 -short
+go test -race ./internal/cluster ./internal/cluster/raft ./internal/server ./internal/dashboard ./internal/upstream ./internal/cache -count=1 -short
 ```
 
 Validate rendered deployment configs:
@@ -39,24 +40,27 @@ sed -i \
   -e "s/\${NOTHINGDNS_AUTH_SECRET}/AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
   -e "s/\${NOTHINGDNS_ADMIN_PASSWORD}/AdminPassword-1234567890-ABCDE/g" \
   -e "s/\${NOTHINGDNS_METRICS_AUTH_TOKEN}/MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
+  -e "s/\${NOTHINGDNS_STORAGE_ENCRYPTION_KEY}/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/g" \
   -e "s/\${NOTHINGDNS_CLUSTER_ENCRYPTION_KEY}/ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ/g" \
+  -e "s/\${NOTHINGDNS_CLUSTER_SNAPSHOT_ENCRYPTION_KEY}/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/g" \
   -e "s/\${POD_NAME}/nothingdns-0/g" \
   -e "s/\${POD_IP}/127.0.0.1/g" \
   /tmp/nothingdns-k8s-config.yaml
 go run ./cmd/nothingdns -config /tmp/nothingdns-k8s-config.yaml -validate-config
 
 # Production config, with all required secrets present
-NOTHINGDNS_AUTH_TOKEN='AuthToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
 NOTHINGDNS_AUTH_SECRET='AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
 NOTHINGDNS_ADMIN_PASSWORD='AdminPassword-1234567890-ABCDE' \
 NOTHINGDNS_OPERATOR_PASSWORD='OperatorPassword-1234567890-ABCDE' \
 NOTHINGDNS_VIEWER_PASSWORD='ViewerPassword-1234567890-ABCDE' \
 NOTHINGDNS_METRICS_AUTH_TOKEN='MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
+NOTHINGDNS_STORAGE_ENCRYPTION_KEY='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
 NOTHINGDNS_CLUSTER_ENCRYPTION_KEY='ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
-go run ./cmd/nothingdns -config deploy/production.yaml -validate-config
+NOTHINGDNS_CLUSTER_SNAPSHOT_ENCRYPTION_KEY='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+go run ./cmd/nothingdns -config deploy/production.yaml -validate-production-config
 ```
 
-The production validation should complete without missing-environment warnings.
+The production validation should complete without missing-environment warnings or production gate failures.
 
 Smoke-test a deployed target before promotion:
 
@@ -66,6 +70,7 @@ NOTHINGDNS_METRICS_URL='https://metrics.example.com/metrics' \
 NOTHINGDNS_DNS_SERVER='203.0.113.53' \
 NOTHINGDNS_DNS_PORT='53' \
 NOTHINGDNS_DNS_NAME='example.com' \
+NOTHINGDNS_DNS_TYPE='A' \
 NOTHINGDNS_METRICS_AUTH_TOKEN="$NOTHINGDNS_METRICS_AUTH_TOKEN" \
 scripts/production-smoke.sh
 ```
@@ -76,6 +81,7 @@ scripts/production-smoke.sh
 
 - The custom YAML parser now reads production-critical fields that were previously documented but ignored: top-level `rrl`, `blocklist.urls`, `cache.serve_stale`, `cache.stale_grace_secs`, `server.pid_file`, `zonemd`, `shutdown_timeout`, and transfer policy.
 - Production, staging, raw Kubernetes, and Helm-rendered configs validate through the actual daemon parser.
+- `-validate-production-config` adds stricter production gates for stable auth secrets/users, closed recursion, DNSSEC time validation, explicit encrypted persistent storage, encrypted cluster transport, Raft persistence, metrics auth, and TSIG-protected transfer allowlists.
 - Helm chart defaults now render valid NothingDNS config by default, including secret/env wiring, transfer policy, metrics auth, ingress/service ports, and network policy behavior.
 - `deploy/production.yaml` documents all auth secrets as environment inputs; `docs/DEPLOYMENT_CHECKLIST.md` includes the full required env set.
 
@@ -117,14 +123,18 @@ NOTHINGDNS_ADMIN_PASSWORD
 NOTHINGDNS_OPERATOR_PASSWORD
 NOTHINGDNS_VIEWER_PASSWORD
 NOTHINGDNS_METRICS_AUTH_TOKEN
+NOTHINGDNS_STORAGE_ENCRYPTION_KEY
 NOTHINGDNS_CLUSTER_ENCRYPTION_KEY
+NOTHINGDNS_CLUSTER_SNAPSHOT_ENCRYPTION_KEY
 ```
 
 Recommended generation:
 
 ```bash
 openssl rand -base64 32  # auth/user/metrics secrets
-openssl rand -hex 32     # cluster encryption key
+openssl rand -hex 32     # persistent zone DB encryption key
+openssl rand -base64 32  # cluster gossip encryption key
+openssl rand -hex 32     # cluster snapshot encryption key
 ```
 
 Do not commit literal secret values to any config file. The config validator rejects common placeholder secret strings and low-entropy secrets.
@@ -142,4 +152,4 @@ Do not commit literal secret values to any config file. The config validator rej
 - `npm --prefix web run build` output is committed under `internal/dashboard/static/dist/`.
 - Container image is built from the verified tree and includes SBOM/provenance.
 - Deployment config validates with real secret values in the target environment.
-- DNS, DoH, metrics, health, cluster, and dashboard endpoints are smoke-tested after rollout with `scripts/production-smoke.sh`.
+- DNS, DoH, metrics, health, readiness, liveness, cluster, and dashboard endpoints are smoke-tested after rollout with `scripts/production-smoke.sh`.

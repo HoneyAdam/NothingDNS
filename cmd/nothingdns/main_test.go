@@ -1887,6 +1887,10 @@ func TestFlagParsing(t *testing.T) {
 			args: []string{"-validate-config", "-config", "/tmp/test.yaml"},
 		},
 		{
+			name: "validate_production_config_flag",
+			args: []string{"-validate-production-config", "-config", "/tmp/test.yaml"},
+		},
+		{
 			name: "pid_file_flag",
 			args: []string{"-pid-file", "/tmp/test.pid"},
 		},
@@ -1905,7 +1909,7 @@ func TestFlagParsing(t *testing.T) {
 			// We can't actually parse flags in tests because flag.Parse() can only be called once
 			// Just verify the flag names are valid
 			validFlags := []string{
-				"-version", "-help", "-config", "-validate-config",
+				"-version", "-help", "-config", "-validate-config", "-validate-production-config",
 				"-pid-file", "-log-level", "-foreground",
 			}
 			for _, arg := range tc.args {
@@ -3110,6 +3114,447 @@ func TestRebuildZoneTree(t *testing.T) {
 	}
 }
 
+func TestReloadConfiguredZoneFilesSuccess(t *testing.T) {
+	h := newTestHandler()
+	h.zoneManager = zone.NewManager()
+	zoneFiles := make(map[string]string)
+
+	count, err := reloadConfiguredZoneFiles(
+		h,
+		h.zoneManager,
+		zoneFiles,
+		[]string{"one.zone"},
+		func(string) (*zone.Zone, error) {
+			return zone.NewZone("one.example."), nil
+		},
+		util.NewLogger(util.ERROR, util.TextFormat, nil),
+	)
+	if err != nil {
+		t.Fatalf("reloadConfiguredZoneFiles: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("reloaded zones = %d, want 1", count)
+	}
+	if _, ok := h.zones["one.example."]; !ok {
+		t.Fatal("expected handler zones to include reloaded zone")
+	}
+	if _, ok := h.zoneManager.Get("one.example."); !ok {
+		t.Fatal("expected zone manager to include reloaded zone")
+	}
+	if got := zoneFiles["one.example."]; got != "one.zone" {
+		t.Fatalf("zone file = %q, want one.zone", got)
+	}
+	if h.zoneProvider == nil {
+		t.Fatal("expected zone provider rebuilt after successful reload")
+	}
+}
+
+func TestPrepareConfiguredZoneFilesDoesNotPublishUntilApply(t *testing.T) {
+	h := newTestHandler()
+	h.zoneManager = zone.NewManager()
+	oldZone := zone.NewZone("old.example.")
+	h.zones["old.example."] = oldZone
+	h.zoneManager.LoadZone(oldZone, "old.zone")
+	zoneFiles := map[string]string{"old.example.": "old.zone"}
+
+	loaded, err := prepareConfiguredZoneFiles([]string{"new.zone"}, func(string) (*zone.Zone, error) {
+		return zone.NewZone("new.example."), nil
+	})
+	if err != nil {
+		t.Fatalf("prepareConfiguredZoneFiles: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded zones = %d, want 1", len(loaded))
+	}
+	if _, ok := h.zones["new.example."]; ok {
+		t.Fatal("prepare must not publish handler zone")
+	}
+	if _, ok := h.zoneManager.Get("new.example."); ok {
+		t.Fatal("prepare must not publish manager zone")
+	}
+	if _, ok := zoneFiles["new.example."]; ok {
+		t.Fatal("prepare must not record zone file")
+	}
+
+	applyConfiguredZoneFiles(h, h.zoneManager, zoneFiles, loaded, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if _, ok := h.zones["new.example."]; !ok {
+		t.Fatal("apply must publish handler zone")
+	}
+	if _, ok := h.zoneManager.Get("new.example."); !ok {
+		t.Fatal("apply must publish manager zone")
+	}
+	if got := zoneFiles["new.example."]; got != "new.zone" {
+		t.Fatalf("zone file = %q, want new.zone", got)
+	}
+}
+
+func TestReloadConfiguredZoneFilesLoadErrorIsAtomic(t *testing.T) {
+	h := newTestHandler()
+	h.zoneManager = zone.NewManager()
+	oldZone := zone.NewZone("old.example.")
+	h.zones["old.example."] = oldZone
+	h.zoneManager.LoadZone(oldZone, "old.zone")
+	zoneFiles := map[string]string{"old.example.": "old.zone"}
+
+	count, err := reloadConfiguredZoneFiles(
+		h,
+		h.zoneManager,
+		zoneFiles,
+		[]string{"new.zone", "bad.zone"},
+		func(path string) (*zone.Zone, error) {
+			if path == "bad.zone" {
+				return nil, fmt.Errorf("load failed")
+			}
+			return zone.NewZone("new.example."), nil
+		},
+		util.NewLogger(util.ERROR, util.TextFormat, nil),
+	)
+	if err == nil {
+		t.Fatal("expected configured zone reload error")
+	}
+	if count != 0 {
+		t.Fatalf("reloaded zones = %d, want 0 on atomic failure", count)
+	}
+	if _, ok := h.zones["new.example."]; ok {
+		t.Fatal("failed reload must not publish newly loaded handler zone")
+	}
+	if _, ok := h.zoneManager.Get("new.example."); ok {
+		t.Fatal("failed reload must not publish newly loaded manager zone")
+	}
+	if _, ok := zoneFiles["new.example."]; ok {
+		t.Fatal("failed reload must not record new zone file")
+	}
+	if _, ok := h.zones["old.example."]; !ok {
+		t.Fatal("failed reload must preserve existing handler zone")
+	}
+	if _, ok := h.zoneManager.Get("old.example."); !ok {
+		t.Fatal("failed reload must preserve existing manager zone")
+	}
+}
+
+func TestReloadConfiguredViewsClearsExisting(t *testing.T) {
+	h := newTestHandler()
+	oldSH, err := filter.NewSplitHorizon([]filter.ViewConfig{
+		{Name: "existing", MatchClients: []string{"192.0.2.0/24"}},
+	})
+	if err != nil {
+		t.Fatalf("NewSplitHorizon: %v", err)
+	}
+	h.splitHorizon = oldSH
+	h.viewZones = map[string]map[string]*zone.Zone{
+		"existing": {"existing.": zone.NewZone("existing.")},
+	}
+
+	err = reloadConfiguredViews(h, nil, nil, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err != nil {
+		t.Fatalf("reloadConfiguredViews: %v", err)
+	}
+	if h.splitHorizon != nil {
+		t.Fatal("expected split-horizon state to be cleared")
+	}
+	if h.viewZones != nil {
+		t.Fatal("expected view zones to be cleared")
+	}
+}
+
+func TestPrepareConfiguredViewsDoesNotPublishUntilApply(t *testing.T) {
+	h := newTestHandler()
+	oldSH, err := filter.NewSplitHorizon([]filter.ViewConfig{
+		{Name: "existing", MatchClients: []string{"192.0.2.0/24"}},
+	})
+	if err != nil {
+		t.Fatalf("NewSplitHorizon: %v", err)
+	}
+	h.splitHorizon = oldSH
+	h.viewZones = map[string]map[string]*zone.Zone{
+		"existing": {"existing.": zone.NewZone("existing.")},
+	}
+	views := []config.ViewConfig{
+		{Name: "internal", MatchClients: []string{"10.0.0.0/8"}, ZoneFiles: []string{"internal.zone"}},
+	}
+
+	plan, count, err := prepareConfiguredViews(h, views, func(string) (*zone.Zone, error) {
+		return zone.NewZone("internal."), nil
+	})
+	if err != nil {
+		t.Fatalf("prepareConfiguredViews: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("view count = %d, want 1", count)
+	}
+	if h.splitHorizon != oldSH {
+		t.Fatal("prepare must not publish split-horizon state")
+	}
+	if _, ok := h.viewZones["existing"]; !ok {
+		t.Fatal("prepare must preserve existing view zones")
+	}
+
+	applyConfiguredViews(h, plan, count, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if h.splitHorizon == oldSH {
+		t.Fatal("apply must publish prepared split-horizon state")
+	}
+	if _, ok := h.viewZones["internal"]; !ok {
+		t.Fatal("apply must publish prepared view zones")
+	}
+}
+
+func TestReloadConfiguredViewsLoadError(t *testing.T) {
+	h := newTestHandler()
+	views := []config.ViewConfig{
+		{Name: "internal", MatchClients: []string{"10.0.0.0/8"}, ZoneFiles: []string{"bad.zone"}},
+	}
+
+	err := reloadConfiguredViews(h, views, func(string) (*zone.Zone, error) {
+		return nil, fmt.Errorf("load failed")
+	}, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err == nil {
+		t.Fatal("expected configured view reload error")
+	}
+	if !strings.Contains(err.Error(), "reloading configured split-horizon views") {
+		t.Fatalf("error = %q, want configured view reload context", err)
+	}
+	if h.splitHorizon != nil {
+		t.Fatal("failed reload must not publish split-horizon state")
+	}
+}
+
+type testBlocklistReloader struct {
+	err error
+}
+
+func (r testBlocklistReloader) Reload() error {
+	return r.err
+}
+
+func (r testBlocklistReloader) Stats() blocklist.Stats {
+	return blocklist.Stats{TotalBlocks: 1, Files: 1}
+}
+
+type testRPZReloader struct {
+	err error
+}
+
+func (r testRPZReloader) Reload() error {
+	return r.err
+}
+
+func (r testRPZReloader) Stats() rpz.Stats {
+	return rpz.Stats{TotalRules: 1, Files: 1}
+}
+
+func TestReloadSecurityPolicySuccess(t *testing.T) {
+	err := reloadSecurityPolicy(
+		testBlocklistReloader{},
+		testRPZReloader{},
+		util.NewLogger(util.ERROR, util.TextFormat, nil),
+	)
+	if err != nil {
+		t.Fatalf("reloadSecurityPolicy: %v", err)
+	}
+}
+
+func TestReloadSecurityPolicyPropagatesErrors(t *testing.T) {
+	err := reloadSecurityPolicy(
+		testBlocklistReloader{err: fmt.Errorf("blocklist load failed")},
+		testRPZReloader{err: fmt.Errorf("rpz load failed")},
+		util.NewLogger(util.ERROR, util.TextFormat, nil),
+	)
+	if err == nil {
+		t.Fatal("expected security policy reload error")
+	}
+	errText := err.Error()
+	if !strings.Contains(errText, "reloading blocklist") {
+		t.Fatalf("error = %q, want blocklist context", errText)
+	}
+	if !strings.Contains(errText, "reloading RPZ zones") {
+		t.Fatalf("error = %q, want RPZ context", errText)
+	}
+}
+
+func TestReloadSecurityComponentsAppliesNewBlocklistConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	blocklistFile := filepath.Join(tmpDir, "blocklist.txt")
+	if err := os.WriteFile(blocklistFile, []byte("0.0.0.0 blocked.example\n"), 0644); err != nil {
+		t.Fatalf("WriteFile blocklist: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Blocklist.Enabled = true
+	cfg.Blocklist.Files = []string{blocklistFile}
+	h := newTestHandler()
+	oldBlocklist := blocklist.New(blocklist.Config{Enabled: true})
+	h.blocklist = oldBlocklist
+
+	manager, result, err := reloadSecurityComponents(cfg, nil, h, nil, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err != nil {
+		t.Fatalf("reloadSecurityComponents: %v", err)
+	}
+	defer manager.Stop()
+	if result.Blocklist == nil {
+		t.Fatal("expected reloaded blocklist")
+	}
+	if h.blocklist == oldBlocklist {
+		t.Fatal("expected handler blocklist pointer to be replaced")
+	}
+	if !h.blocklist.IsBlocked("blocked.example") {
+		t.Fatal("expected new blocklist source to be active")
+	}
+}
+
+func TestLoadReloadConfig_MissingFile(t *testing.T) {
+	_, err := loadReloadConfig(filepath.Join(t.TempDir(), "missing.yaml"))
+	if err == nil {
+		t.Fatal("expected missing reload config error")
+	}
+	if !strings.Contains(err.Error(), "not accessible") {
+		t.Fatalf("error = %q, want accessibility context", err)
+	}
+}
+
+func TestLoadReloadConfig_InvalidRuntimeAsset(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "bad.zone")
+	if err := os.WriteFile(zoneFile, []byte("this is not a valid zone file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile zone: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "zones:\n  - " + zoneFile + "\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	_, err := loadReloadConfig(cfgFile)
+	if err == nil {
+		t.Fatal("expected runtime asset validation error")
+	}
+	if !strings.Contains(err.Error(), "validating zone file") {
+		t.Fatalf("error = %q, want zone validation context", err)
+	}
+}
+
+func TestStoreReloadConfigUpdatesCurrentConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	if err := os.WriteFile(cfgFile, []byte("server:\n  port: 5354\n"), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	current := config.DefaultConfig()
+	var cfgMu sync.RWMutex
+
+	loaded, err := storeReloadConfig(cfgFile, &cfgMu, &current)
+	if err != nil {
+		t.Fatalf("storeReloadConfig: %v", err)
+	}
+	if current != loaded {
+		t.Fatal("expected current config pointer to be updated to loaded config")
+	}
+	if current.Server.Port != 5354 {
+		t.Fatalf("server port = %d, want 5354", current.Server.Port)
+	}
+}
+
+func TestStoreLoadedConfigUpdatesCurrentConfig(t *testing.T) {
+	current := config.DefaultConfig()
+	next := config.DefaultConfig()
+	next.Server.Port = 5355
+	var cfgMu sync.RWMutex
+
+	storeLoadedConfig(next, &cfgMu, &current)
+	if current != next {
+		t.Fatal("expected current config pointer to be updated")
+	}
+	if current.Server.Port != 5355 {
+		t.Fatalf("server port = %d, want 5355", current.Server.Port)
+	}
+}
+
+func TestCommitLoadedConfigUpdatesHandlerConfig(t *testing.T) {
+	current := config.DefaultConfig()
+	next := config.DefaultConfig()
+	next.Resolution.AuthoritativeOnly = true
+	h := newTestHandler()
+	h.config = current
+	var cfgMu sync.RWMutex
+
+	commitLoadedConfig(next, &cfgMu, &current, h)
+	if current != next {
+		t.Fatal("expected current config pointer to be updated")
+	}
+	if h.config != next {
+		t.Fatal("expected handler config pointer to be updated")
+	}
+	if !h.config.Resolution.AuthoritativeOnly {
+		t.Fatal("expected handler to use reloaded config values")
+	}
+}
+
+func TestHandlerRuntimeReloadDoesNotRaceWithServeDNS(t *testing.T) {
+	current := config.DefaultConfig()
+	current.Resolution.AuthoritativeOnly = true
+	current.Upstream.Servers = nil
+	h := newTestHandler()
+	h.config = current
+	var cfgMu sync.RWMutex
+	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					msg, err := protocol.NewQuery(1, "race.example.", protocol.TypeA)
+					if err != nil {
+						panic(err)
+					}
+					h.ServeDNS(newCaptureWriter("10.0.0.1", "udp"), msg)
+				}
+			}
+		}()
+	}
+
+	var currentSecurity *SecurityManager
+	var currentUpstream *UpstreamManager
+	for i := 0; i < 50; i++ {
+		next := config.DefaultConfig()
+		next.Resolution.AuthoritativeOnly = i%2 == 0
+		next.Upstream.Servers = nil
+		next.Upstream.AnycastGroups = nil
+		commitLoadedConfig(next, &cfgMu, &current, h)
+
+		h.applyReloadViews(&viewReloadPlan{})
+
+		nextSecurity, _, err := reloadSecurityComponents(next, currentSecurity, h, nil, logger)
+		if err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("reloadSecurityComponents: %v", err)
+		}
+		currentSecurity = nextSecurity
+
+		upstreamPlan, err := prepareUpstreamComponents(next, logger)
+		if err != nil {
+			close(stop)
+			wg.Wait()
+			t.Fatalf("prepareUpstreamComponents: %v", err)
+		}
+		applyUpstreamComponents(upstreamPlan, currentUpstream, h, nil)
+		currentUpstream = upstreamPlan.upstreamManager
+	}
+	close(stop)
+	wg.Wait()
+	if currentSecurity != nil {
+		currentSecurity.Stop()
+	}
+	if currentUpstream != nil {
+		currentUpstream.Stop()
+	}
+}
+
 // --- ReloadViews tests ---
 
 func TestReloadViews_Empty(t *testing.T) {
@@ -3139,16 +3584,50 @@ func TestReloadViews_WithViews(t *testing.T) {
 
 func TestReloadViews_LoadError(t *testing.T) {
 	h := newTestHandler()
+	oldSH, err := filter.NewSplitHorizon([]filter.ViewConfig{
+		{Name: "existing", MatchClients: []string{"192.0.2.0/24"}},
+	})
+	if err != nil {
+		t.Fatalf("NewSplitHorizon: %v", err)
+	}
+	h.splitHorizon = oldSH
+	h.viewZones = map[string]map[string]*zone.Zone{
+		"existing": {"existing.": zone.NewZone("existing.")},
+	}
+
 	views := []filter.ViewConfig{
 		{Name: "internal", MatchClients: []string{"10.0.0.0/8"}, ZoneFiles: []string{"bad.zone"}},
 	}
-	err := h.ReloadViews(views, func(string) (*zone.Zone, error) { return nil, fmt.Errorf("load error") })
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	err = h.ReloadViews(views, func(string) (*zone.Zone, error) { return nil, fmt.Errorf("load error") })
+	if err == nil {
+		t.Fatal("expected view zone load error")
 	}
-	// Should still create splitHorizon even if zone file fails
-	if h.splitHorizon == nil {
-		t.Error("expected splitHorizon to be set")
+	if !strings.Contains(err.Error(), "loading zone file") {
+		t.Fatalf("error = %q, want zone file context", err)
+	}
+	if h.splitHorizon != oldSH {
+		t.Fatal("reload failure must preserve existing split-horizon state")
+	}
+	if _, ok := h.viewZones["existing"]; !ok {
+		t.Fatal("reload failure must preserve existing view zones")
+	}
+}
+
+func TestReloadViews_ZoneFileWithoutLoader(t *testing.T) {
+	h := newTestHandler()
+	views := []filter.ViewConfig{
+		{Name: "internal", MatchClients: []string{"10.0.0.0/8"}, ZoneFiles: []string{"internal.zone"}},
+	}
+
+	err := h.ReloadViews(views, nil)
+	if err == nil {
+		t.Fatal("expected missing loader error")
+	}
+	if !strings.Contains(err.Error(), "no loader configured") {
+		t.Fatalf("error = %q, want loader context", err)
+	}
+	if h.splitHorizon != nil {
+		t.Fatal("reload failure must not install split-horizon state")
 	}
 }
 
@@ -4589,6 +5068,91 @@ func TestNewUpstreamManager_WithAnycast(t *testing.T) {
 	mgr.Stop()
 }
 
+func TestNewUpstreamManager_InvalidAnycastConfigFails(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Upstream.Servers = []string{}
+	cfg.Upstream.AnycastGroups = []config.AnycastGroupConfig{
+		{
+			AnycastIP:   "192.0.2.1",
+			HealthCheck: "not-a-duration",
+			Backends: []config.AnycastBackendConfig{
+				{PhysicalIP: "192.0.2.2", Port: 53},
+			},
+		},
+	}
+	mgr, err := NewUpstreamManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err == nil {
+		t.Fatal("expected invalid anycast config error")
+	}
+	if mgr != nil {
+		t.Fatal("expected nil manager on invalid anycast config")
+	}
+	if !strings.Contains(err.Error(), "initializing upstream load balancer") {
+		t.Fatalf("error = %q, want load balancer context", err)
+	}
+}
+
+func TestPrepareUpstreamComponentsRejectsInvalidConfig(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Upstream.Servers = []string{}
+	cfg.Upstream.AnycastGroups = []config.AnycastGroupConfig{
+		{
+			AnycastIP:   "192.0.2.1",
+			HealthCheck: "not-a-duration",
+			Backends: []config.AnycastBackendConfig{
+				{PhysicalIP: "192.0.2.2", Port: 53},
+			},
+		},
+	}
+	plan, err := prepareUpstreamComponents(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err == nil {
+		t.Fatal("expected invalid upstream reload config error")
+	}
+	if plan != nil {
+		t.Fatal("expected nil upstream reload plan on error")
+	}
+}
+
+func TestApplyUpstreamComponentsUpdatesHandlerRuntimePointers(t *testing.T) {
+	currentCfg := config.DefaultConfig()
+	currentCfg.Upstream.Servers = []string{"127.0.0.1:5354"}
+	current, err := NewUpstreamManager(currentCfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err != nil {
+		t.Fatalf("NewUpstreamManager current: %v", err)
+	}
+
+	nextCfg := config.DefaultConfig()
+	nextCfg.Upstream.Servers = []string{"127.0.0.1:5355"}
+	nextCfg.DNSSEC.Enabled = true
+	plan, err := prepareUpstreamComponents(nextCfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err != nil {
+		current.Stop()
+		t.Fatalf("prepareUpstreamComponents: %v", err)
+	}
+	defer plan.upstreamManager.Stop()
+
+	h := newTestHandler()
+	h.upstream = current.Client
+	oldClient := h.upstream
+	applyUpstreamComponents(plan, current, h, nil)
+
+	if h.upstream == oldClient {
+		t.Fatal("expected handler upstream client pointer to be replaced")
+	}
+	if h.upstream != plan.upstreamManager.Client {
+		t.Fatal("expected handler upstream client to use reloaded manager")
+	}
+	if h.loadBalancer != plan.upstreamManager.LoadBalancer {
+		t.Fatal("expected handler load balancer to use reloaded manager")
+	}
+	if h.validator != plan.dnssecManager.Validator {
+		t.Fatal("expected handler DNSSEC validator to use reloaded manager")
+	}
+	if h.validator == nil {
+		t.Fatal("expected DNSSEC validator from reloaded config")
+	}
+}
+
 func TestRebuildZoneTree_WithKVPersistence(t *testing.T) {
 	h := newTestHandler()
 	z := zone.NewZone("kv.example.com.")
@@ -4620,14 +5184,14 @@ func TestNewZoneManager_LoadFailure(t *testing.T) {
 	cfg.Zones = []string{filepath.Join(t.TempDir(), "nonexistent.zone")}
 
 	mgr, err := NewZoneManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected zone file load error")
 	}
-	if mgr == nil {
-		t.Fatal("expected non-nil manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on zone file load error")
 	}
-	if len(mgr.Zones()) != 0 {
-		t.Fatalf("expected 0 zones, got %d", len(mgr.Zones()))
+	if !strings.Contains(err.Error(), "loading zone file") {
+		t.Fatalf("error = %q, want zone file context", err)
 	}
 }
 
@@ -5074,6 +5638,139 @@ func TestValidateConfigOnly_Invalid(t *testing.T) {
 	err := validateConfigOnly(badFile)
 	if err == nil {
 		t.Fatal("expected error for invalid config")
+	}
+}
+
+func TestValidateConfigOnly_InvalidConfiguredZoneFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "bad.zone")
+	if err := os.WriteFile(zoneFile, []byte("this is not a valid zone file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile zone: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "zones:\n  - " + zoneFile + "\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	err := validateConfigOnly(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for invalid configured zone file")
+	}
+	if !strings.Contains(err.Error(), "validating zone file") {
+		t.Fatalf("error = %q, want zone validation context", err)
+	}
+}
+
+func TestValidateConfigOnly_InvalidZoneDirFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneDir := filepath.Join(tmpDir, "zones")
+	if err := os.Mkdir(zoneDir, 0755); err != nil {
+		t.Fatalf("Mkdir zone_dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(zoneDir, "bad.zone"), []byte("this is not a valid zone file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile zone: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "zone_dir: " + zoneDir + "\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	err := validateConfigOnly(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for invalid zone_dir zone file")
+	}
+	if !strings.Contains(err.Error(), "validating zone file") {
+		t.Fatalf("error = %q, want zone validation context", err)
+	}
+}
+
+func TestValidateConfigOnly_InvalidViewZoneFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "view.zone")
+	if err := os.WriteFile(zoneFile, []byte("this is not a valid zone file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile zone: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "views:\n" +
+		"  - name: internal\n" +
+		"    match_clients:\n" +
+		"      - 10.0.0.0/8\n" +
+		"    zone_files:\n" +
+		"      - " + zoneFile + "\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	err := validateConfigOnly(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for invalid view zone file")
+	}
+	if !strings.Contains(err.Error(), "for view internal") {
+		t.Fatalf("error = %q, want view zone validation context", err)
+	}
+}
+
+func TestValidateConfigOnly_InvalidDNSSECSigner(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "signed.zone")
+	zoneContent := `$ORIGIN signed.example.
+$TTL 3600
+@ IN SOA ns1 hostmaster 2024010101 3600 900 604800 86400
+@ 3600 IN NS ns1
+ns1 3600 IN A 192.0.2.1
+`
+	if err := os.WriteFile(zoneFile, []byte(zoneContent), 0644); err != nil {
+		t.Fatalf("WriteFile zone: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "zones:\n" +
+		"  - " + zoneFile + "\n" +
+		"dnssec:\n" +
+		"  enabled: true\n" +
+		"  signing:\n" +
+		"    enabled: true\n" +
+		"    keys:\n" +
+		"      - private_key: dummy\n" +
+		"        type: zsk\n" +
+		"        algorithm: 15\n" +
+		"    nsec3:\n" +
+		"      salt: not-hex!\n" +
+		"      iterations: 1\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	err := validateConfigOnly(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for invalid DNSSEC signer config")
+	}
+	if !strings.Contains(err.Error(), "validating DNSSEC signer") {
+		t.Fatalf("error = %q, want DNSSEC signer validation context", err)
+	}
+}
+
+func TestValidateConfigOnly_InvalidRootHintsContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	rootHintsFile := filepath.Join(tmpDir, "named.root")
+	if err := os.WriteFile(rootHintsFile, []byte("this is not a usable root hints file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile root hints: %v", err)
+	}
+	cfgFile := filepath.Join(tmpDir, "config.yaml")
+	cfgContent := "resolution:\n" +
+		"  recursive: true\n" +
+		"  root_hints: " + rootHintsFile + "\n"
+	if err := os.WriteFile(cfgFile, []byte(cfgContent), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	err := validateConfigOnly(cfgFile)
+	if err == nil {
+		t.Fatal("expected error for invalid root hints content")
+	}
+	if !strings.Contains(err.Error(), "validating root hints file") {
+		t.Fatalf("error = %q, want root hints validation context", err)
 	}
 }
 
@@ -6412,10 +7109,12 @@ func TestNewSecurityManager_GeoMMDBError(t *testing.T) {
 	cfg.GeoDNS.MMDBFile = "/nonexistent/file.mmdb"
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewSecurityManager(cfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected GeoDNS MMDB load error")
 	}
-	mgr.Stop()
+	if mgr != nil {
+		t.Fatal("expected nil manager on GeoDNS MMDB load error")
+	}
 }
 
 func TestNewSecurityManager_DNS64Error(t *testing.T) {
@@ -6424,10 +7123,12 @@ func TestNewSecurityManager_DNS64Error(t *testing.T) {
 	cfg.DNS64.PrefixLen = 99
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewSecurityManager(cfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected DNS64 initialization error")
 	}
-	mgr.Stop()
+	if mgr != nil {
+		t.Fatal("expected nil manager on DNS64 initialization error")
+	}
 }
 
 func TestLoadCache_InvalidJSON(t *testing.T) {
@@ -6648,11 +7349,14 @@ func TestNewDNSSECManager_TrustAnchorError(t *testing.T) {
 	cfg.DNSSEC.TrustAnchor = "/nonexistent/trust.anchor"
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewDNSSECManager(cfg, &dnssecResolverAdapter{}, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected trust anchor load error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on trust anchor load error")
+	}
+	if !strings.Contains(err.Error(), "loading DNSSEC trust anchor file") {
+		t.Fatalf("error = %q, want trust anchor context", err)
 	}
 }
 
@@ -6661,18 +7365,29 @@ func TestNewZoneManager_ZoneFileError(t *testing.T) {
 	cfg.Zones = []string{"/nonexistent/zone.zone"}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewZoneManager(cfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected zone file load error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on zone file load error")
+	}
+	if !strings.Contains(err.Error(), "loading zone file") {
+		t.Fatalf("error = %q, want zone file context", err)
 	}
 }
 
 func TestNewZoneManager_SignerError(t *testing.T) {
 	tmpDir := t.TempDir()
 	zoneFile := filepath.Join(tmpDir, "example.com.zone")
-	os.WriteFile(zoneFile, []byte("example.com. 300 IN SOA ns1.example.com. admin.example.com. 1 3600 600 86400 300\n"), 0644)
+	zoneContent := `$ORIGIN example.com.
+$TTL 3600
+@ IN SOA ns1 hostmaster 2024010101 3600 900 604800 86400
+@ 3600 IN NS ns1
+ns1 3600 IN A 192.0.2.1
+`
+	if err := os.WriteFile(zoneFile, []byte(zoneContent), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	cfg := config.DefaultConfig()
 	cfg.Zones = []string{zoneFile}
 	cfg.DNSSEC.Enabled = true
@@ -6680,27 +7395,35 @@ func TestNewZoneManager_SignerError(t *testing.T) {
 	cfg.DNSSEC.Signing.Keys = []config.KeyConfig{{PrivateKey: "dummy", Algorithm: 255, Type: "zsk"}}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewZoneManager(cfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected zone signer error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on zone signer error")
+	}
+	if !strings.Contains(err.Error(), "loading zone signer") {
+		t.Fatalf("error = %q, want zone signer context", err)
 	}
 }
 
-func TestNewZoneManager_KVStoreError(t *testing.T) {
+func TestNewZoneManager_ZoneDirScanError(t *testing.T) {
 	tmpDir := t.TempDir()
 	badPath := filepath.Join(tmpDir, "notadir")
-	os.WriteFile(badPath, []byte{}, 0644)
+	if err := os.WriteFile(badPath, []byte{}, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	cfg := config.DefaultConfig()
 	cfg.ZoneDir = badPath
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewZoneManager(cfg, logger)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected zone_dir scan error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on zone_dir scan error")
+	}
+	if !strings.Contains(err.Error(), "scanning zone_dir") {
+		t.Fatalf("error = %q, want zone_dir context", err)
 	}
 }
 
@@ -8231,9 +8954,11 @@ func TestServeDNS_GeoDNS_Override(t *testing.T) {
 	h := newTestHandler()
 	cfg := config.DefaultConfig()
 	cfg.GeoDNS.Enabled = true
-	cfg.GeoDNS.MMDBFile = "/nonexistent/mmdb" // won't load but GeoDNS is enabled
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
-	sm, _ := NewSecurityManager(cfg, logger)
+	sm, err := NewSecurityManager(cfg, logger)
+	if err != nil {
+		t.Fatalf("NewSecurityManager: %v", err)
+	}
 	h.geoEngine = sm.Result().GeoEngine
 
 	addZoneRecords(t, h, "geo.example.com.", []zone.Record{
@@ -8241,7 +8966,7 @@ func TestServeDNS_GeoDNS_Override(t *testing.T) {
 		{Name: "geo.example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.geo.example.com."},
 	})
 
-	// Without MMDB file, GeoDNS won't actually resolve, but the branch is exercised
+	// Without an MMDB file, GeoDNS won't actually resolve, but the branch is exercised.
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "geo.example.com.", protocol.TypeA))
 	if w.msg == nil {
@@ -9351,8 +10076,8 @@ func TestNewDNSSECManager_TrustAnchorLoadError(t *testing.T) {
 	cfg.DNSSEC.TrustAnchor = "/nonexistent/trust.anchor"
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewDNSSECManager(cfg, nil, logger)
-	// Should still create manager even if anchor file doesn't exist
-	// (it creates an empty store)
+	// Resolver-less DNSSEC setup does not create a validator, so custom
+	// trust anchor loading is skipped.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -9364,17 +10089,21 @@ func TestNewDNSSECManager_TrustAnchorLoadError(t *testing.T) {
 func TestNewZoneManager_InvalidZoneFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	badFile := filepath.Join(tmpDir, "bad.zone")
-	os.WriteFile(badFile, []byte("this is not a valid zone file\n"), 0644)
+	if err := os.WriteFile(badFile, []byte("this is not a valid zone file\n"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	cfg := config.DefaultConfig()
 	cfg.Zones = []string{badFile}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewZoneManager(cfg, logger)
-	// Should create manager but skip the bad zone
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected invalid zone file error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on invalid zone file")
+	}
+	if !strings.Contains(err.Error(), "loading zone file") {
+		t.Fatalf("error = %q, want zone file context", err)
 	}
 }
 
@@ -9907,19 +10636,21 @@ func TestBindEntryToAddr(t *testing.T) {
 }
 
 func TestNewZoneManager_KVStoreOpenError(t *testing.T) {
-	// Use a path that storage.OpenKVStore will reject
 	cfg := config.DefaultConfig()
-	cfg.ZoneDir = "" // empty zone dir uses "."; but we can use a file as path
 	tmpDir := t.TempDir()
-	cfg.ZoneDir = filepath.Join(tmpDir, "afile") // a file, not a directory
-	os.WriteFile(cfg.ZoneDir, []byte("x"), 0644)
+	cfg.ZoneDir = filepath.Join(tmpDir, "afile")
+	if err := os.WriteFile(cfg.ZoneDir, []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	mgr, err := NewZoneManager(cfg, logger)
-	// Should still create manager even if KV store fails to open
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected zone_dir scan error")
 	}
-	if mgr == nil {
-		t.Fatal("expected manager")
+	if mgr != nil {
+		t.Fatal("expected nil manager on zone_dir scan error")
+	}
+	if !strings.Contains(err.Error(), "scanning zone_dir") {
+		t.Fatalf("error = %q, want zone_dir context", err)
 	}
 }

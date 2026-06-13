@@ -122,10 +122,13 @@ func (m *ClusterManager) metricsUpdater(metricsCollector *metrics.MetricsCollect
 
 // Stop stops the cluster manager.
 func (m *ClusterManager) Stop() {
+	if m == nil {
+		return
+	}
 	m.stopOnce.Do(func() {
 		close(m.stopCh)
 		if m.Cluster != nil {
-			_ = m.Cluster.Stop()
+			logManagerStopError(m.logger, "cluster", m.Cluster.Stop())
 		}
 	})
 }

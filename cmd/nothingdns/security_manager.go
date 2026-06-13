@@ -4,6 +4,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/dns64"
@@ -41,7 +43,7 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 		URLs:    cfg.Blocklist.URLs,
 	})
 	if err := mgr.result.Blocklist.Load(); err != nil {
-		logger.Warnf("Failed to load blocklist: %v", err)
+		return nil, fmt.Errorf("loading blocklist: %w", err)
 	} else if cfg.Blocklist.Enabled {
 		stats := mgr.result.Blocklist.Stats()
 		logger.Infof("Blocklist loaded with %d entries from %d files and %d URLs", stats.TotalBlocks, stats.Files, stats.URLs)
@@ -63,7 +65,7 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 			Logger:   logger,
 		})
 		if err := mgr.result.RPZEngine.Load(); err != nil {
-			logger.Warnf("Failed to load RPZ zones: %v", err)
+			return nil, fmt.Errorf("loading RPZ zones: %w", err)
 		} else {
 			stats := mgr.result.RPZEngine.Stats()
 			logger.Infof("RPZ engine loaded with %d rules from %d files", stats.TotalRules, stats.Files)
@@ -75,7 +77,7 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 		mgr.result.GeoEngine = geodns.NewEngine(geodns.Config{Enabled: true})
 		if cfg.GeoDNS.MMDBFile != "" {
 			if err := mgr.result.GeoEngine.LoadMMDB(cfg.GeoDNS.MMDBFile); err != nil {
-				logger.Warnf("Failed to load MMDB: %v", err)
+				return nil, fmt.Errorf("loading GeoDNS MMDB: %w", err)
 			} else {
 				logger.Infof("GeoDNS MMDB loaded from %s", cfg.GeoDNS.MMDBFile)
 			}
@@ -98,11 +100,11 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 		var err error
 		mgr.result.DNS64Synth, err = dns64.NewSynthesizer(cfg.DNS64.Prefix, cfg.DNS64.PrefixLen)
 		if err != nil {
-			logger.Warnf("Failed to initialize DNS64: %v", err)
+			return nil, fmt.Errorf("initializing DNS64: %w", err)
 		} else {
 			for _, cidr := range cfg.DNS64.ExcludeNets {
 				if err := mgr.result.DNS64Synth.AddExcludeNet(cidr); err != nil {
-					logger.Warnf("DNS64: invalid exclude network %q: %v", cidr, err)
+					return nil, fmt.Errorf("adding DNS64 exclude network %q: %w", cidr, err)
 				}
 			}
 			logger.Infof("DNS64 enabled with prefix %s/%d", cfg.DNS64.Prefix, cfg.DNS64.PrefixLen)

@@ -39,6 +39,7 @@ import (
 // integratedHandler is the DNS request handler that uses all components.
 type integratedHandler struct {
 	config        *config.Config
+	runtimeMu     sync.RWMutex
 	logger        *util.Logger
 	cache         *cache.Cache
 	upstream      *upstream.Client
@@ -91,10 +92,21 @@ type integratedHandler struct {
 
 // ServeDNS implements the server.Handler interface.
 func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Message) {
-	if h.pipeline == nil {
-		h.pipeline = NewPipeline(h)
+	h.runtimeMu.RLock()
+	pipeline := h.pipeline
+	h.runtimeMu.RUnlock()
+	if pipeline == nil {
+		h.runtimeMu.Lock()
+		if h.pipeline == nil {
+			h.pipeline = NewPipeline(h)
+		}
+		pipeline = h.pipeline
+		h.runtimeMu.Unlock()
 	}
-	h.pipeline.ServeDNS(h, w, r)
+
+	h.runtimeMu.RLock()
+	defer h.runtimeMu.RUnlock()
+	pipeline.ServeDNS(h, w, r)
 }
 
 // tryDNS64Synthesis checks whether DNS64 synthesis is needed for an AAAA query
@@ -857,32 +869,54 @@ func (h *integratedHandler) RebuildZoneTree() {
 // ReloadViews reloads split-horizon view configuration and zone files.
 // Called during config reload to pick up view changes without restart.
 func (h *integratedHandler) ReloadViews(viewConfigs []filter.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error)) error {
+	plan, err := h.prepareReloadViews(viewConfigs, loadZoneFileFunc)
+	if err != nil {
+		return err
+	}
+	h.applyReloadViews(plan)
+	return nil
+}
+
+type viewReloadPlan struct {
+	splitHorizon *filter.SplitHorizon
+	viewZones    map[string]map[string]*zone.Zone
+}
+
+func (h *integratedHandler) prepareReloadViews(viewConfigs []filter.ViewConfig, loadZoneFileFunc func(string) (*zone.Zone, error)) (*viewReloadPlan, error) {
 	if len(viewConfigs) == 0 {
-		h.splitHorizon = nil
-		h.viewZones = nil
-		return nil
+		return &viewReloadPlan{}, nil
 	}
 
 	newSH, err := filter.NewSplitHorizon(viewConfigs)
 	if err != nil {
-		return fmt.Errorf("reloading split-horizon: %w", err)
+		return nil, fmt.Errorf("reloading split-horizon: %w", err)
 	}
 
 	newViewZones := make(map[string]map[string]*zone.Zone)
 	for _, v := range viewConfigs {
 		vzMap := make(map[string]*zone.Zone)
 		for _, zf := range v.ZoneFiles {
+			if loadZoneFileFunc == nil {
+				return nil, fmt.Errorf("loading zone file %q for view %q: no loader configured", zf, v.Name)
+			}
 			vz, err := loadZoneFileFunc(zf)
 			if err != nil {
-				h.logger.Warnf("Failed to load zone file %q for view %q: %v", zf, v.Name, err)
-				continue
+				return nil, fmt.Errorf("loading zone file %q for view %q: %w", zf, v.Name, err)
 			}
 			vzMap[vz.Origin] = vz
 		}
 		newViewZones[v.Name] = vzMap
 	}
 
-	h.splitHorizon = newSH
-	h.viewZones = newViewZones
-	return nil
+	return &viewReloadPlan{splitHorizon: newSH, viewZones: newViewZones}, nil
+}
+
+func (h *integratedHandler) applyReloadViews(plan *viewReloadPlan) {
+	if plan == nil {
+		return
+	}
+	h.runtimeMu.Lock()
+	defer h.runtimeMu.Unlock()
+	h.splitHorizon = plan.splitHorizon
+	h.viewZones = plan.viewZones
 }

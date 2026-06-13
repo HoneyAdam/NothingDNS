@@ -15,14 +15,17 @@ func (s *Server) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.validator == nil {
+	s.runtimeMu.RLock()
+	validator := s.validator
+	s.runtimeMu.RUnlock()
+	if validator == nil {
 		s.writeJSON(w, http.StatusOK, &dnssec.DNSSECStatus{
 			Enabled: false,
 		})
 		return
 	}
 
-	status := s.validator.DNSSECStatus()
+	status := validator.DNSSECStatus()
 	s.writeJSON(w, http.StatusOK, status)
 }
 
@@ -37,6 +40,7 @@ func (s *Server) handleDNSSECKeys(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var keys []DNSSECKeyInfo
+	s.runtimeMu.RLock()
 	s.zoneSignersMu.RLock()
 	for zone, signer := range s.zoneSigners {
 		for _, k := range signer.GetKeys() {
@@ -51,6 +55,7 @@ func (s *Server) handleDNSSECKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.zoneSignersMu.RUnlock()
+	s.runtimeMu.RUnlock()
 	s.writeJSON(w, http.StatusOK, DNSSECKeysResponse{Zones: keys})
 }
 

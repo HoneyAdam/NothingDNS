@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,7 +18,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.authStore == nil {
+	authStore := s.currentAuthStore()
+	if authStore == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Auth not configured")
 		return
 	}
@@ -43,14 +46,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate user credentials
-	if !s.authStore.VerifyUserPassword(req.Username, req.Password) {
+	if !authStore.VerifyUserPassword(req.Username, req.Password) {
 		s.loginLimiter.recordFailedAttempt(ip, req.Username)
 		s.writeError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
 	// Get user for role and token generation
-	user, err := s.authStore.GetUser(req.Username)
+	user, err := authStore.GetUser(req.Username)
 	if err != nil {
 		s.loginLimiter.recordFailedAttempt(ip, req.Username)
 		s.writeError(w, http.StatusUnauthorized, "Invalid credentials")
@@ -61,10 +64,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.loginLimiter.recordSuccess(ip, req.Username)
 
 	// Revoke all existing tokens to prevent session fixation
-	s.authStore.RevokeAllTokens(req.Username)
+	authStore.RevokeAllTokens(req.Username)
 
 	// Generate token
-	token, err := s.authStore.GenerateToken(req.Username, s.authStore.TokenExpiry())
+	tokenExpiry := authStore.TokenExpiry()
+	token, err := authStore.GenerateToken(req.Username, tokenExpiry)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
@@ -81,7 +85,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   cookieMaxAgeSeconds(s.authStore.TokenExpiry()),
+		MaxAge:   cookieMaxAgeSeconds(tokenExpiry),
 	})
 
 	s.writeJSON(w, http.StatusOK, &LoginResponse{
@@ -110,12 +114,13 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	ip := getClientIP(r)
 	isLocalhost := ip == "127.0.0.1" || ip == "::1"
 
-	if s.authStore == nil {
+	authStore := s.currentAuthStore()
+	if authStore == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Auth not configured")
 		return
 	}
 
-	users := s.authStore.ListUsers()
+	users := authStore.ListUsers()
 
 	// Bootstrap must ALWAYS be from localhost to prevent remote attacker from creating admin accounts.
 	// If users exist: only localhost can perform bootstrap (for password reset).
@@ -166,11 +171,11 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		// account fresh. Using CreateUser (not UpdateUser) means the
 		// new account loses the IsAutoCreated marker and behaves like
 		// any normally-provisioned user from here on out.
-		if err := s.authStore.DeleteUser("admin"); err != nil {
+		if err := authStore.DeleteUser("admin"); err != nil {
 			s.writeError(w, http.StatusInternalServerError, sanitizeError(err, "Failed to remove default admin"))
 			return
 		}
-		user, err = s.authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
+		user, err = authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
 		if err != nil {
 			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
 			return
@@ -181,18 +186,18 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, "Old password required")
 			return
 		}
-		if !s.authStore.VerifyUserPassword(req.Username, req.OldPassword) {
+		if !authStore.VerifyUserPassword(req.Username, req.OldPassword) {
 			s.writeError(w, http.StatusUnauthorized, "Invalid old password")
 			return
 		}
-		user, err = s.authStore.UpdateUser(req.Username, req.Password, "")
+		user, err = authStore.UpdateUser(req.Username, req.Password, "")
 		if err != nil {
 			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
 			return
 		}
 	} else {
 		// No users - create the first admin user
-		user, err = s.authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
+		user, err = authStore.CreateUser(req.Username, req.Password, auth.RoleAdmin)
 		if err != nil {
 			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
 			return
@@ -200,7 +205,8 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generate token
-	token, err := s.authStore.GenerateToken(req.Username, s.authStore.TokenExpiry())
+	tokenExpiry := authStore.TokenExpiry()
+	token, err := authStore.GenerateToken(req.Username, tokenExpiry)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "Failed to generate token")
 		return
@@ -217,7 +223,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
-		MaxAge:   cookieMaxAgeSeconds(s.authStore.TokenExpiry()),
+		MaxAge:   cookieMaxAgeSeconds(tokenExpiry),
 	})
 
 	s.writeJSON(w, http.StatusOK, &BootstrapResponse{
@@ -237,13 +243,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("Authorization")
 	token = strings.TrimPrefix(token, "Bearer ")
 
-	if token != "" && s.authStore != nil {
-		s.authStore.RevokeToken(token)
+	authStore := s.currentAuthStore()
+	if token != "" && authStore != nil {
+		authStore.RevokeToken(token)
 	}
 
 	// Also revoke cookie token
-	if cookie, err := r.Cookie("ndns_token"); err == nil && cookie.Value != "" && s.authStore != nil {
-		s.authStore.RevokeToken(cookie.Value)
+	if cookie, err := r.Cookie("ndns_token"); err == nil && cookie.Value != "" && authStore != nil {
+		authStore.RevokeToken(cookie.Value)
 	}
 
 	// Clear cookie — Secure must match original so browser can actually delete it
@@ -262,18 +269,23 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // handleUsers manages users.
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
-	if s.authStore == nil {
+	authStore := s.currentAuthStore()
+	if authStore == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Auth not configured")
+		return
+	}
+	if userPathParameter(r) && r.Method != http.MethodDelete {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		if !hasRole(r.Context(), s.authStore, auth.RoleOperator) {
+		if !hasRole(r.Context(), authStore, auth.RoleOperator) {
 			s.writeError(w, http.StatusForbidden, "Operator role required")
 			return
 		}
-		users := s.authStore.ListUsers()
+		users := authStore.ListUsers()
 		resp := make([]UserResponse, 0, len(users))
 		for _, u := range users {
 			resp = append(resp, UserResponse{
@@ -287,7 +299,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPost:
 		// Require admin role
-		if !hasRole(r.Context(), s.authStore, auth.RoleAdmin) {
+		if !hasRole(r.Context(), authStore, auth.RoleAdmin) {
 			s.writeError(w, http.StatusForbidden, "Admin role required")
 			return
 		}
@@ -321,7 +333,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		user, err := s.authStore.CreateUser(req.Username, req.Password, role)
+		user, err := authStore.CreateUser(req.Username, req.Password, role)
 		if err != nil {
 			s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
 			return
@@ -336,18 +348,25 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodDelete:
 		// Require admin role
-		if !hasRole(r.Context(), s.authStore, auth.RoleAdmin) {
+		if !hasRole(r.Context(), authStore, auth.RoleAdmin) {
 			s.writeError(w, http.StatusForbidden, "Admin role required")
 			return
 		}
 
-		username := r.URL.Query().Get("username")
+		username := userDeleteName(r)
 		if username == "" {
 			s.writeError(w, http.StatusBadRequest, "username required")
 			return
 		}
-
-		if err := s.authStore.DeleteUser(username); err != nil {
+		caller := GetUser(r.Context())
+		if caller != nil && username == caller.Username {
+			s.writeError(w, http.StatusBadRequest, "Cannot delete current user")
+			return
+		}
+		if err := authStore.DeleteUserPreservingLastAdmin(username); errors.Is(err, auth.ErrLastAdmin) {
+			s.writeError(w, http.StatusBadRequest, "Cannot delete the last admin user")
+			return
+		} else if err != nil {
 			s.writeError(w, http.StatusNotFound, sanitizeError(err, "Not found"))
 			return
 		}
@@ -359,12 +378,49 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func userDeleteName(r *http.Request) string {
+	if username := r.URL.Query().Get("username"); username != "" {
+		return username
+	}
+	path, ok := userPathParameterValue(r)
+	if !ok || strings.Contains(path, "/") {
+		return ""
+	}
+	username, err := url.PathUnescape(path)
+	if err != nil {
+		return ""
+	}
+	return username
+}
+
+func userPathParameter(r *http.Request) bool {
+	_, ok := userPathParameterValue(r)
+	return ok
+}
+
+func userPathParameterValue(r *http.Request) (string, bool) {
+	escapedPath := r.URL.EscapedPath()
+	path := strings.TrimPrefix(escapedPath, "/api/v1/auth/users/")
+	if path == escapedPath || path == "" {
+		return "", false
+	}
+	return path, true
+}
+
 // handleRoles returns available roles.
 func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	if s.requireOperator(w, r) {
+		return
+	}
+
 	s.writeJSON(w, http.StatusOK, &RolesResponse{
 		Roles: []RoleResponse{
 			{Name: "admin", Description: "Full access to all resources"},
-			{Name: "operator", Description: "Can modify zones, cache, and config"},
+			{Name: "operator", Description: "Can modify zones and view operational data"},
 			{Name: "viewer", Description: "Read-only access"},
 		},
 	})

@@ -46,12 +46,15 @@ func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.configGetter == nil {
+	s.runtimeMu.RLock()
+	configGetter := s.configGetter
+	s.runtimeMu.RUnlock()
+	if configGetter == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Config not available")
 		return
 	}
 
-	cfg := s.configGetter()
+	cfg := configGetter()
 	if cfg == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Config not available")
 		return
@@ -175,7 +178,10 @@ func (s *Server) handleConfigRRL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.rateLimiter == nil {
+	s.runtimeMu.RLock()
+	rateLimiter := s.rateLimiter
+	s.runtimeMu.RUnlock()
+	if rateLimiter == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "Rate limiter not available")
 		return
 	}
@@ -199,13 +205,13 @@ func (s *Server) handleConfigRRL(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Enabled != nil {
-		s.rateLimiter.SetEnabled(*req.Enabled)
+		rateLimiter.SetEnabled(*req.Enabled)
 	}
 	if req.Rate != nil && *req.Rate > 0 {
-		s.rateLimiter.SetRate(*req.Rate)
+		rateLimiter.SetRate(*req.Rate)
 	}
 	if req.Burst != nil && *req.Burst > 0 {
-		s.rateLimiter.SetBurst(*req.Burst)
+		rateLimiter.SetBurst(*req.Burst)
 	}
 
 	s.writeJSON(w, http.StatusOK, &MessageResponse{Message: "RRL configuration updated"})
@@ -217,7 +223,9 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	if s.requireOperator(w, r) {
+	// Cache sizing, TTL, prefetch, and stale-serving changes directly affect
+	// resolver availability and memory pressure; keep runtime mutation admin-only.
+	if s.requireAdmin(w, r) {
 		return
 	}
 

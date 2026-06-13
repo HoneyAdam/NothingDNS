@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/config"
@@ -140,6 +141,29 @@ ns1 3600 IN A 192.0.2.1
 	}
 	if _, err := os.Stat(filepath.Join(zoneDir, storage.DataFile)); !os.IsNotExist(err) {
 		t.Fatalf("zone_dir should not contain persistent DB when storage.data_dir is set, stat err = %v", err)
+	}
+}
+
+func TestNewZoneManagerExplicitStorageDataDirOpenError(t *testing.T) {
+	tmpDir := t.TempDir()
+	badDataDir := filepath.Join(tmpDir, "data-dir-file")
+	if err := os.WriteFile(badDataDir, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write bad storage data dir: %v", err)
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Storage.DataDir = badDataDir
+	cfg.Zones = nil
+
+	mgr, err := NewZoneManager(cfg, util.NewLogger(util.ERROR, util.TextFormat, nil))
+	if err == nil {
+		t.Fatal("expected explicit storage.data_dir open failure")
+	}
+	if mgr != nil {
+		t.Fatal("expected nil manager on explicit storage.data_dir open failure")
+	}
+	if !strings.Contains(err.Error(), "initializing persistent zone database") {
+		t.Fatalf("error = %q, want persistent zone database context", err)
 	}
 }
 

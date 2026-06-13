@@ -316,6 +316,48 @@ func TestHandleRPZRules_NilEngine(t *testing.T) {
 	}
 }
 
+func TestHandleRPZRules_NilEngineMutation(t *testing.T) {
+	s := newRPZServer(t, nil)
+
+	body, _ := json.Marshal(RPZAddRuleRequest{
+		Pattern: "blocked.example.com.",
+		Action:  "NXDOMAIN",
+	})
+	postReq := rpzAdminRequest(http.MethodPost, "/api/v1/rpz/rules", body)
+	postReq.Header.Set("Content-Type", "application/json")
+	postRec := httptest.NewRecorder()
+	s.handleRPZRules(postRec, postReq)
+
+	if postRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("POST: expected 503, got %d: %s", postRec.Code, postRec.Body.String())
+	}
+
+	deleteReq := rpzAdminRequest(http.MethodDelete, "/api/v1/rpz/rules?pattern=blocked.example.com.", nil)
+	deleteRec := httptest.NewRecorder()
+	s.handleRPZRules(deleteRec, deleteReq)
+
+	if deleteRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("DELETE: expected 503, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+}
+
+func TestHandleRPZRules_MutationRequiresAdminBeforeServiceCheck(t *testing.T) {
+	s := newRPZServer(t, nil)
+
+	body, _ := json.Marshal(RPZAddRuleRequest{
+		Pattern: "blocked.example.com.",
+		Action:  "NXDOMAIN",
+	})
+	req := rpzAuthenticatedRequest(http.MethodPost, "/api/v1/rpz/rules", body)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.handleRPZRules(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleRPZRules_WrongMethod(t *testing.T) {
 	engine := newEnabledEngine()
 	s := newRPZServer(t, engine)

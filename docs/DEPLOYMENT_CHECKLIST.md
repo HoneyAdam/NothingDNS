@@ -97,12 +97,12 @@ helm install my-release nothingdns/nothingdns \
 sudo mkdir -p /etc/nothingdns/zones
 sudo mkdir -p /etc/nothingdns/tls
 sudo mkdir -p /var/log/nothingdns
-sudo mkdir -p /data/nothingdns
+sudo mkdir -p /var/lib/nothingdns
 
 # Set permissions
 sudo chown -R 1000:1000 /etc/nothingdns
 sudo chown -R 1000:1000 /var/log/nothingdns
-sudo chown -R 1000:1000 /data/nothingdns
+sudo chown -R 1000:1000 /var/lib/nothingdns
 ```
 
 ### 6. Zone File Setup
@@ -153,8 +153,7 @@ acl:
       - 10.0.0.0/8
       - 172.16.0.0/12
       - 192.168.0.0/16
-    types:
-      - ANY
+    # Omit types to allow all DNS query types. "ANY" only matches QTYPE 255.
 ```
 
 ### 4. Tune Runtime RRL
@@ -187,7 +186,15 @@ metrics:
   auth_token: "${NOTHINGDNS_METRICS_AUTH_TOKEN}"
 ```
 
-### 2. Health Checks
+### 2. Persistent Storage
+
+```yaml
+storage:
+  data_dir: /var/lib/nothingdns
+  encryption_key: "${NOTHINGDNS_STORAGE_ENCRYPTION_KEY}"
+```
+
+### 3. Health Checks
 
 ```bash
 # Liveness probe
@@ -224,9 +231,11 @@ export NOTHINGDNS_ADMIN_PASSWORD="$(openssl rand -base64 32)"
 export NOTHINGDNS_OPERATOR_PASSWORD="$(openssl rand -base64 32)"
 export NOTHINGDNS_VIEWER_PASSWORD="$(openssl rand -base64 32)"
 export NOTHINGDNS_METRICS_AUTH_TOKEN="$(openssl rand -base64 32)"
-export NOTHINGDNS_CLUSTER_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+export NOTHINGDNS_STORAGE_ENCRYPTION_KEY="$(openssl rand -hex 32)"
+export NOTHINGDNS_CLUSTER_ENCRYPTION_KEY="$(openssl rand -base64 32)"
+export NOTHINGDNS_CLUSTER_SNAPSHOT_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 
-./nothingdns -validate-config -config /etc/nothingdns/nothingdns.yaml
+./nothingdns -validate-production-config -config /etc/nothingdns/nothingdns.yaml
 ```
 
 ### 2. Test DNS Resolution
@@ -288,7 +297,7 @@ docker run -d \
   -p 8080:8080 \
   -p 9153:9153 \
   -v /etc/nothingdns:/etc/nothingdns:ro \
-  -v /data:/data \
+  -v /var/lib/nothingdns:/var/lib/nothingdns \
   ghcr.io/nothingdns/nothingdns:latest
 ```
 

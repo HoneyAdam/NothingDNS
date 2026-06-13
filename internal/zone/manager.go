@@ -692,7 +692,7 @@ func IncrementSerial(z *Zone) {
 // invoked from API mutations (zone add/remove/update) and from the
 // catalog/IXFR paths, so this fronts every write that ever lands
 // in `zoneDir`.
-func (m *Manager) writeZoneFile(z *Zone, path string) error {
+func (m *Manager) writeZoneFile(z *Zone, path string) (err error) {
 	content, err := WriteZone(z)
 	if err != nil {
 		return err
@@ -711,7 +711,9 @@ func (m *Manager) writeZoneFile(z *Zone, path string) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+				err = fmt.Errorf("remove temp: %w", removeErr)
+			}
 		}
 	}()
 	if err := os.Chmod(tmpName, 0644); err != nil {
@@ -733,9 +735,25 @@ func (m *Manager) writeZoneFile(z *Zone, path string) error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	cleanup = false
-	if dirFd, err := os.Open(dir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncDir(dir string) (err error) {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open dir: %w", err)
+	}
+	defer func() {
+		if closeErr := dirFd.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close dir: %w", closeErr)
+		}
+	}()
+
+	if err := dirFd.Sync(); err != nil {
+		return fmt.Errorf("fsync dir: %w", err)
 	}
 	return nil
 }

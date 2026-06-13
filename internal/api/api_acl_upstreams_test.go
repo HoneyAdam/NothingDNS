@@ -61,6 +61,24 @@ func TestHandleACL_GetNoChecker(t *testing.T) {
 	}
 }
 
+// TestHandleACL_PutNoChecker verifies that PUT with nil aclChecker fails instead
+// of silently reporting success for a mutation that cannot be applied.
+func TestHandleACL_PutNoChecker(t *testing.T) {
+	s, user := newAuthenticatedServer(t, "admin", auth.RoleAdmin)
+
+	body := `{"rules":[]}`
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/acl", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(newAuthenticatedContext(user))
+	rec := httptest.NewRecorder()
+
+	s.handleACL(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestHandleACL_GetWithRules verifies that GET returns the rules from a
 // configured ACLChecker.
 func TestHandleACL_GetWithRules(t *testing.T) {

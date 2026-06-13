@@ -60,12 +60,14 @@ service:
 
 # Secret material used by the generated chart Secret. Set existingSecret to
 # reference a pre-created Secret with these keys instead:
-#   auth-secret, admin-password, metrics-auth-token, cluster-encryption-key.
+#   auth-secret, admin-password, metrics-auth-token,
+#   storage-encryption-key, cluster-encryption-key.
 auth:
   existingSecret: ""
   authSecret: ""
   adminPassword: ""
   metricsAuthToken: ""
+  storageEncryptionKey: ""
   clusterEncryptionKey: ""
 
 # Ingress configuration for DoH/API
@@ -203,13 +205,20 @@ config:
     format: json  # json, text
     output: stdout
 
+  # Persistent storage for API-created zones and IXFR journals
+  storage:
+    data_dir: /var/lib/nothingdns
+
   # Cache configuration
   cache:
     enabled: true
     size: 10000
-    ttl: 300
+    default_ttl: 300
+    max_ttl: 86400
+    min_ttl: 0
     negative_ttl: 60
-    stale_ttl: 86400
+    serve_stale: true
+    stale_grace_secs: 86400
     prefetch: true
     prefetch_threshold: 3
 
@@ -223,24 +232,25 @@ config:
     servers:
       - "1.1.1.1:53"
       - "8.8.8.8:53"
-    timeout: 5s
-    attempts: 3
-    health_check_interval: 30s
+    strategy: round_robin
+    health_check: 30s
+    failover_timeout: 5s
 
   # DNSSEC configuration
   dnssec:
     enabled: true
-    validation: true
-    trust_anchor_file: ""
+    ignore_time: false
+    require_dnssec: false
+    trust_anchor: ""
 
   # Cluster configuration (for HA mode)
   cluster:
     enabled: false
     node_id: ""  # Auto-generated from pod name if empty
     bind_addr: "0.0.0.0"
-    bind_port: 7946
+    gossip_port: 7946
+    consensus_mode: swim
     peers: []
-    # consensus_mode: raft  # raft or gossip
 
   # RPZ (Response Policy Zones)
   rpz:
@@ -258,11 +268,12 @@ config:
     # urls:
     #   - "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
 
-  # GeoIP configuration
-  geoip:
+  # GeoDNS configuration
+  geodns:
     enabled: false
-    database_path: ""
-    # database_path: "/var/lib/nothingdns/GeoLite2-City.mmdb"
+    mmdb_file: ""
+    rules: []
+    # mmdb_file: "/var/lib/nothingdns/GeoLite2-City.mmdb"
 
   # XoT (Zone Transfer over TLS)
   xot:

@@ -227,6 +227,22 @@ func TestManager_WriteZoneFile_InvalidDir(t *testing.T) {
 	}
 }
 
+func TestSyncDir(t *testing.T) {
+	if err := syncDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDir on temp dir: %v", err)
+	}
+}
+
+func TestSyncDir_InvalidPath(t *testing.T) {
+	err := syncDir(filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+	if !strings.Contains(err.Error(), "open dir") {
+		t.Fatalf("error = %v, want open dir context", err)
+	}
+}
+
 // ============================================================================
 // Manager.Load with ZONEMD enabled (manager.go:87) — 72% coverage
 // ============================================================================

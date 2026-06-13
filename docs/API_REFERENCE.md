@@ -121,6 +121,8 @@ Authorization: Bearer <token>
 
 ### Get Roles
 
+Requires operator or admin role.
+
 ```http
 GET /api/v1/auth/roles
 Authorization: Bearer <token>
@@ -130,9 +132,9 @@ Authorization: Bearer <token>
 ```json
 {
   "roles": [
-    {"name": "viewer", "level": 1, "permissions": ["read"]},
-    {"name": "operator", "level": 2, "permissions": ["read", "write"]},
-    {"name": "admin", "level": 3, "permissions": ["read", "write", "admin"]}
+    {"name": "admin", "description": "Full access to all resources"},
+    {"name": "operator", "description": "Can modify zones and view operational data"},
+    {"name": "viewer", "description": "Read-only access"}
   ]
 }
 ```
@@ -384,6 +386,43 @@ Authorization: Bearer <token>
       "health": {...}
     }
   ]
+}
+```
+
+### Join Cluster
+
+Requires admin role. Supported for SWIM/gossip clusters.
+
+```http
+POST /api/v1/cluster/join
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "seed_address": "node-1.example.com:7946"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "message": "Joined cluster via node-1.example.com:7946"
+}
+```
+
+### Leave Cluster
+
+Requires admin role. The node drains in-flight work before leaving.
+
+```http
+DELETE /api/v1/cluster/leave
+Authorization: Bearer <token>
+```
+
+**Response** (200 OK):
+```json
+{
+  "message": "Node left cluster gracefully"
 }
 ```
 

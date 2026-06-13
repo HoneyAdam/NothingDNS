@@ -567,6 +567,30 @@ func TestHandleConfigCache_NoCache(t *testing.T) {
 	}
 }
 
+func TestHandleConfigCache_OperatorForbidden(t *testing.T) {
+	store := newAuthStoreWithUser(t, "operator", "testpass123", auth.RoleOperator)
+	s := newServerWithAuth(store)
+	s.cache = cache.New(cache.Config{Capacity: 1000})
+
+	operatorUser, _ := store.GetUser("operator")
+	body, err := json.Marshal(map[string]any{"size": 5000})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/config/cache", bytes.NewReader(body))
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
+	rec := httptest.NewRecorder()
+
+	s.handleConfigCache(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := s.cache.GetConfig().Capacity; got != 1000 {
+		t.Fatalf("cache capacity changed after rejected operator update: got %d", got)
+	}
+}
+
 func TestHandleConfigCache_InvalidJSON(t *testing.T) {
 	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
 	s := newServerWithAuth(store)

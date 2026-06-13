@@ -23,14 +23,21 @@ func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.aclChecker == nil {
-		s.writeJSON(w, http.StatusOK, &ACLResponse{Rules: []ACLRuleResponse{}})
+	s.runtimeMu.RLock()
+	aclChecker := s.aclChecker
+	s.runtimeMu.RUnlock()
+	if aclChecker == nil {
+		if r.Method == http.MethodGet {
+			s.writeJSON(w, http.StatusOK, &ACLResponse{Rules: []ACLRuleResponse{}})
+			return
+		}
+		s.writeError(w, http.StatusServiceUnavailable, "ACL not available")
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		rules := s.aclChecker.GetRules()
+		rules := aclChecker.GetRules()
 		aclRules := make([]ACLRuleResponse, 0, len(rules))
 		for _, rule := range rules {
 			aclRules = append(aclRules, ACLRuleResponse{
@@ -69,7 +76,7 @@ func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		if err := s.aclChecker.UpdateRules(configRules); err != nil {
+		if err := aclChecker.UpdateRules(configRules); err != nil {
 			s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Invalid request"))
 			return
 		}
