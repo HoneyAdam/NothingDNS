@@ -623,6 +623,90 @@ func TestKVStoreRollback(t *testing.T) {
 	}
 }
 
+func TestKVStoreRollbackReportsReloadError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := OpenKVStore(path)
+	if err != nil {
+		t.Fatalf("OpenKVStore failed: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("test"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("key"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("seed Update failed: %v", err)
+	}
+
+	tx, err := store.Begin(true)
+	if err != nil {
+		t.Fatalf("Begin failed: %v", err)
+	}
+	bucket, err := tx.CreateBucketIfNotExists([]byte("transient"))
+	if err != nil {
+		t.Fatalf("CreateBucketIfNotExists: %v", err)
+	}
+	if err := bucket.Put([]byte("key"), []byte("value")); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := os.WriteFile(store.dataFile, []byte("not-a-valid-kv-file"), 0600); err != nil {
+		t.Fatalf("corrupt data file: %v", err)
+	}
+
+	err = tx.Rollback()
+	if err == nil {
+		t.Fatal("Rollback should report reload failure")
+	}
+	if !strings.Contains(err.Error(), "reload data during rollback") {
+		t.Fatalf("Rollback error should include reload context, got: %v", err)
+	}
+}
+
+func TestKVStoreUpdateReportsRollbackFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := OpenKVStore(path)
+	if err != nil {
+		t.Fatalf("OpenKVStore failed: %v", err)
+	}
+	defer store.Close()
+
+	if err := store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("test"))
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte("key"), []byte("value"))
+	}); err != nil {
+		t.Fatalf("seed Update failed: %v", err)
+	}
+
+	callbackErr := errors.New("callback failed")
+	err = store.Update(func(tx *Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte("transient"))
+		if err != nil {
+			return err
+		}
+		if err := bucket.Put([]byte("key"), []byte("value")); err != nil {
+			return err
+		}
+		if err := os.WriteFile(store.dataFile, []byte("not-a-valid-kv-file"), 0600); err != nil {
+			return err
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("Update error should include callback error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("Update error should include rollback failure context, got: %v", err)
+	}
+}
+
 func TestKVStoreKeyTooLarge(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
 
@@ -2208,6 +2292,22 @@ func TestKVStoreSaveDataIntegrity(t *testing.T) {
 	}
 	if string(result) != "value" {
 		t.Errorf("Data lost after save+reopen: got %q, want 'value'", result)
+	}
+}
+
+func TestSyncDataDir(t *testing.T) {
+	if err := syncDataDir(t.TempDir()); err != nil {
+		t.Fatalf("syncDataDir on temp dir: %v", err)
+	}
+}
+
+func TestSyncDataDirInvalidPath(t *testing.T) {
+	err := syncDataDir(filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("expected error for missing data directory")
+	}
+	if !strings.Contains(err.Error(), "open data dir") {
+		t.Fatalf("error = %v, want open data dir context", err)
 	}
 }
 

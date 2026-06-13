@@ -634,7 +634,9 @@ func (s *Server) ClientLoop(client *Client) {
 		close(client.closed) // Signal write loop to exit
 		s.RemoveClient(client)
 		client.closeSend.Do(func() { close(client.send) })
-		_ = client.conn.Close()
+		if err := closeClientConn(client); err != nil {
+			util.Warnf("dashboard: failed to close WebSocket client: %v", err)
+		}
 	}()
 
 	// Write loop
@@ -680,8 +682,8 @@ func (s *Server) Stop() {
 			close(s.broadcastChan)
 		}
 		for client := range s.clients {
-			if client.conn != nil {
-				_ = client.conn.Close()
+			if err := closeClientConn(client); err != nil {
+				util.Warnf("dashboard: failed to close WebSocket client: %v", err)
 			}
 		}
 		s.clients = make(map[*Client]struct{})
@@ -694,6 +696,13 @@ func (s *Server) Stop() {
 
 	// Wait for broadcastLoop to finish
 	s.wg.Wait()
+}
+
+func closeClientConn(client *Client) error {
+	if client == nil || client.conn == nil {
+		return nil
+	}
+	return client.conn.Close()
 }
 
 // StatsAPIResponse is the JSON response for GET /api/dashboard/stats.

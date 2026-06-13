@@ -543,9 +543,12 @@ func TestHandleLiveness(t *testing.T) {
 
 func TestHandleRoles(t *testing.T) {
 	cfg := config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}
-	srv := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+	store := newAuthStoreWithUser(t, "operator", "testpass123", auth.RoleOperator)
+	srv := NewServer(cfg, nil, nil, nil, nil, nil, nil).WithAuth(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/roles", nil)
+	operatorUser, _ := store.GetUser("operator")
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
 	rec := httptest.NewRecorder()
 	srv.handleRoles(rec, req)
 

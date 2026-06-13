@@ -136,6 +136,32 @@ func TestMetricsCollectorDoubleStartStopReturns(t *testing.T) {
 	}
 }
 
+func TestMetricsCollectorStartReturnsBindError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer ln.Close()
+
+	m := New(Config{
+		Enabled:   true,
+		Bind:      ln.Addr().String(),
+		Path:      "/metrics",
+		AuthToken: "test-token",
+	})
+
+	err = m.Start()
+	if err == nil {
+		t.Fatal("expected metrics bind conflict to be returned from Start")
+	}
+	if !strings.Contains(err.Error(), "listen metrics") {
+		t.Fatalf("Start error = %v, want listen metrics context", err)
+	}
+	if stopErr := m.Stop(); stopErr != nil {
+		t.Fatalf("Stop after failed Start returned error: %v", stopErr)
+	}
+}
+
 func TestRecordMetrics(t *testing.T) {
 	cfg := Config{
 		Enabled:   true,

@@ -76,6 +76,7 @@ type WAL struct {
 	stopChan    chan struct{}
 	syncChan    chan struct{}
 	syncPending bool
+	syncErr     error
 	wg          sync.WaitGroup
 	opts        WALOptions
 }
@@ -285,19 +286,6 @@ func (wal *WAL) createNewSegment() error {
 		id = wal.segments[len(wal.segments)-1].ID + 1
 	}
 
-	// Seal the current active segment AND release its file descriptor.
-	// Sealed segments are read-only and read paths (readSegment) reopen
-	// from disk anyway — keeping the original Append-side handle open
-	// just pinned one FD per rotation until Truncate eventually removed
-	// the segment, which under steady-state writes is a slow leak.
-	if wal.active != nil {
-		wal.active.sealed = true
-		if wal.active.file != nil {
-			_ = wal.active.file.Close()
-			wal.active.file = nil
-		}
-	}
-
 	// Create new segment file
 	path := filepath.Join(wal.dir, fmt.Sprintf("%s%020d%s", WALFilePrefix, id, WALFileSuffix))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
@@ -308,18 +296,39 @@ func (wal *WAL) createNewSegment() error {
 	// Preallocate space
 	if wal.opts.PreallocateSize > 0 {
 		// Close the file first — on Windows, Truncate fails on O_APPEND handles.
-		file.Close()
+		if err := file.Close(); err != nil {
+			return cleanupNewSegment(path, fmt.Errorf("close segment before preallocate: %w", err))
+		}
+		file = nil
 		if err := os.Truncate(path, wal.opts.PreallocateSize); err != nil {
-			return fmt.Errorf("preallocate segment: %w", err)
+			return cleanupNewSegment(path, fmt.Errorf("preallocate segment: %w", err))
 		}
 		if err := os.Truncate(path, 0); err != nil {
-			return fmt.Errorf("truncate segment: %w", err)
+			return cleanupNewSegment(path, fmt.Errorf("truncate segment: %w", err))
 		}
 		// Reopen with O_APPEND for writing — only append after successful reopen
 		file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
-			return fmt.Errorf("reopen segment: %w", err)
+			return cleanupNewSegment(path, fmt.Errorf("reopen segment: %w", err))
 		}
+	}
+
+	// Seal the current active segment AND release its file descriptor only
+	// after the replacement segment is ready. If preparing the new segment
+	// fails, the current active segment remains appendable.
+	if wal.active != nil {
+		if wal.active.file != nil {
+			if wal.syncPending {
+				if err := wal.syncLocked(); err != nil {
+					return cleanupNewSegmentFile(file, path, fmt.Errorf("sync active segment before rotation: %w", err))
+				}
+			}
+			if err := wal.active.file.Close(); err != nil {
+				return cleanupNewSegmentFile(file, path, fmt.Errorf("close active segment before rotation: %w", err))
+			}
+			wal.active.file = nil
+		}
+		wal.active.sealed = true
 	}
 
 	segment := &WALSegment{
@@ -338,6 +347,22 @@ func (wal *WAL) createNewSegment() error {
 	return nil
 }
 
+func cleanupNewSegmentFile(file *os.File, path string, cause error) error {
+	if file != nil {
+		if err := file.Close(); err != nil {
+			cause = errors.Join(cause, fmt.Errorf("close new segment after failure: %w", err))
+		}
+	}
+	return cleanupNewSegment(path, cause)
+}
+
+func cleanupNewSegment(path string, cause error) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		cause = errors.Join(cause, fmt.Errorf("remove new segment after failure: %w", err))
+	}
+	return cause
+}
+
 // Append appends a new entry to the WAL
 func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 	wal.mu.Lock()
@@ -345,6 +370,9 @@ func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 
 	if wal.closed {
 		return 0, ErrWALClosed
+	}
+	if err := wal.checkSyncErrLocked(); err != nil {
+		return 0, err
 	}
 
 	// Check if we need to rotate to a new segment
@@ -397,6 +425,9 @@ func (wal *WAL) AppendBatch(entries []WALEntry) error {
 
 	if wal.closed {
 		return ErrWALClosed
+	}
+	if err := wal.checkSyncErrLocked(); err != nil {
+		return err
 	}
 
 	// Write begin marker
@@ -647,6 +678,8 @@ func (wal *WAL) Sync() error {
 
 func (wal *WAL) syncLocked() error {
 	if wal.active.file == nil {
+		wal.syncPending = false
+		wal.syncErr = nil
 		return nil
 	}
 	if err := wal.active.file.Sync(); err != nil {
@@ -659,9 +692,18 @@ func (wal *WAL) syncLocked() error {
 		// case the daemon crashes between the failed Sync and the
 		// next Append; with the old ordering nothing remembered
 		// "we still owe a sync."
+		wal.syncErr = err
 		return err
 	}
 	wal.syncPending = false
+	wal.syncErr = nil
+	return nil
+}
+
+func (wal *WAL) checkSyncErrLocked() error {
+	if wal.syncErr != nil {
+		return fmt.Errorf("previous WAL sync failed: %w", wal.syncErr)
+	}
 	return nil
 }
 
@@ -676,13 +718,13 @@ func (wal *WAL) syncLoop() {
 		case <-ticker.C:
 			wal.mu.Lock()
 			if wal.syncPending && !wal.closed {
-				_ = wal.syncLocked()
+				wal.syncErr = wal.syncLocked()
 			}
 			wal.mu.Unlock()
 		case <-wal.syncChan:
 			wal.mu.Lock()
 			if wal.syncPending && !wal.closed {
-				_ = wal.syncLocked()
+				wal.syncErr = wal.syncLocked()
 			}
 			wal.mu.Unlock()
 		case <-wal.stopChan:
@@ -723,7 +765,10 @@ func (wal *WAL) Truncate(segmentID uint64) error {
 	// Close and delete old segments
 	for _, seg := range removed {
 		if seg.file != nil {
-			seg.file.Close()
+			if err := seg.file.Close(); err != nil {
+				return fmt.Errorf("close segment %d: %w", seg.ID, err)
+			}
+			seg.file = nil
 		}
 		if err := os.Remove(seg.Path); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove segment %d: %w", seg.ID, err)
@@ -749,6 +794,10 @@ func (wal *WAL) Truncate(segmentID uint64) error {
 func (wal *WAL) Compact(checkpointData []byte) error {
 	wal.mu.Lock()
 	defer wal.mu.Unlock()
+
+	if err := wal.checkSyncErrLocked(); err != nil {
+		return err
+	}
 
 	// Write checkpoint
 	if _, err := wal.appendLocked(EntryTypeCheckpoint, checkpointData); err != nil {
@@ -835,6 +884,10 @@ type WALReader struct {
 	buf     *bytes.Buffer
 }
 
+var closeWALReaderFile = func(file *os.File) error {
+	return file.Close()
+}
+
 // NewReader creates a new WAL reader
 func (wal *WAL) NewReader() *WALReader {
 	return &WALReader{
@@ -909,7 +962,9 @@ func (r *WALReader) Next() (*WALEntry, error) {
 			r.pos += int64(n)
 		}
 		if err == io.EOF {
-			r.file.Close()
+			if closeErr := closeWALReaderFile(r.file); closeErr != nil {
+				return nil, fmt.Errorf("close segment after EOF: %w", closeErr)
+			}
 			r.file = nil
 			continue
 		}
@@ -922,7 +977,10 @@ func (r *WALReader) Next() (*WALEntry, error) {
 // Close closes the reader
 func (r *WALReader) Close() error {
 	if r.file != nil {
-		return r.file.Close()
+		if err := closeWALReaderFile(r.file); err != nil {
+			return err
+		}
+		r.file = nil
 	}
 	return nil
 }

@@ -58,6 +58,11 @@ func NewHandlerWithPadding(dnsHandler server.Handler) *Handler {
 
 // ServeHTTP implements http.Handler for DoH.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.dnsHandler == nil {
+		http.Error(w, "DoH handler not initialised", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Set security headers
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
@@ -196,7 +201,9 @@ func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", ContentTypeDNSJSON)
 	w.WriteHeader(http.StatusOK)
-	w.Write(jsonData)
+	if _, err := w.Write(jsonData); err != nil {
+		util.Warnf("doh: failed to write JSON response: %v", err)
+	}
 }
 
 // jsonResponseWriter captures a DNS response for subsequent JSON encoding.

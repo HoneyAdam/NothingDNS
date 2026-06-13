@@ -21,15 +21,12 @@ import (
 )
 
 // nextSecureID returns a cryptographically secure random DNS transaction ID.
-func nextSecureID() uint16 {
+func nextSecureID() (uint16, error) {
 	var b [2]byte
 	if _, err := cryptorand.Read(b[:]); err != nil {
-		// SECURITY: crypto/rand failure indicates a system-level issue.
-		// We panic rather than fall back to math/rand, as predictable
-		// transaction IDs enable DNS cache poisoning attacks.
-		panic("crypto/rand unavailable for DNS transaction ID generation: " + err.Error())
+		return 0, fmt.Errorf("crypto/rand unavailable for DNS transaction ID generation: %w", err)
 	}
-	return binary.BigEndian.Uint16(b[:])
+	return binary.BigEndian.Uint16(b[:]), nil
 }
 
 // Cache is the interface the resolver uses for caching.
@@ -456,9 +453,14 @@ func (r *Resolver) sendQuery(ctx context.Context, name string, qtype uint16, add
 		return nil, err
 	}
 
+	id, err := nextSecureID()
+	if err != nil {
+		return nil, err
+	}
+
 	msg := &protocol.Message{
 		Header: protocol.Header{
-			ID:    nextSecureID(),
+			ID:    id,
 			Flags: protocol.Flags{RD: false}, // Non-recursive — iterative query
 		},
 		Questions: []*protocol.Question{q},

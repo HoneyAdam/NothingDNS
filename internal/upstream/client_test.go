@@ -1109,6 +1109,94 @@ func TestSelectServerNoServers(t *testing.T) {
 	}
 }
 
+func TestSelectServerSkipsNilServers(t *testing.T) {
+	config := Config{
+		Servers:  []string{"127.0.0.1:53"},
+		Strategy: "random",
+		Timeout:  5 * time.Second,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	server := &Server{Address: "127.0.0.2:53", healthy: true, latency: time.Millisecond}
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		client.mu.Lock()
+		client.strategy = strategy
+		client.servers = []*Server{nil, server}
+		client.mu.Unlock()
+
+		selected := client.selectServer()
+		if selected != server {
+			t.Fatalf("strategy %v selected %#v, want %#v", strategy, selected, server)
+		}
+	}
+}
+
+func TestSelectServerNilOnlyReturnsNil(t *testing.T) {
+	config := Config{
+		Servers:  []string{"127.0.0.1:53"},
+		Strategy: "random",
+		Timeout:  5 * time.Second,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		client.mu.Lock()
+		client.strategy = strategy
+		client.servers = []*Server{nil, nil}
+		client.mu.Unlock()
+
+		if selected := client.selectServer(); selected != nil {
+			t.Fatalf("strategy %v selected %#v with nil-only servers", strategy, selected)
+		}
+	}
+}
+
+func TestClientHealthAndMutationSkipNilServers(t *testing.T) {
+	config := Config{
+		Servers: []string{"127.0.0.1:53"},
+		Timeout: 100 * time.Millisecond,
+	}
+
+	client, err := NewClient(config)
+	if err != nil {
+		t.Fatalf("failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	server := &Server{Address: "127.0.0.2:53", healthy: true, Timeout: 100 * time.Millisecond}
+	client.mu.Lock()
+	client.servers = []*Server{nil, server}
+	client.mu.Unlock()
+
+	if !client.IsHealthy() {
+		t.Fatal("expected healthy due to non-nil healthy server")
+	}
+
+	client.checkHealth()
+
+	if err := client.AddServer("127.0.0.3:53"); err != nil {
+		t.Fatalf("AddServer returned error with nil server slot: %v", err)
+	}
+	if err := client.RemoveServer(server.Address); err != nil {
+		t.Fatalf("RemoveServer returned error with nil server slot: %v", err)
+	}
+	for _, s := range client.servers {
+		if s == nil {
+			t.Fatal("RemoveServer should discard nil server slots")
+		}
+	}
+}
+
 func TestQueryTCPConnectionError(t *testing.T) {
 	config := Config{
 		Servers:  []string{"127.0.0.1:1"}, // Port that won't accept connections

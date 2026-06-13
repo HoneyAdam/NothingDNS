@@ -861,6 +861,57 @@ func TestHandleClusterNodes(t *testing.T) {
 	})
 }
 
+func TestHandleClusterJoin(t *testing.T) {
+	t.Run("invalid seed address rejected before join", func(t *testing.T) {
+		cfg := config.HTTPConfig{
+			Enabled: true,
+			Bind:    "127.0.0.1:0",
+		}
+		clusterCfg := cluster.Config{
+			Enabled:              true,
+			AllowInsecureCluster: true,
+			NodeID:               "join-test-node",
+			BindAddr:             "127.0.0.1",
+			GossipPort:           7948,
+		}
+		c, err := cluster.New(clusterCfg, nil, nil)
+		if err != nil {
+			t.Fatalf("Failed to create cluster: %v", err)
+		}
+		server := NewServer(cfg, nil, nil, nil, nil, c, nil)
+		token := attachTestAuth(server)
+
+		body := bytes.NewReader([]byte(`{"seed_address":"not-a-host-port"}`))
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/cluster/join", body)
+		req = withTestAdminAuth(req, token)
+		rec := httptest.NewRecorder()
+
+		server.handleClusterJoin(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("Expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "seed_address must be host:port") {
+			t.Fatalf("Expected seed_address validation error, got %s", rec.Body.String())
+		}
+	})
+
+	t.Run("seed address validator accepts trimmed host port", func(t *testing.T) {
+		if err := validateClusterSeedAddress(strings.TrimSpace(" 127.0.0.1:7946 ")); err != nil {
+			t.Fatalf("expected trimmed host:port to be valid: %v", err)
+		}
+	})
+
+	t.Run("seed address validator rejects invalid host port", func(t *testing.T) {
+		tests := []string{":7946", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:not-a-port"}
+		for _, seed := range tests {
+			if err := validateClusterSeedAddress(seed); err == nil {
+				t.Fatalf("expected %q to be invalid", seed)
+			}
+		}
+	})
+}
+
 // TestAuthMiddleware tests the authentication middleware
 func TestAuthMiddleware(t *testing.T) {
 	t.Run("no auth token configured - denies request", func(t *testing.T) {
@@ -1062,6 +1113,36 @@ func TestAuthMiddleware(t *testing.T) {
 		}
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("Expected status %d, got %d", http.StatusUnauthorized, rec.Code)
+		}
+	})
+
+	t.Run("SPA fallback handles response write error", func(t *testing.T) {
+		cfg := config.HTTPConfig{
+			Enabled:   true,
+			Bind:      "127.0.0.1:0",
+			AuthToken: "secret-token",
+		}
+		server := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+
+		handlerCalled := false
+		testHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerCalled = true
+			w.WriteHeader(http.StatusOK)
+		})
+
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := &failingResponseWriter{header: make(http.Header)}
+
+		server.authMiddleware(testHandler).ServeHTTP(w, req)
+
+		if handlerCalled {
+			t.Fatal("expected handler not to be called for unauthenticated SPA route")
+		}
+		if w.writes != 1 {
+			t.Fatalf("writes = %d, want 1", w.writes)
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "text/html; charset=utf-8" {
+			t.Fatalf("Content-Type = %q, want text/html; charset=utf-8", ct)
 		}
 	})
 }

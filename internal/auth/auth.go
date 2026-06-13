@@ -11,12 +11,14 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/nothingdns/nothingdns/internal/util"
 )
@@ -26,9 +28,11 @@ type Role string
 
 const (
 	RoleAdmin    Role = "admin"    // Full access
-	RoleOperator Role = "operator" // Can modify zones, cache, config
+	RoleOperator Role = "operator" // Can modify zones and view operational data
 	RoleViewer   Role = "viewer"   // Read-only access
 )
+
+var ErrLastAdmin = errors.New("cannot delete the last admin user")
 
 // User represents a user account.
 type User struct {
@@ -117,6 +121,10 @@ func DefaultConfig() (*Config, error) {
 
 // NewStore creates a new auth store.
 func NewStore(cfg *Config) (*Store, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("auth config is required")
+	}
+
 	var secret []byte
 	if cfg.Secret == "" {
 		// Generate a random secret for this run. This is cryptographically weak
@@ -132,6 +140,9 @@ func NewStore(cfg *Config) (*Store, error) {
 	} else {
 		secret = []byte(cfg.Secret)
 	}
+	if cfg.MaxSessionsPerUser < 0 {
+		return nil, fmt.Errorf("max_sessions_per_user cannot be negative")
+	}
 
 	s := &Store{
 		users:              make(map[string]*User),
@@ -146,11 +157,32 @@ func NewStore(cfg *Config) (*Store, error) {
 	}
 
 	// Load initial users
+	seenUsers := make(map[string]struct{}, len(cfg.Users))
 	for _, u := range cfg.Users {
 		u := u // capture range variable
+		if err := ValidateUsername(u.Username); err != nil {
+			return nil, fmt.Errorf("invalid configured user %q: %w", u.Username, err)
+		}
+		if err := ValidateRole(u.Role); err != nil {
+			return nil, fmt.Errorf("invalid configured role for user %q: %w", u.Username, err)
+		}
+		if _, exists := seenUsers[u.Username]; exists {
+			return nil, fmt.Errorf("duplicate configured user %q", u.Username)
+		}
+		seenUsers[u.Username] = struct{}{}
+		if u.Password == "" && len(u.Hash) == 0 {
+			return nil, fmt.Errorf("configured user %q must have password or hash", u.Username)
+		}
 		// Hash plaintext password if present and zero it from memory
 		if u.Password != "" && len(u.Hash) == 0 {
-			u.Hash = HashPassword(u.Password, nil)
+			if err := ValidatePassword(u.Password); err != nil {
+				return nil, fmt.Errorf("invalid password for configured user %q: %w", u.Username, err)
+			}
+			hash, err := HashPasswordWithError(u.Password, nil)
+			if err != nil {
+				return nil, fmt.Errorf("hashing password for user %q: %w", u.Username, err)
+			}
+			u.Hash = hash
 			u.Password = strings.Repeat("\x00", len(u.Password))
 		}
 		s.users[u.Username] = &u
@@ -163,9 +195,13 @@ func NewStore(cfg *Config) (*Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("auth: crypto/rand unavailable for password generation: %w", err)
 		}
+		hash, err := HashPasswordWithError(defaultPassword, nil)
+		if err != nil {
+			return nil, fmt.Errorf("hashing default admin password: %w", err)
+		}
 		s.users["admin"] = &User{
 			Username:      "admin",
-			Hash:          HashPassword(defaultPassword, nil),
+			Hash:          hash,
 			Role:          RoleAdmin,
 			CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 			UpdatedAt:     time.Now().UTC().Format(time.RFC3339),
@@ -186,10 +222,21 @@ func NewStore(cfg *Config) (*Store, error) {
 // Parameters: 310,000 iterations (OWASP 2023 recommendation for SHA-512), 64-byte output.
 // Returns the hash that can be stored and later verified.
 func HashPassword(password string, salt []byte) []byte {
+	hash, err := HashPasswordWithError(password, salt)
+	if err != nil {
+		util.Errorf("auth: password hashing failed: %v", err)
+		return nil
+	}
+	return hash
+}
+
+// HashPasswordWithError hashes a password and reports entropy/KDF failures to
+// callers that can surface startup or request errors instead of panicking.
+func HashPasswordWithError(password string, salt []byte) ([]byte, error) {
 	if salt == nil {
 		salt = make([]byte, 32) // 256-bit salt
 		if _, err := rand.Read(salt); err != nil {
-			panic("crypto/rand failed to generate salt: " + err.Error())
+			return nil, fmt.Errorf("generate password salt: %w", err)
 		}
 	}
 
@@ -201,14 +248,14 @@ func HashPassword(password string, salt []byte) []byte {
 
 	key, err := pbkdf2.Key(sha512.New, password, salt, iterations, keyLen)
 	if err != nil {
-		panic("pbkdf2 failed: " + err.Error())
+		return nil, fmt.Errorf("derive password key: %w", err)
 	}
 
 	// Prepend salt to hash (salt bytes | key bytes)
 	hash := make([]byte, len(salt)+len(key))
 	copy(hash, salt)
 	copy(hash[len(salt):], key)
-	return hash
+	return hash, nil
 }
 
 // generateSecurePassword generates a cryptographically secure random password.
@@ -261,7 +308,10 @@ func VerifyPassword(password string, hash []byte) bool {
 	// Always run PBKDF2 so every code path pays the same crypto cost.
 	// This closes the timing side-channel where a very-short hash would
 	// return before the expensive KDF (VULN-076).
-	expected := HashPassword(password, salt)
+	expected, err := HashPasswordWithError(password, salt)
+	if err != nil {
+		return false
+	}
 
 	// Constant-time comparison of equal-length (maxLen) buffers.
 	// Zero-pad both hash and expected to maxLen so that:
@@ -468,9 +518,39 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
+// ValidateUsername rejects empty usernames and control characters that break
+// logs, persistence formats, API paths, or terminal output.
+func ValidateUsername(username string) error {
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("username must not be empty")
+	}
+	for _, r := range username {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("username must not contain control characters")
+		}
+	}
+	return nil
+}
+
+// ValidateRole rejects unknown RBAC roles.
+func ValidateRole(role Role) error {
+	switch role {
+	case RoleAdmin, RoleOperator, RoleViewer:
+		return nil
+	default:
+		return fmt.Errorf("invalid role %q", role)
+	}
+}
+
 // CreateUser creates a new user.
 func (s *Store) CreateUser(username, password string, role Role) (*User, error) {
+	if err := ValidateUsername(username); err != nil {
+		return nil, err
+	}
 	if err := ValidatePassword(password); err != nil {
+		return nil, err
+	}
+	if err := ValidateRole(role); err != nil {
 		return nil, err
 	}
 
@@ -481,7 +561,10 @@ func (s *Store) CreateUser(username, password string, role Role) (*User, error) 
 		return nil, fmt.Errorf("user already exists")
 	}
 
-	hash := HashPassword(password, nil)
+	hash, err := HashPasswordWithError(password, nil)
+	if err != nil {
+		return nil, fmt.Errorf("hashing password: %w", err)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	user := &User{
 		Username:  username,
@@ -503,6 +586,11 @@ func (s *Store) UpdateUser(username, password string, role Role) (*User, error) 
 			return nil, err
 		}
 	}
+	if role != "" {
+		if err := ValidateRole(role); err != nil {
+			return nil, err
+		}
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -511,9 +599,16 @@ func (s *Store) UpdateUser(username, password string, role Role) (*User, error) 
 	if !ok {
 		return nil, fmt.Errorf("user not found")
 	}
+	if role != "" && user.Role == RoleAdmin && role != RoleAdmin && s.adminUserCountLocked() <= 1 {
+		return nil, ErrLastAdmin
+	}
 
 	if password != "" {
-		user.Hash = HashPassword(password, nil)
+		hash, err := HashPasswordWithError(password, nil)
+		if err != nil {
+			return nil, fmt.Errorf("hashing password: %w", err)
+		}
+		user.Hash = hash
 	}
 	roleChanged := role != "" && user.Role != role
 	if role != "" {
@@ -539,6 +634,25 @@ func (s *Store) DeleteUser(username string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.deleteUserLocked(username)
+}
+
+// DeleteUserPreservingLastAdmin removes a user while preventing admin lockout.
+func (s *Store) DeleteUserPreservingLastAdmin(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, ok := s.users[username]
+	if !ok {
+		return fmt.Errorf("user not found")
+	}
+	if user.Role == RoleAdmin && s.adminUserCountLocked() <= 1 {
+		return ErrLastAdmin
+	}
+	return s.deleteUserLocked(username)
+}
+
+func (s *Store) deleteUserLocked(username string) error {
 	if _, ok := s.users[username]; !ok {
 		return fmt.Errorf("user not found")
 	}
@@ -552,6 +666,16 @@ func (s *Store) DeleteUser(username string) error {
 	}
 	delete(s.activeSessions, username)
 	return nil
+}
+
+func (s *Store) adminUserCountLocked() int {
+	count := 0
+	for _, user := range s.users {
+		if user.Role == RoleAdmin {
+			count++
+		}
+	}
+	return count
 }
 
 // ListUsers returns all users (without passwords).
@@ -594,7 +718,11 @@ func clonePublicUser(user *User) *User {
 // dummyHash is a pre-computed hash used to equalize login timing when the
 // requested username does not exist (VULN-017). Computed once on first call.
 var dummyHash = sync.OnceValue(func() []byte {
-	return HashPassword("timing-equalization-placeholder", nil)
+	hash, err := HashPasswordWithError("timing-equalization-placeholder", []byte("nothingdns-auth-dummy-salt-00001"))
+	if err != nil {
+		return nil
+	}
+	return hash
 })
 
 // VerifyUserPassword checks username + password against stored credentials.
@@ -609,7 +737,9 @@ func (s *Store) VerifyUserPassword(username, password string) bool {
 		// Burn the same PBKDF2 rounds a real verification would, then return
 		// false. The result is discarded — subtle.ConstantTimeCompare still
 		// pays the comparison cost.
-		_ = VerifyPassword(password, dummyHash())
+		if VerifyPassword(password, dummyHash()) {
+			return false
+		}
 		return false
 	}
 	return VerifyPassword(password, user.Hash)
@@ -644,23 +774,40 @@ func (s *Store) Load(path string) error {
 		return err
 	}
 
-	// Validate loaded users (LOW-008)
-	for username, u := range users {
-		if u == nil || u.Username == "" || username == "" {
-			delete(users, username)
-			continue
-		}
-		switch u.Role {
-		case RoleAdmin, RoleOperator, RoleViewer:
-			// valid
-		default:
-			u.Role = RoleViewer
-		}
+	if err := validateLoadedUsers(users); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.users = users
+	return nil
+}
+
+func validateLoadedUsers(users map[string]*User) error {
+	if len(users) == 0 {
+		return fmt.Errorf("users file contains no users")
+	}
+	for username, u := range users {
+		if strings.TrimSpace(username) == "" {
+			return fmt.Errorf("users file contains empty username key")
+		}
+		if u == nil {
+			return fmt.Errorf("users file contains nil user for %q", username)
+		}
+		if u.Username != username {
+			return fmt.Errorf("users file key %q does not match embedded username %q", username, u.Username)
+		}
+		if err := ValidateUsername(u.Username); err != nil {
+			return fmt.Errorf("invalid loaded user %q: %w", username, err)
+		}
+		if err := ValidateRole(u.Role); err != nil {
+			return fmt.Errorf("invalid loaded role for user %q: %w", username, err)
+		}
+		if len(u.Hash) == 0 {
+			return fmt.Errorf("loaded user %q has no password hash", username)
+		}
+	}
 	return nil
 }
 
@@ -698,7 +845,10 @@ func (s *Store) SaveTokensSigned(path string) error {
 	}
 
 	// Derive a 32-byte AES key from the HMAC secret using HKDF-like derivation
-	aesKey := deriveAESKey(s.secret)
+	aesKey, err := deriveAESKeyWithError(s.secret)
+	if err != nil {
+		return fmt.Errorf("deriving token encryption key: %w", err)
+	}
 	defer clearBytes(aesKey)
 
 	// Generate random nonce
@@ -743,7 +893,7 @@ var syncParentDir = func(dir string) error {
 	return nil
 }
 
-func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create dir: %w", err)
@@ -756,7 +906,9 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+				err = fmt.Errorf("remove temp: %w", removeErr)
+			}
 		}
 	}()
 	if err := os.Chmod(tmpName, mode); err != nil {
@@ -787,9 +939,6 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 // LoadTokensSigned loads tokens from a file encrypted with AES-256-GCM.
 // Returns error if file doesn't exist or decryption/integrity check fails.
 func (s *Store) LoadTokensSigned(path string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -804,7 +953,10 @@ func (s *Store) LoadTokensSigned(path string) error {
 	}
 
 	// Derive AES key from HMAC secret
-	aesKey := deriveAESKey(s.secret)
+	aesKey, err := deriveAESKeyWithError(s.secret)
+	if err != nil {
+		return fmt.Errorf("deriving token encryption key: %w", err)
+	}
 	defer clearBytes(aesKey)
 
 	// Split: nonce (12 bytes) + ciphertext+tag
@@ -831,34 +983,103 @@ func (s *Store) LoadTokensSigned(path string) error {
 		return fmt.Errorf("deserializing tokens: %w", err)
 	}
 
-	// Load tokens, filtering out expired and malformed entries (LOW-008).
-	now := time.Now()
-	for token, t := range tokens {
-		if t == nil || t.Token == "" || t.Username == "" || tokenExpiredAt(t, now) {
-			delete(tokens, token)
-			continue
-		}
-		switch t.Role {
-		case RoleAdmin, RoleOperator, RoleViewer:
-			// valid
-		default:
-			t.Role = RoleViewer
-		}
-		s.activeSessions[t.Username]++
+	users := s.userTokenValiditySnapshot()
+	filteredTokens, activeSessions, err := s.prepareLoadedTokens(tokens, time.Now(), users)
+	if err != nil {
+		return err
 	}
 
-	s.tokens = tokens
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = filteredTokens
+	s.activeSessions = activeSessions
 	return nil
+}
+
+type tokenUserSnapshot struct {
+	updatedAt time.Time
+	hasUpdate bool
+}
+
+func (s *Store) userTokenValiditySnapshot() map[string]tokenUserSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	users := make(map[string]tokenUserSnapshot, len(s.users))
+	for username, user := range s.users {
+		snapshot := tokenUserSnapshot{}
+		if user != nil && user.UpdatedAt != "" {
+			if updatedAt, err := time.Parse(time.RFC3339, user.UpdatedAt); err == nil {
+				snapshot.updatedAt = updatedAt
+				snapshot.hasUpdate = true
+			}
+		}
+		users[username] = snapshot
+	}
+	return users
+}
+
+func (s *Store) prepareLoadedTokens(tokens map[string]*Token, now time.Time, users map[string]tokenUserSnapshot) (map[string]*Token, map[string]int, error) {
+	filtered := make(map[string]*Token, len(tokens))
+	activeSessions := make(map[string]int)
+	for tokenKey, t := range tokens {
+		if t == nil {
+			return nil, nil, fmt.Errorf("tokens file contains nil token for %q", tokenKey)
+		}
+		if tokenKey == "" || t.Token == "" {
+			return nil, nil, fmt.Errorf("tokens file contains empty token")
+		}
+		if tokenKey != t.Token {
+			return nil, nil, fmt.Errorf("tokens file key does not match embedded token")
+		}
+		if t.Username == "" {
+			return nil, nil, fmt.Errorf("token %q has empty username", tokenKey)
+		}
+		if err := ValidateUsername(t.Username); err != nil {
+			return nil, nil, fmt.Errorf("invalid token username %q: %w", t.Username, err)
+		}
+		if err := ValidateRole(t.Role); err != nil {
+			return nil, nil, fmt.Errorf("invalid token role for user %q: %w", t.Username, err)
+		}
+		if t.Signature == "" {
+			return nil, nil, fmt.Errorf("token %q has empty signature", tokenKey)
+		}
+		if !s.verifyTokenSignature(t.Token, t.Signature) {
+			return nil, nil, fmt.Errorf("token %q has invalid signature", tokenKey)
+		}
+		userSnapshot, userExists := users[t.Username]
+		if !userExists {
+			continue
+		}
+		if userSnapshot.hasUpdate && t.CreatedAt.Before(userSnapshot.updatedAt) {
+			continue
+		}
+		if tokenExpiredAt(t, now) {
+			continue
+		}
+		filtered[tokenKey] = t
+		activeSessions[t.Username]++
+	}
+	return filtered, activeSessions, nil
 }
 
 // deriveAESKey derives a 32-byte AES-256 key from the HMAC secret using HKDF (RFC 5869).
 // Replaces the previous SHA-512 truncation with a proper extract-and-expand KDF (MED-002).
 func deriveAESKey(secret []byte) []byte {
-	key, err := hkdf.Key(sha512.New, secret, nil, "nothingdns-token-encryption", 32)
+	key, err := deriveAESKeyWithError(secret)
 	if err != nil {
-		panic("hkdf failed: " + err.Error())
+		util.Errorf("auth: AES key derivation failed: %v", err)
+		return nil
 	}
 	return key
+}
+
+func deriveAESKeyWithError(secret []byte) ([]byte, error) {
+	key, err := hkdf.Key(sha512.New, secret, nil, "nothingdns-token-encryption", 32)
+	if err != nil {
+		return nil, fmt.Errorf("derive AES key: %w", err)
+	}
+	return key, nil
 }
 
 // clearBytes securely clears sensitive key material.

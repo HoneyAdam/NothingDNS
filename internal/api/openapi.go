@@ -2,6 +2,8 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // OpenAPISpec returns the OpenAPI 3.0 specification as JSON.
@@ -619,6 +621,58 @@ const OpenAPISpec = `{
         }
       }
     },
+    "/api/v1/cluster/join": {
+      "post": {
+        "tags": ["Cluster"],
+        "summary": "Join cluster",
+        "description": "Joins the cluster through a seed node address. Requires admin role.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["seed_address"],
+                "properties": {
+                  "seed_address": { "type": "string", "example": "node-1.example.com:7946" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Joined cluster",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Success" }
+              }
+            }
+          },
+          "400": { "description": "Invalid request or join failed" },
+          "503": { "description": "Cluster not available" }
+        }
+      }
+    },
+    "/api/v1/cluster/leave": {
+      "delete": {
+        "tags": ["Cluster"],
+        "summary": "Leave cluster",
+        "description": "Gracefully drains and removes the local node from the cluster. Requires admin role.",
+        "responses": {
+          "200": {
+            "description": "Node left cluster",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Success" }
+              }
+            }
+          },
+          "500": { "description": "Leave failed" },
+          "503": { "description": "Cluster not available" }
+        }
+      }
+    },
     "/api/dashboard/stats": {
       "get": {
         "tags": ["Dashboard"],
@@ -653,14 +707,19 @@ const OpenAPISpec = `{
 // applied by corsMiddleware — a hardcoded `Access-Control-Allow-Origin: *`
 // here would bypass the configurable allowlist (VULN-034).
 func (s *Server) handleOpenAPISpec(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(OpenAPISpec))
+	writeRawResponse(w, "application/json", []byte(OpenAPISpec))
 }
 
 // handleSwaggerUI serves a minimal Swagger UI page that loads the spec from /api/openapi.json.
 func (s *Server) handleSwaggerUI(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(swaggerUIHTML))
+	writeRawResponse(w, "text/html; charset=utf-8", []byte(swaggerUIHTML))
+}
+
+func writeRawResponse(w http.ResponseWriter, contentType string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	if _, err := w.Write(body); err != nil {
+		util.Warnf("api: failed to write response: %v", err)
+	}
 }
 
 // swaggerUIHTML pins swagger-ui-dist to an exact version and adds

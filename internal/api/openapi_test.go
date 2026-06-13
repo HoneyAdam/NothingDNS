@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,8 @@ func TestOpenAPISpec_Paths(t *testing.T) {
 		"/api/v1/config/reload",
 		"/api/v1/cluster/status",
 		"/api/v1/cluster/nodes",
+		"/api/v1/cluster/join",
+		"/api/v1/cluster/leave",
 		"/api/dashboard/stats",
 	}
 
@@ -99,6 +102,44 @@ func TestHandleSwaggerUI(t *testing.T) {
 	}
 }
 
+func TestOpenAPIHandlersHandleWriteError(t *testing.T) {
+	s := &Server{}
+
+	for _, tc := range []struct {
+		name        string
+		path        string
+		handler     func(http.ResponseWriter, *http.Request)
+		contentType string
+	}{
+		{
+			name:        "openapi",
+			path:        "/api/openapi.json",
+			handler:     s.handleOpenAPISpec,
+			contentType: "application/json",
+		},
+		{
+			name:        "swagger",
+			path:        "/api/docs",
+			handler:     s.handleSwaggerUI,
+			contentType: "text/html; charset=utf-8",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			w := &failingResponseWriter{header: make(http.Header)}
+
+			tc.handler(w, req)
+
+			if w.writes != 1 {
+				t.Fatalf("writes = %d, want 1", w.writes)
+			}
+			if ct := w.Header().Get("Content-Type"); ct != tc.contentType {
+				t.Fatalf("Content-Type = %q, want %q", ct, tc.contentType)
+			}
+		})
+	}
+}
+
 func TestOpenAPISpec_Components(t *testing.T) {
 	var spec map[string]interface{}
 	if err := json.Unmarshal([]byte(OpenAPISpec), &spec); err != nil {
@@ -118,4 +159,23 @@ func TestOpenAPISpec_Components(t *testing.T) {
 			t.Errorf("missing schema: %s", s)
 		}
 	}
+}
+
+type failingResponseWriter struct {
+	header http.Header
+	writes int
+	status int
+}
+
+func (w *failingResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *failingResponseWriter) Write([]byte) (int, error) {
+	w.writes++
+	return 0, errors.New("write failed")
+}
+
+func (w *failingResponseWriter) WriteHeader(status int) {
+	w.status = status
 }

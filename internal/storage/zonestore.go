@@ -61,8 +61,9 @@ func (zs *ZoneStore) SaveZone(origin string, meta ZoneMeta, records map[string][
 			return fmt.Errorf("create zones bucket: %w", err)
 		}
 
-		// Delete existing zone bucket (ignore error if not found)
-		_ = zones.DeleteBucket([]byte(origin))
+		if err := deleteExistingZoneBucket(zones, origin); err != nil {
+			return err
+		}
 		zoneBucket, err := zones.CreateBucket([]byte(origin))
 		if err != nil {
 			return fmt.Errorf("create zone bucket %s: %w", origin, err)
@@ -87,6 +88,13 @@ func (zs *ZoneStore) SaveZone(origin string, meta ZoneMeta, records map[string][
 
 		return nil
 	})
+}
+
+func deleteExistingZoneBucket(zones *KVBucket, origin string) error {
+	if err := zones.DeleteBucket([]byte(origin)); err != nil && !errors.Is(err, ErrBucketNotFound) {
+		return fmt.Errorf("delete existing zone bucket %s: %w", origin, err)
+	}
+	return nil
 }
 
 // LoadZone loads a zone's records from the KV store.

@@ -154,6 +154,35 @@ func TestSaveHardState_ReturnsParentDirFsyncError(t *testing.T) {
 	}
 }
 
+func TestVoteRequestRejectsWhenHardStatePersistenceFails(t *testing.T) {
+	originalSyncParentDir := syncHardStateParentDir
+	syncHardStateParentDir = func(string) error {
+		return errors.New("dir sync failed")
+	}
+	t.Cleanup(func() { syncHardStateParentDir = originalSyncParentDir })
+
+	node := NewNode(Config{
+		NodeID:  "node-1",
+		DataDir: t.TempDir(),
+	}, nil, nil)
+
+	resp := node.HandleVoteRequest(VoteRequest{
+		Term:         1,
+		CandidateID:  "candidate-1",
+		LastLogIndex: 0,
+		LastLogTerm:  0,
+	})
+	if resp.VoteGranted {
+		t.Fatal("vote should not be granted when HardState cannot be made durable")
+	}
+	if node.currentTerm != 0 {
+		t.Fatalf("currentTerm = %d, want unchanged 0", node.currentTerm)
+	}
+	if node.votedFor != "" {
+		t.Fatalf("votedFor = %q, want unchanged empty value", node.votedFor)
+	}
+}
+
 func TestLoadHardState_MagicMismatch_Rejected(t *testing.T) {
 	dir := t.TempDir()
 	// Drop a file with the right name but wrong magic.

@@ -482,7 +482,9 @@ func (w *tlsResponseWriter) Write(msg *protocol.Message) (int, error) {
 	binary.BigEndian.PutUint16(frame[0:], uint16(n))
 
 	// Set write timeout
-	_ = w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout))
+	if err := w.conn.SetWriteDeadline(time.Now().Add(TLSWriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
 
 	// Write response
 	return writeFullDNSFrame(w.conn, frame[:n+2])

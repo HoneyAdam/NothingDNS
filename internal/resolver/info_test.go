@@ -285,7 +285,7 @@ func TestNewRDNSSOptionClampsLifetime(t *testing.T) {
 	overflow := time.Duration(int64(^uint32(0))+1) * time.Second
 	opt = NewRDNSSOption(overflow, servers)
 	if opt.Lifetime != ^uint32(0) {
-		t.Errorf("overflow lifetime = %d, want %d", opt.Lifetime, uint32(^uint32(0)))
+		t.Errorf("overflow lifetime = %d, want %d", opt.Lifetime, ^uint32(0))
 	}
 }
 
@@ -418,7 +418,7 @@ func TestNewDNSSLOptionClampsLifetime(t *testing.T) {
 	overflow := time.Duration(int64(^uint32(0))+1) * time.Second
 	opt = NewDNSSLOption(overflow, domains)
 	if opt.Lifetime != ^uint32(0) {
-		t.Errorf("overflow lifetime = %d, want %d", opt.Lifetime, uint32(^uint32(0)))
+		t.Errorf("overflow lifetime = %d, want %d", opt.Lifetime, ^uint32(0))
 	}
 }
 
@@ -736,7 +736,7 @@ func TestRDNSSToTLVClampsLengthToWireRange(t *testing.T) {
 
 	tlv := opt.ToTLV()
 	if tlv.Length != ^uint8(0) {
-		t.Errorf("Length = %d, want %d", tlv.Length, uint8(^uint8(0)))
+		t.Errorf("Length = %d, want %d", tlv.Length, ^uint8(0))
 	}
 }
 

@@ -421,6 +421,9 @@ func (lb *LoadBalancer) selectAnycastTarget() (*Target, error) {
 	var selectedGroup *AnycastGroup
 
 	for _, group := range lb.anycastGroups {
+		if group == nil {
+			continue
+		}
 		total, healthy := group.Stats()
 		if healthy > 0 {
 			selectedGroup = group
@@ -484,16 +487,13 @@ func (lb *LoadBalancer) selectStandaloneTarget() (*Target, error) {
 func (lb *LoadBalancer) selectRandom() *Server {
 	var healthy []*Server
 	for _, s := range lb.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			healthy = append(healthy, s)
 		}
 	}
 
 	if len(healthy) == 0 {
-		if len(lb.servers) > 0 {
-			return lb.servers[0]
-		}
-		return nil
+		return firstServer(lb.servers, 0)
 	}
 
 	idx := int(time.Now().UnixNano()) % len(healthy)
@@ -511,13 +511,14 @@ func (lb *LoadBalancer) selectRoundRobin() *Server {
 	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(servers)
 	for i := 0; i < len(servers); i++ {
 		idx := (startIdx + i) % len(servers)
-		if servers[idx].IsHealthy() {
-			return servers[idx]
+		server := servers[idx]
+		if server != nil && server.IsHealthy() {
+			return server
 		}
 	}
 
 	// Fallback to starting position
-	return servers[startIdx]
+	return firstServer(servers, startIdx)
 }
 
 // selectFastest selects the server with the lowest latency.
@@ -535,7 +536,7 @@ func (lb *LoadBalancer) selectFastest() *Server {
 	var lowestLatency time.Duration = -1
 
 	for _, s := range lb.servers {
-		if !s.IsHealthy() {
+		if s == nil || !s.IsHealthy() {
 			continue
 		}
 
@@ -561,13 +562,26 @@ func (lb *LoadBalancer) selectFastest() *Server {
 	// No measured-healthy server — fall back to any healthy server
 	// so cold-start queries still get answered.
 	for _, s := range lb.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return s
 		}
 	}
 
-	if len(lb.servers) > 0 {
-		return lb.servers[0]
+	return firstServer(lb.servers, 0)
+}
+
+func firstServer(servers []*Server, start int) *Server {
+	if len(servers) == 0 {
+		return nil
+	}
+	if start < 0 || start >= len(servers) {
+		start = 0
+	}
+	for i := 0; i < len(servers); i++ {
+		idx := (start + i) % len(servers)
+		if servers[idx] != nil {
+			return servers[idx]
+		}
 	}
 	return nil
 }
@@ -888,6 +902,9 @@ func (lb *LoadBalancer) checkHealth() {
 	var healthWg sync.WaitGroup
 
 	for _, server := range servers {
+		if server == nil {
+			continue
+		}
 		healthWg.Add(1)
 		go func(s *Server) {
 			defer healthWg.Done()
@@ -906,12 +923,18 @@ func (lb *LoadBalancer) checkHealth() {
 
 	// Check anycast backends
 	for _, group := range lb.anycastGroups {
+		if group == nil {
+			continue
+		}
 		group.mu.RLock()
 		backends := make([]*AnycastBackend, len(group.Backends))
 		copy(backends, group.Backends)
 		group.mu.RUnlock()
 
 		for _, backend := range backends {
+			if backend == nil {
+				continue
+			}
 			healthWg.Add(1)
 			go func(b *AnycastBackend) {
 				defer healthWg.Done()
@@ -946,14 +969,17 @@ func (lb *LoadBalancer) IsHealthy() bool {
 	defer lb.mu.RUnlock()
 
 	for _, s := range lb.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return true
 		}
 	}
 	for _, group := range lb.anycastGroups {
+		if group == nil {
+			continue
+		}
 		group.mu.RLock()
 		for _, b := range group.Backends {
-			if b.IsHealthy() {
+			if b != nil && b.IsHealthy() {
 				group.mu.RUnlock()
 				return true
 			}

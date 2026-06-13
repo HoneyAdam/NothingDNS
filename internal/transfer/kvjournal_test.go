@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -111,6 +112,22 @@ func TestKVJournalStore_SaveEntryRejectsNilEntry(t *testing.T) {
 	err := store.SaveEntry("example.com.", nil)
 	if err == nil || err.Error() != "journal entry is nil" {
 		t.Fatalf("SaveEntry(nil) error = %v, want journal entry is nil", err)
+	}
+}
+
+func TestSyncJournalDir(t *testing.T) {
+	if err := syncJournalDir(t.TempDir()); err != nil {
+		t.Fatalf("syncJournalDir on temp dir: %v", err)
+	}
+}
+
+func TestSyncJournalDirInvalidPath(t *testing.T) {
+	err := syncJournalDir(filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("expected error for missing journal directory")
+	}
+	if !strings.Contains(err.Error(), "open journal dir") {
+		t.Fatalf("error = %v, want open journal dir context", err)
 	}
 }
 

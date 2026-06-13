@@ -1,9 +1,12 @@
 package mdns
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -946,6 +949,61 @@ func TestResponder_SendQuery(t *testing.T) {
 	r.sendQuery("test.local.", protocol.TypeA)
 	r.sendQuery("_http._tcp.local.", protocol.TypePTR)
 	r.sendQuery("host.local.", protocol.TypeANY)
+}
+
+func TestResponderSetReceiveDeadlineReportsError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := util.NewLogger(util.DEBUG, util.TextFormat, &buf)
+	r := NewResponder(DefaultConfig(), logger)
+	deadlineErr := errors.New("deadline failed")
+	conn := &deadlineErrorConn{err: deadlineErr}
+
+	if r.setReceiveDeadline(conn, time.Now()) {
+		t.Fatal("setReceiveDeadline should return false on error")
+	}
+	if conn.calls != 1 {
+		t.Fatalf("SetReadDeadline calls = %d, want 1", conn.calls)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mDNS receive deadline error: deadline failed") {
+		t.Fatalf("log output missing deadline error: %q", logged)
+	}
+}
+
+func TestResponderCloseUDPConnReportsError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := util.NewLogger(util.WARN, util.TextFormat, &buf)
+	r := NewResponder(DefaultConfig(), logger)
+	closeErr := errors.New("close failed")
+	conn := &closeErrorConn{err: closeErr}
+
+	r.closeUDPConn(conn)
+
+	if conn.calls != 1 {
+		t.Fatalf("Close calls = %d, want 1", conn.calls)
+	}
+	if logged := buf.String(); !strings.Contains(logged, "mDNS UDP close error: close failed") {
+		t.Fatalf("log output missing close error: %q", logged)
+	}
+}
+
+type deadlineErrorConn struct {
+	err   error
+	calls int
+}
+
+func (c *deadlineErrorConn) SetReadDeadline(_ time.Time) error {
+	c.calls++
+	return c.err
+}
+
+type closeErrorConn struct {
+	err   error
+	calls int
+}
+
+func (c *closeErrorConn) Close() error {
+	c.calls++
+	return c.err
 }
 
 // ---------------------------------------------------------------------------

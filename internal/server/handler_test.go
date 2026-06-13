@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -218,6 +219,42 @@ func TestBaseResponseWriterWrite(t *testing.T) {
 	}
 }
 
+func TestSendSERVFAILHandlesNilWriter(t *testing.T) {
+	req := &protocol.Message{
+		Header: protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{
+			{Name: mustParseName("example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+
+	sendSERVFAIL(nil, req)
+}
+
+func TestSendSERVFAILHandlesWriteError(t *testing.T) {
+	req := &protocol.Message{
+		Header: protocol.Header{ID: 0x1234},
+		Questions: []*protocol.Question{
+			{Name: mustParseName("example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+	rw := &mockResponseWriter{
+		client:   &ClientInfo{Protocol: "udp"},
+		writeErr: errors.New("write failed"),
+	}
+
+	sendSERVFAIL(rw, req)
+
+	if !rw.written {
+		t.Fatal("expected SERVFAIL write to be attempted")
+	}
+	if rw.msg == nil {
+		t.Fatal("expected SERVFAIL message to be captured")
+	}
+	if rw.msg.Header.Flags.RCODE != protocol.RcodeServerFailure {
+		t.Fatalf("RCODE = %d, want SERVFAIL", rw.msg.Header.Flags.RCODE)
+	}
+}
+
 // TestResponseSizeLimitEdgeCases tests edge cases for ResponseSizeLimit.
 func TestResponseSizeLimitEdgeCases(t *testing.T) {
 	tests := []struct {
@@ -307,10 +344,11 @@ func TestResponseSizeLimitEdgeCases(t *testing.T) {
 
 // mockResponseWriter is a mock for testing.
 type mockResponseWriter struct {
-	client  *ClientInfo
-	maxSize int
-	written bool
-	msg     *protocol.Message
+	client   *ClientInfo
+	maxSize  int
+	written  bool
+	msg      *protocol.Message
+	writeErr error
 }
 
 func (m *mockResponseWriter) ClientInfo() *ClientInfo {
@@ -327,5 +365,5 @@ func (m *mockResponseWriter) Write(msg *protocol.Message) (int, error) {
 	}
 	m.written = true
 	m.msg = msg
-	return 0, nil
+	return 0, m.writeErr
 }

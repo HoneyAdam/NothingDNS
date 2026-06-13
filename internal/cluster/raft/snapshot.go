@@ -86,6 +86,23 @@ const (
 	snapAeadNonceLen         = 12
 )
 
+// syncSnapshotDir flushes the directory entry created by the final rename.
+var syncSnapshotDir = func(dir string) (err error) {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := dirFd.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	if err := dirFd.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Save saves a snapshot to disk.
 //
 // Durability: fsync the temp file before rename and fsync the
@@ -134,11 +151,9 @@ func (s *Snapshotter) Save(snap *Snapshot) error {
 	}
 
 	// fsync the directory so the rename's dirent commit reaches
-	// stable storage. Best-effort: tmpfs and a few exotic FSes
-	// don't support dir fsync, so log-and-ignore an error here.
-	if dirFd, derr := os.Open(s.snapshotsDir); derr == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	// stable storage.
+	if err := syncSnapshotDir(s.snapshotsDir); err != nil {
+		return fmt.Errorf("fsync snapshot dir: %w", err)
 	}
 
 	return nil

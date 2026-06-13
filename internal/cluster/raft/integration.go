@@ -331,8 +331,11 @@ func (ci *ClusterIntegration) Stop() error {
 	}
 	ci.node.Stop()
 	ci.rpcServer.Stop()
-	_ = ci.wal.Close()
+	walErr := ci.wal.Close()
 	ci.wg.Wait()
+	if walErr != nil {
+		return fmt.Errorf("close raft WAL: %w", walErr)
+	}
 	return nil
 }
 

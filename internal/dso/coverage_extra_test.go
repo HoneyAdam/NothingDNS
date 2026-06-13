@@ -1055,9 +1055,11 @@ func TestManager_SendKeepalive_RetriesPartialWrites(t *testing.T) {
 }
 
 type partialWriteConn struct {
-	maxWrite int
-	written  []byte
-	calls    int
+	maxWrite              int
+	written               []byte
+	calls                 int
+	setWriteDeadlineCalls int
+	writeDeadlineErrs     []error
 }
 
 func (c *partialWriteConn) Read(_ []byte) (int, error) {
@@ -1098,7 +1100,80 @@ func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
 }
 
 func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
+	c.setWriteDeadlineCalls++
+	idx := c.setWriteDeadlineCalls - 1
+	if idx >= 0 && idx < len(c.writeDeadlineErrs) {
+		return c.writeDeadlineErrs[idx]
+	}
 	return nil
+}
+
+func TestManager_SendKeepalive_WriteDeadlineError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	m := NewManager(cfg, nil)
+	deadlineErr := errors.New("deadline failed")
+	conn := &partialWriteConn{
+		maxWrite:          3,
+		writeDeadlineErrs: []error{deadlineErr},
+	}
+	session := &Session{
+		ID:            1,
+		Conn:          conn,
+		CreatedAt:     time.Now(),
+		LastActivity:  time.Now().Add(-time.Minute),
+		KeepaliveTime: 5 * time.Second,
+		MaxPayload:    DefaultMaxPayloadSize,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+
+	err := m.SendKeepalive(session)
+	if !errors.Is(err, deadlineErr) {
+		t.Fatalf("SendKeepalive error = %v, want %v", err, deadlineErr)
+	}
+	if conn.calls != 0 {
+		t.Fatalf("connection Write calls = %d, want 0", conn.calls)
+	}
+	if conn.setWriteDeadlineCalls != 1 {
+		t.Fatalf("SetWriteDeadline calls = %d, want 1", conn.setWriteDeadlineCalls)
+	}
+}
+
+func TestManager_SendKeepalive_ResetWriteDeadlineError(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AllowPlainTCP = true
+	m := NewManager(cfg, nil)
+	resetErr := errors.New("reset deadline failed")
+	conn := &partialWriteConn{
+		maxWrite:          3,
+		writeDeadlineErrs: []error{nil, resetErr},
+	}
+	createdAt := time.Now()
+	session := &Session{
+		ID:            1,
+		Conn:          conn,
+		CreatedAt:     createdAt,
+		LastActivity:  createdAt.Add(-time.Minute),
+		KeepaliveTime: 5 * time.Second,
+		MaxPayload:    DefaultMaxPayloadSize,
+		stopCh:        make(chan struct{}),
+		doneCh:        make(chan struct{}),
+	}
+
+	err := m.SendKeepalive(session)
+	if !errors.Is(err, resetErr) {
+		t.Fatalf("SendKeepalive error = %v, want %v", err, resetErr)
+	}
+	if conn.calls == 0 {
+		t.Fatal("expected keepalive frame to be written before reset deadline failure")
+	}
+	if conn.setWriteDeadlineCalls != 2 {
+		t.Fatalf("SetWriteDeadline calls = %d, want 2", conn.setWriteDeadlineCalls)
+	}
+	if !session.LastActivity.Equal(createdAt.Add(-time.Minute)) {
+		t.Fatal("SendKeepalive should not mark activity successful when reset deadline fails")
+	}
 }
 
 func TestManager_SendKeepalive_NilLogger(t *testing.T) {
@@ -1227,7 +1302,7 @@ func TestNewRetryDelayTLV_ClampsDurationToWireRange(t *testing.T) {
 	overflow := time.Duration(int64(^uint32(0))+1) * time.Millisecond
 	tlv = NewRetryDelayTLV(overflow)
 	if got := binary.BigEndian.Uint32(tlv.Value); got != ^uint32(0) {
-		t.Errorf("overflow retry delay milliseconds = %d, want %d", got, uint32(^uint32(0)))
+		t.Errorf("overflow retry delay milliseconds = %d, want %d", got, ^uint32(0))
 	}
 }
 
@@ -1387,7 +1462,7 @@ func TestNewKeepaliveTLV_ClampsDurationToWireRange(t *testing.T) {
 	}
 	secondary := binary.BigEndian.Uint32(tlv.Value[4:])
 	if secondary != ^uint32(0) {
-		t.Errorf("overflow secondary milliseconds = %d, want %d", secondary, uint32(^uint32(0)))
+		t.Errorf("overflow secondary milliseconds = %d, want %d", secondary, ^uint32(0))
 	}
 }
 

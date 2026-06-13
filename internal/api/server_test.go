@@ -61,6 +61,31 @@ func TestAPIServer(t *testing.T) {
 	server.Stop()
 }
 
+func TestAPIServerStartReturnsBindError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen: %v", err)
+	}
+	defer l.Close()
+
+	cfg := config.HTTPConfig{
+		Enabled: true,
+		Bind:    l.Addr().String(),
+	}
+
+	server := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+	err = server.Start()
+	if err == nil {
+		t.Fatal("expected API bind conflict to be returned from Start")
+	}
+	if !strings.Contains(err.Error(), "listen API") {
+		t.Fatalf("Start error = %v, want listen API context", err)
+	}
+	if stopErr := server.Stop(); stopErr != nil {
+		t.Fatalf("Stop after failed Start returned error: %v", stopErr)
+	}
+}
+
 func TestAPIStatus(t *testing.T) {
 	cfg := config.HTTPConfig{
 		Enabled:   true,

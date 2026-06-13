@@ -640,6 +640,47 @@ func TestUDPResponseWriterTruncatesResponseLargerThanPooledBuffer(t *testing.T) 
 	}
 }
 
+func TestUDPResponseWriterErrorsWhenTruncatedResponseStillExceedsMaxSize(t *testing.T) {
+	conn := &captureUDPConn{}
+	server := NewUDPServer("127.0.0.1:0", HandlerFunc(func(ResponseWriter, *protocol.Message) {}))
+	server.ListenWithConn(conn)
+
+	writer := &udpResponseWriter{
+		server:  server,
+		client:  &ClientInfo{Addr: &net.UDPAddr{IP: net.ParseIP("192.0.2.56"), Port: 53000}, Protocol: "udp"},
+		maxSize: protocol.HeaderLen,
+	}
+
+	q, err := protocol.NewQuestion("too-large-question.example.com.", protocol.TypeA, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion failed: %v", err)
+	}
+	msg := &protocol.Message{
+		Header:    protocol.Header{ID: 0xD00D, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
+		Questions: []*protocol.Question{q},
+		Answers: []*protocol.ResourceRecord{
+			{
+				Name:  q.Name,
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+				TTL:   300,
+				Data:  &protocol.RDataA{Address: [4]byte{192, 0, 2, 56}},
+			},
+		},
+	}
+
+	n, err := writer.Write(msg)
+	if err == nil {
+		t.Fatal("expected error when truncated UDP response still exceeds maxSize")
+	}
+	if n != 0 {
+		t.Fatalf("Write returned %d bytes on error, want 0", n)
+	}
+	if len(conn.lastWrite) != 0 {
+		t.Fatalf("unexpected UDP write of %d bytes after truncation error", len(conn.lastWrite))
+	}
+}
+
 func TestUDPResponseWriterReslicesPooledResponseBuffer(t *testing.T) {
 	conn := &captureUDPConn{}
 	server := NewUDPServer("127.0.0.1:0", HandlerFunc(func(ResponseWriter, *protocol.Message) {}))

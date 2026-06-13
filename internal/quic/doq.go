@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // DoQ constants (RFC 9250).
@@ -169,9 +171,10 @@ type DoQServer struct {
 	listener *quic.Listener
 
 	// Lifecycle
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+	closeMu sync.Mutex
 
 	// Connection limiting
 	activeConns   int
@@ -229,14 +232,19 @@ func (s *DoQServer) Listen() error {
 		return fmt.Errorf("doq: listen: %w", err)
 	}
 
-	s.conn = conn
-
-	s.listener, err = quic.Listen(conn, s.tlsConfig, s.config)
+	listener, err := quic.Listen(conn, s.tlsConfig, s.config)
 	if err != nil {
-		_ = conn.Close()
+		if closeErr := conn.Close(); closeErr != nil {
+			return errors.Join(
+				fmt.Errorf("doq: quic listen: %w", err),
+				fmt.Errorf("doq: close udp listener after quic listen failure: %w", closeErr),
+			)
+		}
 		return fmt.Errorf("doq: quic listen: %w", err)
 	}
 
+	s.conn = conn
+	s.listener = listener
 	return nil
 }
 
@@ -263,7 +271,9 @@ func (s *DoQServer) Serve() error {
 
 	<-s.ctx.Done()
 
-	_ = s.listener.Close()
+	if err := s.closeListener(); err != nil {
+		return err
+	}
 	s.wg.Wait()
 	return nil
 }
@@ -287,7 +297,10 @@ func (s *DoQServer) acceptLoop() {
 		s.activeConnsMu.Lock()
 		if s.activeConns >= DoQMaxConnections {
 			s.activeConnsMu.Unlock()
-			_ = conn.CloseWithError(0x05, "connection limit reached")
+			if err := conn.CloseWithError(0x05, "connection limit reached"); err != nil {
+				atomic.AddUint64(&s.errors, 1)
+				util.Warnf("doq: failed to close over-limit connection: %v", err)
+			}
 			continue
 		}
 		s.activeConns++
@@ -299,7 +312,10 @@ func (s *DoQServer) acceptLoop() {
 			s.ipConnsMu.Unlock()
 			s.activeConns--
 			s.activeConnsMu.Unlock()
-			_ = conn.CloseWithError(0x05, "per-IP connection limit reached")
+			if err := conn.CloseWithError(0x05, "per-IP connection limit reached"); err != nil {
+				atomic.AddUint64(&s.errors, 1)
+				util.Warnf("doq: failed to close per-IP over-limit connection: %v", err)
+			}
 			continue
 		}
 		s.ipConns[ip]++
@@ -370,7 +386,11 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	wrappedStream := &Stream{stream: stream}
 
 	// Set stream deadline to prevent slow clients from holding resources.
-	_ = stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout))
+	if err := stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout)); err != nil {
+		atomic.AddUint64(&s.errors, 1)
+		util.Warnf("doq: failed to set stream read deadline: %v", err)
+		return
+	}
 
 	// RFC 9250 §4.2: each DNS message on a QUIC stream is prefixed by a
 	// 2-octet length field, identical to DNS-over-TCP framing per RFC 1035
@@ -402,26 +422,58 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	atomic.AddUint64(&s.queriesReceived, 1)
 
 	// Reset deadline before writing.
-	_ = stream.SetWriteDeadline(time.Now().Add(DoQStreamIdleTimeout))
+	if err := stream.SetWriteDeadline(time.Now().Add(DoQStreamIdleTimeout)); err != nil {
+		atomic.AddUint64(&s.errors, 1)
+		util.Warnf("doq: failed to set stream write deadline: %v", err)
+		return
+	}
 
 	s.handler.ServeDoQ(wrappedStream, query)
 
 	atomic.AddUint64(&s.queriesResponded, 1)
 
 	// Close the stream (sends FIN to client).
-	_ = stream.Close()
+	if err := stream.Close(); err != nil {
+		atomic.AddUint64(&s.errors, 1)
+		util.Warnf("doq: failed to close stream: %v", err)
+	}
 }
 
 // Stop gracefully shuts down the DoQ server.
 func (s *DoQServer) Stop() error {
 	s.cancel()
-	if s.listener != nil {
-		_ = s.listener.Close()
-	}
-	if s.conn != nil {
-		_ = s.conn.Close()
-	}
+	var err error
+	err = errors.Join(err, s.closeListener())
+	err = errors.Join(err, s.closePacketConn())
 	s.wg.Wait()
+	return err
+}
+
+func (s *DoQServer) closeListener() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.listener == nil {
+		return nil
+	}
+	err := s.listener.Close()
+	s.listener = nil
+	if err != nil {
+		return fmt.Errorf("doq: close quic listener: %w", err)
+	}
+	return nil
+}
+
+func (s *DoQServer) closePacketConn() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.conn == nil {
+		return nil
+	}
+	err := s.conn.Close()
+	s.conn = nil
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		return fmt.Errorf("doq: close udp listener: %w", err)
+	}
 	return nil
 }
 

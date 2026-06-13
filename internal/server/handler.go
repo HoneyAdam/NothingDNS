@@ -129,7 +129,7 @@ func (h *ServeDNSWithRecovery) ServeDNS(w ResponseWriter, req *protocol.Message)
 
 // sendSERVFAIL sends a minimal SERVFAIL response.
 func sendSERVFAIL(w ResponseWriter, req *protocol.Message) {
-	if req == nil || len(req.Questions) == 0 {
+	if w == nil || req == nil || len(req.Questions) == 0 {
 		return
 	}
 	resp := &protocol.Message{
@@ -139,7 +139,9 @@ func sendSERVFAIL(w ResponseWriter, req *protocol.Message) {
 		},
 		Questions: req.Questions,
 	}
-	_, _ = w.Write(resp)
+	if _, err := w.Write(resp); err != nil {
+		util.Warnf("failed to write SERVFAIL response: %v", err)
+	}
 }
 
 // ServeDNS calls f(w, req).

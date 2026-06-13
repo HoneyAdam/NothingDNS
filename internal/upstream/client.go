@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -222,12 +223,15 @@ func (c *Client) Close() error {
 
 	// Close all TCP connection pools
 	c.mu.Lock()
+	var closeErr error
 	for _, pool := range c.tcpConnPools {
-		pool.closeAll()
+		if err := pool.closeAll(); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
 	}
 	c.mu.Unlock()
 
-	return nil
+	return closeErr
 }
 
 // RandomTXID generates a cryptographically random 16-bit transaction ID.
@@ -328,17 +332,14 @@ func (c *Client) selectRandom() *Server {
 	// Get list of healthy servers
 	var healthy []*Server
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			healthy = append(healthy, s)
 		}
 	}
 
 	if len(healthy) == 0 {
 		// Fallback to any server if none are healthy
-		if len(c.servers) > 0 {
-			return c.servers[0]
-		}
-		return nil
+		return firstClientServer(c.servers, 0)
 	}
 
 	// Simple round-robin via incrementing counter for now
@@ -364,13 +365,14 @@ func (c *Client) selectRoundRobin() *Server {
 	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(servers)
 	for i := 0; i < len(servers); i++ {
 		idx := (startIdx + i) % len(servers)
-		if servers[idx].IsHealthy() {
-			return servers[idx]
+		server := servers[idx]
+		if server != nil && server.IsHealthy() {
+			return server
 		}
 	}
 
 	// Fallback to starting position if no healthy servers
-	return servers[startIdx]
+	return firstClientServer(servers, startIdx)
 }
 
 // selectFastest selects the server with the lowest latency.
@@ -399,7 +401,7 @@ func (c *Client) selectFastest() *Server {
 	var lowestLatency time.Duration = -1
 
 	for _, s := range c.servers {
-		if !s.IsHealthy() {
+		if s == nil || !s.IsHealthy() {
 			continue
 		}
 
@@ -425,13 +427,26 @@ func (c *Client) selectFastest() *Server {
 	// No measured-healthy server — fall back to any healthy server
 	// so cold-start queries still get answered.
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return s
 		}
 	}
 
-	if len(c.servers) > 0 {
-		return c.servers[0]
+	return firstClientServer(c.servers, 0)
+}
+
+func firstClientServer(servers []*Server, start int) *Server {
+	if len(servers) == 0 {
+		return nil
+	}
+	if start < 0 || start >= len(servers) {
+		start = 0
+	}
+	for i := 0; i < len(servers); i++ {
+		idx := (start + i) % len(servers)
+		if servers[idx] != nil {
+			return servers[idx]
+		}
 	}
 	return nil
 }
@@ -625,9 +640,13 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 			return
 		}
 		if returnToPool && hasPool {
-			pool.put(tc)
+			if err := pool.put(tc); err != nil {
+				util.Warnf("upstream TCP pool: failed to return connection for %s: %v", server.Address, err)
+			}
 		} else {
-			_ = tc.close()
+			if err := tc.close(); err != nil {
+				util.Warnf("upstream TCP: failed to close connection for %s: %v", server.Address, err)
+			}
 		}
 	}()
 
@@ -640,14 +659,18 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	length := uint16(len(packed))
 	lengthBuf := []byte{byte(length >> 8), byte(length)}
 	if err := util.WriteFull(tc.conn, lengthBuf); err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil // don't return broken conn to pool
 		return nil, fmt.Errorf("send length: %w", err)
 	}
 
 	start := time.Now()
 	if err := util.WriteFull(tc.conn, packed); err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("send query: %w", err)
 	}
@@ -655,7 +678,9 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read length prefix
 	respLenBuf := make([]byte, 2)
 	if _, err := io.ReadFull(tc.conn, respLenBuf); err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("read length: %w", err)
 	}
@@ -668,7 +693,9 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	// Read response
 	_, err = io.ReadFull(tc.conn, buf[:respLen])
 	if err != nil {
-		_ = tc.close()
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close broken tcp connection: %w", closeErr))
+		}
 		tc = nil
 		return nil, fmt.Errorf("read response: %w", err)
 	}
@@ -676,7 +703,13 @@ func (c *Client) queryTCPBuf(server *Server, msg *protocol.Message, buf []byte) 
 	latency := time.Since(start)
 
 	// Clear deadline so connection can be reused
-	_ = tc.conn.SetDeadline(time.Time{})
+	if err := tc.conn.SetDeadline(time.Time{}); err != nil {
+		if closeErr := tc.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close tcp connection after deadline reset failure: %w", closeErr))
+		}
+		tc = nil
+		return nil, fmt.Errorf("reset deadline: %w", err)
+	}
 
 	// Parse response
 	resp, err = protocol.UnpackMessage(buf[:respLen])
@@ -734,7 +767,15 @@ func (c *Client) checkHealth() {
 	}
 
 	var healthWg sync.WaitGroup
-	for _, server := range c.servers {
+	c.mu.RLock()
+	servers := make([]*Server, len(c.servers))
+	copy(servers, c.servers)
+	c.mu.RUnlock()
+
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
 		healthWg.Add(1)
 		go func(s *Server) {
 			defer healthWg.Done()
@@ -773,7 +814,7 @@ func (c *Client) IsHealthy() bool {
 	defer c.mu.RUnlock()
 
 	for _, s := range c.servers {
-		if s.IsHealthy() {
+		if s != nil && s.IsHealthy() {
 			return true
 		}
 	}
@@ -799,7 +840,7 @@ func (c *Client) AddServer(addr string) error {
 
 	// Check if server already exists
 	for _, s := range c.servers {
-		if s.Address == addr {
+		if s != nil && s.Address == addr {
 			return fmt.Errorf("server %s already exists", addr)
 		}
 	}
@@ -840,6 +881,9 @@ func (c *Client) RemoveServer(addr string) error {
 	found := false
 	newServers := make([]*Server, 0, len(c.servers))
 	for _, s := range c.servers {
+		if s == nil {
+			continue
+		}
 		if s.Address == addr {
 			found = true
 			continue
@@ -857,7 +901,9 @@ func (c *Client) RemoveServer(addr string) error {
 	delete(c.udpPool, addr)
 	delete(c.tcpPool, addr)
 	if pool, ok := c.tcpConnPools[addr]; ok {
-		pool.closeAll()
+		if err := pool.closeAll(); err != nil {
+			return err
+		}
 		delete(c.tcpConnPools, addr)
 	}
 

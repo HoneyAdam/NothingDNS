@@ -244,8 +244,9 @@ func (s *UDPServer) Serve() error {
 	<-s.ctx.Done()
 
 	// Close the connection to unblock the reader from ReadFromUDP.
+	var closeErr error
 	if s.conn != nil {
-		_ = s.conn.Close()
+		closeErr = closeUDPConn(s.conn)
 	}
 
 	// Wait for the reader to stop sending on requestChan.
@@ -255,7 +256,7 @@ func (s *UDPServer) Serve() error {
 	close(requestChan)
 	s.wg.Wait()
 
-	return nil
+	return closeErr
 }
 
 // pruner periodically cleans stale rate limiter entries.
@@ -448,30 +449,13 @@ func (w *udpResponseWriter) Write(msg *protocol.Message) (int, error) {
 
 	// Truncate if necessary (set TC bit)
 	if n > w.maxSize {
-		msg.Header.Flags.TC = true
-		msg.Authorities = nil
-		msg.Additionals = nil
-
-		// Reduce answers until the message fits
-		for len(msg.Answers) > 0 {
-			// Remove one answer at a time from the end
-			msg.Answers = msg.Answers[:len(msg.Answers)-1]
-			n, err = msg.Pack(packBuf)
-			if err != nil {
-				return 0, err
-			}
-			if n <= w.maxSize {
-				break
-			}
+		msg.Truncate(w.maxSize)
+		n, err = msg.Pack(packBuf)
+		if err != nil {
+			return 0, err
 		}
-
-		// If still too large (or no answers left), send header + question only
-		if n > w.maxSize || len(msg.Answers) == 0 {
-			msg.Answers = nil
-			n, err = msg.Pack(packBuf)
-			if err != nil {
-				return 0, err
-			}
+		if n > w.maxSize {
+			return 0, fmt.Errorf("packed UDP response length %d exceeds max payload size %d", n, w.maxSize)
 		}
 	}
 
@@ -530,9 +514,17 @@ func (s *UDPServer) Stop() error {
 	s.cancel()
 
 	if s.conn != nil {
-		if err := s.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			return err
-		}
+		return closeUDPConn(s.conn)
+	}
+	return nil
+}
+
+func closeUDPConn(conn UDPConn) error {
+	if conn == nil {
+		return nil
+	}
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
 	}
 	return nil
 }

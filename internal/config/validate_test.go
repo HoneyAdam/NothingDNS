@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -68,6 +70,61 @@ func TestValidateServer(t *testing.T) {
 				c.Server.TLS.Enabled = true
 				c.Server.TLS.CertFile = "/cert.pem"
 				c.Server.TLS.KeyFile = ""
+				return c
+			}(),
+			wantErr:  true,
+			errCount: 1,
+		},
+		{
+			name: "QUIC enabled but no cert",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Server.QUIC.Enabled = true
+				return c
+			}(),
+			wantErr:  true,
+			errCount: 1,
+		},
+		{
+			name: "QUIC enabled with TLS cert fallback",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Server.QUIC.Enabled = true
+				c.Server.TLS.CertFile = "/cert.pem"
+				c.Server.TLS.KeyFile = "/key.pem"
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			name: "XoT enabled but no cert",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Server.XoT.Enabled = true
+				return c
+			}(),
+			wantErr:  true,
+			errCount: 1,
+		},
+		{
+			name: "XoT enabled with TLS cert fallback",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Server.XoT.Enabled = true
+				c.Server.TLS.CertFile = "/cert.pem"
+				c.Server.TLS.KeyFile = "/key.pem"
+				return c
+			}(),
+			wantErr: false,
+		},
+		{
+			name: "XoT invalid min TLS version",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Server.XoT.Enabled = true
+				c.Server.XoT.CertFile = "/cert.pem"
+				c.Server.XoT.KeyFile = "/key.pem"
+				c.Server.XoT.MinTLSVersion = 11
 				return c
 			}(),
 			wantErr:  true,
@@ -163,6 +220,17 @@ func TestValidateResolution(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "invalid timeout",
 		},
+		{
+			name: "recursive root hints file missing",
+			cfg: func() *Config {
+				c := DefaultConfig()
+				c.Resolution.Recursive = true
+				c.Resolution.RootHints = filepath.Join(t.TempDir(), "missing.root")
+				return c
+			}(),
+			wantErr:   true,
+			errSubstr: "root_hints",
+		},
 	}
 
 	for _, tt := range tests {
@@ -189,6 +257,90 @@ func TestValidateResolution(t *testing.T) {
 			if len(errors) > 0 {
 				t.Fatalf("expected no errors but got: %v", errors)
 			}
+		})
+	}
+}
+
+func TestValidateZoneFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	zoneFile := filepath.Join(tmpDir, "example.zone")
+	if err := os.WriteFile(zoneFile, []byte("$ORIGIN example.\n"), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	zoneDir := filepath.Join(tmpDir, "zones")
+	if err := os.Mkdir(zoneDir, 0755); err != nil {
+		t.Fatalf("mkdir zone dir: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		errSubstr string
+	}{
+		{
+			name: "valid configured zone sources",
+			mutate: func(c *Config) {
+				c.Zones = []string{zoneFile}
+				c.ZoneDir = zoneDir
+				c.Views = []ViewConfig{{
+					Name:         "internal",
+					MatchClients: []string{"10.0.0.0/8"},
+					ZoneFiles:    []string{zoneFile},
+				}}
+			},
+		},
+		{
+			name: "missing configured zone file",
+			mutate: func(c *Config) {
+				c.Zones = []string{filepath.Join(tmpDir, "missing.zone")}
+			},
+			errSubstr: "zones[0]: cannot access zone file",
+		},
+		{
+			name: "configured zone path is directory",
+			mutate: func(c *Config) {
+				c.Zones = []string{zoneDir}
+			},
+			errSubstr: "zones[0]",
+		},
+		{
+			name: "zone_dir path is file",
+			mutate: func(c *Config) {
+				c.ZoneDir = zoneFile
+			},
+			errSubstr: "zone_dir",
+		},
+		{
+			name: "missing view zone file",
+			mutate: func(c *Config) {
+				c.Views = []ViewConfig{{
+					Name:         "internal",
+					MatchClients: []string{"10.0.0.0/8"},
+					ZoneFiles:    []string{filepath.Join(tmpDir, "missing-view.zone")},
+				}}
+			},
+			errSubstr: "views[0].zone_files[0]: cannot access zone file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tt.mutate(c)
+
+			errors := c.Validate()
+			if tt.errSubstr == "" {
+				if len(errors) != 0 {
+					t.Fatalf("expected no errors, got %v", errors)
+				}
+				return
+			}
+			for _, err := range errors {
+				if strings.Contains(err, tt.errSubstr) {
+					return
+				}
+			}
+			t.Fatalf("errors = %v, want substring %q", errors, tt.errSubstr)
 		})
 	}
 }
@@ -468,6 +620,149 @@ func TestValidateMetrics(t *testing.T) {
 			if !tt.wantErr && len(errors) > 0 {
 				t.Errorf("expected no errors but got: %v", errors)
 			}
+		})
+	}
+}
+
+func TestValidateGeoDNS(t *testing.T) {
+	tmpDir := t.TempDir()
+	mmdbFile := filepath.Join(tmpDir, "geo.mmdb")
+	if err := os.WriteFile(mmdbFile, []byte("placeholder mmdb bytes"), 0644); err != nil {
+		t.Fatalf("write mmdb fixture: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		errSubstr string
+	}{
+		{
+			name: "disabled ignores missing mmdb",
+			mutate: func(c *Config) {
+				c.GeoDNS.Enabled = false
+				c.GeoDNS.MMDBFile = filepath.Join(tmpDir, "missing.mmdb")
+			},
+		},
+		{
+			name: "enabled with existing mmdb file",
+			mutate: func(c *Config) {
+				c.GeoDNS.Enabled = true
+				c.GeoDNS.MMDBFile = mmdbFile
+			},
+		},
+		{
+			name: "enabled with missing mmdb file",
+			mutate: func(c *Config) {
+				c.GeoDNS.Enabled = true
+				c.GeoDNS.MMDBFile = filepath.Join(tmpDir, "missing.mmdb")
+			},
+			errSubstr: "geodns.mmdb_file: cannot access",
+		},
+		{
+			name: "enabled with mmdb directory",
+			mutate: func(c *Config) {
+				c.GeoDNS.Enabled = true
+				c.GeoDNS.MMDBFile = tmpDir
+			},
+			errSubstr: "geodns.mmdb_file",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tt.mutate(c)
+
+			errors := c.Validate()
+			if tt.errSubstr == "" {
+				if len(errors) != 0 {
+					t.Fatalf("expected no errors, got %v", errors)
+				}
+				return
+			}
+			for _, err := range errors {
+				if strings.Contains(err, tt.errSubstr) {
+					return
+				}
+			}
+			t.Fatalf("errors = %v, want substring %q", errors, tt.errSubstr)
+		})
+	}
+}
+
+func TestValidateDNS64(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(*Config)
+		errSubstr string
+	}{
+		{
+			name: "disabled ignores invalid settings",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = false
+				c.DNS64.Prefix = "not-an-ip"
+				c.DNS64.PrefixLen = 99
+				c.DNS64.ExcludeNets = []string{"not-a-cidr"}
+			},
+		},
+		{
+			name: "enabled with valid defaults",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = true
+			},
+		},
+		{
+			name: "enabled with invalid prefix length",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = true
+				c.DNS64.PrefixLen = 99
+			},
+			errSubstr: "dns64: invalid prefix_len",
+		},
+		{
+			name: "enabled with invalid prefix",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = true
+				c.DNS64.Prefix = "not-an-ip"
+			},
+			errSubstr: "dns64: invalid prefix",
+		},
+		{
+			name: "enabled with IPv4 prefix",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = true
+				c.DNS64.Prefix = "192.0.2.1"
+			},
+			errSubstr: "must be IPv6",
+		},
+		{
+			name: "enabled with invalid exclude net",
+			mutate: func(c *Config) {
+				c.DNS64.Enabled = true
+				c.DNS64.ExcludeNets = []string{"not-a-cidr"}
+			},
+			errSubstr: "dns64.exclude_nets: invalid CIDR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := DefaultConfig()
+			tt.mutate(c)
+
+			errors := c.Validate()
+			if tt.errSubstr == "" {
+				if len(errors) != 0 {
+					t.Fatalf("expected no errors, got %v", errors)
+				}
+				return
+			}
+			for _, err := range errors {
+				if strings.Contains(err, tt.errSubstr) {
+					return
+				}
+			}
+			t.Fatalf("errors = %v, want substring %q", errors, tt.errSubstr)
 		})
 	}
 }
@@ -782,6 +1077,22 @@ func TestValidateDurationFields(t *testing.T) {
 			errSubstr: "mdns: multicast_ip",
 		},
 		{
+			name: "mDNS IPv6 multicast unsupported",
+			mutate: func(c *Config) {
+				c.MDNS.Enabled = true
+				c.MDNS.MulticastIP = "ff02::fb"
+			},
+			errSubstr: "must be an IPv4 multicast address",
+		},
+		{
+			name: "mDNS unicast IP unsupported",
+			mutate: func(c *Config) {
+				c.MDNS.Enabled = true
+				c.MDNS.MulticastIP = "127.0.0.1"
+			},
+			errSubstr: "must be an IPv4 multicast address",
+		},
+		{
 			name: "invalid mDNS port",
 			mutate: func(c *Config) {
 				c.MDNS.Enabled = true
@@ -909,6 +1220,122 @@ func TestValidateSecrets_AcceptsEmptyAndRealSecrets(t *testing.T) {
 	}
 }
 
+func TestValidateHTTPUsersRejectsInvalidConfiguredUsers(t *testing.T) {
+	tests := []struct {
+		name    string
+		users   []AuthUserConfig
+		wantErr []string
+	}{
+		{
+			name:    "empty_username",
+			users:   []AuthUserConfig{{Username: "", Password: "password", Role: "admin"}},
+			wantErr: []string{"http.users[0].username", "username must not be empty"},
+		},
+		{
+			name:    "control_character_username",
+			users:   []AuthUserConfig{{Username: "admin\nroot", Password: "password", Role: "admin"}},
+			wantErr: []string{"http.users[0].username", "control characters"},
+		},
+		{
+			name: "duplicate_username",
+			users: []AuthUserConfig{
+				{Username: "admin", Password: "password", Role: "admin"},
+				{Username: "admin", Password: "password2", Role: "viewer"},
+			},
+			wantErr: []string{"http.users[1].username", "duplicate username"},
+		},
+		{
+			name:    "short_password",
+			users:   []AuthUserConfig{{Username: "admin", Password: "short", Role: "admin"}},
+			wantErr: []string{"http.users[0].password", "at least 8"},
+		},
+		{
+			name:    "invalid_role",
+			users:   []AuthUserConfig{{Username: "admin", Password: "password", Role: "owner"}},
+			wantErr: []string{"http.users[0].role", "invalid role"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Server.HTTP.Enabled = true
+			c.Server.HTTP.Users = tc.users
+
+			joined := strings.Join(c.Validate(), "\n")
+			for _, want := range tc.wantErr {
+				if !strings.Contains(joined, want) {
+					t.Fatalf("Validate() missing %q. errors:\n%s", want, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateHTTPUsersRejectsInvalidAuthTokenRole(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.HTTP.Enabled = true
+	c.Server.HTTP.AuthToken = ""
+	c.Server.HTTP.AuthTokenRole = "owner"
+	c.Server.HTTP.Users = []AuthUserConfig{
+		{Username: "admin", Password: "password", Role: "admin"},
+	}
+
+	joined := strings.Join(c.Validate(), "\n")
+	if !strings.Contains(joined, "http.auth_token_role") || !strings.Contains(joined, "invalid role") {
+		t.Fatalf("Validate() missing auth_token_role error. errors:\n%s", joined)
+	}
+}
+
+func TestValidateHTTPUsersAcceptsValidAuthTokenRoles(t *testing.T) {
+	for _, role := range []string{"", "viewer", "operator", "admin", "ADMIN"} {
+		t.Run(role, func(t *testing.T) {
+			c := DefaultConfig()
+			c.Server.HTTP.Enabled = true
+			c.Server.HTTP.AuthToken = ""
+			c.Server.HTTP.AuthTokenRole = role
+			c.Server.HTTP.Users = []AuthUserConfig{
+				{Username: "admin", Password: "password", Role: "admin"},
+			}
+
+			for _, err := range c.Validate() {
+				if strings.Contains(err, "http.auth_token_role") {
+					t.Fatalf("valid auth_token_role %q rejected: %v", role, err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateHTTPUsersRequiresAuthSecretForTokenPersistence(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.HTTP.Enabled = true
+	c.Server.HTTP.AuthSecret = ""
+	c.Server.HTTP.TokenPersistencePath = "/var/lib/nothingdns/tokens.enc"
+	c.Server.HTTP.Users = []AuthUserConfig{
+		{Username: "admin", Password: "password", Role: "admin"},
+	}
+
+	joined := strings.Join(c.Validate(), "\n")
+	if !strings.Contains(joined, "http.token_persistence_path requires http.auth_secret") {
+		t.Fatalf("Validate() missing token persistence auth_secret error. errors:\n%s", joined)
+	}
+}
+
+func TestValidateHTTPUsersRejectsNegativeMaxSessionsPerUser(t *testing.T) {
+	c := DefaultConfig()
+	c.Server.HTTP.Enabled = true
+	c.Server.HTTP.MaxSessionsPerUser = -1
+	c.Server.HTTP.Users = []AuthUserConfig{
+		{Username: "admin", Password: "password", Role: "admin"},
+	}
+
+	joined := strings.Join(c.Validate(), "\n")
+	if !strings.Contains(joined, "http.max_sessions_per_user cannot be negative") {
+		t.Fatalf("Validate() missing max_sessions_per_user error. errors:\n%s", joined)
+	}
+}
+
 // TestValidate_AuthSecret_RejectsShortString regresses SECURITY-REPORT.md
 // L-5. http.auth_secret had a placeholder-check but no entropy check,
 // so a config with auth_secret: "x" or auth_secret: "short" passed
@@ -1021,6 +1448,167 @@ func TestValidate_AtRestEncryptionKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateProduction_AcceptsHardenedConfig(t *testing.T) {
+	c := productionReadyTestConfig()
+
+	if errs := c.ValidateProduction(); len(errs) != 0 {
+		t.Fatalf("production-ready config should pass, got: %v", errs)
+	}
+}
+
+func TestValidateProduction_RejectsUnsafeProductionConfig(t *testing.T) {
+	c := productionReadyTestConfig()
+	c.Server.HTTP.AuthSecret = ""
+	c.Server.HTTP.Users = nil
+	c.Server.HTTP.Bind = "0.0.0.0:8080"
+	c.Server.HTTP.TLSCertFile = ""
+	c.Server.HTTP.TLSKeyFile = ""
+	c.Resolution.Recursive = true
+	c.ACL = nil
+	c.Server.ACLAllowUnrestrictedRecursion = true
+	c.DNSSEC.IgnoreTime = true
+	c.Storage.DataDir = ""
+	c.Storage.EncryptionKey = ""
+	c.Cluster.AllowInsecureCluster = true
+	c.Cluster.EncryptionKey = ""
+	c.Cluster.DataDir = ""
+	c.Metrics.Enabled = true
+	c.Metrics.Bind = ":9153"
+	c.Metrics.AuthToken = ""
+	c.Transfer.AllowList = []string{"10.0.0.0/8"}
+	c.Transfer.RequireTSIG = false
+
+	errs := c.ValidateProduction()
+	joined := strings.Join(errs, "\n")
+	for _, want := range []string{
+		"production: http.auth_secret",
+		"production: at least one http.users",
+		"production: public http.bind",
+		"production: recursive resolver cannot run open",
+		"production: dnssec.ignore_time",
+		"production: storage.data_dir",
+		"production: storage.encryption_key",
+		"production: cluster.allow_insecure",
+		"production: cluster.encryption_key",
+		"production: cluster.data_dir",
+		"production: public metrics.bind",
+		"production: transfer.require_tsig",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("ValidateProduction missing %q. errors:\n%s", want, joined)
+		}
+	}
+}
+
+func TestValidateProduction_RequiresAdminHTTPUser(t *testing.T) {
+	c := productionReadyTestConfig()
+	c.Server.HTTP.Users = []AuthUserConfig{
+		{Username: "operator", Password: "abcdefghij1234567890ABCDEFGHIJKL", Role: "operator"},
+	}
+
+	errs := c.ValidateProduction()
+	joined := strings.Join(errs, "\n")
+	if !strings.Contains(joined, "production: at least one http.users entry must have role admin") {
+		t.Fatalf("ValidateProduction missing admin-user error. errors:\n%s", joined)
+	}
+}
+
+func TestValidateProduction_RejectsWildcardCORSOnPublicHTTPBind(t *testing.T) {
+	c := productionReadyTestConfig()
+	c.Server.HTTP.Bind = "0.0.0.0:8080"
+	c.Server.HTTP.TLSCertFile = "/etc/nothingdns/tls.crt"
+	c.Server.HTTP.TLSKeyFile = "/etc/nothingdns/tls.key"
+	c.Server.HTTP.AllowedOrigins = []string{"*"}
+
+	errs := c.ValidateProduction()
+	joined := strings.Join(errs, "\n")
+	if !strings.Contains(joined, "production: public http.bind cannot use wildcard http.allowed_origins") {
+		t.Fatalf("ValidateProduction missing wildcard CORS error. errors:\n%s", joined)
+	}
+}
+
+func TestValidateProduction_AllowsNonPublicOrExplicitCORSOrigins(t *testing.T) {
+	tests := []struct {
+		name           string
+		bind           string
+		allowedOrigins []string
+	}{
+		{
+			name:           "loopback_wildcard_for_development",
+			bind:           "127.0.0.1:8080",
+			allowedOrigins: []string{"*"},
+		},
+		{
+			name:           "public_explicit_origin",
+			bind:           "0.0.0.0:8080",
+			allowedOrigins: []string{"https://console.example"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := productionReadyTestConfig()
+			c.Server.HTTP.Bind = tc.bind
+			c.Server.HTTP.TLSCertFile = "/etc/nothingdns/tls.crt"
+			c.Server.HTTP.TLSKeyFile = "/etc/nothingdns/tls.key"
+			c.Server.HTTP.AllowedOrigins = tc.allowedOrigins
+
+			for _, err := range c.ValidateProduction() {
+				if strings.Contains(err, "wildcard http.allowed_origins") {
+					t.Fatalf("unexpected wildcard CORS error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateProduction_RequiresAbsoluteTokenPersistencePath(t *testing.T) {
+	c := productionReadyTestConfig()
+	c.Server.HTTP.TokenPersistencePath = "tokens.enc"
+
+	errs := c.ValidateProduction()
+	joined := strings.Join(errs, "\n")
+	if !strings.Contains(joined, "production: http.token_persistence_path must be an absolute path") {
+		t.Fatalf("ValidateProduction missing token persistence path error. errors:\n%s", joined)
+	}
+}
+
+func TestValidateProduction_AllowsAbsoluteTokenPersistencePath(t *testing.T) {
+	c := productionReadyTestConfig()
+	c.Server.HTTP.TokenPersistencePath = "/var/lib/nothingdns/tokens.enc"
+
+	for _, err := range c.ValidateProduction() {
+		if strings.Contains(err, "token_persistence_path") {
+			t.Fatalf("unexpected token persistence path error: %v", err)
+		}
+	}
+}
+
+func productionReadyTestConfig() *Config {
+	c := DefaultConfig()
+	c.Server.HTTP.Enabled = true
+	c.Server.HTTP.Bind = "127.0.0.1:8080"
+	c.Server.HTTP.AuthSecret = "abcdefghij1234567890ABCDEFGHIJKL"
+	c.Server.HTTP.Users = []AuthUserConfig{
+		{Username: "admin", Password: "abcdefghij1234567890ABCDEFGHIJKL", Role: "admin"},
+	}
+	c.DNSSEC.Enabled = true
+	c.DNSSEC.IgnoreTime = false
+	c.Storage.DataDir = "/var/lib/nothingdns"
+	c.Storage.EncryptionKey = strings.Repeat("aa", 32)
+	c.Cluster.Enabled = true
+	c.Cluster.ConsensusMode = "raft"
+	c.Cluster.DataDir = "/var/lib/nothingdns/raft"
+	c.Cluster.EncryptionKey = "abcdefghij1234567890ABCDEFGHIJKL"
+	c.Cluster.AllowInsecureCluster = false
+	c.Metrics.Enabled = true
+	c.Metrics.Bind = "127.0.0.1:9153"
+	c.Metrics.AuthToken = ""
+	c.Transfer.AllowList = nil
+	c.Transfer.RequireTSIG = false
+	return c
 }
 
 func TestLooksLikePlaceholderSecret(t *testing.T) {

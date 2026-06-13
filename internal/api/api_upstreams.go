@@ -21,22 +21,27 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		s.runtimeMu.RLock()
+		upstreamLB := s.upstreamLB
+		upstreamClient := s.upstreamClient
+		s.runtimeMu.RUnlock()
+
 		var upstreams []UpstreamStatus
-		if s.upstreamLB != nil {
-			queries, failed, failovers := s.upstreamLB.Stats()
+		if upstreamLB != nil {
+			queries, failed, failovers := upstreamLB.Stats()
 			upstreams = append(upstreams, UpstreamStatus{
 				Address:   "load-balancer",
-				Healthy:   s.upstreamLB.IsHealthy(),
+				Healthy:   upstreamLB.IsHealthy(),
 				Queries:   queries,
 				Failed:    failed,
 				Failovers: failovers,
 			})
 		}
-		if s.upstreamClient != nil {
-			queries, failed, _ := s.upstreamClient.Stats()
+		if upstreamClient != nil {
+			queries, failed, _ := upstreamClient.Stats()
 			upstreams = append(upstreams, UpstreamStatus{
 				Address: "direct-upstream",
-				Healthy: s.upstreamClient.IsHealthy(),
+				Healthy: upstreamClient.IsHealthy(),
 				Queries: queries,
 				Failed:  failed,
 			})
@@ -55,11 +60,6 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if s.upstreamClient == nil {
-			s.writeError(w, http.StatusServiceUnavailable, "Upstream client not configured")
-			return
-		}
-
 		switch req.Action {
 		case "add":
 			if req.Server == "" {
@@ -71,7 +71,14 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 				s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Invalid upstream address"))
 				return
 			}
-			if err := s.upstreamClient.AddServer(req.Server); err != nil {
+			s.runtimeMu.RLock()
+			upstreamClient := s.upstreamClient
+			s.runtimeMu.RUnlock()
+			if upstreamClient == nil {
+				s.writeError(w, http.StatusServiceUnavailable, "Upstream client not configured")
+				return
+			}
+			if err := upstreamClient.AddServer(req.Server); err != nil {
 				s.writeError(w, http.StatusConflict, sanitizeError(err, "Operation failed"))
 				return
 			}
@@ -82,7 +89,14 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 				s.writeError(w, http.StatusBadRequest, "Server address required")
 				return
 			}
-			if err := s.upstreamClient.RemoveServer(req.Server); err != nil {
+			s.runtimeMu.RLock()
+			upstreamClient := s.upstreamClient
+			s.runtimeMu.RUnlock()
+			if upstreamClient == nil {
+				s.writeError(w, http.StatusServiceUnavailable, "Upstream client not configured")
+				return
+			}
+			if err := upstreamClient.RemoveServer(req.Server); err != nil {
 				s.writeError(w, http.StatusNotFound, sanitizeError(err, "Not found"))
 				return
 			}

@@ -393,50 +393,46 @@ func NewNode(config Config, peers []NodeID, transport Transport) *Node {
 
 // setVotedForLocked records a vote for v and persists it before any
 // response that depends on it can be sent. MUST be called with n.mu held.
-func (n *Node) setVotedForLocked(v NodeID) {
+func (n *Node) setVotedForLocked(v NodeID) error {
 	if v == n.votedFor {
-		return
+		return nil
+	}
+	if err := n.persistHardStateLocked(HardState{CurrentTerm: n.currentTerm, VotedFor: v}); err != nil {
+		return err
 	}
 	n.votedFor = v
-	n.persistHardStateLocked()
+	return nil
 }
 
 // advanceTermLocked advances currentTerm to t, resets votedFor (Raft §5.1
 // "first vote of a new term is fresh"), transitions to follower state, and
 // persists the change to disk before returning. MUST be called with n.mu
 // held. No-op when t is not greater than n.currentTerm.
-func (n *Node) advanceTermLocked(t Term) {
+func (n *Node) advanceTermLocked(t Term) error {
 	if t <= n.currentTerm {
-		return
+		return nil
+	}
+	if err := n.persistHardStateLocked(HardState{CurrentTerm: t, VotedFor: ""}); err != nil {
+		return err
 	}
 	n.currentTerm = t
 	n.state = StateFollower
 	n.votedFor = ""
-	n.persistHardStateLocked()
+	return nil
 }
 
-// persistHardStateLocked writes the current (currentTerm, votedFor) tuple
-// to disk via the atomic+fsync helper. MUST be called with n.mu held so
-// the values read are consistent with what's being persisted. Returns no
-// error: persistence is best-effort here — a failure indicates a
-// catastrophic environment problem (disk full, ENOMEM in fsync) that the
-// surrounding RPC handler cannot meaningfully recover from. The error is
-// surfaced via panic only if DataDir was explicitly configured but the
-// write failed, so silent silent-data-loss never happens.
-func (n *Node) persistHardStateLocked() {
+// persistHardStateLocked writes a candidate (currentTerm, votedFor) tuple to
+// disk via the atomic+fsync helper. MUST be called with n.mu held. Callers
+// apply the in-memory mutation only after this returns nil, so persistence
+// failures reject the Raft transition instead of acknowledging unsafe state.
+func (n *Node) persistHardStateLocked(hs HardState) error {
 	if n.config.DataDir == "" {
-		return
-	}
-	hs := HardState{
-		CurrentTerm: n.currentTerm,
-		VotedFor:    n.votedFor,
+		return nil
 	}
 	if err := saveHardState(n.config.DataDir, hs); err != nil {
-		// Surface the failure rather than silently continuing — a node
-		// that thinks it persisted state but didn't is exactly the
-		// election-safety violation we're trying to prevent.
-		panic(fmt.Sprintf("raft: persisting HardState failed: %v (term=%d votedFor=%q)", err, hs.CurrentTerm, hs.VotedFor))
+		return fmt.Errorf("raft: persisting HardState failed: %w (term=%d votedFor=%q)", err, hs.CurrentTerm, hs.VotedFor)
 	}
+	return nil
 }
 
 // Start starts the Raft node's main loop.
@@ -527,7 +523,11 @@ func (n *Node) runFollower(electionTimer *time.Timer) {
 			// bug) had advanceTermLocked silently stamp us back to Follower,
 			// so the node only ever incremented its term and never campaigned.
 			n.mu.Lock()
-			n.advanceTermLocked(n.currentTerm + 1)
+			if err := n.advanceTermLocked(n.currentTerm + 1); err != nil {
+				util.Errorf("raft: election term advance failed: %v", err)
+				n.mu.Unlock()
+				return
+			}
 			n.state = StateCandidate
 			n.mu.Unlock()
 			return
@@ -546,7 +546,12 @@ func (n *Node) runCandidate() {
 	// Vote for self (Raft §5.2). Persist before sending vote requests so a
 	// restart can't lead us to vote again for someone else in the same term.
 	n.mu.Lock()
-	n.setVotedForLocked(n.config.NodeID)
+	if err := n.setVotedForLocked(n.config.NodeID); err != nil {
+		util.Errorf("raft: self-vote persistence failed: %v", err)
+		n.state = StateFollower
+		n.mu.Unlock()
+		return
+	}
 	term := n.currentTerm
 	lastLogIndex, lastLogTerm := n.lastLogInfo()
 	n.mu.Unlock()
@@ -577,7 +582,12 @@ func (n *Node) runCandidate() {
 			// (it resets state to Follower); then mark candidate. See the
 			// matching note in runFollower.
 			n.mu.Lock()
-			n.advanceTermLocked(n.currentTerm + 1)
+			if err := n.advanceTermLocked(n.currentTerm + 1); err != nil {
+				util.Errorf("raft: election term advance failed: %v", err)
+				n.state = StateFollower
+				n.mu.Unlock()
+				return
+			}
 			n.state = StateCandidate
 			n.mu.Unlock()
 			return
@@ -675,13 +685,29 @@ func (n *Node) handleVoteRequest(req VoteRequest) {
 	// votedFor="") tuple via fsync before we proceed, satisfying the
 	// election-safety durability requirement.
 	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
+		if err := n.advanceTermLocked(req.Term); err != nil {
+			util.Errorf("raft: vote request term advance failed: %v", err)
+			n.voteRespCh <- VoteResponse{
+				Term:        n.currentTerm,
+				VoteGranted: false,
+				From:        n.config.NodeID,
+			}
+			return
+		}
 	}
 
 	// If votedFor is null or candidateId, and candidate's log is at least as
 	// up-to-date as receiver's log, grant vote
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
-		n.setVotedForLocked(req.CandidateID)
+		if err := n.setVotedForLocked(req.CandidateID); err != nil {
+			util.Errorf("raft: vote persistence failed: %v", err)
+			n.voteRespCh <- VoteResponse{
+				Term:        n.currentTerm,
+				VoteGranted: false,
+				From:        n.config.NodeID,
+			}
+			return
+		}
 		// Granting a vote counts as leader contact: don't immediately start
 		// our own campaign against the candidate we just endorsed.
 		n.signalElectionReset()
@@ -734,7 +760,10 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 	// least as new as ours: adopt the term, step down to follower, and
 	// record the leader for client redirection.
 	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
+		if err := n.advanceTermLocked(req.Term); err != nil {
+			util.Errorf("raft: append request term advance failed: %v", err)
+			return resp
+		}
 	}
 	n.state = StateFollower
 	if req.LeaderID != "" {
@@ -831,11 +860,25 @@ func (n *Node) HandleVoteRequest(req VoteRequest) VoteResponse {
 	}
 
 	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
+		if err := n.advanceTermLocked(req.Term); err != nil {
+			util.Errorf("raft: vote request term advance failed: %v", err)
+			return VoteResponse{
+				Term:        n.currentTerm,
+				VoteGranted: false,
+				From:        n.config.NodeID,
+			}
+		}
 	}
 
 	if (n.votedFor == "" || n.votedFor == req.CandidateID) && n.isLogUpToDate(req.LastLogIndex, req.LastLogTerm) {
-		n.setVotedForLocked(req.CandidateID)
+		if err := n.setVotedForLocked(req.CandidateID); err != nil {
+			util.Errorf("raft: vote persistence failed: %v", err)
+			return VoteResponse{
+				Term:        n.currentTerm,
+				VoteGranted: false,
+				From:        n.config.NodeID,
+			}
+		}
 		// Granting a vote counts as leader contact: don't immediately start
 		// our own campaign against the candidate we just endorsed.
 		n.signalElectionReset()
@@ -872,7 +915,10 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
+		if err := n.advanceTermLocked(req.Term); err != nil {
+			util.Errorf("raft: snapshot request term advance failed: %v", err)
+			return
+		}
 	}
 
 	// If we have a state machine and snapshot data, restore it.
@@ -923,7 +969,10 @@ func (n *Node) handleAppendResponse(resp AppendResponse) {
 
 	if resp.Term > n.currentTerm {
 		// Newer term discovered
-		n.advanceTermLocked(resp.Term)
+		if err := n.advanceTermLocked(resp.Term); err != nil {
+			util.Errorf("raft: append response term advance failed: %v", err)
+			n.state = StateFollower
+		}
 		return
 	}
 
@@ -959,7 +1008,10 @@ func (n *Node) handleSnapshotRequest(req SnapshotRequest) {
 	}
 
 	if req.Term > n.currentTerm {
-		n.advanceTermLocked(req.Term)
+		if err := n.advanceTermLocked(req.Term); err != nil {
+			util.Errorf("raft: snapshot request term advance failed: %v", err)
+			return
+		}
 	}
 
 	// If we have a state machine and snapshot data, restore it.
@@ -1014,7 +1066,11 @@ func (n *Node) becomeFollower(term Term) {
 	// least transition to follower state in that case (e.g. on a peer
 	// step-down where the term doesn't move).
 	if term > n.currentTerm {
-		n.advanceTermLocked(term)
+		if err := n.advanceTermLocked(term); err != nil {
+			util.Errorf("raft: follower transition term advance failed: %v", err)
+			n.mu.Unlock()
+			return
+		}
 	} else {
 		n.state = StateFollower
 	}

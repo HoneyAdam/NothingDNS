@@ -177,8 +177,12 @@ func (r *Responder) Start() error {
 	}
 
 	// Socket buffer tuning is best-effort; the responder can run with OS defaults.
-	_ = conn.SetReadBuffer(65536)
-	_ = conn.SetWriteBuffer(65536)
+	if err := conn.SetReadBuffer(65536); err != nil {
+		util.Warnf("mDNS: failed to set read buffer: %v", err)
+	}
+	if err := conn.SetWriteBuffer(65536); err != nil {
+		util.Warnf("mDNS: failed to set write buffer: %v", err)
+	}
 
 	stopCh := make(chan struct{})
 	r.conn = conn
@@ -213,8 +217,7 @@ func (r *Responder) Stop() {
 
 	close(stopCh)
 	if conn != nil {
-		// Closing during shutdown is best-effort; receiveLoop exits on stopCh.
-		_ = conn.Close()
+		r.closeUDPConn(conn)
 	}
 	r.wg.Wait()
 	r.lifecycleMu.Unlock()
@@ -319,8 +322,9 @@ func (r *Responder) receiveLoop(conn *net.UDPConn, stopCh <-chan struct{}) {
 		default:
 		}
 
-		// Deadline updates keep Stop responsive; a failed update is handled by ReadFromUDP.
-		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if !r.setReceiveDeadline(conn, time.Now().Add(100*time.Millisecond)) {
+			return
+		}
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
@@ -339,6 +343,30 @@ func (r *Responder) receiveLoop(conn *net.UDPConn, stopCh <-chan struct{}) {
 		}
 
 		r.handlePacket(buf[:n], src)
+	}
+}
+
+type mdnsDeadlineSetter interface {
+	SetReadDeadline(time.Time) error
+}
+
+type mdnsCloser interface {
+	Close() error
+}
+
+func (r *Responder) setReceiveDeadline(conn mdnsDeadlineSetter, deadline time.Time) bool {
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		if r.logger != nil {
+			r.logger.Debugf("mDNS receive deadline error: %v", err)
+		}
+		return false
+	}
+	return true
+}
+
+func (r *Responder) closeUDPConn(conn mdnsCloser) {
+	if err := conn.Close(); err != nil && r.logger != nil {
+		r.logger.Warnf("mDNS UDP close error: %v", err)
 	}
 }
 

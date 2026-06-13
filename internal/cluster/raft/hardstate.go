@@ -94,7 +94,7 @@ var syncHardStateParentDir = func(dir string) error {
 	return nil
 }
 
-func saveHardState(dataDir string, hs HardState) error {
+func saveHardState(dataDir string, hs HardState) (err error) {
 	if dataDir == "" {
 		return errors.New("raft: hardstate dataDir is empty; refusing to skip persistence")
 	}
@@ -115,7 +115,9 @@ func saveHardState(dataDir string, hs HardState) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			_ = os.Remove(tmpName)
+			if removeErr := os.Remove(tmpName); removeErr != nil && !os.IsNotExist(removeErr) && err == nil {
+				err = fmt.Errorf("remove temp hardstate: %w", removeErr)
+			}
 		}
 	}()
 

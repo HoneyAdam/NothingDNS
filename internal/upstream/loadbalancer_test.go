@@ -791,6 +791,24 @@ func TestLoadBalancerCheckHealthWithAnycast(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 }
 
+func TestLoadBalancerCheckHealthSkipsNilEntries(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	group.Backends = []*AnycastBackend{nil}
+
+	lb := &LoadBalancer{
+		servers: []*Server{nil},
+		anycastGroups: map[string]*AnycastGroup{
+			"192.0.2.1": group,
+			"nil":       nil,
+		},
+		strategy: Random,
+		udpPool:  make(map[string]*sync.Pool),
+		tcpPool:  make(map[string]*sync.Pool),
+	}
+
+	lb.checkHealth()
+}
+
 func TestLoadBalancerQueryUDP(t *testing.T) {
 	config := LoadBalancerConfig{
 		Servers:         []string{"invalid.hostname.invalid:53"},
@@ -2789,6 +2807,99 @@ func TestLoadBalancerSelectStandaloneNilServerAllStrategies(t *testing.T) {
 		if err == nil {
 			t.Errorf("expected error for strategy %v with no servers", strategy)
 		}
+	}
+}
+
+func TestLoadBalancerSelectStandaloneSkipsNilServers(t *testing.T) {
+	server := &Server{Address: "127.0.0.1:53", healthy: true, latency: time.Millisecond}
+
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		lb := &LoadBalancer{
+			servers:       []*Server{nil, server},
+			anycastGroups: map[string]*AnycastGroup{},
+			strategy:      strategy,
+			udpPool:       make(map[string]*sync.Pool),
+			tcpPool:       make(map[string]*sync.Pool),
+		}
+
+		target, err := lb.selectStandaloneTarget()
+		if err != nil {
+			t.Fatalf("strategy %v returned error with non-nil server: %v", strategy, err)
+		}
+		if target.Server != server {
+			t.Fatalf("strategy %v selected %#v, want %#v", strategy, target.Server, server)
+		}
+	}
+}
+
+func TestLoadBalancerSelectStandaloneNilOnlyErrors(t *testing.T) {
+	for _, strategy := range []Strategy{Random, RoundRobin, Fastest} {
+		lb := &LoadBalancer{
+			servers:       []*Server{nil, nil},
+			anycastGroups: map[string]*AnycastGroup{},
+			strategy:      strategy,
+			udpPool:       make(map[string]*sync.Pool),
+			tcpPool:       make(map[string]*sync.Pool),
+		}
+
+		if target, err := lb.selectStandaloneTarget(); err == nil {
+			t.Fatalf("strategy %v returned target %#v with nil-only servers", strategy, target)
+		}
+	}
+}
+
+func TestLoadBalancerSelectAnycastTargetSkipsNilGroups(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	backend := &AnycastBackend{PhysicalIP: "10.0.0.1", Port: 53, Weight: 100, healthy: true}
+	group.Backends = []*AnycastBackend{nil, backend}
+
+	lb := &LoadBalancer{
+		anycastGroups: map[string]*AnycastGroup{
+			"nil":       nil,
+			"192.0.2.1": group,
+		},
+		strategy: Random,
+		udpPool:  make(map[string]*sync.Pool),
+		tcpPool:  make(map[string]*sync.Pool),
+	}
+
+	target, err := lb.selectAnycastTarget()
+	if err != nil {
+		t.Fatalf("selectAnycastTarget returned error: %v", err)
+	}
+	if target.PhysicalIP != backend.PhysicalIP {
+		t.Fatalf("selected physical IP %q, want %q", target.PhysicalIP, backend.PhysicalIP)
+	}
+
+	lb.anycastGroups = map[string]*AnycastGroup{"nil": nil}
+	if target, err := lb.selectAnycastTarget(); err == nil {
+		t.Fatalf("expected error with nil-only anycast groups, got target %#v", target)
+	}
+}
+
+func TestLoadBalancerIsHealthySkipsNilEntries(t *testing.T) {
+	group := NewAnycastGroup("192.0.2.1", 30*time.Second, 5*time.Second)
+	backend := &AnycastBackend{PhysicalIP: "10.0.0.1", Port: 53, healthy: true}
+	group.Backends = []*AnycastBackend{nil, backend}
+
+	lb := &LoadBalancer{
+		servers: []*Server{nil},
+		anycastGroups: map[string]*AnycastGroup{
+			"nil":       nil,
+			"192.0.2.1": group,
+		},
+		strategy: Random,
+		udpPool:  make(map[string]*sync.Pool),
+		tcpPool:  make(map[string]*sync.Pool),
+	}
+
+	if !lb.IsHealthy() {
+		t.Fatal("expected healthy due to non-nil healthy anycast backend")
+	}
+
+	backend.healthy = false
+	if lb.IsHealthy() {
+		t.Fatal("expected unhealthy with only nil entries and unhealthy backend")
 	}
 }
 

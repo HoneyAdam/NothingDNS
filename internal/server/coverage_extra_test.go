@@ -917,6 +917,7 @@ type mockUDPConn struct {
 	readData     []byte
 	readAddr     *net.UDPAddr
 	writeErr     error
+	closeErr     error
 	closed       int32
 	localAddrVal net.Addr
 	readCh       chan struct{} // Signal when a ReadFromUDP is attempted
@@ -948,7 +949,7 @@ func (m *mockUDPConn) WriteToUDP(buf []byte, addr *net.UDPAddr) (int, error) {
 
 func (m *mockUDPConn) Close() error {
 	atomic.StoreInt32(&m.closed, 1)
-	return nil
+	return m.closeErr
 }
 
 func (m *mockUDPConn) SetReadDeadline(t time.Time) error {
@@ -1025,6 +1026,32 @@ func TestUDPServerReaderNetErrClosed(t *testing.T) {
 		// Serve returned after Stop() cancelled the context
 	case <-time.After(2 * time.Second):
 		t.Error("Serve should return after Stop() is called")
+	}
+}
+
+func TestUDPServerServeReturnsCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	server := NewUDPServerWithWorkers("127.0.0.1:0", HandlerFunc(func(w ResponseWriter, req *protocol.Message) {}), 1)
+	server.ListenWithConn(&mockUDPConn{
+		readErr:  net.ErrClosed,
+		closeErr: closeErr,
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- server.Serve()
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	server.cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, closeErr) {
+			t.Fatalf("Serve() error = %v, want %v", err, closeErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve should return after cancel")
 	}
 }
 

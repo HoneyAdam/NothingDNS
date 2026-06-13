@@ -134,16 +134,29 @@ func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) err
 		return fmt.Errorf("rename tmp journal: %w", err)
 	}
 
-	// Best-effort fsync of the parent directory so the rename's dirent is
-	// durable. Some filesystems (e.g. tmpfs) don't support this; ignore that
-	// specific error rather than failing the whole write.
-	if dirFd, err := os.Open(dir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncJournalDir(dir); err != nil {
+		return err
 	}
 
 	if err := s.trimJournalToLocked(zoneName, s.maxJournalSize); err != nil {
 		return fmt.Errorf("trim journal: %w", err)
+	}
+	return nil
+}
+
+func syncJournalDir(dir string) (err error) {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open journal dir: %w", err)
+	}
+	defer func() {
+		if closeErr := dirFd.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close journal dir: %w", closeErr)
+		}
+	}()
+
+	if err := dirFd.Sync(); err != nil {
+		return fmt.Errorf("fsync journal dir: %w", err)
 	}
 	return nil
 }

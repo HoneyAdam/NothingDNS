@@ -2,6 +2,7 @@ package transfer
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -443,4 +444,30 @@ func TestWriteXoTFrameRejectsZeroProgress_Extra7(t *testing.T) {
 	if err != io.ErrShortWrite {
 		t.Fatalf("writeXoTFrame error = %v, want %v", err, io.ErrShortWrite)
 	}
+}
+
+func TestCloseXoTConnReturnsCloseError_Extra7(t *testing.T) {
+	closeErr := errors.New("close failed")
+	conn := &xotCloseErrorConn{err: closeErr}
+
+	if err := closeXoTConn(conn); !errors.Is(err, closeErr) {
+		t.Fatalf("closeXoTConn error = %v, want %v", err, closeErr)
+	}
+	if !conn.closed {
+		t.Fatal("closeXoTConn should call Close")
+	}
+	if err := closeXoTConn(nil); err != nil {
+		t.Fatalf("closeXoTConn(nil) = %v, want nil", err)
+	}
+}
+
+type xotCloseErrorConn struct {
+	xotShortWriteConn
+	err    error
+	closed bool
+}
+
+func (c *xotCloseErrorConn) Close() error {
+	c.closed = true
+	return c.err
 }

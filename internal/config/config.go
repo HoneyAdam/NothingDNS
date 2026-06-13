@@ -583,6 +583,9 @@ func (c *Config) Validate() []string {
 	// from a shipped template (VULN-050).
 	errors = append(errors, c.validateSecrets()...)
 
+	// Validate HTTP dashboard/API users against the auth store invariants.
+	errors = append(errors, c.validateHTTPUsers()...)
+
 	// Validate DNS Cookie configuration
 	errors = append(errors, c.validateCookie()...)
 
@@ -619,6 +622,12 @@ func (c *Config) Validate() []string {
 	// Validate RPZ configuration
 	errors = append(errors, c.validateRPZ()...)
 
+	// Validate GeoDNS configuration
+	errors = append(errors, c.validateGeoDNS()...)
+
+	// Validate DNS64 configuration
+	errors = append(errors, c.validateDNS64()...)
+
 	// Validate cluster configuration
 	errors = append(errors, c.validateCluster()...)
 
@@ -631,12 +640,16 @@ func (c *Config) Validate() []string {
 	// Validate views (split-horizon) configuration
 	errors = append(errors, c.validateViews()...)
 
-	// Validate zone files exist
-	for _, zone := range c.Zones {
-		if zone == "" {
-			errors = append(errors, "zone file path cannot be empty")
-		}
-	}
+	// Validate configured zone file sources.
+	errors = append(errors, c.validateZoneFiles()...)
 
 	return errors
+}
+
+// ValidateProduction applies the normal validation plus deployment gates for
+// settings that are technically valid for development or staging but unsafe
+// for an internet-facing production daemon.
+func (c *Config) ValidateProduction() []string {
+	errors := c.Validate()
+	return append(errors, c.validateProduction()...)
 }

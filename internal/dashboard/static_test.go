@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -44,6 +45,22 @@ func TestSPAHandler_ServesAssets(t *testing.T) {
 	// Should attempt to serve the file (404 if doesn't exist, but not SPA fallback)
 	if w.Code == http.StatusOK && w.Body.Len() == 0 {
 		t.Error("Expected file server behavior for /assets/ routes")
+	}
+}
+
+func TestDistFSContainsIndexHTML(t *testing.T) {
+	if staticInitErr != nil {
+		t.Fatalf("Expected embedded dashboard assets to initialize: %v", staticInitErr)
+	}
+	data, err := fs.ReadFile(DistFS, "index.html")
+	if err != nil {
+		t.Fatalf("Expected embedded index.html to be readable: %v", err)
+	}
+	if len(data) == 0 {
+		t.Fatal("Expected embedded index.html to be non-empty")
+	}
+	if !strings.Contains(string(data), "doctype html") {
+		t.Fatal("Expected embedded index.html to contain HTML doctype")
 	}
 }
 

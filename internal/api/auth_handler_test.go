@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -497,12 +498,207 @@ func TestHandleUsers_DeleteUser(t *testing.T) {
 	}
 }
 
+func TestHandleUsers_DeleteUserPathParameter(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	if _, err := store.CreateUser("delete/path@example", "password123", auth.RoleViewer); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	s := newServerWithAuth(store)
+	adminUser, _ := store.GetUser("admin")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/users/delete%2Fpath%40example", nil)
+	req = req.WithContext(WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+
+	s.handleUsers(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetUser("delete/path@example"); err == nil {
+		t.Fatal("user should be deleted")
+	}
+}
+
+func TestHandleUsers_DeleteRejectsCurrentUser(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	s := newServerWithAuth(store)
+	adminUser, _ := store.GetUser("admin")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/users/admin", nil)
+	req = req.WithContext(WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+
+	s.handleUsers(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetUser("admin"); err != nil {
+		t.Fatal("current user should not be deleted")
+	}
+}
+
+func TestHandleUsers_DeleteRejectsLastAdmin(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	if _, err := store.CreateUser("operator", "operatorpass123", auth.RoleOperator); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	s := newServerWithAuth(store)
+	operatorUser, _ := store.GetUser("operator")
+	operatorUser.Role = auth.RoleAdmin
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/users/admin", nil)
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
+	rec := httptest.NewRecorder()
+
+	s.handleUsers(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetUser("admin"); err != nil {
+		t.Fatal("last admin should not be deleted")
+	}
+}
+
+func TestHandleUsers_DeleteAdminWhenAnotherAdminRemains(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	if _, err := store.CreateUser("otheradmin", "otheradminpass123", auth.RoleAdmin); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	s := newServerWithAuth(store)
+	adminUser, _ := store.GetUser("admin")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/users/otheradmin", nil)
+	req = req.WithContext(WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+
+	s.handleUsers(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.GetUser("otheradmin"); err == nil {
+		t.Fatal("other admin should be deleted")
+	}
+	if _, err := store.GetUser("admin"); err != nil {
+		t.Fatal("current admin should remain")
+	}
+}
+
+func TestHandleUsers_ItemPathRejectsNonDelete(t *testing.T) {
+	store := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	s := newServerWithAuth(store)
+	adminUser, _ := store.GetUser("admin")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/users/admin", nil)
+	req = req.WithContext(WithUser(req.Context(), adminUser))
+	rec := httptest.NewRecorder()
+
+	s.handleUsers(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAuthStoreRuntimeSwapDoesNotRaceWithHandlers(t *testing.T) {
+	storeA := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	storeB := newAuthStoreWithUser(t, "admin", "testpass123", auth.RoleAdmin)
+	s := newServerWithAuth(storeA)
+
+	adminUser, err := storeA.GetUser("admin")
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	token, err := storeA.GenerateToken("admin", storeA.TokenExpiry())
+	if err != nil {
+		t.Fatalf("GenerateToken: %v", err)
+	}
+	loginBody, err := json.Marshal(LoginRequest{Username: "admin", Password: "testpass123"})
+	if err != nil {
+		t.Fatalf("Marshal login request: %v", err)
+	}
+
+	errCh := make(chan string, 16)
+	var wg sync.WaitGroup
+	const iterations = 25
+	wg.Add(4)
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			if i%2 == 0 {
+				s.WithAuth(storeA)
+			} else {
+				s.WithAuth(storeB)
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+			req.Header.Set("Authorization", "Bearer "+token.Token)
+			rec := httptest.NewRecorder()
+			s.authMiddleware(next).ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent && rec.Code != http.StatusUnauthorized {
+				errCh <- "unexpected auth middleware status"
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(loginBody))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			s.handleLogin(rec, req)
+			if rec.Code != http.StatusOK {
+				errCh <- "unexpected login status"
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/users", nil)
+			req = req.WithContext(WithUser(req.Context(), adminUser))
+			rec := httptest.NewRecorder()
+			s.handleUsers(rec, req)
+			if rec.Code != http.StatusOK {
+				errCh <- "unexpected users status"
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+	close(errCh)
+	for errMsg := range errCh {
+		t.Error(errMsg)
+	}
+}
+
 // --- handleRoles tests ---
 
 func TestHandleRolesEndpoint(t *testing.T) {
-	s := NewServer(config.HTTPConfig{Enabled: true}, nil, nil, nil, nil, nil, nil)
+	store := newAuthStoreWithUser(t, "operator", "testpass123", auth.RoleOperator)
+	s := newServerWithAuth(store)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/roles", nil)
+	operatorUser, _ := store.GetUser("operator")
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
 	rec := httptest.NewRecorder()
 
 	s.handleRoles(rec, req)
@@ -517,5 +713,37 @@ func TestHandleRolesEndpoint(t *testing.T) {
 	}
 	if len(resp.Roles) != 3 {
 		t.Errorf("expected 3 roles, got %d", len(resp.Roles))
+	}
+}
+
+func TestHandleRolesRequiresOperator(t *testing.T) {
+	store := newAuthStoreWithUser(t, "viewer", "testpass123", auth.RoleViewer)
+	s := newServerWithAuth(store)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/roles", nil)
+	viewerUser, _ := store.GetUser("viewer")
+	req = req.WithContext(WithUser(req.Context(), viewerUser))
+	rec := httptest.NewRecorder()
+
+	s.handleRoles(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleRolesWrongMethod(t *testing.T) {
+	store := newAuthStoreWithUser(t, "operator", "testpass123", auth.RoleOperator)
+	s := newServerWithAuth(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/roles", nil)
+	operatorUser, _ := store.GetUser("operator")
+	req = req.WithContext(WithUser(req.Context(), operatorUser))
+	rec := httptest.NewRecorder()
+
+	s.handleRoles(rec, req)
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

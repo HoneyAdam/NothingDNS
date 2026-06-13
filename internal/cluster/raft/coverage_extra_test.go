@@ -1137,6 +1137,42 @@ func TestSnapshotterSaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSyncSnapshotDir(t *testing.T) {
+	if err := syncSnapshotDir(t.TempDir()); err != nil {
+		t.Fatalf("syncSnapshotDir existing dir: %v", err)
+	}
+	if err := syncSnapshotDir(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Fatal("syncSnapshotDir missing dir returned nil error")
+	}
+}
+
+func TestSnapshotterSaveReturnsDirFsyncError(t *testing.T) {
+	originalSyncSnapshotDir := syncSnapshotDir
+	syncSnapshotDir = func(string) error {
+		return fmt.Errorf("dir sync failed")
+	}
+	t.Cleanup(func() { syncSnapshotDir = originalSyncSnapshotDir })
+
+	sn, err := NewSnapshotter(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSnapshotter failed: %v", err)
+	}
+	err = sn.Save(&Snapshot{
+		Index:      42,
+		Term:       3,
+		LastIndex:  41,
+		LastTerm:   3,
+		Data:       []byte("snapshot payload data"),
+		Membership: []NodeID{"node1"},
+	})
+	if err == nil {
+		t.Fatal("Save should return snapshot directory fsync error")
+	}
+	if got, want := err.Error(), "fsync snapshot dir: dir sync failed"; got != want {
+		t.Fatalf("Save error = %q, want %q", got, want)
+	}
+}
+
 func TestSnapshotterWriteSnapshotCompletesPartialWrites(t *testing.T) {
 	sn := &Snapshotter{}
 	writer := &chunkedWriter{maxWrite: 3}

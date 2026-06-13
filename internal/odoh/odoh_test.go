@@ -381,6 +381,16 @@ func TestNewObliviousProxy(t *testing.T) {
 	}
 }
 
+func TestNewObliviousProxyRejectsNilConfig(t *testing.T) {
+	proxy, err := NewObliviousProxy(nil)
+	if err == nil {
+		t.Fatal("expected error for nil config")
+	}
+	if proxy != nil {
+		t.Fatal("expected nil proxy for nil config")
+	}
+}
+
 func TestNewObliviousTarget(t *testing.T) {
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	target, err := NewObliviousTarget(cfg, nil)
@@ -395,6 +405,16 @@ func TestNewObliviousTarget(t *testing.T) {
 	}
 	if len(target.privKey) != 32 {
 		t.Errorf("private key length = %d, want 32", len(target.privKey))
+	}
+}
+
+func TestNewObliviousTargetRejectsNilConfig(t *testing.T) {
+	target, err := NewObliviousTarget(nil, nil)
+	if err == nil {
+		t.Fatal("expected error for nil config")
+	}
+	if target != nil {
+		t.Fatal("expected nil target for nil config")
 	}
 }
 
@@ -571,6 +591,16 @@ func TestNewObliviousClient(t *testing.T) {
 	}
 	if client.client.Timeout != 10*time.Second {
 		t.Errorf("client timeout = %v, want 10s", client.client.Timeout)
+	}
+}
+
+func TestNewObliviousClientRejectsNilConfig(t *testing.T) {
+	client, err := NewObliviousClient(nil)
+	if err == nil {
+		t.Fatal("expected error for nil config")
+	}
+	if client != nil {
+		t.Fatal("expected nil client for nil config")
 	}
 }
 

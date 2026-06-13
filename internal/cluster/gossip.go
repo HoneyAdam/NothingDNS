@@ -393,12 +393,21 @@ func (gp *GossipProtocol) Start() error {
 func (gp *GossipProtocol) Stop() error {
 	gp.cancel()
 
+	var closeErr error
 	if gp.conn != nil {
-		_ = gp.conn.Close()
+		if err := gp.conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			closeErr = fmt.Errorf("close gossip UDP socket: %w", err)
+		}
 	}
 
 	gp.wg.Wait()
-	return nil
+	return closeErr
+}
+
+func (gp *GossipProtocol) recoverCallback(name string) {
+	if recovered := recover(); recovered != nil {
+		util.Errorf("gossip: %s callback panic: %v", name, recovered)
+	}
 }
 
 // Join joins the cluster by contacting a seed node.
@@ -662,7 +671,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 				gp.callbacksMu.RLock()
 				if gp.onNodeJoin != nil {
 					func() {
-						defer func() { _ = recover() }()
+						defer gp.recoverCallback("node join")
 						gp.onNodeJoin(newNode)
 					}()
 				}
@@ -674,7 +683,7 @@ func (gp *GossipProtocol) handleGossip(msg Message, from *net.UDPAddr) {
 			gp.callbacksMu.RLock()
 			if gp.onNodeUpdate != nil {
 				func() {
-					defer func() { _ = recover() }()
+					defer gp.recoverCallback("node update")
 					gp.onNodeUpdate(existing)
 				}()
 			}
@@ -713,7 +722,7 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 	gp.callbacksMu.RLock()
 	if gp.onCacheInvalid != nil {
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("cache invalidation")
 			gp.onCacheInvalid(payload.Keys)
 		}()
 	}
@@ -926,7 +935,7 @@ func (gp *GossipProtocol) handleZoneUpdate(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("zone update")
 			onZoneUpdate(payload)
 		}()
 	}
@@ -968,7 +977,7 @@ func (gp *GossipProtocol) handleConfigSync(msg Message, from *net.UDPAddr) {
 			return
 		}
 		func() {
-			defer func() { _ = recover() }()
+			defer gp.recoverCallback("config sync")
 			onConfigSync(payload)
 		}()
 	}
@@ -1542,7 +1551,7 @@ func (gp *GossipProtocol) probeNodes() {
 				gp.callbacksMu.RLock()
 				if gp.onNodeLeave != nil {
 					func() {
-						defer func() { _ = recover() }()
+						defer gp.recoverCallback("node leave")
 						gp.onNodeLeave(node)
 					}()
 				}

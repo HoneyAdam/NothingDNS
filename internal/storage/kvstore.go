@@ -112,6 +112,13 @@ type bucketData struct {
 	Buckets map[string]*bucketData
 }
 
+func newBucketData() *bucketData {
+	return &bucketData{
+		Entries: make(map[string][]byte),
+		Buckets: make(map[string]*bucketData),
+	}
+}
+
 // KVBucket represents a collection of key-value pairs
 type KVBucket struct {
 	tx   *Tx
@@ -430,15 +437,25 @@ func (s *KVStore) save() error {
 	}
 	renamed = true
 
-	// fsync the parent directory so the rename's dirent reaches stable
-	// storage. Without this step, a power loss between rename and
-	// directory flush can leave the old data file visible (the
-	// inode entry for the new file exists but the dirent rebind hasn't
-	// committed yet). Best-effort: tmpfs and a few exotic FSes don't
-	// support dir fsync, so an error here is logged-and-ignored.
-	if dirFd, err := os.Open(dir); err == nil {
-		_ = dirFd.Sync()
-		_ = dirFd.Close()
+	if err := syncDataDir(dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func syncDataDir(dir string) (err error) {
+	dirFd, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("open data dir: %w", err)
+	}
+	defer func() {
+		if closeErr := dirFd.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("close data dir: %w", closeErr)
+		}
+	}()
+
+	if err := dirFd.Sync(); err != nil {
+		return fmt.Errorf("fsync data dir: %w", err)
 	}
 	return nil
 }
@@ -631,7 +648,9 @@ func (s *KVStore) Update(fn func(*Tx) error) error {
 	}
 
 	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
+		}
 		return err
 	}
 
@@ -648,7 +667,9 @@ func (s *KVStore) View(fn func(*Tx) error) error {
 	}
 
 	err = fn(tx)
-	_ = tx.Rollback()
+	if rollbackErr := tx.Rollback(); rollbackErr != nil {
+		return errors.Join(err, fmt.Errorf("rollback failed: %w", rollbackErr))
+	}
 	return err
 }
 
@@ -796,16 +817,22 @@ func (tx *Tx) Rollback() error {
 
 	// Writable: discard in-memory changes by re-loading from disk under the
 	// still-held exclusive lock.
+	var rollbackErr error
 	tx.store.rwtx = nil
 	if err := tx.store.load(); err != nil {
-		util.Warnf("kvstore: failed to reload data during rollback: %v", err)
+		if os.IsNotExist(err) {
+			tx.store.root = newBucketData()
+		} else {
+			rollbackErr = fmt.Errorf("reload data during rollback: %w", err)
+			util.Warnf("kvstore: %v", rollbackErr)
+		}
 	}
 
 	tx.closed = true
 	tx.store.removeTx(tx)
 	atomic.AddInt64(&tx.store.stats.OpenTxCount, -1)
 	tx.store.mu.Unlock()
-	return nil
+	return rollbackErr
 }
 
 // removeTx removes a transaction from the store's txs slice to prevent unbounded memory growth.

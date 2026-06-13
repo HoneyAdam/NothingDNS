@@ -386,7 +386,9 @@ func (w *tcpResponseWriter) Write(msg *protocol.Message) (int, error) {
 	defer w.writeMu.Unlock()
 
 	// Set write timeout
-	w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout))
+	if err := w.conn.SetWriteDeadline(time.Now().Add(TCPWriteTimeout)); err != nil {
+		return 0, fmt.Errorf("set write deadline: %w", err)
+	}
 
 	// Write response
 	sent, err := writeFullDNSFrame(w.conn, frame[:n+2])

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/binary"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -67,6 +68,69 @@ func TestZoneStoreSaveAndLoad(t *testing.T) {
 	mailRecs := loadedRecords["mail.example.com."]
 	if len(mailRecs) != 1 {
 		t.Fatalf("mail records count = %d, want 1", len(mailRecs))
+	}
+}
+
+func TestZoneStoreSaveZoneReplacesExistingBucket(t *testing.T) {
+	zs, cleanup := newTestZoneStore(t)
+	defer cleanup()
+
+	meta := ZoneMeta{Origin: "example.com.", DefaultTTL: 3600}
+	if err := zs.SaveZone("example.com.", meta, map[string][]StoredRecord{
+		"old.example.com.": {
+			{Name: "old.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "192.0.2.1"},
+		},
+	}); err != nil {
+		t.Fatalf("initial SaveZone: %v", err)
+	}
+
+	if err := zs.SaveZone("example.com.", meta, map[string][]StoredRecord{
+		"new.example.com.": {
+			{Name: "new.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "192.0.2.2"},
+		},
+	}); err != nil {
+		t.Fatalf("replacement SaveZone: %v", err)
+	}
+
+	_, records, err := zs.LoadZone("example.com.")
+	if err != nil {
+		t.Fatalf("LoadZone: %v", err)
+	}
+	if _, ok := records["old.example.com."]; ok {
+		t.Fatal("replacement SaveZone left stale records from old zone bucket")
+	}
+	if recs := records["new.example.com."]; len(recs) != 1 || recs[0].RData != "192.0.2.2" {
+		t.Fatalf("new records = %+v, want replacement A record", recs)
+	}
+}
+
+func TestDeleteExistingZoneBucketPropagatesUnexpectedError(t *testing.T) {
+	zs, cleanup := newTestZoneStore(t)
+	defer cleanup()
+
+	if err := zs.kv.Update(func(tx *Tx) error {
+		zones, err := tx.CreateBucket([]byte("zones"))
+		if err != nil {
+			return err
+		}
+		_, err = zones.CreateBucket([]byte("example.com."))
+		return err
+	}); err != nil {
+		t.Fatalf("create zones fixture: %v", err)
+	}
+
+	err := zs.kv.View(func(tx *Tx) error {
+		zones := tx.Bucket([]byte("zones"))
+		return deleteExistingZoneBucket(zones, "example.com.")
+	})
+	if err == nil {
+		t.Fatal("deleteExistingZoneBucket should propagate read-only delete error")
+	}
+	if !strings.Contains(err.Error(), "delete existing zone bucket example.com.") {
+		t.Fatalf("error should include zone delete context, got: %v", err)
+	}
+	if !errors.Is(err, ErrTxNotWritable) {
+		t.Fatalf("error should wrap ErrTxNotWritable, got: %v", err)
 	}
 }
 

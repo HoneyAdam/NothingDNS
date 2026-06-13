@@ -476,7 +476,7 @@ func TestEntryRemainingTTL(t *testing.T) {
 	entry.ExpireTime = now.Add(time.Duration(int64(^uint32(0))+1) * time.Second)
 	remaining = entry.RemainingTTL(now)
 	if remaining != ^uint32(0) {
-		t.Errorf("expected saturated remaining TTL %d, got %d", uint32(^uint32(0)), remaining)
+		t.Errorf("expected saturated remaining TTL %d, got %d", ^uint32(0), remaining)
 	}
 }
 

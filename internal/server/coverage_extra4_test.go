@@ -1,10 +1,12 @@
 package server
 
 import (
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -380,9 +382,10 @@ func TestWriteFullDNSFrameRejectsZeroByteWrite(t *testing.T) {
 }
 
 type partialWriteConn struct {
-	maxWrite int
-	written  []byte
-	calls    int
+	maxWrite         int
+	written          []byte
+	calls            int
+	writeDeadlineErr error
 }
 
 func (c *partialWriteConn) Read(_ []byte) (int, error) {
@@ -423,7 +426,72 @@ func (c *partialWriteConn) SetReadDeadline(_ time.Time) error {
 }
 
 func (c *partialWriteConn) SetWriteDeadline(_ time.Time) error {
-	return nil
+	return c.writeDeadlineErr
+}
+
+func TestTCPResponseWriterWriteDeadlineError(t *testing.T) {
+	deadlineErr := errors.New("deadline failed")
+	conn := &partialWriteConn{
+		maxWrite:         8,
+		writeDeadlineErr: deadlineErr,
+	}
+	rw := &tcpResponseWriter{
+		conn:    conn,
+		client:  &ClientInfo{Protocol: "tcp"},
+		maxSize: TCPMaxMessageSize,
+		writeMu: &sync.Mutex{},
+	}
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0xD1,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+	}
+
+	written, err := rw.Write(msg)
+	if !errors.Is(err, deadlineErr) {
+		t.Fatalf("Write error = %v, want %v", err, deadlineErr)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
+	if conn.calls != 0 {
+		t.Fatalf("connection Write calls = %d, want 0", conn.calls)
+	}
+}
+
+func TestTLSResponseWriterWriteDeadlineError(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	tlsConn := tls.Client(clientConn, &tls.Config{InsecureSkipVerify: true})
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("close client conn: %v", err)
+	}
+	if err := serverConn.Close(); err != nil {
+		t.Fatalf("close server conn: %v", err)
+	}
+
+	rw := &tlsResponseWriter{
+		conn:    tlsConn,
+		client:  &ClientInfo{Protocol: "dot"},
+		maxSize: TLSMaxMessageSize,
+	}
+	msg := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0xD2,
+			Flags: protocol.NewResponseFlags(protocol.RcodeSuccess),
+		},
+	}
+
+	written, err := rw.Write(msg)
+	if err == nil {
+		t.Fatal("expected write deadline error")
+	}
+	if !strings.Contains(err.Error(), "set write deadline") {
+		t.Fatalf("Write error = %v, want set write deadline context", err)
+	}
+	if written != 0 {
+		t.Fatalf("written = %d, want 0", written)
+	}
 }
 
 // ==============================================================================

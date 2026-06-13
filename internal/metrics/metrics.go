@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -144,7 +145,7 @@ func (m *MetricsCollector) Start() error {
 	}
 
 	// SECURITY: Refuse to serve metrics without auth. Operators must set
-	// auth_token when enabling the metrics endpoint on any non-loopback bind.
+	// auth_token whenever the metrics endpoint is enabled.
 	if m.config.AuthToken == "" {
 		return fmt.Errorf("metrics enabled but auth_token not configured: " +
 			"refusing to serve sensitive operational metrics without authentication; " +
@@ -175,6 +176,12 @@ func (m *MetricsCollector) Start() error {
 		MaxHeaderBytes:    1 << 15,
 	}
 
+	ln, err := net.Listen("tcp", m.config.Bind)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("listen metrics %s: %w", m.config.Bind, err)
+	}
+
 	m.mu.Lock()
 	m.server = srv
 	m.ctx = ctx
@@ -184,7 +191,7 @@ func (m *MetricsCollector) Start() error {
 	m.wg.Add(1)
 	go func(srv *http.Server) {
 		defer m.wg.Done()
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			util.Warnf("metrics server error: %v", err)
 		}
 	}(srv)

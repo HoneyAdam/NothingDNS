@@ -626,6 +626,7 @@ type ErrorMockWebSocketConn struct {
 	closed   bool
 	readErr  atomic.Bool
 	writeErr atomic.Bool
+	closeErr error
 	mu       sync.Mutex
 }
 
@@ -653,7 +654,29 @@ func (m *ErrorMockWebSocketConn) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.closed = true
-	return nil
+	return m.closeErr
+}
+
+func TestCloseClientConnReturnsCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	conn := &ErrorMockWebSocketConn{closeErr: closeErr}
+	client := &Client{conn: conn}
+
+	if err := closeClientConn(client); !errors.Is(err, closeErr) {
+		t.Fatalf("closeClientConn error = %v, want %v", err, closeErr)
+	}
+	if !conn.closed {
+		t.Fatal("closeClientConn should still close the connection")
+	}
+}
+
+func TestCloseClientConnNilSafe(t *testing.T) {
+	if err := closeClientConn(nil); err != nil {
+		t.Fatalf("closeClientConn(nil) = %v, want nil", err)
+	}
+	if err := closeClientConn(&Client{}); err != nil {
+		t.Fatalf("closeClientConn(nil conn) = %v, want nil", err)
+	}
 }
 
 // Test Stop is idempotent when called after broadcastChan is drained

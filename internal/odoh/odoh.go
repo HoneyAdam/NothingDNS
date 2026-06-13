@@ -50,6 +50,7 @@ var (
 	ErrDecryptionFailed = errors.New("decryption failed")
 	ErrInvalidNonce     = errors.New("invalid nonce")
 	ErrTooManyDHPairs   = errors.New("too many DH pairs for this context")
+	errNilConfig        = errors.New("odoh config cannot be nil")
 	errBodyTooLarge     = errors.New("odoh body too large")
 )
 
@@ -155,6 +156,9 @@ func NewODoHConfig(targetName, proxyName string) *ODoHConfig {
 
 // NewObliviousClient creates a new ODoH client.
 func NewObliviousClient(config *ODoHConfig) (*ObliviousClient, error) {
+	if config == nil {
+		return nil, errNilConfig
+	}
 	return &ObliviousClient{
 		config: config,
 		client: &http.Client{
@@ -203,6 +207,9 @@ func (c *ObliviousClient) Query(dnsQuery []byte) ([]byte, error) {
 // ObliviousDoHConfigContents. The client config carries it in
 // TargetPublicKey for compatibility with the existing API surface.
 func (c *ObliviousClient) getTargetConfigContents() ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	if len(c.config.TargetPublicKey) == 0 {
 		return nil, ErrInvalidKey
 	}
@@ -212,6 +219,9 @@ func (c *ObliviousClient) getTargetConfigContents() ([]byte, error) {
 // postEncapsulated POSTs the RFC 9230 wire-format message to the
 // configured proxy URL and returns the response bytes.
 func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	req, err := http.NewRequest("POST", c.config.ProxyURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -239,6 +249,9 @@ func (c *ObliviousClient) postEncapsulated(body []byte) ([]byte, error) {
 // The key must be provided via configuration or fetched securely.
 // Returns an error if no valid key is configured.
 func (c *ObliviousClient) getTargetPublicKey() ([]byte, error) {
+	if c == nil || c.config == nil {
+		return nil, errNilConfig
+	}
 	// In a real implementation, the key would be:
 	// 1. Fetched from DNS (with DNSSEC validation)
 	// 2. Pre-configured by the operator
@@ -358,6 +371,9 @@ func (c *ObliviousClient) decapsulateResponse(response *ObliviousDNSMessage, eph
 
 // NewObliviousProxy creates a new ODoH proxy server.
 func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
+	if config == nil {
+		return nil, errNilConfig
+	}
 	return &ObliviousProxy{
 		config: config,
 		client: &http.Client{
@@ -372,6 +388,10 @@ func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
 // requires the proxy never see the inner DNS message, which is exactly
 // what a byte-for-byte pass-through achieves.
 func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p == nil || p.config == nil {
+		http.Error(w, "ODoH proxy not initialised", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -395,7 +415,9 @@ func (p *ObliviousProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(respBytes)
+	if _, err := w.Write(respBytes); err != nil {
+		return
+	}
 }
 
 // forwardRaw POSTs the opaque ODoH message bytes to the configured
@@ -451,6 +473,9 @@ func NewObliviousTarget(config *ODoHConfig, handler server.Handler) (*ObliviousT
 // validateODoHSuite returns an error if the config's KEM/KDF/AEAD does
 // not name one of the supported HPKE suites.
 func validateODoHSuite(cfg *ODoHConfig) error {
+	if cfg == nil {
+		return errNilConfig
+	}
 	if cfg.HPKEKEM != HPKEDHX25519 {
 		return fmt.Errorf("KEM %d not supported (only X25519 = %d)", cfg.HPKEKEM, HPKEDHX25519)
 	}
@@ -483,6 +508,10 @@ const HPKEAEADAES128GCM = 3
 // On any decode, decrypt, or resolution failure, HTTP 400 / 500 is
 // returned without leaking which step failed.
 func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if t == nil {
+		http.Error(w, "ODoH target not initialised", http.StatusServiceUnavailable)
+		return
+	}
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -536,7 +565,9 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/oblivious-dns-message")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(encryptedResponse)
+	if _, err := w.Write(encryptedResponse); err != nil {
+		return
+	}
 }
 
 func readLimitedODoHBody(r io.Reader) ([]byte, error) {

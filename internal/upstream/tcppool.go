@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"errors"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -80,17 +81,28 @@ func (p *tcpConnPool) get() (*tcpConn, error) {
 
 		// Check if the idle connection is still valid
 		if tcpIdleTimeoutReachedAt(c.lastUsedAt, time.Now(), p.idleTimeout) {
-			_ = p.closeConnLocked(c)
+			if err := p.closeConnLocked(c); err != nil {
+				p.mu.Unlock()
+				return nil, err
+			}
 			continue
 		}
 
 		// Check if connection is still alive with a zero-read deadline
 		if err := c.conn.SetReadDeadline(time.Now()); err != nil {
-			_ = p.closeConnLocked(c)
-			continue
+			if closeErr := p.closeConnLocked(c); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+			p.mu.Unlock()
+			return nil, err
 		}
-		// Reset deadline to zero (blocking)
-		_ = c.conn.SetReadDeadline(time.Time{})
+		if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
+			if closeErr := p.closeConnLocked(c); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+			p.mu.Unlock()
+			return nil, err
+		}
 
 		c.inUse.Store(true)
 		p.mu.Unlock()
@@ -140,11 +152,10 @@ func tcpIdleTimeoutReachedAt(lastUsedAt, now time.Time, idleTimeout time.Duratio
 }
 
 // put returns a connection to the pool or closes it.
-func (p *tcpConnPool) put(c *tcpConn) {
+func (p *tcpConnPool) put(c *tcpConn) error {
 	if c.pool != p {
 		// Not part of this pool (overflow connection) — just close
-		_ = c.close()
-		return
+		return c.close()
 	}
 
 	c.lastUsedAt = time.Now()
@@ -154,29 +165,32 @@ func (p *tcpConnPool) put(c *tcpConn) {
 	defer p.mu.Unlock()
 
 	if p.closed {
-		_ = p.closeConnLocked(c)
-		return
+		return p.closeConnLocked(c)
 	}
 
 	// If too many idle, close this one
 	if len(p.idle) >= p.maxIdle {
-		_ = p.closeConnLocked(c)
-		return
+		return p.closeConnLocked(c)
 	}
 
 	p.idle = append(p.idle, c)
+	return nil
 }
 
 // closeAll closes all idle connections and marks the pool as closed.
-func (p *tcpConnPool) closeAll() {
+func (p *tcpConnPool) closeAll() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.closed = true
+	var closeErr error
 	for _, c := range p.idle {
-		_ = p.closeConnLocked(c)
+		if err := p.closeConnLocked(c); err != nil {
+			closeErr = errors.Join(closeErr, err)
+		}
 	}
 	p.idle = nil
+	return closeErr
 }
 
 // closeConnLocked closes a pooled connection while p.mu is already held.

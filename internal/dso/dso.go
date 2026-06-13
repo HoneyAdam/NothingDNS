@@ -740,14 +740,15 @@ func (m *Manager) SendKeepalive(session *Session) error {
 	// Set a write deadline so a stuck peer can't hang us forever.
 	deadline := time.Now().Add(5 * time.Second)
 	if err := session.Conn.SetWriteDeadline(deadline); err != nil {
-		// Non-fatal: continue and let Write block on the underlying timeout.
-		_ = err
+		return fmt.Errorf("dso: set keepalive write deadline: %w", err)
 	}
 	if err := util.WriteFull(session.Conn, out); err != nil {
 		return fmt.Errorf("dso: write keepalive: %w", err)
 	}
 	// Reset write deadline.
-	_ = session.Conn.SetWriteDeadline(time.Time{})
+	if err := session.Conn.SetWriteDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("dso: reset keepalive write deadline: %w", err)
+	}
 
 	session.UpdateActivity()
 	if m.logger != nil {

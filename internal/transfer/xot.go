@@ -216,7 +216,16 @@ func (s *XoTServer) Serve(addr string) error {
 
 // AcceptLoop runs the accept loop for incoming connections.
 func (s *XoTServer) AcceptLoop() {
+	s.mu.Lock()
+	if s.closed || s.listener == nil {
+		s.mu.Unlock()
+		return
+	}
+	listener := s.listener
+	stopCh := s.stopCh
 	s.wg.Add(1)
+	s.mu.Unlock()
+
 	defer s.wg.Done()
 	defer func() {
 		if r := recover(); r != nil {
@@ -229,16 +238,23 @@ func (s *XoTServer) AcceptLoop() {
 	}()
 
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := listener.Accept()
 		if err != nil {
 			select {
-			case <-s.stopCh:
+			case <-stopCh:
 				return
 			default:
 				continue
 			}
 		}
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			s.closeConn(conn, "accepted connection after shutdown")
+			return
+		}
 		s.wg.Add(1)
+		s.mu.Unlock()
 		go func() {
 			defer s.wg.Done()
 			s.handleConnection(conn)
@@ -257,7 +273,7 @@ func (s *XoTServer) handleConnection(conn net.Conn) {
 				fmt.Printf("XoT handleConnection panic recovered: %v\n", r)
 			}
 		}
-		conn.Close()
+		s.closeConn(conn, "connection")
 	}()
 
 	// Read length-prefixed DNS messages
@@ -884,6 +900,23 @@ func writeXoTFrame(conn net.Conn, frame []byte, payloadLen int) error {
 		frame = frame[n:]
 	}
 	return nil
+}
+
+func (s *XoTServer) closeConn(conn net.Conn, label string) {
+	if err := closeXoTConn(conn); err != nil {
+		if s.logger != nil {
+			s.logger.Warnf("XoT: failed to close %s: %v", label, err)
+		} else {
+			fmt.Printf("XoT: failed to close %s: %v\n", label, err)
+		}
+	}
+}
+
+func closeXoTConn(conn net.Conn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.Close()
 }
 
 // Close closes the XoT server.

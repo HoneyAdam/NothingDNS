@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -179,13 +180,16 @@ func TestTCPPool_Put_OverflowConnection(t *testing.T) {
 
 	// Create a connection that belongs to a different pool
 	otherPool := &tcpConnPool{}
+	closeErr := errors.New("overflow close failed")
 	conn := &tcpConn{
 		pool: otherPool,
-		conn: &net.TCPConn{},
+		conn: &closeErrorConn{closeErr: closeErr},
 	}
 
 	// put should close the overflow connection
-	pool.put(conn)
+	if err := pool.put(conn); !errors.Is(err, closeErr) {
+		t.Fatalf("put error = %v, want %v", err, closeErr)
+	}
 	// Should not panic and should not add to idle
 	if len(pool.idle) != 0 {
 		t.Errorf("expected 0 idle conns, got %d", len(pool.idle))
@@ -200,13 +204,17 @@ func TestTCPPool_Put_PoolClosed(t *testing.T) {
 		active:   1,
 	}
 
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
 	conn := &tcpConn{
 		pool: pool,
-		conn: &net.TCPConn{},
+		conn: clientConn,
 	}
 	conn.inUse.Store(true)
 
-	pool.put(conn)
+	if err := pool.put(conn); err != nil {
+		t.Fatalf("put to closed pool: %v", err)
+	}
 
 	if pool.active != 0 {
 		t.Errorf("expected active=0 after put to closed pool, got %d", pool.active)
@@ -222,13 +230,17 @@ func TestTCPPool_Put_TooManyIdle(t *testing.T) {
 	}
 	pool.idle[0] = &tcpConn{pool: pool}
 
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
 	conn := &tcpConn{
 		pool: pool,
-		conn: &net.TCPConn{},
+		conn: clientConn,
 	}
 	conn.inUse.Store(true)
 
-	pool.put(conn)
+	if err := pool.put(conn); err != nil {
+		t.Fatalf("put over max idle: %v", err)
+	}
 
 	// Should close the connection because idle is full
 	if len(pool.idle) != 1 {
@@ -247,13 +259,17 @@ func TestTCPPool_Put_Success(t *testing.T) {
 		active:   1,
 	}
 
+	clientConn, serverConn := net.Pipe()
+	defer serverConn.Close()
 	conn := &tcpConn{
 		pool: pool,
-		conn: &net.TCPConn{},
+		conn: clientConn,
 	}
 	conn.inUse.Store(true)
 
-	pool.put(conn)
+	if err := pool.put(conn); err != nil {
+		t.Fatalf("put: %v", err)
+	}
 
 	if len(pool.idle) != 1 {
 		t.Errorf("expected 1 idle conn, got %d", len(pool.idle))
@@ -301,7 +317,9 @@ func TestTCPConn_Close_DecrementsPooledActiveOnce(t *testing.T) {
 		t.Fatalf("expected active=0 after close, got %d", pool.active)
 	}
 
-	_ = conn.close()
+	if err := conn.close(); err != nil {
+		t.Fatalf("second close() error = %v", err)
+	}
 	if pool.active != 0 {
 		t.Fatalf("expected second close to keep active=0, got %d", pool.active)
 	}
@@ -368,6 +386,15 @@ func (c *partialWriteConn) Close() error {
 	return nil
 }
 
+type closeErrorConn struct {
+	partialWriteConn
+	closeErr error
+}
+
+func (c *closeErrorConn) Close() error {
+	return c.closeErr
+}
+
 func (c *partialWriteConn) LocalAddr() net.Addr {
 	return &net.IPAddr{IP: net.IPv4(127, 0, 0, 1)}
 }
@@ -405,8 +432,33 @@ func TestTCPPool_CloseAll_DecrementsIdleActive(t *testing.T) {
 		{pool: pool, conn: clientConn2},
 	}
 
-	pool.closeAll()
+	if err := pool.closeAll(); err != nil {
+		t.Fatalf("closeAll: %v", err)
+	}
 
+	if pool.active != 0 {
+		t.Fatalf("expected active=0 after closeAll, got %d", pool.active)
+	}
+	if len(pool.idle) != 0 {
+		t.Fatalf("expected idle list to be cleared, got %d", len(pool.idle))
+	}
+}
+
+func TestTCPPool_CloseAllReportsCloseError(t *testing.T) {
+	closeErr := errors.New("idle close failed")
+	pool := &tcpConnPool{
+		maxIdle:  1,
+		maxTotal: 1,
+		active:   1,
+	}
+	pool.idle = []*tcpConn{
+		{pool: pool, conn: &closeErrorConn{closeErr: closeErr}},
+	}
+
+	err := pool.closeAll()
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("closeAll error = %v, want %v", err, closeErr)
+	}
 	if pool.active != 0 {
 		t.Fatalf("expected active=0 after closeAll, got %d", pool.active)
 	}
@@ -432,12 +484,16 @@ func TestTCPPool_GetRejectsClosedPool(t *testing.T) {
 	}()
 
 	pool := newTCPConnPool(ln.Addr().String(), 1, 1, time.Second, time.Second)
-	pool.closeAll()
+	if err := pool.closeAll(); err != nil {
+		t.Fatalf("closeAll: %v", err)
+	}
 
 	tc, err := pool.get()
 	if err == nil {
 		if tc != nil {
-			_ = tc.close()
+			if closeErr := tc.close(); closeErr != nil {
+				t.Fatalf("close unexpected conn: %v", closeErr)
+			}
 		}
 		t.Fatal("expected closed pool to reject get")
 	}
@@ -451,7 +507,9 @@ func TestTCPPool_GetRejectsClosedPool(t *testing.T) {
 	select {
 	case conn := <-accepted:
 		if conn != nil {
-			_ = conn.Close()
+			if err := conn.Close(); err != nil {
+				t.Fatalf("close unexpected accepted conn: %v", err)
+			}
 			t.Fatal("closed pool unexpectedly opened a TCP connection")
 		}
 	case <-time.After(50 * time.Millisecond):
