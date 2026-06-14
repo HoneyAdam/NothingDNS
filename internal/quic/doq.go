@@ -283,7 +283,17 @@ func (s *DoQServer) acceptLoop() {
 	defer s.wg.Done()
 
 	for {
-		conn, err := s.listener.Accept(s.ctx)
+		// Acquire closeMu to safely read s.listener, preventing a data race
+		// with Stop() -> closeListener() which writes s.listener = nil.
+		s.closeMu.Lock()
+		listener := s.listener
+		s.closeMu.Unlock()
+
+		if listener == nil {
+			return
+		}
+
+		conn, err := listener.Accept(s.ctx)
 		if err != nil {
 			// Context cancelled means shutdown
 			if s.ctx.Err() != nil {
