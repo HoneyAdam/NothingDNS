@@ -5,13 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/server"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/server"
 )
 
 // TestDoHPOST_BodyExceedsMaxSize tests that handlePOST rejects bodies
@@ -444,4 +444,236 @@ func TestIsJSONRequest(t *testing.T) {
 			}
 		})
 	}
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) {
+	return 0, errors.New("random source failed")
+}
+
+func TestNewHandler(t *testing.T) {
+	h := NewHandler(nil)
+	if h == nil {
+		t.Fatal("NewHandler returned nil")
+	}
+	if h.padding {
+		t.Error("padding should be false by default")
+	}
+}
+
+func TestNewHandlerWithPadding(t *testing.T) {
+	h := NewHandlerWithPadding(nil)
+	if h == nil {
+		t.Fatal("NewHandlerWithPadding returned nil")
+	}
+	if !h.padding {
+		t.Error("padding should be true")
+	}
+}
+
+func TestHandlerServeHTTPRejectsUninitializedHandler(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler *Handler
+	}{
+		{name: "nil handler", handler: nil},
+		{name: "zero value handler", handler: &Handler{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/dns-query", nil)
+			rr := httptest.NewRecorder()
+
+			tc.handler.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want %d", rr.Code, http.StatusServiceUnavailable)
+			}
+		})
+	}
+}
+
+func TestGeneratePadding(t *testing.T) {
+	padding, err := generatePadding()
+	if err != nil {
+		t.Fatalf("generatePadding failed: %v", err)
+	}
+	if len(padding) < MinPaddingSize {
+		t.Errorf("padding too small: %d < %d", len(padding), MinPaddingSize)
+	}
+	if len(padding) > MaxPaddingSize {
+		t.Errorf("padding too large: %d > %d", len(padding), MaxPaddingSize)
+	}
+}
+
+func TestGeneratePadding_MultipleCalls(t *testing.T) {
+	sizes := make(map[int]bool)
+	for i := 0; i < 100; i++ {
+		padding, err := generatePadding()
+		if err != nil {
+			t.Fatalf("generatePadding failed: %v", err)
+		}
+		sizes[len(padding)] = true
+	}
+	// With random sizing, we should get multiple distinct sizes
+	if len(sizes) < 3 {
+		t.Errorf("expected varied padding sizes, got %d distinct values", len(sizes))
+	}
+}
+
+func TestPadMessage(t *testing.T) {
+	original := []byte{0x00, 0x01, 0x02, 0x03}
+	padded, err := padMessage(original)
+	if err != nil {
+		t.Fatalf("padMessage failed: %v", err)
+	}
+	if len(padded) <= len(original) {
+		t.Errorf("padded message should be longer: %d <= %d", len(padded), len(original))
+	}
+	// Original bytes should be preserved
+	for i, b := range original {
+		if padded[i] != b {
+			t.Errorf("byte %d mismatch: %x != %x", i, padded[i], b)
+		}
+	}
+}
+
+func TestPadMessage_Empty(t *testing.T) {
+	padded, err := padMessage([]byte{})
+	if err != nil {
+		t.Fatalf("padMessage failed: %v", err)
+	}
+	if len(padded) < MinPaddingSize {
+		t.Errorf("padded empty should have at least MinPaddingSize: %d", len(padded))
+	}
+}
+
+func TestPadMessage_RandomFailureReturnsOriginalAndError(t *testing.T) {
+	originalReader := secureRandomReader
+	secureRandomReader = failingReader{}
+	t.Cleanup(func() { secureRandomReader = originalReader })
+
+	original := []byte{0x00, 0x01, 0x02, 0x03}
+	padded, err := padMessage(original)
+	if err == nil {
+		t.Fatal("padMessage should return random source error")
+	}
+	if len(padded) != len(original) {
+		t.Fatalf("failed padding should return original length: got %d, want %d", len(padded), len(original))
+	}
+	for i, b := range original {
+		if padded[i] != b {
+			t.Errorf("byte %d mismatch: %x != %x", i, padded[i], b)
+		}
+	}
+}
+
+func TestDohResponseWriter_MaxSize(t *testing.T) {
+	rw := &dohResponseWriter{}
+	if rw.MaxSize() != MaxDNSMessageSize {
+		t.Errorf("MaxSize should be %d, got %d", MaxDNSMessageSize, rw.MaxSize())
+	}
+}
+
+func TestWsResponseWriter_MaxSize(t *testing.T) {
+	rw := &wsResponseWriter{}
+	if rw.MaxSize() != MaxDNSMessageSize {
+		t.Errorf("MaxSize should be %d, got %d", MaxDNSMessageSize, rw.MaxSize())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// jsonResponseWriter.ClientInfo — hostname fallback to 0.0.0.0
+// ---------------------------------------------------------------------------
+
+func TestJSONResponseWriter_ClientInfo_HostnameFallback(t *testing.T) {
+	req := &http.Request{
+		RemoteAddr: "hostname-not-ip:1234",
+	}
+	rw := &jsonResponseWriter{httpReq: req}
+
+	info := rw.ClientInfo()
+	if info == nil {
+		t.Fatal("expected non-nil ClientInfo")
+	}
+	if info.Protocol != "https" {
+		t.Errorf("Protocol = %q, want https", info.Protocol)
+	}
+	if info.Addr == nil {
+		t.Fatal("expected non-nil Addr")
+	}
+	// Should fall back to 0.0.0.0 since "hostname-not-ip" is not a valid IP
+	tcpAddr, ok := info.Addr.(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("expected *net.TCPAddr, got %T", info.Addr)
+	}
+	if !tcpAddr.IP.Equal(net.IPv4(0, 0, 0, 0)) {
+		t.Errorf("IP = %v, want 0.0.0.0", tcpAddr.IP)
+	}
+	if tcpAddr.Port != 1234 {
+		t.Errorf("Port = %d, want 1234", tcpAddr.Port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// jsonResponseWriter.ClientInfo — no port
+// ---------------------------------------------------------------------------
+
+func TestJSONResponseWriter_ClientInfo_NoPort(t *testing.T) {
+	req := &http.Request{
+		RemoteAddr: "1.2.3.4", // no port
+	}
+	rw := &jsonResponseWriter{httpReq: req}
+
+	info := rw.ClientInfo()
+	if info == nil {
+		t.Fatal("expected non-nil ClientInfo")
+	}
+	if info.Protocol != "https" {
+		t.Errorf("Protocol = %q, want https", info.Protocol)
+	}
+	// SplitHostPort fails, so Addr should be nil
+	if info.Addr != nil {
+		t.Errorf("expected nil Addr when RemoteAddr has no port, got %v", info.Addr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dohResponseWriter.ClientInfo — IPv6 address
+// ---------------------------------------------------------------------------
+
+func TestDohResponseWriter_ClientInfo_IPv6(t *testing.T) {
+	req := &http.Request{
+		RemoteAddr: "[::1]:4321",
+	}
+	rw := &dohResponseWriter{
+		r: req,
+	}
+
+	info := rw.ClientInfo()
+	if info == nil {
+		t.Fatal("expected non-nil ClientInfo")
+	}
+	if info.Addr == nil {
+		t.Fatal("expected non-nil Addr")
+	}
+	tcpAddr, ok := info.Addr.(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("expected *net.TCPAddr, got %T", info.Addr)
+	}
+	if !tcpAddr.IP.Equal(net.ParseIP("::1")) {
+		t.Errorf("IP = %v, want ::1", tcpAddr.IP)
+	}
+	if tcpAddr.Port != 4321 {
+		t.Errorf("Port = %d, want 4321", tcpAddr.Port)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// wsResponseWriter — verify interface compliance
+// ---------------------------------------------------------------------------
+
+func TestWSResponseWriter_Interface(t *testing.T) {
+	// Compile-time check that wsResponseWriter implements server.ResponseWriter
+	var _ server.ResponseWriter = (*wsResponseWriter)(nil)
 }

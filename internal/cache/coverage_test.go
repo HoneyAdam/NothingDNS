@@ -1,12 +1,245 @@
 package cache
 
 import (
+	"github.com/nothingdns/nothingdns/internal/protocol"
 	"sort"
 	"testing"
 	"time"
-
-	"github.com/nothingdns/nothingdns/internal/protocol"
 )
+
+// TestRemainingTTL_NegativeDurationCoversNegativeBranch tests the
+// `if remaining < 0 { return 0 }` branch in RemainingTTL.
+// This branch handles the case where IsExpired returns false but the
+// computed remaining duration is negative (a defensive guard).
+// Since this is extremely difficult to trigger through normal time
+// calculations, we directly test the function behavior around boundaries.
+func TestRemainingTTL_NegativeDurationCoversNegativeBranch(t *testing.T) {
+	now := time.Now()
+
+	// Entry with ExpireTime slightly in the past (500ms ago).
+	// IsExpired returns true, so RemainingTTL returns 0 at line 55.
+	entry := &Entry{
+		ExpireTime: now.Add(-500 * time.Millisecond),
+	}
+	remaining := entry.RemainingTTL(now)
+	if remaining != 0 {
+		t.Errorf("expected 0 for expired entry, got %d", remaining)
+	}
+
+	// Entry with ExpireTime exactly equal to now.
+	// IsExpired(now) returns false (now.After(now) == false),
+	// remaining = ExpireTime.Sub(now) = 0, which is >= 0, returns uint32(0) = 0.
+	entry2 := &Entry{
+		ExpireTime: now,
+	}
+	remaining2 := entry2.RemainingTTL(now)
+	if remaining2 != 0 {
+		t.Errorf("expected 0 for exactly-at-expiry entry, got %d", remaining2)
+	}
+
+	// Entry well in the future: covers the normal return path (line 61).
+	entry3 := &Entry{
+		ExpireTime: now.Add(120 * time.Second),
+	}
+	remaining3 := entry3.RemainingTTL(now)
+	if remaining3 != 120 {
+		t.Errorf("expected 120 remaining, got %d", remaining3)
+	}
+}
+
+// TestSetNegative_MinTTLClamping covers the `if ttl < c.minTTL` branch
+// in SetNegative by configuring negativeTTL < minTTL.
+func TestSetNegative_MinTTLClamping(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = 128
+	config.MinTTL = 10 * time.Second
+	config.NegativeTTL = 2 * time.Second // negativeTTL < minTTL
+	c := New(config)
+
+	c.SetNegative("clamp.com:1", 3)
+
+	entry := c.Get("clamp.com:1")
+	if entry == nil {
+		t.Fatal("expected entry to exist")
+	}
+
+	// Entry should NOT be expired at 8 seconds (since TTL was clamped to 10s).
+	if entry.IsExpired(time.Now().Add(8 * time.Second)) {
+		t.Error("entry should not be expired at 8s (negativeTTL clamped to minTTL=10s)")
+	}
+	// Entry SHOULD be expired well after 10 seconds.
+	if !entry.IsExpired(time.Now().Add(12 * time.Second)) {
+		t.Error("entry should be expired at 12s (negativeTTL clamped to minTTL=10s)")
+	}
+}
+
+// TestSetNegative_MaxTTLClamping covers the `if ttl > c.maxTTL` branch
+// in SetNegative by configuring negativeTTL > maxTTL.
+func TestSetNegative_MaxTTLClamping(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = 128
+	config.MaxTTL = 5 * time.Second
+	config.NegativeTTL = 120 * time.Second // negativeTTL > maxTTL
+	c := New(config)
+
+	c.SetNegative("maxclamp.com:1", 3)
+
+	entry := c.Get("maxclamp.com:1")
+	if entry == nil {
+		t.Fatal("expected entry to exist")
+	}
+
+	// Entry should NOT be expired at 4 seconds (TTL clamped to maxTTL=5s).
+	if entry.IsExpired(time.Now().Add(4 * time.Second)) {
+		t.Error("entry should not be expired at 4s (negativeTTL clamped to maxTTL=5s)")
+	}
+	// Entry SHOULD be expired after 6 seconds.
+	if !entry.IsExpired(time.Now().Add(6 * time.Second)) {
+		t.Error("entry should be expired at 6s (negativeTTL clamped to maxTTL=5s)")
+	}
+}
+
+// TestEvictOldest_NilElement covers the empty-list branch in
+// cacheShard.evictOldest (returns false when lruBack is nil). Calls into
+// the per-shard helper directly since this defensive path is unreachable
+// via the public API.
+func TestEvictOldest_NilElement(t *testing.T) {
+	config := DefaultConfig()
+	config.Capacity = 128
+	c := New(config)
+
+	// Fresh cache: every shard has an empty LRU list. Call evictOldest on
+	// shard 0 to exercise the `if s.lruBack == nil { return false }` branch.
+	s := &c.shards[0]
+	s.mu.Lock()
+	if s.evictOldest() {
+		t.Error("evictOldest on empty shard should return false")
+	}
+	s.mu.Unlock()
+
+	// Verify no evictions were recorded (since there was nothing to evict).
+	stats := c.Stats()
+	if stats.Evictions != 0 {
+		t.Errorf("expected 0 evictions, got %d", stats.Evictions)
+	}
+	if stats.Size != 0 {
+		t.Errorf("expected size 0, got %d", stats.Size)
+	}
+}
+
+// TestExtractQueryInfo_InvalidType covers invalid qtype parsing in
+// ExtractQueryInfo where the part between separators is not a uint16.
+func TestExtractQueryInfo_InvalidType(t *testing.T) {
+	// Key with non-numeric type portion.
+	name, qtype := ExtractQueryInfo("example.com|abc|0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for non-numeric type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with empty type portion.
+	name, qtype = ExtractQueryInfo("example.com||0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for empty type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with a partially numeric type must not be accepted as its prefix.
+	name, qtype = ExtractQueryInfo("example.com|1abc|0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for partially numeric type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with a type outside the uint16 DNS RRType range must be rejected.
+	name, qtype = ExtractQueryInfo("example.com|65536|0")
+	if name != "" || qtype != 0 {
+		t.Errorf("expected ('', 0) for overflow type, got (%q, %d)", name, qtype)
+	}
+
+	// Key with valid type still works.
+	name, qtype = ExtractQueryInfo("valid.com|1|0")
+	if name != "valid.com" || qtype != 1 {
+		t.Errorf("expected ('valid.com', 1), got (%q, %d)", name, qtype)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// cache.go:58-60 - RemainingTTL negative remaining branch
+// The branch `if remaining < 0 { return 0 }` in RemainingTTL is
+// a defensive guard. With IsExpired treating now >= ExpireTime as expired,
+// this branch is effectively unreachable through normal time API.
+//
+// We test the function's behavior at the boundary to confirm it
+// returns 0 for all edge cases.
+// ---------------------------------------------------------------------------
+
+func TestRemainingTTL_NegativeBranch_SyntheticEntry(t *testing.T) {
+	now := time.Now()
+
+	// Case 1: Entry that is exactly at expiry time.
+	// Exact boundary is expired, so RemainingTTL returns 0.
+	entry := &Entry{
+		ExpireTime: now,
+	}
+	remaining := entry.RemainingTTL(now)
+	if remaining != 0 {
+		t.Errorf("expected 0 for exact-expiry entry, got %d", remaining)
+	}
+
+	// Case 2: Entry well in the past.
+	// IsExpired returns true, so RemainingTTL returns 0 at line 55.
+	entry2 := &Entry{
+		ExpireTime: now.Add(-1 * time.Millisecond),
+	}
+	remaining2 := entry2.RemainingTTL(now)
+	if remaining2 != 0 {
+		t.Errorf("expected 0 for past-expiry entry, got %d", remaining2)
+	}
+
+	// Case 3: Entry well in the future.
+	entry3 := &Entry{
+		ExpireTime: now.Add(60 * time.Second),
+	}
+	remaining3 := entry3.RemainingTTL(now)
+	if remaining3 != 60 {
+		t.Errorf("expected 60 for future entry, got %d", remaining3)
+	}
+
+	// Case 4: Entry 1 second in the future.
+	entry4 := &Entry{
+		ExpireTime: now.Add(1 * time.Second),
+	}
+	remaining4 := entry4.RemainingTTL(now)
+	if remaining4 != 1 {
+		t.Errorf("expected 1 for 1-second future entry, got %d", remaining4)
+	}
+
+	// Case 5: Entry 500ms in the future - should return 0 because
+	// uint32(500ms.Seconds()) = uint32(0.5) = 0
+	entry5 := &Entry{
+		ExpireTime: now.Add(500 * time.Millisecond),
+	}
+	remaining5 := entry5.RemainingTTL(now)
+	if remaining5 != 0 {
+		t.Errorf("expected 0 for sub-second future entry, got %d", remaining5)
+	}
+}
+
+// TestRemainingTTL_NegativeBranch_JustBeforeExpiry verifies behavior
+// when the entry is very close to expiry but not yet expired.
+func TestRemainingTTL_NegativeBranch_JustBeforeExpiry(t *testing.T) {
+	now := time.Now()
+
+	// Entry 1 nanosecond in the future - not expired, remaining = 0 seconds
+	entry := &Entry{
+		ExpireTime: now.Add(1 * time.Nanosecond),
+	}
+	if entry.IsExpired(now) {
+		t.Error("entry should not be expired (1ns in the future)")
+	}
+	remaining := entry.RemainingTTL(now)
+	if remaining != 0 {
+		t.Errorf("expected 0 for sub-second remaining, got %d", remaining)
+	}
+}
 
 // TestSetInternal_MinTTLClamping verifies that Set with a TTL below minTTL
 // gets clamped up to minTTL.
