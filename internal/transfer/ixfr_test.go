@@ -869,25 +869,8 @@ func TestIXFRServer_generateIncrementalIXFR_NilJournalEntry(t *testing.T) {
 	}
 }
 
-func TestIXFRServer_generateIncrementalIXFR_SerialNotInRange(t *testing.T) {
-	axfrServer := NewAXFRServer(make(map[string]*zone.Zone), WithAllowList([]string{"127.0.0.0/8"}))
-	server := NewIXFRServer(axfrServer)
-
-	z := zone.NewZone("example.com.")
-	z.SOA = &zone.SOARecord{
-		MName:   "ns1.example.com.",
-		RName:   "admin.example.com.",
-		Serial:  2024010105,
-		Refresh: 3600,
-	}
-
-	// Add journal entries that don't cover client serial (startIdx will be -1)
-	server.RecordChange("example.com.", 2024010103, 2024010104, nil, nil)
-	server.RecordChange("example.com.", 2024010104, 2024010105, nil, nil)
-
-	// Client serial 2024010101 is before our journal range - should fallback to AXFR
-	_, _ = server.generateIncrementalIXFR(z, 2024010101)
-}
+// TestIXFRServer_generateIncrementalIXFR_SerialNotInRange is in coverage_test.go
+// with a real assertion on the error return value.
 
 func TestIXFRServer_generateIncrementalIXFR_Success(t *testing.T) {
 	axfrServer := NewAXFRServer(make(map[string]*zone.Zone), WithAllowList([]string{"127.0.0.0/8"}))

@@ -1373,7 +1373,7 @@ func TestLoggerLogFatalExitSkipped(t *testing.T) {
 // 6. logger.go:282-283 - Package-level Fatal/Fatalf: Delegate to defaultLogger
 //    which calls log(FATAL, ...) which exits.
 //
-// All these paths are already covered by skipped tests in coverage_extra3_test.go.
+// All these paths are already covered by skipped tests in coverage_test.go.
 // The util package coverage of 98.4% represents the maximum achievable without
 // subprocess-based testing or refactoring the Fatal methods to accept an
 // exit function.
@@ -1387,7 +1387,7 @@ func TestUtilCoverageDocumentation(t *testing.T) {
 	t.Log("util package coverage analysis: all uncovered lines are unreachable or call os.Exit(1)")
 }
 
-// coverage_extra_test.go adds tests for remaining low-coverage functions in the util package.
+// coverage_test.go adds tests for remaining low-coverage functions in the util package.
 
 // ============================================================================
 // logger.go: log method - JSON marshal error path (line 176)

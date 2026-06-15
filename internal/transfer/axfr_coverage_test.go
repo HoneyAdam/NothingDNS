@@ -415,14 +415,7 @@ func TestAXFRClient_buildAXFRRequest_ValidName(t *testing.T) {
 }
 
 // Test sendMessage error handling
-func TestAXFRClient_sendMessage_PackError(t *testing.T) {
-	// Create a message that will fail to pack due to invalid data
-	client := NewAXFRClient("ns1.example.com:53")
-
-	// We can't easily create a pack error, so skip this for now
-	// The message pack is generally robust
-	_ = client
-}
+// (moved to coverage_test.go with a real implementation that triggers the pack error)
 
 // Test receiveAXFRResponse error cases
 func TestAXFRClient_receiveAXFRResponse_InvalidLength(t *testing.T) {

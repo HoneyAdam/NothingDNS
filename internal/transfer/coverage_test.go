@@ -806,7 +806,7 @@ func mustParseName4(name string) *protocol.Name {
 // Tests the path where the zone name gets a trailing dot appended.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_AddSlaveZone_DotNormalization_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_AddSlaveZone_DotNormalization(t *testing.T) {
 	sm := NewSlaveManager(nil)
 	// Zone name without trailing dot - should be normalized internally
 	err := sm.AddSlaveZone(SlaveZoneConfig{
@@ -826,7 +826,7 @@ func TestSlaveManager_AddSlaveZone_DotNormalization_CoverageExtra4(t *testing.T)
 // Tests the error path when NewSlaveZone fails inside AddSlaveZone.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_AddSlaveZone_NewSlaveZoneError_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_AddSlaveZone_NewSlaveZoneError(t *testing.T) {
 	sm := NewSlaveManager(nil)
 	err := sm.AddSlaveZone(SlaveZoneConfig{
 		ZoneName:     "badzone.example.com.",
@@ -843,7 +843,7 @@ func TestSlaveManager_AddSlaveZone_NewSlaveZoneError_CoverageExtra4(t *testing.T
 // Tests that RemoveSlaveZone normalizes the zone name by adding trailing dot.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_RemoveSlaveZone_DotNormalization_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_RemoveSlaveZone_DotNormalization(t *testing.T) {
 	sm := NewSlaveManager(nil)
 	err := sm.AddSlaveZone(SlaveZoneConfig{
 		ZoneName: "rmdot.example.com.",
@@ -868,7 +868,7 @@ func TestSlaveManager_RemoveSlaveZone_DotNormalization_CoverageExtra4(t *testing
 // Tests the nil check path in notifyListener.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_notifyListener_NilNotify_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_notifyListener_NilNotify(t *testing.T) {
 	sm := NewSlaveManager(nil)
 
 	// Start the listener
@@ -885,34 +885,15 @@ func TestSlaveManager_notifyListener_NilNotify_CoverageExtra4(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // slave.go:331 - applyTransferredZone error (empty records)
-// Tests the path where zone transfer records are applied but fail.
+// Covered by TestSlaveManager_applyTransferredZone_EmptyRecords in slave_test.go.
 // ---------------------------------------------------------------------------
-
-func TestSlaveManager_applyTransferredZone_EmptyRecords_CoverageExtra4(t *testing.T) {
-	sm := NewSlaveManager(nil)
-	sz, err := NewSlaveZone(SlaveZoneConfig{
-		ZoneName: "empty.example.com.",
-		Masters:  []string{"192.0.2.1:53"},
-	})
-	if err != nil {
-		t.Fatalf("NewSlaveZone: %v", err)
-	}
-	sm.mu.Lock()
-	sm.slaveZones["empty.example.com."] = sz
-	sm.mu.Unlock()
-
-	err = sm.applyTransferredZone(sz, []*protocol.ResourceRecord{})
-	if err == nil {
-		t.Error("expected error for empty records in applyTransferredZone")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // slave.go:331 - applyTransferredZone error (no SOA record)
 // Tests the path where transferred records have no SOA.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_applyTransferredZone_NoSOARecord_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_applyTransferredZone_NoSOARecord(t *testing.T) {
 	sm := NewSlaveManager(nil)
 	sz, err := NewSlaveZone(SlaveZoneConfig{
 		ZoneName: "nosoa.example.com.",
@@ -947,7 +928,7 @@ func TestSlaveManager_applyTransferredZone_NoSOARecord_CoverageExtra4(t *testing
 // Tests the error path where the zone origin can't be parsed.
 // ---------------------------------------------------------------------------
 
-func TestAXFRServer_generateAXFRRecords_InvalidOrigin_CoverageExtra4(t *testing.T) {
+func TestAXFRServer_generateAXFRRecords_InvalidOrigin(t *testing.T) {
 	longLabel := strings.Repeat("a", 70)
 	z := zone.NewZone(longLabel + ".com.")
 	z.SOA = &zone.SOARecord{
@@ -966,7 +947,7 @@ func TestAXFRServer_generateAXFRRecords_InvalidOrigin_CoverageExtra4(t *testing.
 // Tests the error path where creating the SOA RR fails.
 // ---------------------------------------------------------------------------
 
-func TestAXFRServer_generateAXFRRecords_InvalidSOAMName_CoverageExtra4(t *testing.T) {
+func TestAXFRServer_generateAXFRRecords_InvalidSOAMName(t *testing.T) {
 	z := zone.NewZone("example.com.")
 	z.SOA = &zone.SOARecord{
 		MName:  strings.Repeat("a", 70) + ".example.com.", // Invalid label
@@ -985,7 +966,7 @@ func TestAXFRServer_generateAXFRRecords_InvalidSOAMName_CoverageExtra4(t *testin
 // Tests the error path where the record name can't be parsed.
 // ---------------------------------------------------------------------------
 
-func TestAXFRServer_zoneRecordToRR_InvalidRecordName_CoverageExtra4(t *testing.T) {
+func TestAXFRServer_zoneRecordToRR_InvalidRecordName(t *testing.T) {
 	s := NewAXFRServer(make(map[string]*zone.Zone))
 	longLabel := strings.Repeat("a", 70)
 	_, err := s.zoneRecordToRR(longLabel+".example.com.", zone.Record{
@@ -1001,7 +982,7 @@ func TestAXFRServer_zoneRecordToRR_InvalidRecordName_CoverageExtra4(t *testing.T
 // Tests the error path where msg.Pack fails.
 // ---------------------------------------------------------------------------
 
-func TestAXFRClient_sendMessage_PackError_CoverageExtra4(t *testing.T) {
+func TestAXFRClient_sendMessage_PackError(t *testing.T) {
 	client := NewAXFRClient("ns1.example.com:53")
 	// Message with QDCount=1 but no questions will cause Pack to fail
 	msg := &protocol.Message{
@@ -1023,7 +1004,7 @@ func TestAXFRClient_sendMessage_PackError_CoverageExtra4(t *testing.T) {
 // Tests the error path where UnpackMessage fails on response data.
 // ---------------------------------------------------------------------------
 
-func TestAXFRClient_receiveAXFRResponse_UnpackError_CoverageExtra4(t *testing.T) {
+func TestAXFRClient_receiveAXFRResponse_UnpackError(t *testing.T) {
 	client := NewAXFRClient("ns1.example.com:53")
 	// Valid length prefix but garbage data that can't be unpacked
 	data := []byte{0x00, 0x10}
@@ -1040,7 +1021,7 @@ func TestAXFRClient_receiveAXFRResponse_UnpackError_CoverageExtra4(t *testing.T)
 // Tests the startIdx == -1 path.
 // ---------------------------------------------------------------------------
 
-func TestIXFRServer_generateIncrementalIXFR_SerialNotInRange_CoverageExtra4(t *testing.T) {
+func TestIXFRServer_generateIncrementalIXFR_SerialNotInRange(t *testing.T) {
 	axfrServer := NewAXFRServer(make(map[string]*zone.Zone))
 	server := NewIXFRServer(axfrServer)
 
@@ -1067,7 +1048,7 @@ func TestIXFRServer_generateIncrementalIXFR_SerialNotInRange_CoverageExtra4(t *t
 // Tests startIdx > 0 with serial mismatch.
 // ---------------------------------------------------------------------------
 
-func TestIXFRServer_generateIncrementalIXFR_JournalGap_CoverageExtra4(t *testing.T) {
+func TestIXFRServer_generateIncrementalIXFR_JournalGap(t *testing.T) {
 	axfrServer := NewAXFRServer(make(map[string]*zone.Zone))
 	server := NewIXFRServer(axfrServer)
 
@@ -1099,7 +1080,7 @@ func TestIXFRServer_generateIncrementalIXFR_JournalGap_CoverageExtra4(t *testing
 // Tests the success path by setting up a real TCP server that serves AXFR.
 // ---------------------------------------------------------------------------
 
-func TestSlaveManager_performAXFR_Success_CoverageExtra4(t *testing.T) {
+func TestSlaveManager_performAXFR_Success(t *testing.T) {
 	// This test can be flaky under load due to TCP timing; skip in short mode
 	if testing.Short() {
 		t.Skip("skipping flaky integration test in short mode")

@@ -1960,7 +1960,7 @@ func TestTLSResponseWriterSuccessfulWrite(t *testing.T) {
 
 // ==============================================================================
 // generateTestTLSCert2 generates a TLS certificate for testing.
-// Duplicated with a different name to avoid conflicts with coverage_extra_test.go
+// Duplicated with a different name to avoid conflicts with coverage_test.go
 // ==============================================================================
 
 func generateTestTLSCert2(t *testing.T) tls.Certificate {
