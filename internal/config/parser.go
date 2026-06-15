@@ -274,7 +274,13 @@ func (p *Parser) parseMapping(indent int) (*Node, error) {
 				p.advance()
 			}
 		default:
-			value = &Node{Type: NodeScalar, Value: ""}
+			// Empty value after a colon is valid YAML (e.g. "key:").
+			// But an unexpected token means silent data loss — surface as error.
+			if p.current.Type == TokenNewline || p.current.Type == TokenEOF {
+				value = &Node{Type: NodeScalar, Value: ""}
+			} else {
+				return nil, fmt.Errorf("unexpected token %s after key at line %d", p.current.Type, p.current.Line)
+			}
 		}
 
 		if err != nil {

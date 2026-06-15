@@ -98,15 +98,22 @@ func (t *Tokenizer) Next() Token {
 	case ']':
 		return t.emitChar(TokenRBracket)
 	case '|':
-		return t.emitChar(TokenPipe)
+		t.next() // consume '|'
+		return Token{Type: TokenError, Value: fmt.Sprintf("YAML block scalar (|) is not supported at line %d; use quoted strings instead", t.line), Line: t.line, Col: t.col - 1}
 	case '>':
-		return t.emitChar(TokenGreater)
+		t.next() // consume '>'
+		return Token{Type: TokenError, Value: fmt.Sprintf("YAML folded scalar (>) is not supported at line %d; use quoted strings instead", t.line), Line: t.line, Col: t.col - 1}
 	case '!':
-		return t.readTag()
+		t.next() // consume '!'
+		return Token{Type: TokenError, Value: fmt.Sprintf("YAML tags (!) are not supported at line %d", t.line), Line: t.line, Col: t.col - 1}
 	case '&':
-		return t.readAnchor()
+		t.next() // consume '&'
+		return Token{Type: TokenError, Value: fmt.Sprintf("YAML anchors (&) are not supported at line %d", t.line), Line: t.line, Col: t.col - 1}
 	case '*':
-		return t.readAlias()
+		// Could be an alias (*alias) or the start of a quoted string in flow style.
+		// In block context, '*' at the start of a value is always an alias.
+		t.next() // consume '*'
+		return Token{Type: TokenError, Value: fmt.Sprintf("YAML aliases (*) are not supported at line %d", t.line), Line: t.line, Col: t.col - 1}
 	case '"', '\'':
 		return t.readQuotedString()
 	}
@@ -259,57 +266,6 @@ func (t *Tokenizer) readComment() Token {
 
 	value := t.input[start+1 : t.pos] // Don't include the #
 	return Token{Type: TokenComment, Value: strings.TrimSpace(value), Line: t.line, Col: startCol}
-}
-
-// readTag reads a tag (!tag).
-func (t *Tokenizer) readTag() Token {
-	start := t.pos
-	startCol := t.col
-	t.next() // consume '!'
-
-	for {
-		ch := t.peek()
-		if ch == 0 || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
-			break
-		}
-		t.next()
-	}
-
-	return Token{Type: TokenTag, Value: t.input[start:t.pos], Line: t.line, Col: startCol}
-}
-
-// readAnchor reads an anchor (&anchor).
-func (t *Tokenizer) readAnchor() Token {
-	start := t.pos
-	startCol := t.col
-	t.next() // consume '&'
-
-	for {
-		ch := t.peek()
-		if ch == 0 || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
-			break
-		}
-		t.next()
-	}
-
-	return Token{Type: TokenAnchor, Value: t.input[start:t.pos], Line: t.line, Col: startCol}
-}
-
-// readAlias reads an alias (*alias).
-func (t *Tokenizer) readAlias() Token {
-	start := t.pos
-	startCol := t.col
-	t.next() // consume '*'
-
-	for {
-		ch := t.peek()
-		if ch == 0 || ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
-			break
-		}
-		t.next()
-	}
-
-	return Token{Type: TokenAlias, Value: t.input[start:t.pos], Line: t.line, Col: startCol}
 }
 
 // readQuotedString reads a single or double quoted string.

@@ -1326,3 +1326,36 @@ func sliceEqual(a, b []string) bool {
 	}
 	return true
 }
+
+// TestParserRejectsAnchor verifies that YAML anchors produce a hard parse
+// error rather than silently being swallowed (which previously caused the
+// anchored value to be lost — silent data loss).
+func TestParserRejectsAnchor(t *testing.T) {
+	input := "defaults: &defaults\n  port: 53\n  ttl: 3600\nserver:\n  <<: *defaults"
+	parser := NewParser(input)
+	_, err := parser.ParseMapping()
+	if err == nil {
+		t.Fatal("expected error for YAML anchor/alias, got nil")
+	}
+}
+
+// TestParserRejectsBlockScalar verifies that YAML block scalars (|) produce
+// a hard parse error rather than silently dropping the value.
+func TestParserRejectsBlockScalar(t *testing.T) {
+	input := "key: |\n  multi\n  line\n  value"
+	parser := NewParser(input)
+	_, err := parser.ParseMapping()
+	if err == nil {
+		t.Fatal("expected error for YAML block scalar (|), got nil")
+	}
+}
+
+// TestParserRejectsTag verifies that YAML tags produce a hard parse error.
+func TestParserRejectsTag(t *testing.T) {
+	input := "key: !str value"
+	parser := NewParser(input)
+	_, err := parser.ParseMapping()
+	if err == nil {
+		t.Fatal("expected error for YAML tag (!), got nil")
+	}
+}

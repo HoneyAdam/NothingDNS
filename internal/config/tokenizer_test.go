@@ -402,16 +402,16 @@ func TestTokenizerEmptyInput(t *testing.T) {
 func TestTokenizerPipeToken(t *testing.T) {
 	tokenizer := NewTokenizer("|")
 	tok := tokenizer.Next()
-	if tok.Type != TokenPipe {
-		t.Errorf("expected PIPE, got %v", tok.Type)
+	if tok.Type != TokenError {
+		t.Errorf("expected ERROR for pipe (|), got %v", tok.Type)
 	}
 }
 
 func TestTokenizerGreaterToken(t *testing.T) {
 	tokenizer := NewTokenizer(">")
 	tok := tokenizer.Next()
-	if tok.Type != TokenGreater {
-		t.Errorf("expected GREATER, got %v", tok.Type)
+	if tok.Type != TokenError {
+		t.Errorf("expected ERROR for greater (>), got %v", tok.Type)
 	}
 }
 
@@ -461,5 +461,37 @@ func TestTokenizerCommentOnlyLine(t *testing.T) {
 
 	if len(tokens) == 0 {
 		t.Fatal("expected tokens")
+	}
+}
+
+// TestTokenizerUnsupportedFeatures verifies that YAML features the parser
+// doesn't support (anchors, aliases, tags, block scalars) are hard errors,
+// not silently ignored tokens that cause data loss.
+func TestTokenizerUnsupportedFeatures(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"anchor", "&anchor value"},
+		{"alias", "*alias"},
+		{"tag", "!str value"},
+		{"pipe block scalar", "key: |\n  line1"},
+		{"greater folded scalar", "key: >\n  line1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenizer := NewTokenizer(tt.input)
+			tokens := tokenizer.TokenizeAll()
+			hasError := false
+			for _, tok := range tokens {
+				if tok.Type == TokenError {
+					hasError = true
+					break
+				}
+			}
+			if !hasError {
+				t.Fatalf("expected TokenError for unsupported feature %q, got tokens: %v", tt.input, tokens)
+			}
+		})
 	}
 }
