@@ -1,15 +1,13 @@
 package api
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/nothingdns/nothingdns/internal/config"
 )
 
 func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPut {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet, http.MethodPut) {
 		return
 	}
 	// GET: operator-readable. PUT: admin-only — an ACL rewrite can trivially
@@ -59,8 +57,7 @@ func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
 				Redirect string   `json:"redirect,omitempty"`
 			} `json:"rules"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-			s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		if !s.decode(w, r, &req) {
 			return
 		}
 

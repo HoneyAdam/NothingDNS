@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -176,8 +175,7 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request) {
 		AdminEmail  string   `json:"admin_email"`
 		Nameservers []string `json:"nameservers"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -310,8 +308,7 @@ func (s *Server) handleAddRecord(w http.ResponseWriter, r *http.Request, zoneNam
 		TTL  uint32 `json:"ttl"`
 		Data string `json:"data"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -324,9 +321,7 @@ func (s *Server) handleAddRecord(w http.ResponseWriter, r *http.Request, zoneNam
 	if ttl == 0 {
 		// Use zone's default TTL
 		if z, ok := s.zoneManager.Get(zoneName); ok {
-			z.RLock()
-			ttl = z.DefaultTTL
-			z.RUnlock()
+			ttl = z.GetDefaultTTL()
 		}
 		if ttl == 0 {
 			ttl = 3600
@@ -370,8 +365,7 @@ func (s *Server) handleUpdateRecord(w http.ResponseWriter, r *http.Request, zone
 		TTL     uint32 `json:"ttl"`
 		Data    string `json:"data"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -414,8 +408,7 @@ func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request, zone
 		Name string `json:"name"`
 		Type string `json:"type"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -474,8 +467,7 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 		AddA     bool   `json:"addA"`
 		Preview  bool   `json:"preview"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -519,17 +511,15 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 	}
 
 	// Validate zone/CIDR compatibility
-	zoneOrigin := z.Origin
+	zoneOrigin := z.GetOrigin()
 	if _, err := validateZoneCIDRNetwork(zoneOrigin, ip4, ones); err != nil {
 		s.writeError(w, http.StatusBadRequest, sanitizeError(err, "Invalid request"))
 		return
 	}
 
-	// Analyze all records in one lock
-	z.RLock()
-	existingPTR := bulkPTRRecordsOfTypeLocked(z, "PTR")
-	existingA := bulkPTRRecordsOfTypeLocked(z, "A")
-	z.RUnlock()
+	// Analyze existing records (thread-safe, no explicit lock needed)
+	existingPTR := z.RecordsByType("PTR")
+	existingA := z.RecordsByType("A")
 
 	changes := make([]ReverseDNSChange, 0, numIPs)
 	add, addA, skip, override, overrideA := 0, 0, 0, 0, 0
@@ -698,19 +688,6 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 	})
 }
 
-func bulkPTRRecordsOfTypeLocked(z *zone.Zone, rrtype string) []zone.Record {
-	rrtype = strings.ToUpper(rrtype)
-	records := make([]zone.Record, 0)
-	for _, ownerRecords := range z.Records {
-		for _, rec := range ownerRecords {
-			if strings.ToUpper(rec.Type) == rrtype {
-				records = append(records, rec)
-			}
-		}
-	}
-	return records
-}
-
 func bulkPTROwnerMatches(recordName, owner, zoneOrigin string) bool {
 	recordName = strings.TrimSuffix(strings.ToLower(recordName), ".")
 	owner = strings.TrimSuffix(strings.ToLower(owner), ".")
@@ -750,7 +727,7 @@ func (s *Server) handlePtr6Lookup(w http.ResponseWriter, r *http.Request, zoneNa
 	}
 
 	// Check if zone is an ip6.arpa zone
-	if !strings.HasSuffix(z.Origin, "ip6.arpa.") {
+	if !strings.HasSuffix(z.GetOrigin(), "ip6.arpa.") {
 		s.writeError(w, http.StatusBadRequest, "Zone is not an IPv6 reverse zone (must end with ip6.arpa.)")
 		return
 	}
@@ -759,14 +736,11 @@ func (s *Server) handlePtr6Lookup(w http.ResponseWriter, r *http.Request, zoneNa
 	// 2001:db8::1 -> 1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa
 	ptrName := reverseIPv6(ip)
 
-	// Lock zone for reading
-	z.RLock()
-	defer z.RUnlock()
-
-	// Search for PTR record
-	for _, rec := range bulkPTRRecordsOfTypeLocked(z, "PTR") {
+	// Search for PTR record (thread-safe via RecordsByType)
+	zoneOrigin := z.GetOrigin()
+	for _, rec := range z.RecordsByType("PTR") {
 		target := ptrName + "."
-		if bulkPTROwnerMatches(rec.Name, ptrName, z.Origin) {
+		if bulkPTROwnerMatches(rec.Name, ptrName, zoneOrigin) {
 			s.writeJSON(w, http.StatusOK, PTRLookupResponse{
 				IP:      ipStr,
 				PTR:     ptrName,
@@ -791,8 +765,7 @@ func (s *Server) handlePtr6Lookup(w http.ResponseWriter, r *http.Request, zoneNa
 // reverseIPv6 computes the ip6.arpa reverse lookup name for an IPv6 address.
 // Each nibble (4 bits) of the IPv6 address becomes a label in the reverse tree.
 func (s *Server) handleZoneReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	if s.requireAdmin(w, r) {

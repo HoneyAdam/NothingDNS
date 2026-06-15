@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,8 +12,7 @@ import (
 )
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
@@ -33,8 +31,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req LoginRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -101,8 +98,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 // SECURITY (LOW-009): Restricted to localhost. Defense-in-depth: require a
 // bootstrap token from file or environment variable for production deployments.
 func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
@@ -132,8 +128,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req BootstrapRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -235,8 +230,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 
 // handleLogout invalidates the current token.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 
@@ -305,8 +299,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var req CreateUserRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-			s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		if !s.decode(w, r, &req) {
 			return
 		}
 
@@ -409,8 +402,7 @@ func userPathParameterValue(r *http.Request) (string, bool) {
 
 // handleRoles returns available roles.
 func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {

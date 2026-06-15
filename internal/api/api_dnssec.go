@@ -7,8 +7,7 @@ import (
 )
 
 func (s *Server) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -31,8 +30,7 @@ func (s *Server) handleDNSSECStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleDNSSECKeys returns DNSSEC signing keys for all zones or a specific zone.
 func (s *Server) handleDNSSECKeys(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireAdmin(w, r) {

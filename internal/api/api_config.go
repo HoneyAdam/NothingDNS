@@ -11,8 +11,7 @@ import (
 )
 
 func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	// Config reload can swap zones, TLS certs, ACL, upstreams, blocklists.
@@ -38,8 +37,7 @@ func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
 
 // handleConfigGet returns the current server configuration with sensitive fields redacted.
 func (s *Server) handleConfigGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -140,8 +138,7 @@ func (s *Server) handleConfigLogging(w http.ResponseWriter, r *http.Request) {
 		Level string `json:"level"`
 	}
 	// VULN-071: use MaxBytesReader to prevent unbounded body reading on config PUT
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -199,8 +196,7 @@ func (s *Server) handleConfigRRL(w http.ResponseWriter, r *http.Request) {
 		Burst   *int     `json:"burst"`
 	}
 	// VULN-071: use MaxBytesReader to prevent unbounded body reading on config PUT
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 
@@ -254,8 +250,7 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 		StaleGraceSecs    *int  `json:"stale_grace_secs"`
 	}
 	// VULN-071: use MaxBytesReader to prevent unbounded body reading on config PUT
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 

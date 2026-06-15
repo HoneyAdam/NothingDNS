@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,8 +9,7 @@ import (
 )
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -84,8 +82,7 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleClusterNodes returns list of cluster nodes.
 func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -125,8 +122,7 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 // handleClusterJoin joins the cluster via a seed node address.
 // POST /api/v1/cluster/join { "seed_address": "host:port" }
 func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	// Cluster join/leave are infrastructure-level operations that change
@@ -142,8 +138,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		SeedAddress string `json:"seed_address"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid JSON")
+	if !s.decode(w, r, &req) {
 		return
 	}
 	if req.SeedAddress == "" {

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -55,8 +54,7 @@ func (s *Server) handleUpstreams(w http.ResponseWriter, r *http.Request) {
 		}
 		// Update upstream configuration (add/remove servers)
 		var req UpstreamUpdateRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-			s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		if !s.decode(w, r, &req) {
 			return
 		}
 

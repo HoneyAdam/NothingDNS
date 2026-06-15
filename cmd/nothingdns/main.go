@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -32,11 +31,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/mdns"
 	"github.com/nothingdns/nothingdns/internal/metrics"
 	"github.com/nothingdns/nothingdns/internal/odoh"
-	"github.com/nothingdns/nothingdns/internal/quic"
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/rpz"
-	"github.com/nothingdns/nothingdns/internal/server"
-	"github.com/nothingdns/nothingdns/internal/transfer"
 	"github.com/nothingdns/nothingdns/internal/util"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
@@ -894,199 +890,14 @@ func run() error {
 		}
 	}
 
-	// Create and start DNS servers
-	// Use configured bind addresses if set, otherwise default to ":PORT"
-	defaultAddr := fmt.Sprintf(":%d", cfg.Server.Port)
-
-	udpAddr := defaultAddr
-	if len(cfg.Server.UDPBind) > 0 {
-		udpAddr = cfg.Server.UDPBind[0]
-	} else if len(cfg.Server.Bind) > 0 {
-		udpAddr = bindEntryToAddr(cfg.Server.Bind[0], cfg.Server.Port)
+	// ── Phase 2: Start DNS transport servers ───────────────────────────
+	transports, err := startServers(cfg, handler, transferManager, logger)
+	if err != nil {
+		// Clean up already-started transports before returning the error.
+		transports.stopAll(logger)
+		return err
 	}
-
-	tcpAddr := defaultAddr
-	if len(cfg.Server.TCPBind) > 0 {
-		tcpAddr = cfg.Server.TCPBind[0]
-	} else if len(cfg.Server.Bind) > 0 {
-		tcpAddr = bindEntryToAddr(cfg.Server.Bind[0], cfg.Server.Port)
-	}
-
-	udpServer := server.NewUDPServerWithWorkers(udpAddr, handler, cfg.Server.UDPWorkers)
-	tcpServer := server.NewTCPServerWithWorkers(tcpAddr, handler, cfg.Server.TCPWorkers)
-
-	// Start UDP server
-	if err := udpServer.Listen(); err != nil {
-		return fmt.Errorf("starting UDP server: %w", err)
-	}
-	go func() {
-		if err := udpServer.Serve(); err != nil {
-			logger.Errorf("UDP server error: %v", err)
-		}
-	}()
-	logger.Infof("UDP server listening on %s", udpAddr)
-
-	// Start TCP server
-	if err := tcpServer.Listen(); err != nil {
-		return fmt.Errorf("starting TCP server: %w", err)
-	}
-	go func() {
-		if err := tcpServer.Serve(); err != nil {
-			logger.Errorf("TCP server error: %v", err)
-		}
-	}()
-	logger.Infof("TCP server listening on %s", tcpAddr)
-
-	// Start TLS server if enabled
-	var tlsServer *server.TLSServer
-	if cfg.Server.TLS.Enabled {
-		tlsAddr := cfg.Server.TLS.Bind
-		if tlsAddr == "" {
-			tlsAddr = fmt.Sprintf(":%d", server.DefaultTLSPort)
-		}
-
-		// Load TLS certificate
-		cert, err := tls.LoadX509KeyPair(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
-		if err != nil {
-			return fmt.Errorf("loading TLS certificate: %w", err)
-		}
-
-		tlsConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS13,
-			CurvePreferences: []tls.CurveID{
-				tls.CurveP256,
-				tls.X25519,
-			},
-			// Dynamic certificate loading — reloads on each handshake
-			// Supports Let's Encrypt auto-renewal without restart
-			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-				updatedCert, err := tls.LoadX509KeyPair(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
-				if err != nil {
-					return nil, err
-				}
-				return &updatedCert, nil
-			},
-		}
-
-		tlsServer = server.NewTLSServer(tlsAddr, handler, tlsConfig)
-		if err := tlsServer.Listen(); err != nil {
-			return fmt.Errorf("starting TLS server: %w", err)
-		}
-		go func() {
-			if err := tlsServer.Serve(); err != nil {
-				logger.Errorf("TLS server error: %v", err)
-			}
-		}()
-		logger.Infof("TLS server listening on %s (DoT)", tlsAddr)
-	}
-
-	// Start QUIC server (DNS over QUIC, RFC 9250) if enabled
-	var doqServer *quic.DoQServer
-	if cfg.Server.QUIC.Enabled {
-		doqAddr := cfg.Server.QUIC.Bind
-		if doqAddr == "" {
-			doqAddr = fmt.Sprintf(":%d", quic.DefaultDoQPort)
-		}
-
-		certFile := cfg.Server.QUIC.CertFile
-		keyFile := cfg.Server.QUIC.KeyFile
-		// Fall back to TLS cert if QUIC-specific cert is not set
-		if certFile == "" && cfg.Server.TLS.CertFile != "" {
-			certFile = cfg.Server.TLS.CertFile
-			keyFile = cfg.Server.TLS.KeyFile
-		}
-
-		if certFile == "" || keyFile == "" {
-			return fmt.Errorf("QUIC enabled but cert_file/key_file not configured")
-		}
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return fmt.Errorf("loading QUIC certificate: %w", err)
-		}
-
-		quicTLSConfig := &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			NextProtos:   []string{"doq"},
-			MinVersion:   tls.VersionTLS13,
-			CurvePreferences: []tls.CurveID{
-				tls.CurveP256,
-				tls.X25519,
-			},
-		}
-
-		doqHandler := &doqHandlerAdapter{handler: handler}
-		doqServer = quic.NewDoQServer(doqAddr, doqHandler, quicTLSConfig)
-		if err := doqServer.Listen(); err != nil {
-			return fmt.Errorf("starting DoQ server: %w", err)
-		}
-		go func() {
-			if err := doqServer.Serve(); err != nil {
-				logger.Errorf("DoQ server error: %v", err)
-			}
-		}()
-		logger.Infof("DoQ server listening on %s (DNS over QUIC)", doqAddr)
-	}
-
-	// Start XoT server (DNS Zone Transfer over TLS, RFC 9103) if enabled
-	var xotServer *transfer.XoTServer
-	if cfg.Server.XoT.Enabled {
-		xotAddr := cfg.Server.XoT.Bind
-		if xotAddr == "" {
-			xotAddr = fmt.Sprintf(":%d", 853) // XoT default port
-		}
-
-		xotConfig := &transfer.XoTConfig{
-			CertFile:      cfg.Server.XoT.CertFile,
-			KeyFile:       cfg.Server.XoT.KeyFile,
-			CAFile:        cfg.Server.XoT.CAFile,
-			ListenPort:    853,
-			MinTLSVersion: cfg.Server.XoT.MinTLSVersion,
-		}
-
-		// Reuse TLS cert if XoT cert not specifically configured
-		if xotConfig.CertFile == "" && cfg.Server.TLS.CertFile != "" {
-			xotConfig.CertFile = cfg.Server.TLS.CertFile
-			xotConfig.KeyFile = cfg.Server.TLS.KeyFile
-		}
-
-		if xotConfig.CertFile == "" || xotConfig.KeyFile == "" {
-			return fmt.Errorf("XoT enabled but cert_file/key_file not configured")
-		}
-		xotServer, err = transfer.NewXoTServer(zones, xotConfig, logger)
-		if err != nil {
-			return fmt.Errorf("creating XoT server: %w", err)
-		}
-		xotServer.SetJournalStore(transferManager.Result().JournalStore)
-
-		if err := xotServer.Serve(xotAddr); err != nil {
-			return fmt.Errorf("starting XoT server: %w", err)
-		}
-
-		go xotServer.AcceptLoop()
-		logger.Infof("XoT server listening on %s (DNS Zone Transfer over TLS, RFC 9103)", xotServer.Addr())
-	}
-
-	// Periodically collect transport stats
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-stopCh:
-				return
-			case <-ticker.C:
-				if metricsCollector != nil {
-					us := udpServer.Stats()
-					ts := tcpServer.Stats()
-					metricsCollector.SetTransportStats(
-						us.PacketsReceived, us.PacketsSent, us.Errors,
-						ts.ConnectionsAccepted, ts.ConnectionsClosed, ts.MessagesReceived, ts.Errors,
-					)
-				}
-			}
-		}
-	}()
+	startStatsCollector(transports, metricsCollector, stopCh)
 
 	// Setup signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -1134,29 +945,9 @@ func run() error {
 			go func() {
 				defer close(done)
 
-				// Stop servers
+				// Stop transport servers (UDP/TCP/TLS/DoQ/XoT)
 				cancelServer() // Cancel in-flight queries before stopping transports
-				if err := udpServer.Stop(); err != nil {
-					logger.Warnf("Failed to stop UDP server cleanly: %v", err)
-				}
-				if err := tcpServer.Stop(); err != nil {
-					logger.Warnf("Failed to stop TCP server cleanly: %v", err)
-				}
-				if tlsServer != nil {
-					if err := tlsServer.Stop(); err != nil {
-						logger.Warnf("Failed to stop TLS server cleanly: %v", err)
-					}
-				}
-				if doqServer != nil {
-					if err := doqServer.Stop(); err != nil {
-						logger.Warnf("Failed to stop DoQ server cleanly: %v", err)
-					}
-				}
-				if xotServer != nil {
-					if err := xotServer.Close(); err != nil {
-						logger.Warnf("Failed to close XoT server cleanly: %v", err)
-					}
-				}
+				transports.stopAll(logger)
 
 				// Close upstream client and load balancer
 				upstreamManager.Stop()

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,8 +8,7 @@ import (
 )
 
 func (s *Server) handleRPZ(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -55,8 +53,7 @@ func (s *Server) handleRPZ(w http.ResponseWriter, r *http.Request) {
 
 // handleRPZRules returns RPZ QNAME rules list.
 func (s *Server) handleRPZRules(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost && r.Method != http.MethodDelete {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet, http.MethodPost, http.MethodDelete) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -114,8 +111,7 @@ func (s *Server) handleRPZRules(w http.ResponseWriter, r *http.Request) {
 		})
 	case http.MethodPost:
 		var req RPZAddRuleRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-			s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		if !s.decode(w, r, &req) {
 			return
 		}
 		if req.Pattern == "" {

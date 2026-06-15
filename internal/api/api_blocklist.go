@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -9,8 +8,7 @@ import (
 )
 
 func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet, http.MethodPost) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -49,8 +47,7 @@ func (s *Server) handleBlocklists(w http.ResponseWriter, r *http.Request) {
 		s.writeJSON(w, http.StatusOK, stats)
 	case http.MethodPost:
 		var req BlocklistAddRequest
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
-			s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		if !s.decode(w, r, &req) {
 			return
 		}
 		if req.File != "" {

@@ -1384,6 +1384,35 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
 	s.writeJSON(w, status, &ErrorResponse{Error: message})
 }
 
+// requireMethod checks that r.Method is one of the allowed methods and writes
+// a 405 response if not. Returns true if the caller should return (method
+// rejected), false if the method is allowed. Use:
+//
+//	if s.requireMethod(w, r, http.MethodGet, http.MethodPost) { return }
+func (s *Server) requireMethod(w http.ResponseWriter, r *http.Request, methods ...string) bool {
+	for _, m := range methods {
+		if r.Method == m {
+			return false
+		}
+	}
+	s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	return true
+}
+
+// decode reads a JSON request body into dst, enforcing the standard body-size
+// limit (maxBodyBytes). Returns true on success, or writes a 400 response and
+// returns false on failure. Use:
+//
+//	var req FooRequest
+//	if !s.decode(w, r, &req) { return }
+func (s *Server) decode(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(dst); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return false
+	}
+	return true
+}
+
 // sanitizeError converts an internal error to a safe client-facing message.
 // Use this instead of err.Error() in API responses to prevent information leakage.
 func sanitizeError(err error, fallback string) string {

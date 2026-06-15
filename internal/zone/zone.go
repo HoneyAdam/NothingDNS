@@ -1013,6 +1013,37 @@ func (z *Zone) LookupAll(name string) []Record {
 	return cloneRecords(z.Records[name])
 }
 
+// GetDefaultTTL returns the zone's default TTL. Thread-safe.
+func (z *Zone) GetDefaultTTL() uint32 {
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+	return z.DefaultTTL
+}
+
+// GetOrigin returns the zone's origin name. Thread-safe (Origin is set
+// at construction and never mutated, but the method exists so callers
+// don't reach into the struct field directly).
+func (z *Zone) GetOrigin() string {
+	return z.Origin
+}
+
+// RecordsByType returns all records matching the given type (case-insensitive).
+// The returned slice is a copy and safe to use without holding the zone lock.
+func (z *Zone) RecordsByType(rrtype string) []Record {
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+	rrtype = strings.ToUpper(rrtype)
+	var results []Record
+	for _, ownerRecords := range z.Records {
+		for _, rec := range ownerRecords {
+			if strings.ToUpper(rec.Type) == rrtype {
+				results = append(results, rec)
+			}
+		}
+	}
+	return results
+}
+
 // NameExists returns true if the given name has any records in the zone.
 // This is needed for wildcard matching — a name that exists but has no
 // records of the requested type is NODATA, not a wildcard match.

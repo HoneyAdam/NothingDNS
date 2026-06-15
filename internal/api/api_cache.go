@@ -5,8 +5,7 @@ import (
 )
 
 func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodGet) {
 		return
 	}
 	if s.requireOperator(w, r) {
@@ -24,8 +23,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 
 // handleCacheFlush flushes the cache.
 func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+	if s.requireMethod(w, r, http.MethodPost) {
 		return
 	}
 	if s.requireAdmin(w, r) {
