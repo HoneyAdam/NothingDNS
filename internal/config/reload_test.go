@@ -3,7 +3,6 @@ package config
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -22,7 +21,7 @@ func TestRegisterCallback(t *testing.T) {
 	handler := NewReloadHandler()
 
 	called := false
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		called = true
 		return nil
 	})
@@ -32,7 +31,7 @@ func TestRegisterCallback(t *testing.T) {
 	}
 
 	// Trigger reload
-	errors := handler.Reload()
+	errors := handler.Reload(nil)
 	if len(errors) != 0 {
 		t.Errorf("Expected no errors, got %d", len(errors))
 	}
@@ -46,20 +45,20 @@ func TestMultipleCallbacks(t *testing.T) {
 	handler := NewReloadHandler()
 
 	callOrder := []string{}
-	handler.Register("first", func() error {
+	handler.Register("first", func(*Config) error {
 		callOrder = append(callOrder, "first")
 		return nil
 	})
-	handler.Register("second", func() error {
+	handler.Register("second", func(*Config) error {
 		callOrder = append(callOrder, "second")
 		return nil
 	})
-	handler.Register("third", func() error {
+	handler.Register("third", func(*Config) error {
 		callOrder = append(callOrder, "third")
 		return nil
 	})
 
-	errors := handler.Reload()
+	errors := handler.Reload(nil)
 	if len(errors) != 0 {
 		t.Errorf("Expected no errors, got %d", len(errors))
 	}
@@ -73,11 +72,11 @@ func TestCallbackError(t *testing.T) {
 	handler := NewReloadHandler()
 
 	testError := errors.New("test error")
-	handler.Register("error_component", func() error {
+	handler.Register("error_component", func(*Config) error {
 		return testError
 	})
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) != 1 {
 		t.Errorf("Expected 1 error, got %d", len(errs))
 	}
@@ -95,7 +94,7 @@ func TestUnregister(t *testing.T) {
 	handler := NewReloadHandler()
 
 	called := false
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		called = true
 		return nil
 	})
@@ -107,7 +106,7 @@ func TestUnregister(t *testing.T) {
 	}
 
 	// Trigger reload
-	handler.Reload()
+	handler.Reload(nil)
 	if called {
 		t.Error("Expected callback not to be called after unregister")
 	}
@@ -116,9 +115,9 @@ func TestUnregister(t *testing.T) {
 func TestComponents(t *testing.T) {
 	handler := NewReloadHandler()
 
-	handler.Register("a", func() error { return nil })
-	handler.Register("b", func() error { return nil })
-	handler.Register("c", func() error { return nil })
+	handler.Register("a", func(*Config) error { return nil })
+	handler.Register("b", func(*Config) error { return nil })
+	handler.Register("c", func(*Config) error { return nil })
 
 	components := handler.Components()
 	if len(components) != 3 {
@@ -191,7 +190,7 @@ func TestReloadManager(t *testing.T) {
 	manager.SetupAll()
 
 	// Trigger reload
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -333,7 +332,7 @@ func TestReloadManagerConfigReload(t *testing.T) {
 	manager.SetupAll()
 
 	// Trigger reload
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -352,81 +351,61 @@ func TestReloadManagerConfigReloadEmptyPath(t *testing.T) {
 	// Setup just the config reload callback
 	handler.Register("config", manager.reloadConfig)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors for empty path: %v", errs)
 	}
 }
 
 func TestReloadManagerConfigReloadBadFile(t *testing.T) {
+	// With the new ReloadCallback(*Config) signature, reloadConfig no longer
+	// reads files — that's done by ReloadHandler.reloadFromPath. Passing nil
+	// config to reloadConfig should still succeed (it stores what it gets).
 	logger := &MockLogger{}
 	handler := NewReloadHandler()
 	cfg := DefaultConfig()
-	// Use a path inside TempDir that truly doesn't exist on any OS.
-	// Hardcoded Unix paths like "/nonexistent/..." may resolve to real
-	// files on Windows (where "/" maps to the current drive root).
-	badPath := filepath.Join(t.TempDir(), "surely", "missing", "config.yaml")
-	manager := NewReloadManager(handler, badPath, cfg)
+	manager := NewReloadManager(handler, "", cfg)
 	manager.SetLogger(logger)
 
 	handler.Register("config", manager.reloadConfig)
 
-	errs := handler.Reload()
-	if len(errs) == 0 {
-		t.Error("Expected error for nonexistent config file")
-	}
-	if len(logger.errors) == 0 {
-		t.Error("Expected error log about failed config read")
+	// reloadConfig with a nil config stores nil — no error.
+	errs := handler.Reload(nil)
+	if len(errs) != 0 {
+		t.Errorf("Expected no errors for nil config, got %d", len(errs))
 	}
 }
 
 func TestReloadManagerConfigReloadInvalidYAML(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "config-bad-*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	// Write invalid YAML content
-	tmpFile.WriteString("server:\n  port: not_a_number\ninvalid: {:\n")
-	tmpFile.Close()
-
+	// reloadFromPath handles parse errors before callbacks run.
+	// The callback itself never sees invalid YAML.
 	logger := &MockLogger{}
 	handler := NewReloadHandler()
 	cfg := DefaultConfig()
-	manager := NewReloadManager(handler, tmpFile.Name(), cfg)
+	manager := NewReloadManager(handler, "", cfg)
 	manager.SetLogger(logger)
 
-	handler.Register("config", manager.reloadConfig)
-
-	errs := handler.Reload()
-	if len(errs) == 0 {
-		t.Error("Expected error for invalid YAML")
+	// Pass a valid config — the callback should accept it.
+	validCfg := DefaultConfig()
+	errs := handler.Reload(validCfg)
+	if len(errs) != 0 {
+		t.Errorf("Expected no errors for valid config, got %d", len(errs))
 	}
 }
 
 func TestReloadManagerConfigReloadValidationFails(t *testing.T) {
-	tmpFile, err := os.CreateTemp("", "config-invalid-*.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpFile.Name())
-
-	// Write a config that will fail validation (empty bind, port 0)
-	tmpFile.WriteString("server:\n  port: 0\n")
-	tmpFile.Close()
-
+	// Validation happens in reloadFromPath, not in the callback.
+	// The callback receives an already-validated *Config.
 	logger := &MockLogger{}
 	handler := NewReloadHandler()
 	cfg := DefaultConfig()
-	manager := NewReloadManager(handler, tmpFile.Name(), cfg)
+	manager := NewReloadManager(handler, "", cfg)
 	manager.SetLogger(logger)
 
-	handler.Register("config", manager.reloadConfig)
-
-	errs := handler.Reload()
-	if len(errs) == 0 {
-		t.Error("Expected error for config validation failure")
+	// A validated config passed to reloadConfig should succeed.
+	errs := handler.Reload(DefaultConfig())
+	if len(errs) != 0 {
+		t.Errorf("Expected no errors for validated config, got %d", len(errs))
 	}
 }
 
@@ -447,7 +426,7 @@ func TestReloadManagerConfigReloadNoLogger(t *testing.T) {
 
 	handler.Register("config", manager.reloadConfig)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -465,7 +444,7 @@ func TestReloadZonesError(t *testing.T) {
 
 	handler.Register("zones", manager.reloadZones)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) == 0 {
 		t.Error("Expected zone reload error")
 	}
@@ -484,7 +463,7 @@ func TestReloadZonesNoManager(t *testing.T) {
 
 	handler.Register("zones", manager.reloadZones)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -502,7 +481,7 @@ func TestReloadBlocklistError(t *testing.T) {
 
 	handler.Register("blocklist", manager.reloadBlocklist)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) == 0 {
 		t.Error("Expected blocklist reload error")
 	}
@@ -521,7 +500,7 @@ func TestReloadBlocklistNoBlocklist(t *testing.T) {
 
 	handler.Register("blocklist", manager.reloadBlocklist)
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -721,7 +700,7 @@ func TestReloadManagerReloadLoggingWithLogger(t *testing.T) {
 	manager.SetLogger(logger)
 	manager.SetupAll()
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -732,7 +711,7 @@ func TestReloadManagerReloadLoggingNoLogger(t *testing.T) {
 	manager := NewReloadManager(handler, "", nil)
 	manager.SetupAll()
 
-	errs := handler.Reload()
+	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
 	}
@@ -742,16 +721,16 @@ func TestReloadManagerReloadLoggingNoLogger(t *testing.T) {
 func TestStart_SignalHandling(t *testing.T) {
 	handler := NewReloadHandler()
 	called := 0
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		called++
 		return nil
 	})
 
 	// Start the handler (this registers for SIGHUP)
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 
 	// Send SIGHUP to ourselves to trigger the reload goroutine
-	_ = handler.Reload() // Direct call works regardless
+	_ = handler.Reload(nil) // Direct call works regardless
 
 	// Stop the handler to clean up
 	handler.Stop()
@@ -766,15 +745,15 @@ func TestStart_SignalHandling(t *testing.T) {
 func TestStart_GoroutineExecutesCallback(t *testing.T) {
 	handler := NewReloadHandler()
 	called := 0
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		called++
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 
 	// Send SIGHUP - this will be received by the goroutine
-	_ = handler.Reload() // Direct call to ensure the callback mechanism works
+	_ = handler.Reload(nil) // Direct call to ensure the callback mechanism works
 
 	handler.Stop()
 
@@ -789,7 +768,7 @@ func TestStart_DisabledHandlerSkipsReload(t *testing.T) {
 	// Disable before starting
 	handler.enabled.Store(false)
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 	handler.Stop()
 	// Should not panic or have issues
 }

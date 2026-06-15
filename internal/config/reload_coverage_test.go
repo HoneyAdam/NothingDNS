@@ -5,11 +5,25 @@ package config
 import (
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// writeTestConfig writes a minimal valid config file and returns its path.
+// Used by SIGHUP signal tests that need Start() to successfully load config
+// before dispatching to callbacks.
+func writeTestConfig(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.yaml")
+	if err := os.WriteFile(path, []byte("server:\n  port: 53\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 // TestStart_SIGHUPTriggersReload tests that sending SIGHUP to the process
 // triggers the goroutine started by Start() to call Reload (line 71).
@@ -18,14 +32,14 @@ func TestStart_SIGHUPTriggersReload(t *testing.T) {
 
 	var mu sync.Mutex
 	reloadCalled := false
-	handler.Register("test_component", func() error {
+	handler.Register("test_component", func(*Config) error {
 		mu.Lock()
 		reloadCalled = true
 		mu.Unlock()
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 	defer handler.Stop()
 
 	// Send SIGHUP to ourselves - this goes through the signal.Notify channel
@@ -64,14 +78,14 @@ func TestStart_DisabledSkipsSignalReload(t *testing.T) {
 
 	var mu sync.Mutex
 	reloadCount := 0
-	handler.Register("test_component", func() error {
+	handler.Register("test_component", func(*Config) error {
 		mu.Lock()
 		reloadCount++
 		mu.Unlock()
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 	defer handler.Stop()
 
 	// First SIGHUP: enabled is true, should trigger reload
@@ -120,14 +134,14 @@ func TestStart_MultipleSIGHUPs(t *testing.T) {
 
 	var mu sync.Mutex
 	reloadCount := 0
-	handler.Register("counter", func() error {
+	handler.Register("counter", func(*Config) error {
 		mu.Lock()
 		reloadCount++
 		mu.Unlock()
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 	defer handler.Stop()
 
 	// Send multiple SIGHUP signals
@@ -167,14 +181,14 @@ func TestStart_SIGHUPWithCallbackError(t *testing.T) {
 
 	var mu sync.Mutex
 	called := false
-	handler.Register("failing", func() error {
+	handler.Register("failing", func(*Config) error {
 		mu.Lock()
 		called = true
 		mu.Unlock()
 		return os.ErrNotExist
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 	defer handler.Stop()
 
 	// Send SIGHUP - even though callback errors, goroutine should survive
@@ -225,11 +239,11 @@ func TestStart_SIGHUPWithCallbackError(t *testing.T) {
 func TestStart_StopClosesChannel(t *testing.T) {
 	handler := NewReloadHandler()
 
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 
 	// Send a signal to verify the goroutine is running
 	syscall.Kill(syscall.Getpid(), syscall.SIGHUP)
@@ -257,11 +271,11 @@ func TestStart_SignalNotifyCalled(t *testing.T) {
 	signal.Notify(sigChan, syscall.SIGHUP)
 	defer signal.Stop(sigChan)
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 
 	var mu sync.Mutex
 	reloadCalled := false
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		mu.Lock()
 		reloadCalled = true
 		mu.Unlock()
@@ -306,14 +320,14 @@ func TestStart_GoroutineExitsOnChannelClose(t *testing.T) {
 
 	var mu sync.Mutex
 	reloadCount := 0
-	handler.Register("test", func() error {
+	handler.Register("test", func(*Config) error {
 		mu.Lock()
 		reloadCount++
 		mu.Unlock()
 		return nil
 	})
 
-	handler.Start()
+	handler.Start(writeTestConfig(t))
 
 	// Trigger a reload through the channel
 	syscall.Kill(syscall.Getpid(), syscall.SIGHUP)

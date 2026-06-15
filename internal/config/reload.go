@@ -22,8 +22,11 @@ type ReloadHandler struct {
 	stopOnce  sync.Once // guards Stop() against close-of-closed panic
 }
 
-// ReloadCallback is called on configuration reload
-type ReloadCallback func() error
+// ReloadCallback is called on configuration reload. The newly-loaded
+// *Config is passed in so every callback sees the same fresh config —
+// previously each callback had to re-fetch config independently, risking
+// stale reads if a concurrent reload swapped the atomic between callbacks.
+type ReloadCallback func(newCfg *Config) error
 
 // ReloadPriority determines callback execution order
 type ReloadPriority int
@@ -72,7 +75,7 @@ func (h *ReloadHandler) Unregister(component string) {
 }
 
 // Start starts listening for reload signals
-func (h *ReloadHandler) Start() {
+func (h *ReloadHandler) Start(configPath string) {
 	signal.Notify(h.reloadSig, syscall.SIGHUP)
 
 	h.wg.Add(1)
@@ -87,9 +90,33 @@ func (h *ReloadHandler) Start() {
 			if !h.enabled.Load() {
 				continue
 			}
-			h.Reload()
+			h.reloadFromPath(configPath)
 		}
 	}()
+}
+
+// reloadFromPath loads the config from path, then dispatches it to all
+// registered callbacks via Reload. If the config fails to load or validate,
+// the reload is aborted and the error is logged — stale callbacks never run.
+func (h *ReloadHandler) reloadFromPath(configPath string) {
+	if configPath == "" {
+		return
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		util.Errorf("reload: failed to read config %s: %v", configPath, err)
+		return
+	}
+	newCfg, err := UnmarshalYAML(string(data))
+	if err != nil {
+		util.Errorf("reload: failed to parse config: %v", err)
+		return
+	}
+	if errs := newCfg.Validate(); len(errs) > 0 {
+		util.Errorf("reload: config validation failed: %v", errs)
+		return
+	}
+	h.Reload(newCfg)
 }
 
 // Stop stops listening for reload signals. Idempotent — a second
@@ -112,19 +139,14 @@ func (h *ReloadHandler) Stop() {
 	h.wg.Wait()
 }
 
-// Reload triggers a manual reload.
-// SECURITY (MED-010): Callbacks execute with an RLock, but each component
-// is responsible for its own atomic state management. The ReloadManager
-// uses atomic.Pointer[Config] for consistent config snapshots.
-func (h *ReloadHandler) Reload() []ReloadError {
+// Reload triggers a manual reload. The newCfg is passed to every callback
+// so they all see the same freshly-loaded config snapshot.
+func (h *ReloadHandler) Reload(newCfg *Config) []ReloadError {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	var errors []ReloadError
 
-	// Execute callbacks in priority order
-	// For simplicity, we execute in map order
-	// A more sophisticated implementation would sort by priority
 	for component, cb := range h.callbacks {
 		func() {
 			defer func() {
@@ -135,7 +157,7 @@ func (h *ReloadHandler) Reload() []ReloadError {
 					})
 				}
 			}()
-			if err := cb(); err != nil {
+			if err := cb(newCfg); err != nil {
 				errors = append(errors, ReloadError{
 					Component: component,
 					Error:     err,
@@ -219,38 +241,9 @@ func (m *ReloadManager) SetupAll() {
 	m.handler.Register("logging", m.reloadLogging)
 }
 
-func (m *ReloadManager) reloadConfig() error {
-	if m.configPath == "" {
-		return nil
-	}
-
-	// Read config file
-	data, err := os.ReadFile(m.configPath)
-	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to read config file", "error", err)
-		}
-		return err
-	}
-
-	// Parse configuration
-	newCfg, err := UnmarshalYAML(string(data))
-	if err != nil {
-		if m.logger != nil {
-			m.logger.Error("Failed to parse config", "error", err)
-		}
-		return err
-	}
-
-	// Validate
-	if errors := newCfg.Validate(); len(errors) > 0 {
-		if m.logger != nil {
-			m.logger.Error("Config validation failed", "errors", errors)
-		}
-		return fmt.Errorf("config validation failed")
-	}
-
-	// Update config atomically
+func (m *ReloadManager) reloadConfig(newCfg *Config) error {
+	// Config was already loaded and validated by ReloadHandler.reloadFromPath.
+	// Store it atomically so subsequent reads by the server pick up the new value.
 	m.config.Store(newCfg)
 
 	if m.logger != nil {
@@ -260,7 +253,7 @@ func (m *ReloadManager) reloadConfig() error {
 	return nil
 }
 
-func (m *ReloadManager) reloadZones() error {
+func (m *ReloadManager) reloadZones(_ *Config) error {
 	if m.zoneManager == nil {
 		return nil
 	}
@@ -279,7 +272,7 @@ func (m *ReloadManager) reloadZones() error {
 	return nil
 }
 
-func (m *ReloadManager) reloadBlocklist() error {
+func (m *ReloadManager) reloadBlocklist(_ *Config) error {
 	if m.blocklist == nil {
 		return nil
 	}
@@ -298,7 +291,8 @@ func (m *ReloadManager) reloadBlocklist() error {
 	return nil
 }
 
-func (m *ReloadManager) reloadLogging() error {
+func (m *ReloadManager) reloadLogging(newCfg *Config) error {
+	_ = newCfg // available for future use (e.g. dynamic log level changes)
 	if m.logger != nil {
 		m.logger.Info("Logging configuration reloaded")
 	}

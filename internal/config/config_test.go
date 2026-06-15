@@ -1490,7 +1490,7 @@ func TestReloadHandlerStart(t *testing.T) {
 	h := NewReloadHandler()
 
 	// Start the handler
-	h.Start()
+	h.Start("")
 
 	// Cleanup
 	h.Stop()
