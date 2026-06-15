@@ -191,7 +191,7 @@ Benefits: each stage ~50–100 LOC and individually testable; ordering becomes d
 - **Strategic question:** is maintaining ~835 LOC of bespoke YAML (no anchors, no multiline, fragile dedent, ~3000 LOC of tests) worth it vs adopting a vetted parser? Given the project already broke the "no third-party YAML" rule by adding pgx, re-evaluate. If keeping it: add a fuzz target (`FuzzParseYAML`).
 
 **Hot reload (`reload.go`) · Confidence: Medium:**
-- Reload callbacks take no args and each must re-fetch config → easy to read stale config. Pass `newCfg *Config` into callbacks.
+- ✅ Reload callbacks now receive `*Config` (DONE 2026-06-15): `ReloadCallback` changed to `func(*Config) error`; `ReloadHandler.reloadFromPath` loads/validates config before dispatching to callbacks.
 - Reload is not atomic across zones (zone 3 failing leaves zones 1–2 swapped). Load+validate all into a temp state, then swap under one lock. (Mirror in `main.go` SIGHUP handler — guard against overlapping reloads.)
 
 ### C3. `internal/cluster` + `raft` — split god-objects, harden concurrency (P2, careful) · Confidence: **Investigate** (HA code — reproduce before changing) · ✅ **File splits DONE (2026-06-15)**
@@ -341,7 +341,7 @@ Fuzz tests exist (`dnscookie`, `cache`). **Add** fuzz targets for the two highes
 ### Phase 3 — Monolith decomposition (1–2 weeks) · ✅ **DONE**
 - [x] C2 `config.go` split — ✅ DONE (prior session): split into 20 per-domain files; `config.go` now 655 LOC.
 - [x] C5 `protocol/types.go` split — ✅ DONE (prior session): `types_address.go`, `types_security.go`, `types_svcb.go`, etc.
-- [ ] Harden the YAML parser (fail loudly on anchors/multiline) or replace it. **Remaining.**
+- [x] Harden the YAML parser (fail loudly on anchors/multiline) — ✅ DONE (2026-06-15): tokenizer emits `TokenError` for anchors/aliases/tags/block scalars; parser default case errors instead of silent empty scalar.
 - [ ] D9/D10 follow-through. **Remaining (mostly done — minor caps).**
 
 ### Phase 4 — Consensus hardening (carefully, 1–2 weeks) · ✅ **File splits DONE (2026-06-15)**
@@ -403,6 +403,27 @@ Split the 1920-line `raft.go` into 5 focused files + doc anchor — zero behavio
 ### 7. Web dashboard cleanup · `web/package.json`
 - Removed unused `next-themes` dependency (0 references in source). Both lockfiles regenerated.
 
+### 8. YAML parser hardening · `internal/config/`
+- Tokenizer now emits `TokenError` for anchors (`&`), aliases (`*`), tags (`!`), block scalars (`|`, `>`) — previously silently swallowed, causing data loss
+- Parser `parseMapping` default case now errors on unexpected tokens instead of silently producing an empty scalar
+- Removed dead `readTag`/`readAnchor`/`readAlias` methods (~50 LOC)
+- Added `TestTokenizerUnsupportedFeatures` (5 subtests) + `TestParserRejectsAnchor/BlockScalar/Tag`
+
+### 9. Test file consolidation
+- Merged 70 `coverage_extra*_test.go` files into 28 per-package `coverage_test.go` files
+- Removed 14 `_CoverageExtra4` suffixes from test function names
+- Resolved 3 name collisions by keeping the better test and deleting stubs
+- Updated 3 stale comments referencing old filenames
+
+### 10. `ReloadCallback(*Config)` signature change · `internal/config/reload.go`
+- `ReloadCallback` changed from `func() error` to `func(*Config) error` — every callback now receives the freshly-loaded config instead of independently re-fetching it (stale-read risk)
+- `ReloadHandler.Start(configPath)` now loads/parses/validates config via `reloadFromPath` before dispatching to callbacks — if loading fails, callbacks never run
+- `ReloadManager.reloadConfig` simplified: just stores the passed config
+
+### 11. Web component decompositions
+- `zone-editor.tsx` (1380 LOC) → `zone-editor/` directory: `record-utils.ts` (262), `record-form.tsx` (184), `record-dialogs.tsx` (450), `index.tsx` (516)
+- `settings.tsx` (994 LOC) → `settings/` directory: `types.tsx` (148), `shared.tsx` (72), `general-settings.tsx` (67), `dns-settings.tsx` (61), `upstream-settings.tsx` (53), `cache-settings.tsx` (141), `security-settings.tsx` (120), `logging-settings.tsx` (76), `cluster-settings.tsx` (34), `advanced-settings.tsx` (94), `index.tsx` (131)
+
 ### Verification
 - `go test -race ./...` run across all packages: cluster (5.5s), raft (24.7s), api (280s), cmd (2.5s), + 30 smaller packages — **all pass, zero data races**
 - `gofmt -l` returns 0 files
@@ -410,14 +431,10 @@ Split the 1920-line `raft.go` into 5 focused files + doc anchor — zero behavio
 
 ### Remaining items (from original plan)
 - D8: CSRF synchronizer token (medium effort, SameSite mitigates)
-- YAML parser hardening (fail loudly on anchors/multiline)
 - Callbacks-under-lock, election single-flight in gossip (need reproduction tests)
-- `ReloadCallback(*Config)` signature change
 - `dnssec/validator.go` method extraction
 - `resolver.go` per-hop timeout granularity
 - OpenAPI generation from handler metadata
-- Consolidate 70 `coverage_extra*` test files into behavior-named tests
-- Web: decompose `zone-editor.tsx` (1380 LOC) and `settings.tsx` (994 LOC)
 
 ---
 
