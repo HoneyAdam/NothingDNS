@@ -97,8 +97,11 @@ Accepted / deferred (rationale):
 | V23 | CSP `style-src 'unsafe-inline'` | **Accept** — required by Radix UI; `script-src 'self'` remains strict |
 | V24 | Management API defaults to `0.0.0.0:8080` | **Mitigated** — production validation requires TLS on a public `http.bind`; changing the default would break container/port-mapped deployments (maintainer call) |
 
-Note H4 requires the release process to publish a `SHA256SUMS` asset for the
-installer to succeed (else it fails closed, or `NOTHINGDNS_SKIP_CHECKSUM=1`).
+H4's operational dependency is now satisfied by `.github/workflows/release.yml`,
+which builds the cross-platform binaries and publishes a `SHA256SUMS` manifest to
+each GitHub Release (asset names match the installer; verified end-to-end). The
+installer still fails closed if a release lacks the manifest
+(`NOTHINGDNS_SKIP_CHECKSUM=1` bypasses).
 
 ---
 
