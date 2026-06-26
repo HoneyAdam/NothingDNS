@@ -110,7 +110,7 @@ jobs:
           find coverage -name '*.out' ! -name all.out -exec grep -h -v "^mode:" {} + >> coverage/all.out
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@fb8b3582c8e49de0d7c17ffa66023941024efa8b # v7.0.0
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage/all.out
           flags: unittests
@@ -129,7 +129,7 @@ jobs:
             done > coverage/summary.txt
 
       - name: Upload coverage artifacts
-        uses: actions/upload-artifact@043fb46d1a93a6e44c6ee1ceda5bb4e74e8ebb06 # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-report
           path: |
@@ -225,13 +225,13 @@ jobs:
           go vet ./...
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@8aad20d150bb77aa24c3e8eab2e6b8e0c1d1b5e5 # v4.36.2
+        uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
         with:
           languages: go
           queries: security-extended
 
       - name: Run CodeQL Analysis
-        uses: github/codeql-action/analyze@8aad20d150bb77aa24c3e8eab2e6b8e0c1d1b5e5 # v4.36.2
+        uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
 
   e2e:
     runs-on: ubuntu-latest
@@ -247,7 +247,7 @@ jobs:
           cache: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda99b16ec9dc1eb40e761f0fbcfc27 # v6.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '20'
 
@@ -263,7 +263,7 @@ jobs:
 
       - name: Upload E2E logs on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93a6e44c6ee1ceda5bb4e74e8ebb06 # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: e2e-logs
           path: |
@@ -289,7 +289,7 @@ jobs:
           cache: false
 
       - name: Cache fuzz corpus
-        uses: actions/cache@27d5ce7f107f21e3a5a9db2a3c0c7d9f7b1e6a2c # v5.0.5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/.cache/go-build/fuzz
           key: fuzz-${{ runner.os }}-${{ hashFiles('**/*.go') }}
@@ -319,7 +319,7 @@ jobs:
 
       - name: Upload fuzz failures on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93a6e44c6ee1ceda5bb4e74e8ebb06 # v7.0.1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: fuzz-failures
           path: |
