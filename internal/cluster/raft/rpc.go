@@ -115,6 +115,14 @@ func (s *RPCServer) Stop() {
 // acceptLoop accepts incoming connections.
 func (s *RPCServer) acceptLoop() {
 	defer s.wg.Done()
+	// Defense-in-depth (V14): a panic in the accept path must not crash the
+	// whole process. The DNS data path already recovers; cluster goroutines did
+	// not.
+	defer func() {
+		if r := recover(); r != nil {
+			util.Errorf("raft rpc: panic in acceptLoop: %v", r)
+		}
+	}()
 
 	for {
 		select {
@@ -165,6 +173,14 @@ func setListenerDeadline(listener net.Listener, deadline time.Time) error {
 
 // handleConn handles a single connection.
 func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
+	// Recover from any panic decoding attacker-controlled bytes so a single
+	// malformed/malicious connection tears down only itself, not the process
+	// (V14). Registered first so it runs after the cleanup defers below.
+	defer func() {
+		if r := recover(); r != nil {
+			util.Errorf("raft rpc: panic handling connection from %s: %v", nodeID, r)
+		}
+	}()
 	defer s.wg.Done()
 	defer func() {
 		if err := closeRaftConn(conn); err != nil {

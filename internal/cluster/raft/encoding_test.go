@@ -79,6 +79,23 @@ func TestFrameAEADRoundTrip(t *testing.T) {
 	}
 }
 
+// TestDecodeEntrySlice_HugeCmdLenRejected guards the V15 bounds check: an entry
+// declaring a near-uint32-max command length must be rejected (not panic, not
+// attempt a huge allocation). On 32-bit platforms the previous int arithmetic
+// could overflow and bypass this guard.
+func TestDecodeEntrySlice_HugeCmdLenRejected(t *testing.T) {
+	data := make([]byte, 29)
+	binary.BigEndian.PutUint32(data[0:], 1) // count = 1
+	// entry: index[4:12], term[12:20], type[20], cmdLen[21:25]
+	binary.BigEndian.PutUint32(data[21:], 0xFFFFFFFF)
+
+	var entries []entry
+	err := decodeEntrySlice(&entries, data)
+	if err == nil {
+		t.Fatal("expected overflow error for oversized cmdLen, got nil")
+	}
+}
+
 // TestFrameAEADTamperRejected confirms the AAD/tag actually authenticates the
 // frame: flipping a ciphertext byte must fail Open rather than decode garbage.
 func TestFrameAEADTamperRejected(t *testing.T) {

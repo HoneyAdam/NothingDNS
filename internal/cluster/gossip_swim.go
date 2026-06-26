@@ -65,7 +65,13 @@ func (gp *GossipProtocol) receiveLoop() {
 		}
 
 		atomic.AddUint64(&gp.messagesReceived, 1)
-		gp.handleMessage(buf[:n], from)
+		// Recover per packet (V14): a panic decoding one malformed/malicious
+		// datagram must not kill the receive loop or the process. Reuses the
+		// existing callback recovery helper.
+		func() {
+			defer gp.recoverCallback("handleMessage")
+			gp.handleMessage(buf[:n], from)
+		}()
 	}
 }
 

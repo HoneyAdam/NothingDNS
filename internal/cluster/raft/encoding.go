@@ -573,7 +573,10 @@ func decodeEntrySlice(entries *[]entry, data []byte) error {
 		off++
 		cmdLen := binary.BigEndian.Uint32(data[off:])
 		off += 4
-		if off+int(cmdLen)+8 > len(data) {
+		// Bounds-check in uint64: on 32-bit platforms off+int(cmdLen)+8 (cmdLen
+		// is uint32) can overflow int and wrap negative, bypassing the guard and
+		// allowing a huge make()/out-of-bounds copy below (V15).
+		if uint64(off)+uint64(cmdLen)+8 > uint64(len(data)) {
 			return fmt.Errorf("entry slice: command %d overflow", i)
 		}
 		if cmdLen > 0 {
