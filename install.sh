@@ -22,6 +22,11 @@ USE_PORT_5353=false
 # in trusted/offline environments: NOTHINGDNS_SKIP_CHECKSUM=1.
 SKIP_CHECKSUM="${NOTHINGDNS_SKIP_CHECKSUM:-0}"
 CHECKSUMS_FILE=""
+# In non-interactive installs (e.g. curl | bash) we must NOT silently stop and
+# disable the host's resolver (systemd-resolved/unbound/bind9/dnsmasq) — that
+# can break system DNS. Default: fall back to port 5353. Set
+# NOTHINGDNS_STOP_HOST_DNS=1 to explicitly consent to taking over port 53.
+STOP_HOST_DNS="${NOTHINGDNS_STOP_HOST_DNS:-0}"
 
 # Colors
 RED='\033[0;31m'
@@ -628,9 +633,16 @@ main() {
                     ;;
                 *) error "Installation cancelled" ;;
             esac
-        else
-            info "Auto-stopping existing DNS services..."
+        elif [ "${STOP_HOST_DNS}" = "1" ]; then
+            info "NOTHINGDNS_STOP_HOST_DNS=1 — stopping existing DNS services to take over port 53..."
             stop_existing_dns
+        else
+            # Non-interactive (e.g. curl | bash) without explicit consent: never
+            # silently disable the host resolver. Use port 5353 instead.
+            warn "Port 53 is in use and this is a non-interactive install."
+            warn "Falling back to port 5353 to avoid disrupting host DNS."
+            warn "To take over port 53, re-run with NOTHINGDNS_STOP_HOST_DNS=1."
+            USE_PORT_5353=true
         fi
     fi
 
