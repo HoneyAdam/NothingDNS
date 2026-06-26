@@ -16,6 +16,12 @@ SKIP_DOWNLOAD=false
 BOOTSTRAP_USER="admin"
 BOOTSTRAP_PASS=""
 USE_PORT_5353=false
+# Release assets are verified against the published SHA256SUMS by default. This
+# is the integrity control that stops a hijacked/MITM'd release from achieving
+# root code execution (the binary is chmod +x'd and run as root). Override only
+# in trusted/offline environments: NOTHINGDNS_SKIP_CHECKSUM=1.
+SKIP_CHECKSUM="${NOTHINGDNS_SKIP_CHECKSUM:-0}"
+CHECKSUMS_FILE=""
 
 # Colors
 RED='\033[0;31m'
@@ -30,6 +36,55 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 # Check if stdin is a terminal
 is_interactive() {
     [ -t 0 ]
+}
+
+# Compute the SHA-256 of a file using whichever tool is available.
+sha256_of() {
+    if command -v sha256sum &> /dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum &> /dev/null; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# Download the release SHA256SUMS once, into CHECKSUMS_FILE. Fails closed unless
+# the operator explicitly opted out via NOTHINGDNS_SKIP_CHECKSUM=1.
+fetch_checksums() {
+    if [ "${SKIP_DOWNLOAD}" = true ]; then
+        return
+    fi
+    if [ "${SKIP_CHECKSUM}" = "1" ]; then
+        warn "NOTHINGDNS_SKIP_CHECKSUM=1 — release integrity verification DISABLED"
+        return
+    fi
+    if [ -z "$(sha256_of /dev/null)" ]; then
+        error "No sha256sum/shasum tool available to verify the release. Install coreutils, or set NOTHINGDNS_SKIP_CHECKSUM=1 to bypass (NOT recommended)."
+    fi
+    CHECKSUMS_FILE=$(mktemp)
+    trap "rm -f ${CHECKSUMS_FILE}" EXIT
+    local url="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/SHA256SUMS"
+    curl -fsSL -o "${CHECKSUMS_FILE}" "${url}" || \
+        error "Could not download release checksums (${url}). Refusing to install unverified binaries; set NOTHINGDNS_SKIP_CHECKSUM=1 to bypass (NOT recommended)."
+}
+
+# Verify a downloaded file against the published checksum for the given asset
+# name. Aborts on mismatch or a missing entry (fail-closed).
+verify_checksum() {
+    local file="$1" asset="$2"
+    if [ "${SKIP_CHECKSUM}" = "1" ]; then
+        return
+    fi
+    local expected
+    expected=$(grep -E "[[:space:]][*]?${asset}\$" "${CHECKSUMS_FILE}" | awk '{print $1}' | head -n1)
+    [ -n "${expected}" ] || error "No checksum entry for ${asset} in SHA256SUMS — refusing to install."
+    local actual
+    actual=$(sha256_of "${file}")
+    if [ "${expected}" != "${actual}" ]; then
+        error "Checksum mismatch for ${asset}: expected ${expected}, got ${actual}. Aborting — the download may be corrupt or tampered with."
+    fi
+    info "Verified ${asset} (sha256 ${actual})"
 }
 
 # Check if port 53 is in use and find what's using it
@@ -213,9 +268,10 @@ download_binary() {
     info "Downloading from ${DOWNLOAD_URL}..."
 
     TEMP_FILE=$(mktemp)
-    trap "rm -f ${TEMP_FILE}" EXIT
+    trap "rm -f ${TEMP_FILE} ${CHECKSUMS_FILE}" EXIT
 
     curl -fsSL -o "${TEMP_FILE}" "${DOWNLOAD_URL}" || error "Download failed"
+    verify_checksum "${TEMP_FILE}" "${BINARY_NAME}-${PLATFORM}"
     chmod +x "${TEMP_FILE}"
 
     if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
@@ -253,6 +309,7 @@ download_dnsctl() {
         warn "dnsctl download failed, skipping..."
         return
     }
+    verify_checksum "${TEMP_FILE}" "${DNSCTL_NAME}-${PLATFORM}"
     chmod +x "${TEMP_FILE}"
 
     if [ -d "${INSTALL_DIR}" ] && [ -w "${INSTALL_DIR}" ]; then
@@ -578,6 +635,7 @@ main() {
     fi
 
     stop_existing_nothingdns
+    fetch_checksums
     download_binary
     download_dnsctl
 

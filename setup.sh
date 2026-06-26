@@ -12,6 +12,12 @@ CONFIG_DIR="/etc/nothingdns"
 DATA_DIR="/var/lib/nothingdns"
 BINARY_NAME="nothingdns"
 DNSCTL_NAME="dnsctl"
+REPO="NothingDNS/NothingDNS"
+# Release assets are verified against the published SHA256SUMS by default to stop
+# a hijacked/MITM'd release from achieving root code execution. Override only in
+# trusted/offline environments: NOTHINGDNS_SKIP_CHECKSUM=1.
+SKIP_CHECKSUM="${NOTHINGDNS_SKIP_CHECKSUM:-0}"
+CHECKSUMS_FILE=""
 
 # Colors
 RED='\033[0;31m'
@@ -29,6 +35,54 @@ section() { echo -e "\n${CYAN}=== $1 ===${NC}"; }
 # Check if stdin is a terminal
 is_interactive() {
     [ -t 0 ]
+}
+
+# Compute the SHA-256 of a file using whichever tool is available.
+sha256_of() {
+    if command -v sha256sum &> /dev/null; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum &> /dev/null; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        echo ""
+    fi
+}
+
+# fatal prints an error and exits — used for integrity failures where continuing
+# (chmod +x and run as root) is unsafe. setup.sh's error() does not exit.
+fatal() { error "$1"; exit 1; }
+
+# Download the release SHA256SUMS into CHECKSUMS_FILE (fail-closed).
+fetch_checksums() {
+    if [ "${SKIP_CHECKSUM}" = "1" ]; then
+        warn "NOTHINGDNS_SKIP_CHECKSUM=1 — release integrity verification DISABLED"
+        return
+    fi
+    if [ -z "$(sha256_of /dev/null)" ]; then
+        fatal "No sha256sum/shasum tool available to verify the release. Install coreutils, or set NOTHINGDNS_SKIP_CHECKSUM=1 to bypass (NOT recommended)."
+    fi
+    CHECKSUMS_FILE=$(mktemp)
+    local url="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/SHA256SUMS"
+    curl -fsSL -o "${CHECKSUMS_FILE}" "${url}" || \
+        fatal "Could not download release checksums (${url}). Refusing to install unverified binaries; set NOTHINGDNS_SKIP_CHECKSUM=1 to bypass (NOT recommended)."
+}
+
+# Verify a downloaded file against the published checksum for the given asset
+# name. Fatal on mismatch or missing entry.
+verify_checksum() {
+    local file="$1" asset="$2"
+    if [ "${SKIP_CHECKSUM}" = "1" ]; then
+        return
+    fi
+    local expected
+    expected=$(grep -E "[[:space:]][*]?${asset}\$" "${CHECKSUMS_FILE}" | awk '{print $1}' | head -n1)
+    [ -n "${expected}" ] || fatal "No checksum entry for ${asset} in SHA256SUMS — refusing to install."
+    local actual
+    actual=$(sha256_of "${file}")
+    if [ "${expected}" != "${actual}" ]; then
+        fatal "Checksum mismatch for ${asset}: expected ${expected}, got ${actual}. Aborting — the download may be corrupt or tampered with."
+    fi
+    info "Verified ${asset} (sha256 ${actual})"
 }
 
 # Detect OS and architecture
@@ -86,16 +140,19 @@ get_latest_version() {
 download_and_install() {
     section "Downloading and Installing"
 
+    fetch_checksums
+
     local download_url="https://github.com/NothingDNS/NothingDNS/releases/download/${LATEST_VERSION}/${BINARY_NAME}-${PLATFORM}"
     info "Downloading ${BINARY_NAME} from ${download_url}..."
 
     local temp_bin=$(mktemp)
-    trap "rm -f ${temp_bin}" RETURN
+    trap "rm -f ${temp_bin} ${CHECKSUMS_FILE}" RETURN
 
     curl -fsSL -o "${temp_bin}" "${download_url}" || {
         error "Download failed"
         return 1
     }
+    verify_checksum "${temp_bin}" "${BINARY_NAME}-${PLATFORM}"
     chmod +x "${temp_bin}"
 
     if [ -w "${INSTALL_DIR}" ]; then
@@ -111,6 +168,7 @@ download_and_install() {
 
     local temp_dnsctl=$(mktemp)
     if curl -fsSL -o "${temp_dnsctl}" "${dnsctl_url}" 2>/dev/null; then
+        verify_checksum "${temp_dnsctl}" "${DNSCTL_NAME}-${PLATFORM}"
         chmod +x "${temp_dnsctl}"
         if [ -w "${INSTALL_DIR}" ]; then
             mv "${temp_dnsctl}" "${INSTALL_DIR}/${DNSCTL_NAME}"
