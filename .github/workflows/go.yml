@@ -206,10 +206,14 @@ jobs:
           govulncheck ./...
 
       - name: Run Static Analysis
+        # M-11 / security scan 2026-06-26: ALL tool versions are pinned (no
+        # @latest). This job has `security-events: write` and GITHUB_TOKEN in
+        # scope, so a compromised upstream tag of any tool would inherit those
+        # permissions. Bump these tags via Renovate / Dependabot.
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
-          go install github.com/kisielk/errcheck@latest
-          go install github.com/polyfloyd/go-errorlint@latest
+          go install github.com/kisielk/errcheck@v1.20.0
+          go install github.com/polyfloyd/go-errorlint@v1.8.0
           staticcheck ./...
           # errcheck: skip _test.go (test mocks pervasively ignore writer/closer
           # errors) and exclude conventionally-safe stdlib signatures listed in
