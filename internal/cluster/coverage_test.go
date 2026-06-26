@@ -13,6 +13,39 @@ import (
 	"time"
 )
 
+// TestInitRaft_RequiresEncryptionKey verifies the VULN-005 Raft guard: a Raft
+// cluster must not start in plaintext unless allow_insecure is explicitly set.
+func TestInitRaft_RequiresEncryptionKey(t *testing.T) {
+	logger := util.NewLogger(util.INFO, util.TextFormat, nil)
+	dnsCache := cache.New(cache.Config{Capacity: 16})
+
+	base := func() Config {
+		return Config{
+			Enabled:       true,
+			NodeID:        "n1",
+			BindAddr:      "127.0.0.1",
+			GossipPort:    0,
+			ConsensusMode: ConsensusRaft,
+			DataDir:       t.TempDir(),
+			Peers:         []PeerConfig{{NodeID: "n2", Addr: "127.0.0.1:19999"}},
+		}
+	}
+
+	// No key, no opt-in → must be rejected.
+	if _, err := New(base(), logger, dnsCache); err == nil {
+		t.Fatal("New() should reject a keyless Raft cluster without allow_insecure")
+	}
+
+	// allow_insecure=true → permitted (dev/test escape hatch).
+	cfg := base()
+	cfg.AllowInsecureCluster = true
+	c, err := New(cfg, logger, dnsCache)
+	if err != nil {
+		t.Fatalf("New() with allow_insecure should succeed: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Stop() })
+}
+
 // ---------------------------------------------------------------------------
 // 1. ConsensusMode constants
 // ---------------------------------------------------------------------------

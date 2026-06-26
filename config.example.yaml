@@ -81,7 +81,10 @@ cluster:
   #   - node_id: "node-3"
   #     addr: "10.0.0.3:7946"
 
-  # Encryption key (REQUIRED for multi-node, 32 bytes, hex encoded)
+  # Encryption key (REQUIRED for multi-node, 32 bytes, hex encoded).
+  # Required for BOTH swim (with seed_nodes) AND raft consensus: it encrypts and
+  # authenticates the transport, so only key holders can inject cluster state.
+  # Startup is refused without it unless allow_insecure: true (dev/test only).
   # Generate with: openssl rand -hex 32
   # encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE"
 
