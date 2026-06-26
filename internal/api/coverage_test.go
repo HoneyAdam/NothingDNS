@@ -1093,6 +1093,44 @@ func TestHandleStatus_WithCluster(t *testing.T) {
 	}
 }
 
+// TestHandleStatus_RoleTiering verifies V10: operational detail (cache stats,
+// cluster topology) is exposed to operators but withheld from viewers, while
+// both still get the basic running status.
+func TestHandleStatus_RoleTiering(t *testing.T) {
+	statusFor := func(role auth.Role) StatusResponse {
+		s, user := newAuthenticatedServer(t, "u-"+string(role), role)
+		s.cache = cache.New(cache.Config{Capacity: 64, MinTTL: 60, MaxTTL: 3600, DefaultTTL: 300})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil).
+			WithContext(newAuthenticatedContext(user))
+		rec := httptest.NewRecorder()
+		s.handleStatus(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("role %s: expected 200, got %d", role, rec.Code)
+		}
+		var resp StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("role %s: decode: %v", role, err)
+		}
+		return resp
+	}
+
+	op := statusFor(auth.RoleOperator)
+	if op.Status != "running" {
+		t.Errorf("operator status = %q, want running", op.Status)
+	}
+	if op.Cache == nil {
+		t.Error("operator should see cache stats")
+	}
+
+	viewer := statusFor(auth.RoleViewer)
+	if viewer.Status != "running" {
+		t.Errorf("viewer status = %q, want running", viewer.Status)
+	}
+	if viewer.Cache != nil {
+		t.Error("viewer must NOT see cache stats (V10)")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Start: cover DoH branch (lines 50-53) and cluster routes branch (lines 60-63)
 // ---------------------------------------------------------------------------
