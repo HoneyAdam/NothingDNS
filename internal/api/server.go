@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
@@ -1017,10 +1018,16 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Validate token
 		if token != "" {
-			// First try old-style shared token (auth_token)
-			// SECURITY: Check length first to prevent timing attack via ConstantTimeCompare
+			// First try old-style shared token (auth_token).
+			// SECURITY (V21): compare fixed-length SHA-256 digests. An explicit
+			// len() guard (and ConstantTimeCompare's own length short-circuit) is
+			// a length oracle — a wrong-length token would return faster than a
+			// right-length one. Hashing first makes both length and contents
+			// timing-independent.
 			legacyToken := s.config.AuthToken
-			if legacyToken != "" && len(token) == len(legacyToken) && subtle.ConstantTimeCompare([]byte(token), []byte(legacyToken)) == 1 {
+			gotDigest := sha256.Sum256([]byte(token))
+			wantDigest := sha256.Sum256([]byte(legacyToken))
+			if legacyToken != "" && subtle.ConstantTimeCompare(gotDigest[:], wantDigest[:]) == 1 {
 				// Legacy token binds to config.AuthTokenRole (default viewer).
 				// Previously this silently synthesized admin regardless of intent.
 				ctx := WithUser(r.Context(), legacyTokenUser(s.config.AuthTokenRole))
@@ -1321,6 +1328,19 @@ func hasRole(ctx context.Context, _ *auth.Store, required auth.Role) bool {
 		return false
 	}
 	return roleOrder[user.Role] >= roleOrder[required]
+}
+
+// hasOperatorRole reports whether the request is authorized at operator level
+// or above, without writing an error response. Used to tier a response by role
+// (e.g. expose operational detail only to operators). In single-token mode
+// (no authStore) a request that reached here already presented the valid
+// auth_token, which is fully privileged.
+func (s *Server) hasOperatorRole(r *http.Request) bool {
+	authStore := s.currentAuthStore()
+	if authStore == nil {
+		return true
+	}
+	return hasRole(r.Context(), authStore, auth.RoleOperator)
 }
 
 // requireOperator checks if the request has operator role.
