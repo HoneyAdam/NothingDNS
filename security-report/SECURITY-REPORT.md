@@ -69,9 +69,36 @@ All 4 Mediums are now also fixed:
 | M3 | CI installs errcheck/go-errorlint from `@latest` | **Fixed** | `ci: pin errcheck and go-errorlint…` |
 | M4 | Phantom pgx/PostgreSQL backend in CLAUDE.md | **Fixed** | `docs: remove phantom pgx…` |
 
-The 16 Lows remain open — see roadmap Phases 3–4. Note H4 requires the release
-process to publish a `SHA256SUMS` asset for the installer to succeed (else it
-fails closed, or `NOTHINGDNS_SKIP_CHECKSUM=1`).
+**Lows — 7 fixed, 9 accepted/deferred with rationale:**
+
+Fixed (code + tests):
+
+| ID | Finding | Commit summary |
+|----|---------|----------------|
+| V10 | `/api/v1/status` leaked cache/cluster detail to viewers | tier response by role |
+| V13 | Gossip membership map unbounded | 65536-member ceiling |
+| V14 | Cluster inbound goroutines lacked `recover()` | recover in acceptLoop/handleConn/receiveLoop |
+| V15 | `decodeEntrySlice` 32-bit overflow in bounds check | compute in uint64 + guard test |
+| V19 | `health-check.sh` hardcoded `admin:admin` | source creds from env |
+| V21 | `auth_token` length oracle via early `len()` | compare SHA-256 digests |
+| V25 | no `go mod verify`; secrets echoed to stdout | verify in Dockerfile; creds to root-only file |
+
+Accepted / deferred (rationale):
+
+| ID | Finding | Disposition |
+|----|---------|-------------|
+| V11 | Blocklist `AddFile` reads an admin-supplied absolute path | **Accept** — admin-only function whose purpose is loading a local file; already acknowledged (VULN-009) |
+| V12 | Wildcard-CORS Origin reflection | **Mitigated** — `validation.go` already rejects wildcard `allowed_origins` on a public bind in production mode |
+| V16 | No aggregate byte cap on inbound AXFR/IXFR | **Defer** — per-record bounds already enforced; aggregate cap is hardening, needs streaming rework |
+| V17 | DNS record type/RData validation gap | **Accept** — operator-gated write path |
+| V18 | JSON decode lacks `DisallowUnknownFields` | **Accept** — DTOs are narrow (no mass-assignment); enabling strict decode risks breaking existing/older API clients |
+| V20 | Dashboard persists `username`/`role` to localStorage | **Accept** — UI-only; authz is server-enforced via bearer+RBAC |
+| V22 | No global concurrent-connection cap | **Mitigated** — slowloris covered by read/write/idle timeouts; a hard cap risks dropping legitimate load |
+| V23 | CSP `style-src 'unsafe-inline'` | **Accept** — required by Radix UI; `script-src 'self'` remains strict |
+| V24 | Management API defaults to `0.0.0.0:8080` | **Mitigated** — production validation requires TLS on a public `http.bind`; changing the default would break container/port-mapped deployments (maintainer call) |
+
+Note H4 requires the release process to publish a `SHA256SUMS` asset for the
+installer to succeed (else it fails closed, or `NOTHINGDNS_SKIP_CHECKSUM=1`).
 
 ---
 
