@@ -30,8 +30,12 @@ type XoTServer struct {
 	closed       bool
 	mu           sync.Mutex
 	allowList    []net.IPNet
-	logger       *util.Logger
-	journalStore JournalStore // For IXFR incremental transfers
+	// requireClientCert is true when mTLS is enforced (CAFile configured). In
+	// that case the TLS handshake has already verified the client certificate,
+	// so transfers are authenticated independently of allowList.
+	requireClientCert bool
+	logger            *util.Logger
+	journalStore      JournalStore // For IXFR incremental transfers
 
 	stopCh chan struct{}  // closed to signal AcceptLoop stop
 	wg     sync.WaitGroup // waits for AcceptLoop and active connections
@@ -130,6 +134,18 @@ func NewXoTServer(zones map[string]*zone.Zone, config *XoTConfig, logger *util.L
 			continue
 		}
 		server.allowList = append(server.allowList, *network)
+	}
+
+	// mTLS (CAFile) is the strongest gate: buildXoTTLSConfig sets
+	// RequireAndVerifyClientCert when CAFile is configured.
+	server.requireClientCert = tlsConfig.ClientAuth == tls.RequireAndVerifyClientCert
+
+	// Deny-by-default: without mTLS and without an IP allowlist, every zone is
+	// exposed to any client that completes a server-auth-only TLS handshake.
+	// Refuse to start in that configuration so a full zone disclosure cannot be
+	// introduced by an empty/forgotten allowlist (matches AXFRServer's posture).
+	if !server.requireClientCert && len(server.allowList) == 0 {
+		return nil, fmt.Errorf("XoT requires access control: configure server.xot.ca_file (mTLS) or server.xot.allowed_networks")
 	}
 
 	return server, nil
@@ -489,11 +505,13 @@ func xotClientIP(conn net.Conn) net.IP {
 	return net.ParseIP(host)
 }
 
-// isAllowed checks if a client IP is allowed for XoT.
-// Returns true if no allowlist is configured (allow all) or if client IP matches an allowed network.
+// isAllowed checks if a client IP is allowed for XoT. Deny-by-default: access is
+// granted only when mTLS authenticated the client (requireClientCert) or the
+// client IP matches a configured allowed network. NewXoTServer guarantees at
+// least one of those controls is present, so an empty allowList denies all.
 func (s *XoTServer) isAllowed(clientIP net.IP) bool {
-	if len(s.allowList) == 0 {
-		return true // Allow all if no list configured
+	if s.requireClientCert {
+		return true // client certificate already verified during TLS handshake
 	}
 	for _, network := range s.allowList {
 		if network.Contains(clientIP) {

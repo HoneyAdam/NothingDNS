@@ -89,7 +89,9 @@ type XoTConfig struct {
 	// Key file for TLS
 	KeyFile string `yaml:"key_file"`
 
-	// CA file for client certificate verification (optional)
+	// CA file for client certificate verification (optional). When set, XoT
+	// enforces mutual TLS (RequireAndVerifyClientCert) and that authenticates the
+	// peer regardless of allowed_networks.
 	CAFile string `yaml:"ca_file"`
 
 	// Listen address (default ":853")
@@ -97,6 +99,11 @@ type XoTConfig struct {
 
 	// Minimum TLS version (12 or 13, default 12)
 	MinTLSVersion int `yaml:"min_tls_version"`
+
+	// AllowedNetworks restricts which client IPs may request zone transfers,
+	// as CIDR strings. When CAFile (mTLS) is not set, at least one entry is
+	// required — XoT is deny-by-default and will refuse all transfers otherwise.
+	AllowedNetworks []string `yaml:"allowed_networks"`
 }
 
 // HTTPConfig contains HTTP API settings.
@@ -207,6 +214,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.XoT.KeyFile = xotNode.GetString("key_file")
 		cfg.XoT.CAFile = xotNode.GetString("ca_file")
 		cfg.XoT.Bind = xotNode.GetString("bind")
+		cfg.XoT.AllowedNetworks = getStringSlice(xotNode, "allowed_networks", nil)
 		if cfg.XoT.MinTLSVersion, err = getRequiredInt(xotNode, "min_tls_version", 12); err != nil {
 			return fmt.Errorf("xot: %w", err)
 		}

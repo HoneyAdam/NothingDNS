@@ -14,8 +14,9 @@ import (
 
 func TestXoTServerHandleAXFRRequestRejectsNilQuestionName(t *testing.T) {
 	srv := &XoTServer{
-		zones:   map[string]*zone.Zone{},
-		zonesMu: &sync.RWMutex{},
+		zones:             map[string]*zone.Zone{},
+		zonesMu:           &sync.RWMutex{},
+		requireClientCert: true, // pass the access gate to reach nil-name validation
 	}
 	conn := &xotValidationConn{remote: &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}}
 	req := &protocol.Message{
@@ -32,8 +33,9 @@ func TestXoTServerHandleAXFRRequestRejectsNilQuestionName(t *testing.T) {
 
 func TestXoTServerHandleIXFRRequestRejectsNilQuestionName(t *testing.T) {
 	srv := &XoTServer{
-		zones:   map[string]*zone.Zone{},
-		zonesMu: &sync.RWMutex{},
+		zones:             map[string]*zone.Zone{},
+		zonesMu:           &sync.RWMutex{},
+		requireClientCert: true, // pass the access gate to reach nil-name validation
 	}
 	conn := &xotValidationConn{remote: &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}}
 	req := &protocol.Message{
@@ -46,6 +48,30 @@ func TestXoTServerHandleIXFRRequestRejectsNilQuestionName(t *testing.T) {
 	srv.handleIXFRRequest(conn, req, net.ParseIP("127.0.0.1"))
 
 	assertXoTErrorResponse(t, conn.Bytes(), 0x1202, protocol.RcodeFormatError)
+}
+
+func TestXoTServerHandleAXFRRequestDeniesUnauthorizedClient(t *testing.T) {
+	// Deny-by-default: a client neither mTLS-authenticated nor in the allowlist
+	// must be REFUSED, never served zone data.
+	_, allowed, _ := net.ParseCIDR("10.0.0.0/8")
+	srv := &XoTServer{
+		zones:     map[string]*zone.Zone{"example.com.": zone.NewZone("example.com.")},
+		zonesMu:   &sync.RWMutex{},
+		allowList: []net.IPNet{*allowed},
+	}
+	conn := &xotValidationConn{remote: &net.TCPAddr{IP: net.ParseIP("203.0.113.7")}}
+	q, err := protocol.NewQuestion("example.com.", protocol.TypeAXFR, protocol.ClassIN)
+	if err != nil {
+		t.Fatalf("NewQuestion: %v", err)
+	}
+	req := &protocol.Message{
+		Header:    protocol.Header{ID: 0x1301},
+		Questions: []*protocol.Question{q},
+	}
+
+	srv.handleAXFRRequest(conn, req, net.ParseIP("203.0.113.7"))
+
+	assertXoTErrorResponse(t, conn.Bytes(), 0x1301, protocol.RcodeRefused)
 }
 
 func TestXoTServerHandleMessageAcceptsNonTCPRemoteAddr(t *testing.T) {

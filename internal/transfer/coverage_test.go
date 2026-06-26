@@ -4120,7 +4120,14 @@ func TestNewXoTServer_NilConfig_Defaults_CovExtra(t *testing.T) {
 	zones := map[string]*zone.Zone{
 		"example.com.": zone.NewZone("example.com."),
 	}
-	srv, err := NewXoTServer(zones, nil, nil)
+	// nil config means no access control (no mTLS CAFile, no allowlist). XoT is
+	// deny-by-default, so this must be rejected rather than expose all zones.
+	if _, err := NewXoTServer(zones, nil, nil); err == nil {
+		t.Fatal("NewXoTServer() with no access control should error")
+	}
+
+	// With an allowlist it should construct and default the port to 853.
+	srv, err := NewXoTServer(zones, &XoTConfig{AllowedNetworks: []string{"127.0.0.0/8"}}, nil)
 	if err != nil {
 		t.Fatalf("NewXoTServer() error: %v", err)
 	}
@@ -4200,9 +4207,15 @@ func TestXoTExtractIXFRClientSerialReadsAuthoritySOA(t *testing.T) {
 }
 
 func TestXoTServer_isAllowed_NoAllowList_CovExtra(t *testing.T) {
+	// Deny-by-default: with neither mTLS nor an allowlist, no client is allowed.
 	srv := &XoTServer{}
-	if !srv.isAllowed(net.ParseIP("1.2.3.4")) {
-		t.Error("expected allowed when no allow list configured")
+	if srv.isAllowed(net.ParseIP("1.2.3.4")) {
+		t.Error("expected denied when no allow list and no mTLS configured")
+	}
+	// mTLS-authenticated clients are allowed regardless of allowlist.
+	srvMTLS := &XoTServer{requireClientCert: true}
+	if !srvMTLS.isAllowed(net.ParseIP("1.2.3.4")) {
+		t.Error("expected allowed when mTLS client cert is required/verified")
 	}
 }
 
@@ -4727,9 +4740,10 @@ func TestXoTServer_Close_StopsAcceptLoop_CovExtra(t *testing.T) {
 		"example.com.": zone.NewZone("example.com."),
 	}
 	srv, err := NewXoTServer(zones, &XoTConfig{
-		CertFile:   certFile,
-		KeyFile:    keyFile,
-		ListenPort: port,
+		CertFile:        certFile,
+		KeyFile:         keyFile,
+		ListenPort:      port,
+		AllowedNetworks: []string{"127.0.0.0/8"},
 	}, nil)
 	if err != nil {
 		t.Fatalf("NewXoTServer() error: %v", err)
@@ -5325,7 +5339,7 @@ func TestXoTServer_Serve_AlreadyListening_CovExtra(t *testing.T) {
 	zones := map[string]*zone.Zone{
 		"example.com.": zone.NewZone("example.com."),
 	}
-	srv, err := NewXoTServer(zones, &XoTConfig{ListenPort: 0}, nil)
+	srv, err := NewXoTServer(zones, &XoTConfig{ListenPort: 0, AllowedNetworks: []string{"127.0.0.0/8"}}, nil)
 	if err != nil {
 		t.Fatalf("NewXoTServer() error: %v", err)
 	}

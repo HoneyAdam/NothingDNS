@@ -34,6 +34,12 @@ server:
   #   cert_file: /etc/nothingdns/tls/server.crt
   #   key_file: /etc/nothingdns/tls/server.key
   #   bind: ":853"
+  #   # XoT is deny-by-default. You MUST configure at least one access control or
+  #   # the server refuses to start: either ca_file (enforces mutual TLS) or
+  #   # allowed_networks (CIDR allowlist of permitted transfer clients).
+  #   ca_file: /etc/nothingdns/tls/client-ca.crt
+  #   allowed_networks:
+  #     - "10.0.0.0/8"
 
   # DNS over QUIC (DoQ)
   # quic:
