@@ -21,15 +21,15 @@ import (
 // XoTServer handles DNS Zone Transfer over TLS (XoT) as specified in RFC 9103.
 // XoT uses TLS 1.3 (preferred) or TLS 1.2 to encrypt zone transfer communications.
 type XoTServer struct {
-	tlsConfig    *tls.Config
-	listener     net.Listener
-	zones        map[string]*zone.Zone
-	zonesMu      *sync.RWMutex
-	address      string
-	port         int
-	closed       bool
-	mu           sync.Mutex
-	allowList    []net.IPNet
+	tlsConfig *tls.Config
+	listener  net.Listener
+	zones     map[string]*zone.Zone
+	zonesMu   *sync.RWMutex
+	address   string
+	port      int
+	closed    bool
+	mu        sync.Mutex
+	allowList []net.IPNet
 	// requireClientCert is true when mTLS is enforced (CAFile configured). In
 	// that case the TLS handshake has already verified the client certificate,
 	// so transfers are authenticated independently of allowList.
