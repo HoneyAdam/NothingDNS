@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -89,6 +90,10 @@ type Config struct {
 	Peers                []PeerConfig                   // Raft peer nodes
 	ZoneManager          *zone.Manager                  // zone manager for replication
 	ConfigReloadCallback func(*ClusterConfigJSON) error // called when leader sends config
+	// RPCTLS, when non-nil, wraps the Raft RPC listener and peer dials in
+	// (m)TLS. Built by the caller from cluster.rpc.* (config.RPCConfig). nil =
+	// plain TCP transport (AEAD via EncryptionKey is still applied).
+	RPCTLS *tls.Config
 }
 
 // PeerConfig describes a Raft cluster peer.
@@ -327,7 +332,9 @@ func (c *Cluster) initRaft() error {
 	raftAddr := fmt.Sprintf("%s:%d", c.config.BindAddr, c.config.GossipPort)
 
 	// Create Raft cluster integration. L-6 added the optional
-	// snapshot-at-rest key as the trailing arg.
+	// snapshot-at-rest key; RPCTLS is the optional RPC transport (m)TLS, built
+	// from cluster.rpc.* by the caller. It is independent of the mandatory
+	// message-level AEAD: when set it adds mutual TLS authentication on top.
 	raftNode, err := raft.NewClusterIntegration(
 		raft.NodeID(c.config.NodeID),
 		peerIDs,
@@ -336,6 +343,7 @@ func (c *Cluster) initRaft() error {
 		dataDir,
 		c.config.EncryptionKey,
 		c.config.SnapshotEncryptionKey,
+		c.config.RPCTLS,
 		c.logger,
 	)
 	if err != nil {

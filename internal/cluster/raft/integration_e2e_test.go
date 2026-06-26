@@ -16,7 +16,7 @@ import (
 
 func TestClusterIntegration_ProposeAppliesViaHook(t *testing.T) {
 	dir := t.TempDir()
-	ci, err := NewClusterIntegration("n1", nil, nil, "127.0.0.1:0", dir, "", "", util.DefaultLogger())
+	ci, err := NewClusterIntegration("n1", nil, nil, "127.0.0.1:0", dir, "", "", nil, util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("NewClusterIntegration: %v", err)
 	}

@@ -3,6 +3,7 @@ package raft
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -70,7 +71,12 @@ type ClusterIntegration struct {
 // is missing (or the whole map is nil), the NodeID itself is used as the
 // address — preserving the old behavior for callers/tests that name peers by
 // their address.
-func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]string, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, logger *util.Logger) (*ClusterIntegration, error) {
+//
+// rpcTLS, when non-nil, wraps the Raft RPC listener and peer dials in TLS
+// (typically mTLS built from cluster.rpc.*). It is independent of the
+// message-level AEAD derived from encryptionKey: AEAD authenticates every
+// frame, while TLS adds transport-level mutual authentication. nil = plain TCP.
+func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]string, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, rpcTLS *tls.Config, logger *util.Logger) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
 
@@ -96,8 +102,9 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]s
 		// Note: the gossip protocol uses AES-256-GCM with per-sender sequence tracking.
 	}
 
-	// Create transport with AEAD encryption (nil AEAD = plaintext for dev).
-	transport := NewTCPTransport(nil, aead)
+	// Create transport with optional TLS + AEAD encryption (nil AEAD = plaintext
+	// for dev). rpcTLS, when set, also wraps peer dials in (m)TLS.
+	transport := NewTCPTransport(rpcTLS, aead)
 
 	// Register each peer's reachable RPC address.
 	for _, peerID := range peers {
@@ -120,8 +127,8 @@ func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]s
 	stateMachine := NewZoneStateMachine()
 	node.SetStateMachine(stateMachine)
 
-	// Create RPC server with AEAD encryption.
-	rpcServer, err := NewRPCServer(addr, node, nil, aead)
+	// Create RPC server with optional TLS listener + AEAD encryption.
+	rpcServer, err := NewRPCServer(addr, node, rpcTLS, aead)
 	if err != nil {
 		return nil, fmt.Errorf("rpc server: %w", err)
 	}

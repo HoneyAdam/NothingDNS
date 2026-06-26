@@ -35,6 +35,14 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 		return mgr, nil
 	}
 
+	// Build optional Raft RPC transport (m)TLS from cluster.rpc.*. Returns nil
+	// when rpc.enabled is false. This is layered on top of the mandatory
+	// message-level AEAD (cluster.encryption_key), not a replacement for it.
+	rpcTLS, err := cfg.Cluster.RPC.NewTLSConfig()
+	if err != nil {
+		return nil, fmt.Errorf("build cluster RPC TLS config: %w", err)
+	}
+
 	clusterConfig := cluster.Config{
 		Enabled:               cfg.Cluster.Enabled,
 		NodeID:                cfg.Cluster.NodeID,
@@ -53,9 +61,9 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 		ConsensusMode:         cluster.ConsensusMode(cfg.Cluster.ConsensusMode),
 		DataDir:               cfg.Cluster.DataDir,
 		Peers:                 mapClusterPeers(cfg.Cluster.Peers),
+		RPCTLS:                rpcTLS,
 	}
 
-	var err error
 	mgr.Cluster, err = cluster.New(clusterConfig, logger, dnsCache)
 	if err != nil {
 		return nil, fmt.Errorf("initialize cluster: %w", err)

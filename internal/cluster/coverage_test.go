@@ -3868,7 +3868,7 @@ func TestCluster_IsLeader_NoGossip(t *testing.T) {
 }
 
 func TestCluster_LeadershipUsesRaftWhenGossipNil(t *testing.T) {
-	ci, err := raft.NewClusterIntegration("raft-node", nil, nil, "127.0.0.1:0", t.TempDir(), "", "", util.DefaultLogger())
+	ci, err := raft.NewClusterIntegration("raft-node", nil, nil, "127.0.0.1:0", t.TempDir(), "", "", nil, util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("NewClusterIntegration() error = %v", err)
 	}

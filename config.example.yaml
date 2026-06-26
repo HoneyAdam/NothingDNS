@@ -99,6 +99,18 @@ cluster:
   # encryption_key above (key separation enforced by config.Validate).
   # snapshot_encryption_key: "YOUR_64_HEX_CHAR_KEY_HERE_DIFFERENT_FROM_ABOVE"
 
+  # Optional transport-level (mutual) TLS for Raft RPC, layered on top of the
+  # mandatory message-level AEAD (encryption_key). When enabled, the RPC
+  # listener and peer dials use TLS; with tls_ca_cert_file set, peers
+  # authenticate each other against that private CA (mTLS). Certs must have SANs
+  # matching peer addresses.
+  # rpc:
+  #   enabled: true
+  #   tls_cert_file: /etc/nothingdns/tls/raft.crt
+  #   tls_key_file: /etc/nothingdns/tls/raft.key
+  #   tls_ca_cert_file: /etc/nothingdns/tls/raft-ca.crt
+  #   min_tls_version: 13
+
   # Enable cache synchronization across nodes
   cache_sync: true
 
