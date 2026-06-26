@@ -60,10 +60,18 @@ race detector + staticcheck/errcheck), and committed:
 | H3 | Raft WAL non-atomic rewrite + false durability ack | **Fixed** | `d90c204` (temp+rename + fail-closed persist) |
 | H4 | Installer no checksum verification | **Fixed** | `ebeb6b2` (SHA256SUMS verify, fail-closed) |
 
-Mediums (M1 RPC-TLS dead config, M2 installer resolver disable, M3 CI `@latest`
-tools, M4 phantom pgx) and the 16 Lows remain open — see roadmap Phases 2–4.
-Note H4 requires the release process to publish a `SHA256SUMS` asset for the
-installer to succeed (else it fails closed, or `NOTHINGDNS_SKIP_CHECKSUM=1`).
+All 4 Mediums are now also fixed:
+
+| ID | Finding | Status | Commit |
+|----|---------|--------|--------|
+| M1 | Raft RPC TLS config parsed but never wired | **Fixed** | `fix(cluster): wire Raft RPC TLS…` |
+| M2 | Installer silently disables host DNS (non-interactive) | **Fixed** | `fix(install): don't silently disable host DNS…` |
+| M3 | CI installs errcheck/go-errorlint from `@latest` | **Fixed** | `ci: pin errcheck and go-errorlint…` |
+| M4 | Phantom pgx/PostgreSQL backend in CLAUDE.md | **Fixed** | `docs: remove phantom pgx…` |
+
+The 16 Lows remain open — see roadmap Phases 3–4. Note H4 requires the release
+process to publish a `SHA256SUMS` asset for the installer to succeed (else it
+fails closed, or `NOTHINGDNS_SKIP_CHECKSUM=1`).
 
 ---
 
