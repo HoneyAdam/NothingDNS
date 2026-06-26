@@ -6,12 +6,96 @@ package raft
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/binary"
 	"io"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+func testAEAD(t *testing.T) cipher.AEAD {
+	t.Helper()
+	// Fixed 32-byte key → AES-256-GCM, matching the cluster's transport cipher.
+	key := bytes.Repeat([]byte{0x42}, 32)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher: %v", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("cipher.NewGCM: %v", err)
+	}
+	return aead
+}
+
+// TestFrameAEADRoundTrip guards against regressing the nonce-on-the-wire bug
+// (Seal(nonceBuf[:0], ...) dropped the nonce, making encrypted clusters
+// undecryptable). The encrypted RPC framing path previously had zero coverage.
+func TestFrameAEADRoundTrip(t *testing.T) {
+	req := AppendRequest{
+		Term:         9,
+		LeaderID:     "leader-1",
+		PrevLogIndex: 3,
+		PrevLogTerm:  8,
+		LeaderCommit: 2,
+		Entries: []entry{
+			{Index: 4, Term: 9, Command: []byte("set a=1")},
+			{Index: 5, Term: 9, Command: []byte("set b=2")},
+		},
+	}
+
+	var buf bytes.Buffer
+	fw := newFrameWriter(&buf, testAEAD(t))
+	if err := fw.writeFramed(msgTypeAppendRequest, req); err != nil {
+		t.Fatalf("writeFramed: %v", err)
+	}
+
+	// The framed payload must be longer than the plaintext by at least
+	// nonce+tag — proving the nonce is actually on the wire.
+	aead := testAEAD(t)
+	wireLen := binary.BigEndian.Uint32(buf.Bytes()[1:frameHeaderSize])
+	if int(wireLen) <= aead.NonceSize()+aead.Overhead() {
+		t.Fatalf("ciphertext length %d does not include nonce+tag", wireLen)
+	}
+
+	fr := newFrameReader(bytes.NewReader(buf.Bytes()), aead)
+	var got AppendRequest
+	msgType, err := fr.readFramed(&got)
+	if err != nil {
+		t.Fatalf("readFramed (encrypted): %v", err)
+	}
+	if msgType != msgTypeAppendRequest {
+		t.Fatalf("msgType = %d, want %d", msgType, msgTypeAppendRequest)
+	}
+	if got.Term != req.Term || got.LeaderID != req.LeaderID || len(got.Entries) != len(req.Entries) {
+		t.Fatalf("decoded AppendRequest = %+v, want %+v", got, req)
+	}
+	for i := range req.Entries {
+		if !bytes.Equal(got.Entries[i].Command, req.Entries[i].Command) {
+			t.Fatalf("entry %d command = %q, want %q", i, got.Entries[i].Command, req.Entries[i].Command)
+		}
+	}
+}
+
+// TestFrameAEADTamperRejected confirms the AAD/tag actually authenticates the
+// frame: flipping a ciphertext byte must fail Open rather than decode garbage.
+func TestFrameAEADTamperRejected(t *testing.T) {
+	var buf bytes.Buffer
+	fw := newFrameWriter(&buf, testAEAD(t))
+	if err := fw.writeFramed(msgTypeVoteRequest, VoteRequest{Term: 1, CandidateID: "x"}); err != nil {
+		t.Fatalf("writeFramed: %v", err)
+	}
+	b := buf.Bytes()
+	b[len(b)-1] ^= 0xFF // flip a tag byte
+
+	fr := newFrameReader(bytes.NewReader(b), testAEAD(t))
+	var got VoteRequest
+	if _, err := fr.readFramed(&got); err == nil {
+		t.Fatal("expected AEAD open failure on tampered frame, got nil")
+	}
+}
 
 func TestFrameWriterCompletesPartialWrites(t *testing.T) {
 	w := &chunkedWriter{maxWrite: 2}
