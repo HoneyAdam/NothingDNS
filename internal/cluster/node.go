@@ -183,6 +183,12 @@ func (nl *NodeList) Get(id string) (*Node, bool) {
 	return &cp, true
 }
 
+// maxClusterNodes caps the membership table to bound memory against a
+// (key-holding) peer disseminating many fabricated node IDs via gossip (V13).
+// No real cluster approaches this — it is a safety ceiling, not an operational
+// limit.
+const maxClusterNodes = 65536
+
 // Add adds a node to the list.
 func (nl *NodeList) Add(node *Node) bool {
 	nl.mu.Lock()
@@ -194,6 +200,12 @@ func (nl *NodeList) Add(node *Node) bool {
 			nl.nodes[node.ID] = node
 			return true
 		}
+		return false
+	}
+
+	// Cap NEW insertions only; updates to existing members above are always
+	// allowed. Prevents unbounded membership growth from fabricated node IDs.
+	if len(nl.nodes) >= maxClusterNodes {
 		return false
 	}
 
