@@ -138,7 +138,11 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 			// Term conflict at PrevLogIndex: drop it and everything after,
 			// then ask the leader to retry one entry earlier.
 			n.truncateFrom(req.PrevLogIndex)
-			n.persistTruncateLocked(req.PrevLogIndex - 1)
+			if err := n.persistTruncateLocked(req.PrevLogIndex - 1); err != nil {
+				// Reconciliation not durable — leave Success false so the
+				// leader retries rather than trusting an unpersisted truncation.
+				return resp
+			}
 			resp.MatchIndex = req.PrevLogIndex - 1
 			return resp
 		}
@@ -172,11 +176,19 @@ func (n *Node) appendEntriesLocked(req AppendRequest) AppendResponse {
 		n.log = append(n.log, toAppend...)
 		break
 	}
-	// Durably record the reconciliation before acknowledging.
+	// Durably record the reconciliation before acknowledging. If persistence
+	// fails (e.g. disk full), do NOT ack as Success: a follower that reports
+	// entries durable when they are not lets the leader commit data this
+	// follower will lose on restart (Raft safety violation). resp.Success
+	// stays false, so the leader simply retries.
 	if truncated {
-		n.persistTruncateLocked(keepThrough)
+		if err := n.persistTruncateLocked(keepThrough); err != nil {
+			return resp
+		}
 	}
-	n.persistEntriesLocked(toAppend)
+	if err := n.persistEntriesLocked(toAppend); err != nil {
+		return resp
+	}
 
 	// Advance commit index. Cap at the last entry this request let us
 	// verify is consistent with the leader (PrevLogIndex + #entries) —

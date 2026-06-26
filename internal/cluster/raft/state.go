@@ -595,32 +595,38 @@ func (n *Node) SetLogPersister(p logPersister) {
 	n.persister = p
 }
 
-// persistEntriesLocked durably appends entries and fsyncs. A failure is
-// logged but not fatal: it indicates a catastrophic environment problem
-// (disk full) and panicking would take the node down harder than running
-// with a stale WAL. Caller holds n.mu.
-func (n *Node) persistEntriesLocked(entries []entry) {
+// persistEntriesLocked durably appends entries and fsyncs, returning any
+// failure so the caller can refuse to acknowledge non-durable entries. A
+// follower that ACKs entries it did not actually fsync (e.g. disk full) lets
+// the leader count it toward quorum and commit data this follower will lose on
+// restart — a Raft durability/safety violation. Caller holds n.mu.
+func (n *Node) persistEntriesLocked(entries []entry) error {
 	if n.persister == nil || len(entries) == 0 {
-		return
+		return nil
 	}
 	for _, e := range entries {
 		if err := n.persister.Write(e); err != nil {
 			util.Errorf("raft: WAL write failed (index=%d): %v", e.Index, err)
-			return
+			return fmt.Errorf("wal write (index=%d): %w", e.Index, err)
 		}
 	}
 	if err := n.persister.Sync(); err != nil {
 		util.Errorf("raft: WAL sync failed: %v", err)
+		return fmt.Errorf("wal sync: %w", err)
 	}
+	return nil
 }
 
-// persistTruncateLocked durably discards WAL entries past keepThrough.
-// Caller holds n.mu.
-func (n *Node) persistTruncateLocked(keepThrough Index) {
+// persistTruncateLocked durably discards WAL entries past keepThrough,
+// returning any failure so the caller can refuse to acknowledge a
+// reconciliation that was not actually persisted. Caller holds n.mu.
+func (n *Node) persistTruncateLocked(keepThrough Index) error {
 	if n.persister == nil {
-		return
+		return nil
 	}
 	if err := n.persister.TruncateAfter(keepThrough); err != nil {
 		util.Errorf("raft: WAL truncate failed (keepThrough=%d): %v", keepThrough, err)
+		return fmt.Errorf("wal truncate (keepThrough=%d): %w", keepThrough, err)
 	}
+	return nil
 }

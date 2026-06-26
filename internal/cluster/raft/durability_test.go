@@ -50,6 +50,49 @@ func TestWAL_TruncateAfter(t *testing.T) {
 	}
 }
 
+// TestWAL_RewriteDurableAcrossReopen verifies the atomic rewrite (temp+rename)
+// actually replaces the canonical WAL file on disk: a fresh NewWAL on the same
+// directory must read back exactly the kept entries. The previous in-place
+// Truncate(0)+re-append could lose committed entries on a crash mid-rewrite.
+func TestWAL_RewriteDurableAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	wal, err := NewWAL(dir)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	for i := 1; i <= 6; i++ {
+		if err := wal.Write(entry{Index: Index(i), Term: 1, Command: []byte{byte(i)}}); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	// Drop the prefix subsumed by a snapshot (keep indexes > 3).
+	if err := wal.CompactBefore(3); err != nil {
+		t.Fatalf("CompactBefore: %v", err)
+	}
+	if err := wal.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen the same directory: the renamed file must hold only the suffix.
+	reopened, err := NewWAL(dir)
+	if err != nil {
+		t.Fatalf("reopen NewWAL: %v", err)
+	}
+	defer reopened.Close()
+	got, err := reopened.ReadAll()
+	if err != nil {
+		t.Fatalf("ReadAll after reopen: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("after compact+reopen len = %d, want 3 (indexes 4,5,6)", len(got))
+	}
+	for i, e := range got {
+		if e.Index != Index(i+4) {
+			t.Errorf("entry %d index = %d, want %d", i, e.Index, i+4)
+		}
+	}
+}
+
 func TestNode_ProposePersistsToWAL(t *testing.T) {
 	wal := openTestWAL(t)
 	n := NewNode(Config{NodeID: "leader"}, nil, &mockTransport{})
