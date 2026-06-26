@@ -17,8 +17,11 @@ RUN apk add --no-cache git make ca-certificates
 # Set working directory
 WORKDIR /build
 
-# Copy go module files
-COPY go.mod ./
+# Copy go module files first (for layer caching) and verify module integrity
+# against go.sum before building — fails the build if any cached module's hash
+# does not match, closing a supply-chain tampering gap (V25).
+COPY go.mod go.sum ./
+RUN go mod download && go mod verify
 
 # Copy source code
 COPY . .

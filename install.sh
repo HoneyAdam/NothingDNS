@@ -449,8 +449,13 @@ EOF
 
     sudo chmod 600 "${CONFIG_FILE}"
     info "Config created at ${CONFIG_FILE}"
-    info "Auth secret generated. Save this secret for API access:"
-    info "  ${AUTH_SECRET}"
+    # Persist the API auth secret to a root-only file rather than echoing it to
+    # stdout, which can leak into terminal scrollback or logs — especially under
+    # curl | bash (V25).
+    printf 'api_auth_secret: %s\n' "${AUTH_SECRET}" | sudo tee "${CONFIG_DIR}/credentials" >/dev/null
+    sudo chmod 600 "${CONFIG_DIR}/credentials"
+    info "API auth secret saved to ${CONFIG_DIR}/credentials (root-only)."
+    info "Retrieve with: sudo cat ${CONFIG_DIR}/credentials"
 }
 
 # Create bootstrap user via API
@@ -495,6 +500,11 @@ create_bootstrap_user() {
 
         if echo "$response" | grep -q "token"; then
             info "Bootstrap user created successfully"
+            # Save the generated admin password to the root-only credentials file
+            # instead of printing it to stdout (V25).
+            printf 'username: %s\npassword: %s\n' "${BOOTSTRAP_USER}" "${BOOTSTRAP_PASS}" | sudo tee -a "${CONFIG_DIR}/credentials" >/dev/null
+            sudo chmod 600 "${CONFIG_DIR}/credentials"
+            info "Admin credentials saved to ${CONFIG_DIR}/credentials (root-only). Retrieve with: sudo cat ${CONFIG_DIR}/credentials"
         else
             warn "Bootstrap response: $response"
             warn "Generated password (save this): ${BOOTSTRAP_PASS}"
