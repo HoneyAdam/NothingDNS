@@ -159,7 +159,8 @@ jobs:
         run: |
           helm lint deploy/helm/nothingdns \
             --set-string auth.authSecret='AuthSecret-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ' \
-            --set-string auth.adminPassword='AdminPassword-1234567890-ABCDE'
+            --set-string auth.adminPassword='AdminPassword-1234567890-ABCDE' \
+            --set-string auth.storageEncryptionKey='a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90'
 
       - name: Validate rendered daemon config
         env:
@@ -167,10 +168,12 @@ jobs:
           NOTHINGDNS_ADMIN_PASSWORD: AdminPassword-1234567890-ABCDE
           NOTHINGDNS_METRICS_AUTH_TOKEN: MetricsToken-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ
           NOTHINGDNS_CLUSTER_ENCRYPTION_KEY: ClusterKey-1234567890-ABCDEFGHIJKLMNOPQRSTUVWXYZ
+          NOTHINGDNS_STORAGE_ENCRYPTION_KEY: a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90
         run: |
           helm template nothingdns deploy/helm/nothingdns \
             --set-string auth.authSecret="$NOTHINGDNS_AUTH_SECRET" \
             --set-string auth.adminPassword="$NOTHINGDNS_ADMIN_PASSWORD" \
+            --set-string auth.storageEncryptionKey="$NOTHINGDNS_STORAGE_ENCRYPTION_KEY" \
             > /tmp/nothingdns-helm.yaml
 
           awk '
