@@ -1256,6 +1256,55 @@ www IN A 192.0.2.1
 	}
 }
 
+func TestManager_Load_AllowsZoneDirWithDotDotInName(t *testing.T) {
+	parent := t.TempDir()
+	zoneDir := filepath.Join(parent, "zones..prod")
+	if err := os.MkdirAll(zoneDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	zoneFile := filepath.Join(zoneDir, "example.zone")
+	content := `$ORIGIN example.com.
+$TTL 3600
+@ IN SOA ns1 hostmaster 1 3600 900 604800 86400
+@ IN NS ns1
+`
+	if err := os.WriteFile(zoneFile, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	m.SetZoneDir(zoneDir)
+	if err := m.Load("example.com.", zoneFile); err != nil {
+		t.Fatalf("Load should allow paths inside zone_dir even when directory name contains '..': %v", err)
+	}
+}
+
+func TestManager_Load_RejectsOutsideZoneDir(t *testing.T) {
+	parent := t.TempDir()
+	zoneDir := filepath.Join(parent, "zones")
+	outsideDir := filepath.Join(parent, "zones-sibling")
+	if err := os.MkdirAll(zoneDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	zoneFile := filepath.Join(outsideDir, "example.zone")
+	if err := os.WriteFile(zoneFile, []byte("$ORIGIN example.com.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager()
+	m.SetZoneDir(zoneDir)
+	err := m.Load("example.com.", zoneFile)
+	if err == nil {
+		t.Fatal("Load should reject paths outside zone_dir")
+	}
+	if !strings.Contains(err.Error(), "outside zone_dir") {
+		t.Fatalf("Load error = %v, want outside zone_dir", err)
+	}
+}
+
 func TestManager_Load_SymlinkRejected(t *testing.T) {
 	tmpDir := t.TempDir()
 	zoneFile := filepath.Join(tmpDir, "real.zone")

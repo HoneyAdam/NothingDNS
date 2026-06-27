@@ -1137,6 +1137,49 @@ func TestSnapshotterSaveLoadRoundtrip(t *testing.T) {
 	}
 }
 
+func TestSnapshotterSaveDoesNotFollowFixedTmpSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	sn, err := NewSnapshotter(tmpDir)
+	if err != nil {
+		t.Fatalf("NewSnapshotter failed: %v", err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	const outsideData = "keep me"
+	if err := os.WriteFile(outside, []byte(outsideData), 0600); err != nil {
+		t.Fatalf("WriteFile outside: %v", err)
+	}
+	snapshotPath := filepath.Join(tmpDir, snapFilename(42))
+	if err := os.Symlink(outside, snapshotPath+".tmp"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	err = sn.Save(&Snapshot{
+		Index:      42,
+		Term:       3,
+		LastIndex:  41,
+		LastTerm:   3,
+		Data:       []byte("snapshot payload data"),
+		Membership: []NodeID{"node1"},
+	})
+	if err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("ReadFile outside: %v", err)
+	}
+	if string(got) != outsideData {
+		t.Fatalf("fixed tmp symlink target was modified: got %q", string(got))
+	}
+	if info, err := os.Lstat(snapshotPath); err != nil {
+		t.Fatalf("expected snapshot file: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("snapshot file must not be the fixed tmp symlink")
+	}
+}
+
 func TestSyncSnapshotDir(t *testing.T) {
 	if err := syncSnapshotDir(t.TempDir()); err != nil {
 		t.Fatalf("syncSnapshotDir existing dir: %v", err)

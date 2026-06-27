@@ -5464,6 +5464,13 @@ func TestReadCAFile_CovExtra(t *testing.T) {
 	if _, err := readCAFile(badPath); err == nil {
 		t.Error("expected error for a file with no PEM certificates")
 	}
+	oversizedPath := filepath.Join(t.TempDir(), "oversized-ca.pem")
+	if err := os.WriteFile(oversizedPath, bytes.Repeat([]byte{'x'}, maxXoTCAFileSize+1), 0o600); err != nil {
+		t.Fatalf("write oversized CA: %v", err)
+	}
+	if _, err := readCAFile(oversizedPath); err == nil {
+		t.Error("expected error for an oversized CA file")
+	}
 	// A valid CA loads into a non-nil pool.
 	pool, err := readCAFile(writeTestCAFile(t))
 	if err != nil {

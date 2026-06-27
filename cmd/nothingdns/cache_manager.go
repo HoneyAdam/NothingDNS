@@ -6,6 +6,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -18,7 +19,10 @@ import (
 	"github.com/nothingdns/nothingdns/internal/util"
 )
 
-const cachePersistFile = "cache.json"
+const (
+	cachePersistFile        = "cache.json"
+	maxCachePersistFileSize = 64 << 20
+)
 
 // CacheManager manages the DNS cache and optional memory monitoring.
 type CacheManager struct {
@@ -107,9 +111,12 @@ func (m *CacheManager) LoadCache() {
 		return
 	}
 
-	data, err := os.ReadFile(m.persistPath)
+	data, err := readCachePersistFile(m.persistPath)
 	if err != nil {
 		// File doesn't exist yet — no cached data
+		if !os.IsNotExist(err) {
+			m.logger.Warnf("Failed to read cache persistence file: %v", err)
+		}
 		return
 	}
 
@@ -131,6 +138,23 @@ func (m *CacheManager) LoadCache() {
 	if restored > 0 {
 		m.logger.Infof("Cache restored %d entries from persistent storage", restored)
 	}
+}
+
+func readCachePersistFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxCachePersistFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxCachePersistFileSize {
+		return nil, fmt.Errorf("cache persistence file exceeds %d bytes", maxCachePersistFileSize)
+	}
+	return data, nil
 }
 
 // StartPersistence starts a goroutine that periodically saves the cache.
@@ -177,17 +201,49 @@ func (m *CacheManager) saveToFile() {
 		return
 	}
 
-	tmpPath := m.persistPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := writeCachePersistFile(m.persistPath, data); err != nil {
 		m.logger.Warnf("Failed to write cache persistence file: %v", err)
 		return
 	}
+}
 
-	// Atomic rename
-	if err := os.Rename(tmpPath, m.persistPath); err != nil {
-		m.logger.Warnf("Failed to atomically rename cache persistence file: %v", err)
-		return
+func writeCachePersistFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmp, err := os.CreateTemp(dir, "."+base+"-*.tmp")
+	if err != nil {
+		return err
 	}
+	tmpPath := tmp.Name()
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if err := util.WriteFull(tmp, data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	keepTemp = true
+	return nil
 }
 
 // SaveCacheToKV saves the cache to a KVStore bucket (alternative method).

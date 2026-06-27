@@ -742,6 +742,27 @@ func TestTrustAnchorStoreLoadFromFileInvalidXML(t *testing.T) {
 	}
 }
 
+func TestTrustAnchorStoreLoadFromFileOversized(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "trust-anchor-oversized-*.xml")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(bytes.Repeat([]byte{'x'}, maxTrustAnchorXMLSize+1)); err != nil {
+		t.Fatalf("Failed to write temp file: %v", err)
+	}
+	tmpFile.Close()
+
+	store := NewTrustAnchorStore()
+	if err := store.LoadFromFile(tmpFile.Name()); err == nil {
+		t.Fatal("expected error for oversized trust anchor file")
+	}
+	if zones := store.GetAllZones(); len(zones) != 0 {
+		t.Fatalf("zones loaded after oversized file error: %v", zones)
+	}
+}
+
 func TestTrustAnchorStoreLoadFromFileInvalidDigest(t *testing.T) {
 	// Create a temporary XML file with invalid hex digest
 	xmlContent := `<?xml version="1.0" encoding="UTF-8"?>

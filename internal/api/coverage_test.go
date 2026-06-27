@@ -420,6 +420,28 @@ func TestHandleBulkPTR_PatternMissingPlaceholders(t *testing.T) {
 	}
 }
 
+func TestHandleBulkPTR_PatternTooLong(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+
+	pattern := strings.Repeat("a", maxBulkPTRPatternLength+1) + "-[A]-[B]-[C]-[D].example.com."
+	body, err := json.Marshal(map[string]string{
+		"cidr":    "192.168.1.0/30",
+		"pattern": pattern,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader(body))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestHandleBulkPTR_ZoneNotFound(t *testing.T) {
 	s, user := newServerWithReverseZone(t)
 

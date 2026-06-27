@@ -169,11 +169,7 @@ func (m *Manager) SetZoneDir(dir string) {
 
 // Load loads a zone from a file.
 func (m *Manager) Load(name, path string) error {
-	// Canonicalize and validate path to prevent traversal attacks
 	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		return fmt.Errorf("zone path traversal attempt blocked: %s", path)
-	}
 	if m.zoneDir != "" {
 		absPath, err := filepath.Abs(cleanPath)
 		if err != nil {
@@ -183,7 +179,8 @@ func (m *Manager) Load(name, path string) error {
 		if err != nil {
 			return fmt.Errorf("zone dir: %w", err)
 		}
-		if !strings.HasPrefix(absPath, absDir+string(filepath.Separator)) {
+		rel, err := filepath.Rel(absDir, absPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("zone path %q is outside zone_dir %q", path, m.zoneDir)
 		}
 	}

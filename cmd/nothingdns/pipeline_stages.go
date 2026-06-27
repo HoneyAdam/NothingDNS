@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
-	"github.com/nothingdns/nothingdns/internal/dnssec"
 	"github.com/nothingdns/nothingdns/internal/idna"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
@@ -401,7 +400,7 @@ func resolverStage(h *integratedHandler) Stage {
 			return handled, err
 		}
 
-		if h.tryDNS64Synthesis(w, q.msg, q.q, resp) {
+		if h.tryDNS64Synthesis(ctx, w, q.msg, q.q, resp) {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
@@ -482,47 +481,17 @@ func upstreamStage(h *integratedHandler) Stage {
 		}
 		q.msg.Header.ID = origID
 
-		// DNSSEC validation
-		dnssecValidated := false
-		if h.validator != nil && dnssec.HasSignature(resp) {
-			result, valErr := h.validator.ValidateResponse(ctx, resp, q.qname)
-			if valErr != nil {
-				h.logger.Warnf("DNSSEC validation error for %s: %v", q.qname, valErr)
-			}
-			switch result {
-			case dnssec.ValidationSecure:
-				h.logger.Debugf("DNSSEC validation secure for %s", q.qname)
-				resp.Header.Flags.AD = true
-				dnssecValidated = true
-			case dnssec.ValidationBogus:
-				h.logger.Warnf("DNSSEC validation failed (bogus) for %s", q.qname)
-				if h.config.DNSSEC.Enabled {
-					if h.metrics != nil {
-						h.metrics.RecordResponse(protocol.RcodeServerFailure)
-					}
-					sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECBogus, "DNSSEC validation failed")
-					return true, nil
-				}
-			case dnssec.ValidationInsecure:
-				h.logger.Debugf("DNSSEC insecure zone for %s", q.qname)
-			case dnssec.ValidationIndeterminate:
-				h.logger.Debugf("DNSSEC indeterminate for %s", q.qname)
-				if h.config.DNSSEC.Enabled {
-					if h.metrics != nil {
-						h.metrics.RecordResponse(protocol.RcodeServerFailure)
-					}
-					sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDEDNSSECIndeterminate, "DNSSEC indeterminate")
-					return true, nil
-				}
-			}
+		handled, dnssecValidated := h.validateDNSSECResponse(ctx, q.currentWriter, q.msg, q.qname, resp)
+		if handled {
+			return true, nil
 		}
 
-		handled, err := h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, q.qname)
+		handled, err = h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, q.qname)
 		if handled || err != nil {
 			return handled, err
 		}
 
-		if h.tryDNS64Synthesis(w, q.msg, q.q, resp) {
+		if h.tryDNS64Synthesis(ctx, w, q.msg, q.q, resp) {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}

@@ -240,3 +240,37 @@ func TestDoHBypassOnlyWhenEnabled(t *testing.T) {
 		t.Error("DoH disabled: bypass should not have forwarded to the mux (handler was reached)")
 	}
 }
+
+func TestAPIPathsNeverBypassAuthAsStaticAssets(t *testing.T) {
+	cfg := config.HTTPConfig{
+		Enabled:   true,
+		Bind:      "127.0.0.1:0",
+		AuthToken: "shared-secret-token",
+	}
+	server := NewServer(cfg, nil, nil, nil, nil, nil, nil)
+
+	for _, path := range []string{
+		"/api/v1/status.js",
+		"/api/v1/zones.css",
+		"/api/v1/auth/users/admin.svg",
+	} {
+		t.Run(path, func(t *testing.T) {
+			handlerCalled := false
+			testHandler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handlerCalled = true
+				w.WriteHeader(http.StatusOK)
+			})
+
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			rec := httptest.NewRecorder()
+			server.authMiddleware(testHandler).ServeHTTP(rec, req)
+
+			if handlerCalled {
+				t.Fatal("API path with static suffix bypassed auth and reached handler")
+			}
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}

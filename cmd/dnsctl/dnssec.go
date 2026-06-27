@@ -24,6 +24,12 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/dnssec"
 	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
+)
+
+const (
+	maxDNSCTLKeyFileSize  = 1 << 20
+	maxDNSCTLZoneFileSize = 64 << 20
 )
 
 func cmdDNSSEC(args []string) error {
@@ -58,6 +64,23 @@ func newDNSSECFlagSet(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	return fs
+}
+
+func readDNSCTLFile(path string, maxSize int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSize {
+		return nil, fmt.Errorf("file exceeds %d bytes", maxSize)
+	}
+	return data, nil
 }
 
 // cmdDNSSECStatus queries the live daemon's validator state via
@@ -350,13 +373,7 @@ func cmdDNSSECSignZone(args []string) error {
 	}
 
 	// Parse zone file into resource records
-	f, err := os.Open(*inputFile)
-	if err != nil {
-		return fmt.Errorf("opening zone file: %w", err)
-	}
-	defer f.Close()
-
-	content, err := io.ReadAll(f)
+	content, err := readDNSCTLFile(*inputFile, maxDNSCTLZoneFileSize)
 	if err != nil {
 		return fmt.Errorf("reading zone file: %w", err)
 	}
@@ -388,7 +405,7 @@ func cmdDNSSECSignZone(args []string) error {
 		output.WriteByte('\n')
 	}
 
-	if err := os.WriteFile(*outputFile, []byte(output.String()), 0644); err != nil {
+	if err := writeDNSCTLFile(*outputFile, []byte(output.String()), 0644); err != nil {
 		return fmt.Errorf("writing signed zone: %w", err)
 	}
 
@@ -704,7 +721,7 @@ func writePrivateKey(path string, key *dnssec.SigningKey) error {
 		content.WriteString(fmt.Sprintf("PrivateKey: %s\n", base64.StdEncoding.EncodeToString(derBytes)))
 	}
 
-	return os.WriteFile(path, []byte(content.String()), 0600)
+	return writeDNSCTLFile(path, []byte(content.String()), 0600)
 }
 
 func writePublicKey(path string, zone string, key *dnssec.SigningKey) error {
@@ -717,11 +734,49 @@ func writePublicKey(path string, zone string, key *dnssec.SigningKey) error {
 		key.DNSKEY.Algorithm,
 		base64.StdEncoding.EncodeToString(key.DNSKEY.PublicKey))
 
-	return os.WriteFile(path, []byte(content), 0644)
+	return writeDNSCTLFile(path, []byte(content), 0644)
+}
+
+func writeDNSCTLFile(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmp, err := os.CreateTemp(dir, "."+base+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if err := util.WriteFull(tmp, data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	keepTemp = true
+	return nil
 }
 
 func readDNSKEYFromFile(path string) (*protocol.RDataDNSKEY, error) {
-	data, err := os.ReadFile(path)
+	data, err := readDNSCTLFile(path, maxDNSCTLKeyFileSize)
 	if err != nil {
 		return nil, err
 	}
@@ -867,7 +922,7 @@ func loadSigningKey(keyPath, zone string) (*dnssec.SigningKey, error) {
 
 // loadPrivateKey reads a private key from BIND-format private key file.
 func loadPrivateKey(path string, algorithm uint8) (crypto.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := readDNSCTLFile(path, maxDNSCTLKeyFileSize)
 	if err != nil {
 		return nil, err
 	}
@@ -944,7 +999,7 @@ func cmdDNSSECValidateZone(args []string) error {
 	}
 
 	// Read the zone file
-	data, err := os.ReadFile(*zoneFile)
+	data, err := readDNSCTLFile(*zoneFile, maxDNSCTLZoneFileSize)
 	if err != nil {
 		return fmt.Errorf("reading zone file: %w", err)
 	}

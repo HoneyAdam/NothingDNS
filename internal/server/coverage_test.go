@@ -3112,6 +3112,15 @@ func TestValidateTLSProfile_OldTLSVersion(t *testing.T) {
 	}
 }
 
+func TestValidateTLSProfile_RejectsInsecureSkipVerify(t *testing.T) {
+	cfg := DefaultTLSProfileConfig()
+	cfg.InsecureSkipVerify = true
+	err := ValidateTLSProfile(cfg)
+	if err == nil {
+		t.Error("expected error for insecure skip verify")
+	}
+}
+
 func TestValidateTLSProfile_Valid(t *testing.T) {
 	cfg := &TLSProfileConfig{
 		Profile:           TLSProfileOpportunistic,
@@ -3203,6 +3212,14 @@ func TestBuildTLSConfigForProfile_InvalidCert(t *testing.T) {
 	_, err := BuildTLSConfigForProfile(cfg, "/nonexistent/cert.pem", "/nonexistent/key.pem")
 	if err == nil {
 		t.Error("expected error for invalid cert files")
+	}
+}
+
+func TestBuildTLSConfigForProfile_RejectsInvalidProfile(t *testing.T) {
+	cfg := DefaultTLSProfileConfig()
+	cfg.InsecureSkipVerify = true
+	if _, err := BuildTLSConfigForProfile(cfg, "", ""); err == nil {
+		t.Error("expected invalid TLS profile error")
 	}
 }
 

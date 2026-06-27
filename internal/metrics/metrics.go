@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net"
@@ -454,13 +455,21 @@ func (m *MetricsCollector) requireMetricsAuth(next http.HandlerFunc) http.Handle
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.Header.Get("Authorization")
 		token = strings.TrimPrefix(token, "Bearer ")
-		if len(token) != len(m.config.AuthToken) ||
-			subtle.ConstantTimeCompare([]byte(token), []byte(m.config.AuthToken)) != 1 {
+		if !constantTimeTokenEqual(token, m.config.AuthToken) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		next(w, r)
 	}
+}
+
+func constantTimeTokenEqual(got, want string) bool {
+	if want == "" {
+		return false
+	}
+	gotDigest := sha256.Sum256([]byte(got))
+	wantDigest := sha256.Sum256([]byte(want))
+	return subtle.ConstantTimeCompare(gotDigest[:], wantDigest[:]) == 1
 }
 
 // handleMetrics serves Prometheus-format metrics.

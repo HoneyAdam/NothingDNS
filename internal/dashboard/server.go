@@ -2,6 +2,7 @@
 package dashboard
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -32,7 +33,9 @@ type Server struct {
 
 // secureCompare performs constant-time comparison to prevent timing attacks
 func secureCompare(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	aDigest := sha256.Sum256([]byte(a))
+	bDigest := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(aDigest[:], bDigest[:]) == 1
 }
 
 // MaxWebSocketClients is the maximum number of concurrent WebSocket connections.
@@ -299,10 +302,8 @@ func (s *Server) authenticateRequest(w http.ResponseWriter, r *http.Request) boo
 	}
 
 	valid := false
-	if authToken != "" && len(token) == len(authToken) {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(authToken)) == 1 {
-			valid = true
-		}
+	if authToken != "" && secureCompare(token, authToken) {
+		valid = true
 	}
 	if !valid && authStore != nil {
 		if _, err := authStore.ValidateToken(token); err == nil {
@@ -464,10 +465,8 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Validate token: check legacy token first, then JWT (matches auth middleware behavior)
 	valid := false
-	if authToken != "" && len(token) == len(authToken) {
-		if subtle.ConstantTimeCompare([]byte(token), []byte(authToken)) == 1 {
-			valid = true
-		}
+	if authToken != "" && secureCompare(token, authToken) {
+		valid = true
 	}
 	if !valid && authStore != nil {
 		if _, err := authStore.ValidateToken(token); err == nil {

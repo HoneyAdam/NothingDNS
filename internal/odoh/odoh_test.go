@@ -574,6 +574,36 @@ func TestProxyForwardToTarget(t *testing.T) {
 	}
 }
 
+func TestProxyForwardToTargetDoesNotFollowRedirect(t *testing.T) {
+	redirected := make(chan struct{}, 1)
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	defer targetServer.Close()
+
+	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	cfg.TargetURL = targetServer.URL
+	proxy, err := NewObliviousProxy(cfg)
+	if err != nil {
+		t.Fatalf("NewObliviousProxy failed: %v", err)
+	}
+
+	if _, err := proxy.forwardRaw([]byte("opaque")); err == nil {
+		t.Fatal("expected redirect status to fail without following")
+	}
+	select {
+	case <-redirected:
+		t.Fatal("ODoH proxy followed target redirect")
+	default:
+	}
+}
+
 func TestNewObliviousClient(t *testing.T) {
 	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
 	client, err := NewObliviousClient(cfg)
@@ -591,6 +621,36 @@ func TestNewObliviousClient(t *testing.T) {
 	}
 	if client.client.Timeout != 10*time.Second {
 		t.Errorf("client timeout = %v, want 10s", client.client.Timeout)
+	}
+}
+
+func TestObliviousClientDoesNotFollowProxyRedirect(t *testing.T) {
+	redirected := make(chan struct{}, 1)
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	defer proxyServer.Close()
+
+	cfg := NewODoHConfig("target.example.com", "proxy.example.com")
+	cfg.ProxyURL = proxyServer.URL
+	client, err := NewObliviousClient(cfg)
+	if err != nil {
+		t.Fatalf("NewObliviousClient failed: %v", err)
+	}
+
+	if _, err := client.postEncapsulated([]byte("opaque")); err == nil {
+		t.Fatal("expected redirect status to fail without following")
+	}
+	select {
+	case <-redirected:
+		t.Fatal("ODoH client followed proxy redirect")
+	default:
 	}
 }
 

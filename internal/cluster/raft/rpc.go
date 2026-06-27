@@ -417,13 +417,7 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 	}
 
 	// Dial new connection
-	var dialConn net.Conn
-	var err error
-	if t.tlsConfig != nil {
-		dialConn, err = tls.Dial("tcp", addr, t.tlsConfig)
-	} else {
-		dialConn, err = net.DialTimeout("tcp", addr, t.dialTimeout)
-	}
+	dialConn, err := t.dial(addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -444,6 +438,14 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 	t.mu.Unlock()
 
 	return dialConn, nil
+}
+
+func (t *TCPTransport) dial(addr string) (net.Conn, error) {
+	if t.tlsConfig != nil {
+		dialer := &net.Dialer{Timeout: t.dialTimeout}
+		return tls.DialWithDialer(dialer, "tcp", addr, t.tlsConfig)
+	}
+	return net.DialTimeout("tcp", addr, t.dialTimeout)
 }
 
 func closeRaftConn(conn net.Conn) error {

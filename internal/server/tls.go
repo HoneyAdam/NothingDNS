@@ -124,6 +124,10 @@ func PrivacyTLSProfileConfig(hostname string, caPool *x509.CertPool) *TLSProfile
 
 // BuildTLSConfigForProfile builds a tls.Config from a profile configuration.
 func BuildTLSConfigForProfile(profile *TLSProfileConfig, certFile, keyFile string) (*tls.Config, error) {
+	if err := ValidateTLSProfile(profile); err != nil {
+		return nil, err
+	}
+
 	config := &tls.Config{
 		MinVersion: profile.MinimumTLSVersion,
 		MaxVersion: tls.VersionTLS13,
@@ -182,6 +186,10 @@ func ValidateTLSProfile(profile *TLSProfileConfig) error {
 
 	if profile.MinimumTLSVersion < tls.VersionTLS12 {
 		return errors.New("minimum TLS version must be at least 1.2")
+	}
+
+	if profile.InsecureSkipVerify {
+		return errors.New("insecure skip verify is not allowed in TLS profiles")
 	}
 
 	return nil

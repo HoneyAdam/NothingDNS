@@ -937,6 +937,10 @@ func isOriginAllowed(origin string, allowed []string) bool {
 }
 
 func isSPAStaticAsset(path string) bool {
+	if strings.HasPrefix(path, "/api/") {
+		return false
+	}
+
 	if strings.HasPrefix(path, "/assets/") {
 		return true
 	}

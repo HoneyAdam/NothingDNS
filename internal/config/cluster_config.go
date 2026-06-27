@@ -4,8 +4,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"io"
 	"os"
 )
+
+const maxRPCCACertFileSize = 1 << 20
 
 // StorageConfig groups the at-rest data-store settings the daemon
 // understands. SECURITY-REPORT.md L-6 added EncryptionKey here so
@@ -204,7 +207,7 @@ func (c *RPCConfig) NewTLSConfig() (*tls.Config, error) {
 	}
 
 	if c.TLSCACertFile != "" {
-		caCert, err := os.ReadFile(c.TLSCACertFile)
+		caCert, err := readRPCCACertFile(c.TLSCACertFile)
 		if err != nil {
 			return nil, fmt.Errorf("read RPC CA certificate: %w", err)
 		}
@@ -226,4 +229,21 @@ func (c *RPCConfig) NewTLSConfig() (*tls.Config, error) {
 	}
 
 	return config, nil
+}
+
+func readRPCCACertFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxRPCCACertFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxRPCCACertFileSize {
+		return nil, fmt.Errorf("RPC CA certificate file exceeds %d bytes", maxRPCCACertFileSize)
+	}
+	return data, nil
 }

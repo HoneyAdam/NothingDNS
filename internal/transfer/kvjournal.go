@@ -74,7 +74,7 @@ func (s *KVJournalStore) zoneDir(zoneName string) string {
 // SaveEntry persists a journal entry to disk using the tmp+fsync+rename
 // idiom so that a power loss between Write and Close cannot leave a
 // half-written file under the canonical name. Each entry is written to a
-// sibling ".tmp" file, fsynced, then atomically renamed into place; the
+// sibling temporary file, fsynced, then atomically renamed into place; the
 // parent directory is fsynced too so the new dirent is durable.
 func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) error {
 	if s == nil {
@@ -95,24 +95,29 @@ func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) err
 	}
 
 	filename := filepath.Join(dir, fmt.Sprintf("%d.journal", entry.Serial))
-	tmpName := filename + ".tmp"
+	base := filepath.Base(filename)
 
-	f, err := os.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	f, err := os.CreateTemp(dir, "."+base+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("creating tmp journal file: %w", err)
 	}
+	tmpName := f.Name()
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.Remove(tmpName)
+		}
+	}()
 
 	if s.hmacKey != nil {
 		if err := s.writeEntry(f, entry); err != nil {
 			f.Close()
-			os.Remove(tmpName)
 			return fmt.Errorf("write entry: %w", err)
 		}
 	} else {
 		enc := json.NewEncoder(f)
 		if err := enc.Encode(entry); err != nil {
 			f.Close()
-			os.Remove(tmpName)
 			return fmt.Errorf("encoding journal entry: %w", err)
 		}
 	}
@@ -121,18 +126,16 @@ func (s *KVJournalStore) SaveEntry(zoneName string, entry *IXFRJournalEntry) err
 	// and the rename may publish a name whose contents haven't reached disk.
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(tmpName)
 		return fmt.Errorf("fsync tmp journal: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmpName)
 		return fmt.Errorf("close tmp journal: %w", err)
 	}
 
 	if err := os.Rename(tmpName, filename); err != nil {
-		os.Remove(tmpName)
 		return fmt.Errorf("rename tmp journal: %w", err)
 	}
+	keepTemp = true
 
 	if err := syncJournalDir(dir); err != nil {
 		return err

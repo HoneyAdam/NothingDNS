@@ -113,7 +113,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 // that received no AAAA answers. If synthesis is appropriate, it re-queries for
 // A records via the same upstream path and returns a synthesized AAAA response.
 // Returns true if a synthesized response was written, false otherwise.
-func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
+func (h *integratedHandler) tryDNS64Synthesis(ctx context.Context, w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
 	if h.dns64Synth == nil {
 		return false
 	}
@@ -134,19 +134,36 @@ func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protoc
 		h.logger.Warnf("DNS64: failed to build A query for %s: %v", qname, err)
 		return false
 	}
+	aQuery.Header.ID = upstream.RandomTXID()
 
 	// Send the A query through the same upstream path.
 	var aResp *protocol.Message
 	if h.loadBalancer != nil {
-		aResp, err = h.loadBalancer.Query(aQuery)
+		aResp, err = h.loadBalancer.QueryContext(ctx, aQuery)
 	} else if h.upstream != nil {
-		aResp, err = h.upstream.Query(aQuery)
+		aResp, err = h.upstream.QueryContext(ctx, aQuery)
 	} else {
 		return false
 	}
 	if err != nil {
 		h.logger.Warnf("DNS64: upstream A query failed for %s: %v", qname, err)
 		return false
+	}
+	if aResp == nil {
+		h.logger.Warnf("DNS64: upstream returned nil A response for %s", qname)
+		return false
+	}
+	sanitizePipelineResponse(aResp)
+	if aResp.Header.ID != aQuery.Header.ID {
+		h.logger.Warnf("DNS64: upstream A response ID mismatch for %s: got %d, want %d", qname, aResp.Header.ID, aQuery.Header.ID)
+		return false
+	}
+
+	if handled, _ := h.validateDNSSECResponse(ctx, w, r, qname, aResp); handled {
+		return true
+	}
+	if handled, err := h.applyRPZResponsePolicyWithError(w, r, q, aResp, qname); handled || err != nil {
+		return handled
 	}
 
 	// Only synthesize if the A response has answers.
@@ -162,6 +179,45 @@ func (h *integratedHandler) tryDNS64Synthesis(w server.ResponseWriter, r *protoc
 	h.logger.Debugf("DNS64: synthesized %d AAAA records for %s", len(synthesized.Answers), qname)
 	reply(w, r, synthesized)
 	return true
+}
+
+func (h *integratedHandler) validateDNSSECResponse(ctx context.Context, w server.ResponseWriter, r *protocol.Message, qname string, resp *protocol.Message) (bool, bool) {
+	if h.validator == nil {
+		return false, false
+	}
+
+	result, valErr := h.validator.ValidateResponse(ctx, resp, qname)
+	if valErr != nil {
+		h.logger.Warnf("DNSSEC validation error for %s: %v", qname, valErr)
+	}
+	switch result {
+	case dnssec.ValidationSecure:
+		h.logger.Debugf("DNSSEC validation secure for %s", qname)
+		resp.Header.Flags.AD = true
+		return false, true
+	case dnssec.ValidationBogus:
+		h.logger.Warnf("DNSSEC validation failed (bogus) for %s", qname)
+		if h.config.DNSSEC.Enabled {
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEDNSSECBogus, "DNSSEC validation failed")
+			return true, false
+		}
+	case dnssec.ValidationInsecure:
+		h.logger.Debugf("DNSSEC insecure zone for %s", qname)
+	case dnssec.ValidationIndeterminate:
+		h.logger.Debugf("DNSSEC indeterminate for %s", qname)
+		if h.config.DNSSEC.Enabled {
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEDNSSECIndeterminate, "DNSSEC indeterminate")
+			return true, false
+		}
+	}
+
+	return false, false
 }
 
 func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) bool {

@@ -50,6 +50,8 @@ const (
 	TLSAIgnored
 )
 
+const maxXoTCAFileSize = 1 << 20
+
 // XoTConfig contains XoT-specific configuration.
 type XoTConfig struct {
 	CertFile        string
@@ -200,7 +202,7 @@ func buildXoTTLSConfig(config *XoTConfig) (*tls.Config, error) {
 // certs were validated against public roots and the private-CA allowlist was
 // silently bypassed. Fails closed if the file is unreadable or has no certs.
 func readCAFile(filename string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(filename)
+	pem, err := readXoTCAFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("xot: read CA file %q: %w", filename, err)
 	}
@@ -209,6 +211,23 @@ func readCAFile(filename string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("xot: CA file %q contains no valid PEM certificates", filename)
 	}
 	return pool, nil
+}
+
+func readXoTCAFile(filename string) ([]byte, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxXoTCAFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxXoTCAFileSize {
+		return nil, fmt.Errorf("XoT CA file exceeds %d bytes", maxXoTCAFileSize)
+	}
+	return data, nil
 }
 
 // Serve starts the XoT server listening for incoming connections.

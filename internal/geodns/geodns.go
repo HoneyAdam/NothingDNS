@@ -3,6 +3,7 @@ package geodns
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"sync"
@@ -14,6 +15,7 @@ const (
 	mmdbMetadataMarker = "\xAB\xCD\xEFMaxMind.com"
 	mmdbNodeSize       = 24 // 6 bytes per node (left/right children, 3 bytes each)
 	mmdbVersion        = 2
+	maxMMDBFileSize    = 256 << 20
 )
 
 // GeoRecord holds geo-targeted DNS record data.
@@ -93,7 +95,7 @@ func NewEngine(cfg Config) *Engine {
 // LoadMMDB loads a MaxMind DB file using the real binary-format parser in
 // mmdb.go (RFC: https://maxmind.github.io/MaxMind-DB/).
 func (e *Engine) LoadMMDB(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := readMMDBFile(path, maxMMDBFileSize)
 	if err != nil {
 		return fmt.Errorf("geodns: read mmdb: %w", err)
 	}
@@ -129,6 +131,23 @@ func (e *Engine) LoadMMDB(path string) error {
 	e.mmdbLoaded = true
 	e.mu.Unlock()
 	return nil
+}
+
+func readMMDBFile(path string, maxSize int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSize {
+		return nil, fmt.Errorf("mmdb file exceeds %d bytes", maxSize)
+	}
+	return data, nil
 }
 
 // parseMMDBMetadata extracts tree size and node count from MMDB metadata.

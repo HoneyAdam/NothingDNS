@@ -330,6 +330,54 @@ func TestBlocklistAddFile(t *testing.T) {
 	}
 }
 
+func TestBlocklistBaseDirRejectsSymlinkEscape(t *testing.T) {
+	parent := t.TempDir()
+	baseDir := filepath.Join(parent, "lists")
+	outsideDir := filepath.Join(parent, "outside")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("0.0.0.0 escaped.example\n"), 0644); err != nil {
+		t.Fatalf("write outside file: %v", err)
+	}
+	linkPath := filepath.Join(baseDir, "link.txt")
+	if err := os.Symlink(outsideFile, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	bl := New(Config{Enabled: true, BaseDir: baseDir})
+	if err := bl.AddFile(linkPath); err == nil {
+		t.Fatal("expected BaseDir symlink escape to be rejected")
+	}
+	if bl.IsBlocked("escaped.example") {
+		t.Fatal("escaped symlink source was loaded")
+	}
+}
+
+func TestBlocklistBaseDirAllowsDotDotInDirectoryName(t *testing.T) {
+	parent := t.TempDir()
+	baseDir := filepath.Join(parent, "lists..prod")
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		t.Fatalf("mkdir base: %v", err)
+	}
+	blockFile := filepath.Join(baseDir, "block.txt")
+	if err := os.WriteFile(blockFile, []byte("0.0.0.0 allowed.example\n"), 0644); err != nil {
+		t.Fatalf("write block file: %v", err)
+	}
+
+	bl := New(Config{Enabled: true, BaseDir: baseDir})
+	if err := bl.AddFile(blockFile); err != nil {
+		t.Fatalf("AddFile rejected safe path with '..' in directory name: %v", err)
+	}
+	if !bl.IsBlocked("allowed.example") {
+		t.Fatal("safe blocklist file was not loaded")
+	}
+}
+
 func TestBlocklistRemoveFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	blockFile1 := filepath.Join(tmpDir, "block1.txt")

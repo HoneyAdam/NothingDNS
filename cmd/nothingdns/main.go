@@ -5,13 +5,21 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,6 +39,7 @@ import (
 	"github.com/nothingdns/nothingdns/internal/mdns"
 	"github.com/nothingdns/nothingdns/internal/metrics"
 	"github.com/nothingdns/nothingdns/internal/odoh"
+	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/rpz"
 	"github.com/nothingdns/nothingdns/internal/util"
@@ -38,7 +47,9 @@ import (
 )
 
 const (
-	Name = "NothingDNS"
+	Name                        = "NothingDNS"
+	maxConfigFileSize           = 4 << 20
+	maxDNSSECPrivateKeyFileSize = 64 << 10
 )
 
 var (
@@ -911,7 +922,7 @@ func run() error {
 	// Write PID file if configured
 	if cfg.Server.PIDFile != "" {
 		pidStr := fmt.Sprintf("%d\n", os.Getpid())
-		if err := os.WriteFile(cfg.Server.PIDFile, []byte(pidStr), 0644); err != nil {
+		if err := writePIDFile(cfg.Server.PIDFile, []byte(pidStr)); err != nil {
 			logger.Warnf("Failed to write PID file %s: %v", cfg.Server.PIDFile, err)
 		} else {
 			logger.Infof("Wrote PID to %s", cfg.Server.PIDFile)
@@ -1112,7 +1123,7 @@ func run() error {
 
 // loadConfig loads and validates the configuration file.
 func loadConfig(path string) (*config.Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := readLimitedFile(path, maxConfigFileSize)
 	if err != nil {
 		// If file doesn't exist, use defaults
 		if os.IsNotExist(err) {
@@ -1186,20 +1197,214 @@ func loadZoneSigner(z *zone.Zone, signingCfg config.SigningConfig) (*dnssec.Sign
 
 	signer := dnssec.NewSigner(z.Origin, signerCfg)
 
-	// Generate key pairs from config
 	for _, keyConfig := range signingCfg.Keys {
 		if keyConfig.PrivateKey == "" {
 			continue
 		}
 
-		isKSK := keyConfig.Type == "ksk"
-		_, err := signer.GenerateKeyPair(keyConfig.Algorithm, isKSK)
+		key, err := loadConfiguredSigningKey(keyConfig)
 		if err != nil {
-			return nil, fmt.Errorf("generating key pair: %w", err)
+			return nil, fmt.Errorf("loading private key %q: %w", keyConfig.PrivateKey, err)
 		}
+		signer.AddKey(key)
 	}
 
 	return signer, nil
+}
+
+func loadConfiguredSigningKey(keyConfig config.KeyConfig) (*dnssec.SigningKey, error) {
+	if !protocol.IsAlgorithmSupported(keyConfig.Algorithm) {
+		return nil, fmt.Errorf("unsupported algorithm: %d", keyConfig.Algorithm)
+	}
+
+	privKey, err := loadDNSSECPrivateKeyFile(keyConfig.PrivateKey, keyConfig.Algorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	publicKey, err := dnssec.GeneratePublicKeyData(keyConfig.Algorithm, privKey)
+	if err != nil {
+		return nil, fmt.Errorf("generating DNSKEY public key: %w", err)
+	}
+
+	flags := uint16(protocol.DNSKEYFlagZone)
+	isKSK := keyConfig.Type == "ksk"
+	if isKSK {
+		flags |= protocol.DNSKEYFlagSEP
+	}
+
+	dnskey := &protocol.RDataDNSKEY{
+		Flags:     flags,
+		Protocol:  3,
+		Algorithm: keyConfig.Algorithm,
+		PublicKey: publicKey,
+	}
+	keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
+	if keyTag == 0 {
+		return nil, fmt.Errorf("DNSSEC key tag must not be zero")
+	}
+
+	return &dnssec.SigningKey{
+		PrivateKey: privKey,
+		DNSKEY:     dnskey,
+		KeyTag:     keyTag,
+		IsKSK:      isKSK,
+		IsZSK:      !isKSK,
+	}, nil
+}
+
+func loadDNSSECPrivateKeyFile(path string, algorithm uint8) (*dnssec.PrivateKey, error) {
+	data, err := readLimitedFile(path, maxDNSSECPrivateKeyFileSize)
+	if err != nil {
+		return nil, err
+	}
+	return parseDNSSECPrivateKey(data, algorithm)
+}
+
+func readLimitedFile(path string, maxSize int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSize {
+		return nil, fmt.Errorf("file exceeds %d bytes", maxSize)
+	}
+	return data, nil
+}
+
+func writePIDFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+
+	tmp, err := os.CreateTemp(dir, "."+base+"-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.Remove(tmpPath)
+		}
+	}()
+
+	if err := util.WriteFull(tmp, data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	keepTemp = true
+	return nil
+}
+
+func parseDNSSECPrivateKey(data []byte, algorithm uint8) (*dnssec.PrivateKey, error) {
+	der := data
+	if block, _ := pem.Decode(data); block != nil {
+		der = block.Bytes
+	}
+
+	switch algorithm {
+	case protocol.AlgorithmRSASHA256, protocol.AlgorithmRSASHA512:
+		key, err := parseRSAPrivateKey(der)
+		if err != nil {
+			return nil, err
+		}
+		return &dnssec.PrivateKey{Algorithm: algorithm, Key: key}, nil
+	case protocol.AlgorithmECDSAP256SHA256, protocol.AlgorithmECDSAP384SHA384:
+		key, err := parseECDSAPrivateKey(der, algorithm)
+		if err != nil {
+			return nil, err
+		}
+		return &dnssec.PrivateKey{Algorithm: algorithm, Key: key}, nil
+	case protocol.AlgorithmED25519:
+		key, err := parseEd25519PrivateKey(der)
+		if err != nil {
+			return nil, err
+		}
+		return &dnssec.PrivateKey{Algorithm: algorithm, Key: key}, nil
+	default:
+		return nil, fmt.Errorf("unsupported algorithm: %d", algorithm)
+	}
+}
+
+func parseRSAPrivateKey(der []byte) (*rsa.PrivateKey, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("parsing RSA private key: %w", err)
+	}
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key is %T, not RSA", key)
+	}
+	return rsaKey, nil
+}
+
+func parseECDSAPrivateKey(der []byte, algorithm uint8) (*ecdsa.PrivateKey, error) {
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return validateECDSAPrivateKeyCurve(key, algorithm)
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("parsing ECDSA private key: %w", err)
+	}
+	ecdsaKey, ok := key.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key is %T, not ECDSA", key)
+	}
+	return validateECDSAPrivateKeyCurve(ecdsaKey, algorithm)
+}
+
+func validateECDSAPrivateKeyCurve(key *ecdsa.PrivateKey, algorithm uint8) (*ecdsa.PrivateKey, error) {
+	switch algorithm {
+	case protocol.AlgorithmECDSAP256SHA256:
+		if key.Curve != elliptic.P256() {
+			return nil, fmt.Errorf("ECDSAP256SHA256 requires P-256 private key")
+		}
+	case protocol.AlgorithmECDSAP384SHA384:
+		if key.Curve != elliptic.P384() {
+			return nil, fmt.Errorf("ECDSAP384SHA384 requires P-384 private key")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported ECDSA algorithm: %d", algorithm)
+	}
+	return key, nil
+}
+
+func parseEd25519PrivateKey(der []byte) (ed25519.PrivateKey, error) {
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err == nil {
+		edKey, ok := key.(ed25519.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("private key is %T, not Ed25519", key)
+		}
+		return edKey, nil
+	}
+	if len(der) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(append([]byte(nil), der...)), nil
+	}
+	return nil, fmt.Errorf("parsing Ed25519 private key: %w", err)
 }
 
 // validateConfigOnly loads and validates a configuration file without starting the server.

@@ -115,6 +115,45 @@ func TestKVJournalStore_SaveEntryRejectsNilEntry(t *testing.T) {
 	}
 }
 
+func TestKVJournalStore_SaveEntryDoesNotFollowFixedTmpSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := NewKVJournalStore(tmpDir)
+	zoneName := "example.com."
+	serial := uint32(2024010101)
+	zoneDir := filepath.Join(tmpDir, "ixfr-journals", sanitizeFilename(zoneName))
+	if err := os.MkdirAll(zoneDir, 0700); err != nil {
+		t.Fatalf("MkdirAll zone journal dir: %v", err)
+	}
+
+	journalPath := filepath.Join(zoneDir, "2024010101.journal")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	const outsideData = "keep me"
+	if err := os.WriteFile(outside, []byte(outsideData), 0600); err != nil {
+		t.Fatalf("WriteFile outside: %v", err)
+	}
+	if err := os.Symlink(outside, journalPath+".tmp"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	err := store.SaveEntry(zoneName, &IXFRJournalEntry{Serial: serial, Timestamp: time.Now()})
+	if err != nil {
+		t.Fatalf("SaveEntry: %v", err)
+	}
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("ReadFile outside: %v", err)
+	}
+	if string(got) != outsideData {
+		t.Fatalf("fixed tmp symlink target was modified: got %q", string(got))
+	}
+	if info, err := os.Lstat(journalPath); err != nil {
+		t.Fatalf("expected journal file: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("journal file must not be the fixed tmp symlink")
+	}
+}
+
 func TestSyncJournalDir(t *testing.T) {
 	if err := syncJournalDir(t.TempDir()); err != nil {
 		t.Fatalf("syncJournalDir on temp dir: %v", err)

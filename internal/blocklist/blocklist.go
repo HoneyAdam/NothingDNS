@@ -338,29 +338,15 @@ func (bl *Blocklist) loadURL(url string) error {
 
 // loadFile loads a single blocklist file.
 func (bl *Blocklist) loadFile(path string) error {
-	// SECURITY: Check for path traversal sequences and validate resolved path
 	cleanPath := filepath.Clean(path)
-	if strings.Contains(cleanPath, "..") {
-		return fmt.Errorf("blocklist path traversal attempt blocked: %s", path)
-	}
-	// VULN-067: Reject absolute paths outside BaseDir when BaseDir is configured.
-	// This prevents reading arbitrary files like /etc/passwd or ../../secret.
-	if bl.baseDir != "" {
-		absPath, err := filepath.Abs(cleanPath)
-		if err != nil {
-			return fmt.Errorf("blocklist path: %w", err)
-		}
-		absBaseDir, err := filepath.Abs(bl.baseDir)
-		if err != nil {
-			return fmt.Errorf("blocklist basedir: %w", err)
-		}
-		if !strings.HasPrefix(absPath, absBaseDir+string(filepath.Separator)) {
-			return fmt.Errorf("blocklist path %q is outside BaseDir %q", path, bl.baseDir)
-		}
-	}
 	// Ensure the path is absolute
 	if !filepath.IsAbs(cleanPath) {
 		return fmt.Errorf("blocklist path must be absolute: %s", path)
+	}
+	if bl.baseDir != "" {
+		if err := ensureBlocklistPathInBaseDir(cleanPath, bl.baseDir); err != nil {
+			return err
+		}
 	}
 	f, err := os.Open(cleanPath)
 	if err != nil {
@@ -407,6 +393,22 @@ func (bl *Blocklist) loadFile(path string) error {
 	}
 
 	return scanner.Err()
+}
+
+func ensureBlocklistPathInBaseDir(path, baseDir string) error {
+	realPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("blocklist path: %w", err)
+	}
+	realBaseDir, err := filepath.EvalSymlinks(baseDir)
+	if err != nil {
+		return fmt.Errorf("blocklist basedir: %w", err)
+	}
+	rel, err := filepath.Rel(realBaseDir, realPath)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("blocklist path %q is outside BaseDir %q", path, baseDir)
+	}
+	return nil
 }
 
 // IsBlocked checks if a domain is blocked.
