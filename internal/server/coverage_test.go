@@ -3248,7 +3248,7 @@ func TestSendSERVFAIL_ValidRequest(t *testing.T) {
 	rw := &servfailMockWriter{}
 	req := &protocol.Message{
 		Header:    protocol.Header{ID: 42},
-		Questions: []*protocol.Question{{Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true}, QType: protocol.TypeA}},
+		Questions: []*protocol.Question{{Name: mustParseName("example.com."), QType: protocol.TypeA}},
 	}
 
 	sendSERVFAIL(rw, req)

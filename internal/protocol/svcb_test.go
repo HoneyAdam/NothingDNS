@@ -119,7 +119,7 @@ func TestRDataSVCBRoundTrip(t *testing.T) {
 			name: "AliasMode_root_target",
 			svcb: &RDataSVCB{
 				Priority: 0,
-				Target:   &Name{Labels: []string{}, FQDN: true},
+				Target:   NewName([]string{}, true),
 				Params:   nil,
 			},
 		},
@@ -265,7 +265,7 @@ func TestRDataHTTPSRoundTrip(t *testing.T) {
 			name: "AliasMode_root_target",
 			https: &RDataHTTPS{
 				Priority: 0,
-				Target:   &Name{Labels: []string{}, FQDN: true},
+				Target:   NewName([]string{}, true),
 				Params:   nil,
 			},
 		},

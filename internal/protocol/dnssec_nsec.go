@@ -226,7 +226,7 @@ func (r *RDataNSEC) Copy() RData {
 
 	var nextDomain *Name
 	if r.NextDomain != nil {
-		nextDomain = NewName(r.NextDomain.Labels, r.NextDomain.FQDN)
+		nextDomain = r.NextDomain.Copy()
 	}
 
 	typeMapCopy := make([]uint16, len(r.TypeBitMap))

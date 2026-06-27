@@ -42,14 +42,72 @@ type Name struct {
 	Labels []string
 	// FQDN indicates if the name is fully qualified (ends with root).
 	FQDN bool
+	// stringCache memoizes String() for request-path callers that repeatedly
+	// stringify the same unpacked name. It must be cleared on every mutation or
+	// pool reuse.
+	stringCache string
 }
 
 // NewName creates a Name from a slice of labels.
 func NewName(labels []string, fqdn bool) *Name {
-	// Make a copy of the labels
-	l := make([]string, len(labels))
-	copy(l, labels)
-	return &Name{Labels: l, FQDN: fqdn}
+	pooledLabels := acquireLabelSlice()
+	pooledLabels = append(pooledLabels, labels...)
+	name := acquireName()
+	name.Labels = pooledLabels
+	name.FQDN = fqdn
+	return name
+}
+
+// Copy creates a deep copy of the Name.
+func (n *Name) Copy() *Name {
+	if n == nil {
+		return nil
+	}
+	return NewName(n.LabelsSlice(), n.FQDN)
+}
+
+// CanonicalWire returns the canonical lowercase wire-format name.
+func (n *Name) CanonicalWire() []byte {
+	if n == nil {
+		return []byte{0}
+	}
+	return CanonicalWireName(n.String())
+}
+
+// LabelsSlice returns a copy-compatible view of the labels.
+// Compatibility helper during migration away from direct field-based cloning.
+func (n *Name) LabelsSlice() []string {
+	if n == nil {
+		return nil
+	}
+	return n.Labels
+}
+
+// ForEachLabel iterates labels in left-to-right order.
+func (n *Name) ForEachLabel(fn func(label string) bool) {
+	if n == nil || fn == nil {
+		return
+	}
+	for _, label := range n.Labels {
+		if !fn(label) {
+			return
+		}
+	}
+}
+
+// Release returns the Name and its label-slice backing storage to internal pools.
+// After Release the Name must not be used again.
+func (n *Name) Release() {
+	if n == nil {
+		return
+	}
+	if n.Labels != nil {
+		releaseLabelSlice(n.Labels)
+		n.Labels = nil
+	}
+	n.FQDN = false
+	n.stringCache = ""
+	namePool.Put(n)
 }
 
 // ParseName parses a domain name string into a Name struct.
@@ -62,7 +120,10 @@ func ParseName(s string) (*Name, error) {
 
 	// Root domain
 	if s == "" {
-		return &Name{Labels: []string{}, FQDN: fqdn}, nil
+		name := acquireName()
+		name.Labels = acquireLabelSlice()
+		name.FQDN = fqdn
+		return name, nil
 	}
 
 	// Split into labels
@@ -79,7 +140,10 @@ func ParseName(s string) (*Name, error) {
 		}
 	}
 
-	return &Name{Labels: labels, FQDN: fqdn}, nil
+	name := acquireName()
+	name.Labels = labels
+	name.FQDN = fqdn
+	return name, nil
 }
 
 // String returns the domain name as a string.
@@ -87,10 +151,21 @@ func (n *Name) String() string {
 	if n == nil {
 		return "."
 	}
+	if n.stringCache != "" {
+		return n.stringCache
+	}
+	if len(n.Labels) == 0 {
+		if n.FQDN {
+			n.stringCache = "."
+			return n.stringCache
+		}
+		return ""
+	}
 	result := strings.Join(n.Labels, ".")
 	if n.FQDN {
 		result += "."
 	}
+	n.stringCache = result
 	return result
 }
 
@@ -126,6 +201,14 @@ func (n *Name) HasPrefix(prefix []string) bool {
 	return true
 }
 
+// HasPrefixName returns true if the name has the given prefix name.
+func (n *Name) HasPrefixName(prefix *Name) bool {
+	if prefix == nil {
+		return true
+	}
+	return n.HasPrefix(prefix.Labels)
+}
+
 // HasSuffix returns true if the name has the given suffix labels.
 func (n *Name) HasSuffix(suffix []string) bool {
 	if n == nil {
@@ -141,6 +224,14 @@ func (n *Name) HasSuffix(suffix []string) bool {
 		}
 	}
 	return true
+}
+
+// HasSuffixName returns true if the name has the given suffix name.
+func (n *Name) HasSuffixName(suffix *Name) bool {
+	if suffix == nil {
+		return true
+	}
+	return n.HasSuffix(suffix.Labels)
 }
 
 // Equal returns true if the names are equal (case-insensitive).
@@ -329,12 +420,18 @@ func UnpackName(buf []byte, offset int) (*Name, int, error) {
 		return nil, 0, ErrInvalidOffset
 	}
 
-	// Pre-allocate labels slice for typical 3-label names (e.g., www.example.com)
-	labels := make([]string, 0, 4)
 	var nameLen int
 	startOffset := offset
 	ptrDepth := 0
 	ptrOffset := -1
+
+	// Build one contiguous dotted-name byte slice and slice substrings out of the
+	// final string, instead of allocating one string per label.
+	var nameBuf [MaxNameLength]byte
+	namePos := 0
+	var labelStarts [maxLabels]int
+	var labelEnds [maxLabels]int
+	labelCount := 0
 
 	for {
 		// Check bounds
@@ -381,10 +478,19 @@ func UnpackName(buf []byte, offset int) (*Name, int, error) {
 		// Check for root (empty label)
 		if labelLen == 0 {
 			offset++
-			if ptrOffset > 0 {
-				return &Name{Labels: labels, FQDN: true}, ptrOffset - startOffset, nil
+			fullName := string(nameBuf[:namePos])
+			labels := acquireLabelSlice()
+			for i := 0; i < labelCount; i++ {
+				labels = append(labels, fullName[labelStarts[i]:labelEnds[i]])
 			}
-			return &Name{Labels: labels, FQDN: true}, offset - startOffset, nil
+			name := acquireName()
+			name.Labels = labels
+			name.FQDN = true
+			name.stringCache = ""
+			if ptrOffset > 0 {
+				return name, ptrOffset - startOffset, nil
+			}
+			return name, offset - startOffset, nil
 		}
 
 		// Validate label length
@@ -402,9 +508,19 @@ func UnpackName(buf []byte, offset int) (*Name, int, error) {
 		if nameLen > MaxNameLength {
 			return nil, 0, ErrNameTooLong
 		}
+		if labelCount >= maxLabels {
+			return nil, 0, ErrNameTooLong
+		}
 
-		// Extract label - convert to string directly from buffer
-		labels = append(labels, string(buf[offset+1:offset+1+labelLen]))
+		if labelCount > 0 {
+			nameBuf[namePos] = '.'
+			namePos++
+		}
+		labelStarts[labelCount] = namePos
+		copy(nameBuf[namePos:], buf[offset+1:offset+1+labelLen])
+		namePos += labelLen
+		labelEnds[labelCount] = namePos
+		labelCount++
 
 		offset += 1 + labelLen
 	}
@@ -526,10 +642,10 @@ func WireNameLength(buf []byte, offset int) (int, error) {
 func CompareNames(a, b *Name) int {
 	var aLabels, bLabels []string
 	if a != nil {
-		aLabels = a.Labels
+		aLabels = a.LabelsSlice()
 	}
 	if b != nil {
-		bLabels = b.Labels
+		bLabels = b.LabelsSlice()
 	}
 
 	// Compare from the rightmost label (TLD) to the leftmost
@@ -562,5 +678,5 @@ func IsSubdomain(child, parent *Name) bool {
 	if parent == nil {
 		return true
 	}
-	return child.HasSuffix(parent.Labels)
+	return child.HasSuffixName(parent)
 }

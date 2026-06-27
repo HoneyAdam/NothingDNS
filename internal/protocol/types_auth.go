@@ -166,20 +166,20 @@ func (r *RDataSOA) Copy() RData {
 	}
 	var mname, rname *Name
 	if r.MName != nil {
-		mname = NewName(r.MName.Labels, r.MName.FQDN)
+		mname = r.MName.Copy()
 	}
 	if r.RName != nil {
-		rname = NewName(r.RName.Labels, r.RName.FQDN)
+		rname = r.RName.Copy()
 	}
-	return &RDataSOA{
-		MName:   mname,
-		RName:   rname,
-		Serial:  r.Serial,
-		Refresh: r.Refresh,
-		Retry:   r.Retry,
-		Expire:  r.Expire,
-		Minimum: r.Minimum,
-	}
+	copyR := rdataSOAPool.Get().(*RDataSOA)
+	copyR.MName = mname
+	copyR.RName = rname
+	copyR.Serial = r.Serial
+	copyR.Refresh = r.Refresh
+	copyR.Retry = r.Retry
+	copyR.Expire = r.Expire
+	copyR.Minimum = r.Minimum
+	return copyR
 }
 
 // ============================================================================
@@ -296,12 +296,12 @@ func (r *RDataSRV) Copy() RData {
 	}
 	var target *Name
 	if r.Target != nil {
-		target = NewName(r.Target.Labels, r.Target.FQDN)
+		target = r.Target.Copy()
 	}
-	return &RDataSRV{
-		Priority: r.Priority,
-		Weight:   r.Weight,
-		Port:     r.Port,
-		Target:   target,
-	}
+	copyR := rdataSRVPool.Get().(*RDataSRV)
+	copyR.Priority = r.Priority
+	copyR.Weight = r.Weight
+	copyR.Port = r.Port
+	copyR.Target = target
+	return copyR
 }

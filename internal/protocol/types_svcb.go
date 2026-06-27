@@ -375,7 +375,7 @@ func (r *RDataSVCB) Copy() RData {
 
 	var target *Name
 	if r.Target != nil {
-		target = NewName(r.Target.Labels, r.Target.FQDN)
+		target = r.Target.Copy()
 	}
 	params := make([]SvcParam, len(r.Params))
 	for i, p := range r.Params {
@@ -456,7 +456,7 @@ func (r *RDataHTTPS) Copy() RData {
 
 	var target *Name
 	if r.Target != nil {
-		target = NewName(r.Target.Labels, r.Target.FQDN)
+		target = r.Target.Copy()
 	}
 	params := make([]SvcParam, len(r.Params))
 	for i, p := range r.Params {
@@ -485,13 +485,16 @@ func packNameUncompressed(name *Name, buf []byte, offset int) (int, error) {
 		return 1, nil
 	}
 
-	for _, label := range name.Labels {
+	var packErr error
+	name.ForEachLabel(func(label string) bool {
 		labelLen := len(label)
 		if labelLen > MaxLabelLength {
-			return 0, ErrLabelTooLong
+			packErr = ErrLabelTooLong
+			return false
 		}
 		if offset+1+labelLen > len(buf) {
-			return 0, ErrBufferTooSmall
+			packErr = ErrBufferTooSmall
+			return false
 		}
 		buf[offset] = byte(labelLen)
 		offset++
@@ -499,6 +502,10 @@ func packNameUncompressed(name *Name, buf []byte, offset int) (int, error) {
 			buf[offset] = toLower(label[i])
 			offset++
 		}
+		return true
+	})
+	if packErr != nil {
+		return 0, packErr
 	}
 
 	// Terminating zero byte

@@ -30,7 +30,7 @@ func genName(r *rand.Rand) *Name {
 		}
 		labels[i] = string(buf)
 	}
-	return &Name{Labels: labels, FQDN: true}
+	return NewName(labels, true)
 }
 
 func TestProperty_NameRoundTrip(t *testing.T) {

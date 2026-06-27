@@ -16,14 +16,14 @@ func TestEncodeJSON_ARecord(t *testing.T) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:   mustName("example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
 		},
 		Answers: []*protocol.ResourceRecord{
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeA,
 				Class: protocol.ClassIN,
 				TTL:   300,
@@ -90,34 +90,34 @@ func TestEncodeJSON_MultipleAnswerTypes(t *testing.T) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:   mustName("example.com."),
 				QType:  protocol.TypeANY,
 				QClass: protocol.ClassIN,
 			},
 		},
 		Answers: []*protocol.ResourceRecord{
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeA,
 				Class: protocol.ClassIN,
 				TTL:   300,
 				Data:  &protocol.RDataA{Address: [4]byte{93, 184, 216, 34}},
 			},
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeAAAA,
 				Class: protocol.ClassIN,
 				TTL:   600,
 				Data:  makeAAAA("2606:2800:220:1:248:1893:25c8:1946"),
 			},
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeMX,
 				Class: protocol.ClassIN,
 				TTL:   3600,
 				Data: &protocol.RDataMX{
 					Preference: 10,
-					Exchange:   &protocol.Name{Labels: []string{"mail", "example", "com"}, FQDN: true},
+					Exchange:   mustName("mail.example.com."),
 				},
 			},
 		},
@@ -169,25 +169,25 @@ func TestEncodeJSON_AuthoritySection(t *testing.T) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:   mustName("example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
 		},
 		Authorities: []*protocol.ResourceRecord{
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeNS,
 				Class: protocol.ClassIN,
 				TTL:   86400,
-				Data:  &protocol.RDataNS{NSDName: &protocol.Name{Labels: []string{"ns1", "example", "com"}, FQDN: true}},
+				Data:  &protocol.RDataNS{NSDName: mustName("ns1.example.com.")},
 			},
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeNS,
 				Class: protocol.ClassIN,
 				TTL:   86400,
-				Data:  &protocol.RDataNS{NSDName: &protocol.Name{Labels: []string{"ns2", "example", "com"}, FQDN: true}},
+				Data:  &protocol.RDataNS{NSDName: mustName("ns2.example.com.")},
 			},
 		},
 	}
@@ -234,7 +234,7 @@ func TestEncodeJSON_SkipsMalformedRecords(t *testing.T) {
 			nil,
 			{QType: protocol.TypeA},
 			{
-				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:   mustName("example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
@@ -243,7 +243,7 @@ func TestEncodeJSON_SkipsMalformedRecords(t *testing.T) {
 			nil,
 			{Type: protocol.TypeA},
 			{
-				Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name: mustName("example.com."),
 				Type: protocol.TypeA,
 				TTL:  300,
 				Data: (*protocol.RDataA)(nil),
@@ -252,7 +252,7 @@ func TestEncodeJSON_SkipsMalformedRecords(t *testing.T) {
 		Authorities: []*protocol.ResourceRecord{
 			nil,
 			{
-				Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name: mustName("example.com."),
 				Type: protocol.TypeNS,
 				TTL:  60,
 				Data: (*protocol.RDataNS)(nil),
@@ -262,7 +262,7 @@ func TestEncodeJSON_SkipsMalformedRecords(t *testing.T) {
 			nil,
 			{Type: protocol.TypeOPT},
 			{
-				Name: &protocol.Name{Labels: []string{"extra", "example", "com"}, FQDN: true},
+				Name: mustName("extra.example.com."),
 				Type: protocol.TypeA,
 				TTL:  30,
 				Data: (*protocol.RDataA)(nil),
@@ -518,7 +518,7 @@ func TestEncodeJSON_EmptySections(t *testing.T) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"nonexistent", "example", "com"}, FQDN: true},
+				Name:   mustName("nonexistent.example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
@@ -553,14 +553,14 @@ func TestEncodeJSON_OPTFiltered(t *testing.T) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:   mustName("example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
 		},
 		Answers: []*protocol.ResourceRecord{
 			{
-				Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+				Name:  mustName("example.com."),
 				Type:  protocol.TypeA,
 				Class: protocol.ClassIN,
 				TTL:   300,

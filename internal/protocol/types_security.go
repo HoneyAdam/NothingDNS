@@ -301,7 +301,7 @@ func (r *RDataIPSECKEY) Copy() RData {
 	copy(gateway, r.Gateway)
 	var gatewayName *Name
 	if r.GatewayName != nil {
-		gatewayName = NewName(r.GatewayName.Labels, r.GatewayName.FQDN)
+		gatewayName = r.GatewayName.Copy()
 	}
 	publicKey := make([]byte, len(r.PublicKey))
 	copy(publicKey, r.PublicKey)
@@ -468,7 +468,7 @@ func (r *RDataHIP) Copy() RData {
 	servers := make([]*Name, len(r.RendezvousServers))
 	for i, server := range r.RendezvousServers {
 		if server != nil {
-			servers[i] = NewName(server.Labels, server.FQDN)
+			servers[i] = server.Copy()
 		}
 	}
 	return &RDataHIP{

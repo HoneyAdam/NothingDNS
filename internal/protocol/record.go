@@ -67,13 +67,13 @@ func NewResourceRecord(name string, rrtype, rrclass uint16, ttl uint32, data RDa
 		return nil, err
 	}
 
-	return &ResourceRecord{
-		Name:  n,
-		Type:  rrtype,
-		Class: rrclass,
-		TTL:   ttl,
-		Data:  data,
-	}, nil
+	rr := acquireResourceRecord()
+	rr.Name = n
+	rr.Type = rrtype
+	rr.Class = rrclass
+	rr.TTL = ttl
+	rr.Data = data
+	return rr, nil
 }
 
 // WireLength returns the length of the resource record in wire format.
@@ -154,6 +154,25 @@ func (rr *ResourceRecord) Pack(buf []byte, offset int, compression map[string]in
 	return offset - startOffset, nil
 }
 
+// Release returns the ResourceRecord and any pooled children to internal pools.
+func (rr *ResourceRecord) Release() {
+	if rr == nil {
+		return
+	}
+	if rr.Name != nil {
+		rr.Name.Release()
+		rr.Name = nil
+	}
+	if !isNilRData(rr.Data) {
+		releaseRData(rr.Data)
+		rr.Data = nil
+	}
+	rr.Type = 0
+	rr.Class = 0
+	rr.TTL = 0
+	resourceRecordPool.Put(rr)
+}
+
 // UnpackResourceRecord deserializes a resource record from wire format.
 // Returns the record and the number of bytes consumed.
 func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) {
@@ -168,6 +187,7 @@ func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) 
 
 	// Check bounds for fixed fields
 	if offset+10 > len(buf) {
+		name.Release()
 		return nil, 0, ErrBufferTooSmall
 	}
 
@@ -189,6 +209,7 @@ func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) 
 
 	// Check bounds for RDATA
 	if offset+int(rdlength) > len(buf) {
+		name.Release()
 		return nil, 0, ErrBufferTooSmall
 	}
 
@@ -199,9 +220,13 @@ func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) 
 	if data != nil {
 		n, err := data.Unpack(buf, offset, rdlength)
 		if err != nil {
+			name.Release()
+			releaseRData(data)
 			return nil, 0, fmt.Errorf("unpacking rdata: %w", err)
 		}
 		if n != int(rdlength) {
+			name.Release()
+			releaseRData(data)
 			return nil, 0, fmt.Errorf("rdata length mismatch: consumed %d bytes, rdlength %d", n, rdlength)
 		}
 		offset += n
@@ -216,13 +241,13 @@ func UnpackResourceRecord(buf []byte, offset int) (*ResourceRecord, int, error) 
 		offset += int(rdlength)
 	}
 
-	return &ResourceRecord{
-		Name:  name,
-		Type:  rrtype,
-		Class: rrclass,
-		TTL:   ttl,
-		Data:  data,
-	}, offset - startOffset, nil
+	rr := acquireResourceRecord()
+	rr.Name = name
+	rr.Type = rrtype
+	rr.Class = rrclass
+	rr.TTL = ttl
+	rr.Data = data
+	return rr, offset - startOffset, nil
 }
 
 // RDataRaw is a fallback for unknown record types.
@@ -299,6 +324,9 @@ func (r *RDataRaw) Copy() RData {
 // createRData creates an appropriate RData structure for the given type.
 // Returns nil for types not yet implemented.
 func createRData(rrtype uint16) RData {
+	if pooled := pooledRData(rrtype); pooled != nil {
+		return pooled
+	}
 	switch rrtype {
 	case TypeA:
 		return &RDataA{}
@@ -434,16 +462,16 @@ func (rr *ResourceRecord) Copy() *ResourceRecord {
 	}
 	var name *Name
 	if rr.Name != nil {
-		name = NewName(rr.Name.Labels, rr.Name.FQDN)
+		name = rr.Name.Copy()
 	}
 
-	return &ResourceRecord{
-		Name:  name,
-		Type:  rr.Type,
-		Class: rr.Class,
-		TTL:   rr.TTL,
-		Data:  data,
-	}
+	copyRR := acquireResourceRecord()
+	copyRR.Name = name
+	copyRR.Type = rr.Type
+	copyRR.Class = rr.Class
+	copyRR.TTL = rr.TTL
+	copyRR.Data = data
+	return copyRR
 }
 
 // IsExpired returns true if the record has expired based on the given timestamp.

@@ -68,7 +68,9 @@ func (r *RDataA) Copy() RData {
 	if r == nil {
 		return nil
 	}
-	return &RDataA{Address: r.Address}
+	copyR := rdataAPool.Get().(*RDataA)
+	copyR.Address = r.Address
+	return copyR
 }
 
 // IP returns the address as net.IP.
@@ -149,7 +151,9 @@ func (r *RDataAAAA) Copy() RData {
 	if r == nil {
 		return nil
 	}
-	return &RDataAAAA{Address: r.Address}
+	copyR := rdataAAAAPool.Get().(*RDataAAAA)
+	copyR.Address = r.Address
+	return copyR
 }
 
 // IP returns the address as net.IP.
@@ -541,9 +545,11 @@ func (r *RDataCNAME) Copy() RData {
 	}
 	var cname *Name
 	if r.CName != nil {
-		cname = NewName(r.CName.Labels, r.CName.FQDN)
+		cname = r.CName.Copy()
 	}
-	return &RDataCNAME{CName: cname}
+	copyR := rdataCNAMEPool.Get().(*RDataCNAME)
+	copyR.CName = cname
+	return copyR
 }
 
 // ============================================================================
@@ -612,9 +618,11 @@ func (r *RDataDNAME) Copy() RData {
 	}
 	var dname *Name
 	if r.DName != nil {
-		dname = NewName(r.DName.Labels, r.DName.FQDN)
+		dname = r.DName.Copy()
 	}
-	return &RDataDNAME{DName: dname}
+	copyR := rdataDNAMEPool.Get().(*RDataDNAME)
+	copyR.DName = dname
+	return copyR
 }
 
 // ============================================================================
@@ -683,9 +691,11 @@ func (r *RDataNS) Copy() RData {
 	}
 	var nsdname *Name
 	if r.NSDName != nil {
-		nsdname = NewName(r.NSDName.Labels, r.NSDName.FQDN)
+		nsdname = r.NSDName.Copy()
 	}
-	return &RDataNS{NSDName: nsdname}
+	copyR := rdataNSPool.Get().(*RDataNS)
+	copyR.NSDName = nsdname
+	return copyR
 }
 
 // ============================================================================
@@ -754,7 +764,9 @@ func (r *RDataPTR) Copy() RData {
 	}
 	var ptrdname *Name
 	if r.PtrDName != nil {
-		ptrdname = NewName(r.PtrDName.Labels, r.PtrDName.FQDN)
+		ptrdname = r.PtrDName.Copy()
 	}
-	return &RDataPTR{PtrDName: ptrdname}
+	copyR := rdataPTRPool.Get().(*RDataPTR)
+	copyR.PtrDName = ptrdname
+	return copyR
 }

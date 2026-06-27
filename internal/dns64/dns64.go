@@ -288,7 +288,7 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 
 	// Set the question section with AAAA type.
 	msg.Questions = append(msg.Questions, &protocol.Question{
-		Name:   protocol.NewName(originalQuestion.Name.Labels, originalQuestion.Name.FQDN),
+		Name:   originalQuestion.Name.Copy(),
 		QType:  protocol.TypeAAAA,
 		QClass: originalQuestion.QClass,
 	})
@@ -320,7 +320,7 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 		copy(addr[:], synthesized.To16())
 
 		synRR := &protocol.ResourceRecord{
-			Name:  protocol.NewName(rr.Name.Labels, rr.Name.FQDN),
+			Name:  rr.Name.Copy(),
 			Type:  protocol.TypeAAAA,
 			Class: protocol.ClassIN,
 			TTL:   rr.TTL,

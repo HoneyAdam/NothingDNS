@@ -881,7 +881,7 @@ func newTestQuery3(id uint16) *protocol.Message {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"test", "com"}, FQDN: true},
+				Name:   mustNameP("test.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},

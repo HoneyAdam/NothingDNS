@@ -211,11 +211,11 @@ func (r *RDataRP) Copy() RData {
 	}
 	var mbox *Name
 	if r.MBox != nil {
-		mbox = NewName(r.MBox.Labels, r.MBox.FQDN)
+		mbox = r.MBox.Copy()
 	}
 	var txt *Name
 	if r.Txt != nil {
-		txt = NewName(r.Txt.Labels, r.Txt.FQDN)
+		txt = r.Txt.Copy()
 	}
 	return &RDataRP{MBox: mbox, Txt: txt}
 }
@@ -311,7 +311,7 @@ func (r *RDataAFSDB) Copy() RData {
 	}
 	var hostname *Name
 	if r.Hostname != nil {
-		hostname = NewName(r.Hostname.Labels, r.Hostname.FQDN)
+		hostname = r.Hostname.Copy()
 	}
 	return &RDataAFSDB{Subtype: r.Subtype, Hostname: hostname}
 }
@@ -407,7 +407,7 @@ func (r *RDataKX) Copy() RData {
 	}
 	var exchanger *Name
 	if r.Exchanger != nil {
-		exchanger = NewName(r.Exchanger.Labels, r.Exchanger.FQDN)
+		exchanger = r.Exchanger.Copy()
 	}
 	return &RDataKX{Preference: r.Preference, Exchanger: exchanger}
 }
@@ -713,7 +713,7 @@ func (r *RDataNAPTR) Copy() RData {
 
 	var replacement *Name
 	if r.Replacement != nil {
-		replacement = NewName(r.Replacement.Labels, r.Replacement.FQDN)
+		replacement = r.Replacement.Copy()
 	}
 	return &RDataNAPTR{
 		Order:       r.Order,

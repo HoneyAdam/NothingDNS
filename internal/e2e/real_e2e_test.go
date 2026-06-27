@@ -15,6 +15,15 @@ import (
 	"github.com/nothingdns/nothingdns/internal/server"
 )
 
+func mustName(t *testing.T, s string) *protocol.Name {
+	t.Helper()
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		t.Fatalf("ParseName(%q): %v", s, err)
+	}
+	return n
+}
+
 // TestRealUDPServer tests a real UDP DNS server from query to response.
 func TestRealUDPServer(t *testing.T) {
 	handler := server.HandlerFunc(func(w server.ResponseWriter, req *protocol.Message) {
@@ -49,7 +58,7 @@ func TestRealUDPServer(t *testing.T) {
 					TTL:   300,
 					Data: &protocol.RDataMX{
 						Preference: 10,
-						Exchange:   &protocol.Name{Labels: []string{"mail", "example", "com"}, FQDN: true},
+						Exchange:   mustName(t, "mail.example.com."),
 					},
 				})
 			} else if q.QType == protocol.TypeTXT {
@@ -66,7 +75,7 @@ func TestRealUDPServer(t *testing.T) {
 					Type:  protocol.TypeNS,
 					Class: protocol.ClassIN,
 					TTL:   300,
-					Data:  &protocol.RDataNS{NSDName: &protocol.Name{Labels: []string{"ns1", "example", "com"}, FQDN: true}},
+					Data:  &protocol.RDataNS{NSDName: mustName(t, "ns1.example.com.")},
 				})
 			} else if q.QType == protocol.TypeCNAME {
 				resp.AddAnswer(&protocol.ResourceRecord{
@@ -74,7 +83,7 @@ func TestRealUDPServer(t *testing.T) {
 					Type:  protocol.TypeCNAME,
 					Class: protocol.ClassIN,
 					TTL:   300,
-					Data:  &protocol.RDataCNAME{CName: &protocol.Name{Labels: []string{"www", "example", "com"}, FQDN: true}},
+					Data:  &protocol.RDataCNAME{CName: mustName(t, "www.example.com.")},
 				})
 			}
 		}

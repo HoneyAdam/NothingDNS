@@ -799,3 +799,18 @@ func must[T any](v T, err error) T {
 	}
 	return v
 }
+
+func mustName(t *testing.T, s string) *Name {
+	t.Helper()
+	n, err := ParseName(s)
+	if err != nil {
+		t.Fatalf("ParseName(%q): %v", s, err)
+	}
+	return n
+}
+
+// unsafeName constructs a Name without validation. Use only in tests that
+// intentionally exercise pack-time validation/error paths.
+func unsafeName(labels []string, fqdn bool) *Name {
+	return &Name{Labels: labels, FQDN: fqdn}
+}

@@ -211,7 +211,7 @@ func (r *RDataRRSIG) Copy() RData {
 
 	var signerName *Name
 	if r.SignerName != nil {
-		signerName = NewName(r.SignerName.Labels, r.SignerName.FQDN)
+		signerName = r.SignerName.Copy()
 	}
 
 	sigCopy := make([]byte, len(r.Signature))
@@ -330,7 +330,7 @@ func RRSIGForRRSet(rrsig *RDataRRSIG, rrset []*ResourceRecord) ([]byte, error) {
 	data = append(data, byte(rrsig.Inception>>24), byte(rrsig.Inception>>16),
 		byte(rrsig.Inception>>8), byte(rrsig.Inception))
 	data = append(data, byte(rrsig.KeyTag>>8), byte(rrsig.KeyTag))
-	data = append(data, CanonicalWireName(rrsig.SignerName.String())...)
+	data = append(data, rrsig.SignerName.CanonicalWire()...)
 
 	// RRSet in canonical form (sorted, one RR at a time):
 	// Owner Name | Type | Class | TTL | RDLENGTH | RDATA
@@ -344,7 +344,7 @@ func RRSIGForRRSet(rrsig *RDataRRSIG, rrset []*ResourceRecord) ([]byte, error) {
 		}
 
 		var rrWire []byte
-		rrWire = append(rrWire, CanonicalWireName(rr.Name.String())...)
+		rrWire = append(rrWire, rr.Name.CanonicalWire()...)
 		rrWire = append(rrWire, byte(rr.Type>>8), byte(rr.Type))
 		rrWire = append(rrWire, byte(rr.Class>>8), byte(rr.Class))
 		rrWire = append(rrWire, byte(rrsig.OriginalTTL>>24), byte(rrsig.OriginalTTL>>16),
