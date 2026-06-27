@@ -178,11 +178,12 @@ func (s *servers) startXoT(cfg *config.Config, zones map[string]*zone.Zone, tran
 	}
 
 	xotConfig := &transfer.XoTConfig{
-		CertFile:      cfg.Server.XoT.CertFile,
-		KeyFile:       cfg.Server.XoT.KeyFile,
-		CAFile:        cfg.Server.XoT.CAFile,
-		ListenPort:    853,
-		MinTLSVersion: cfg.Server.XoT.MinTLSVersion,
+		CertFile:        cfg.Server.XoT.CertFile,
+		KeyFile:         cfg.Server.XoT.KeyFile,
+		CAFile:          cfg.Server.XoT.CAFile,
+		ListenPort:      853,
+		MinTLSVersion:   cfg.Server.XoT.MinTLSVersion,
+		AllowedNetworks: cfg.Server.XoT.AllowedNetworks,
 	}
 
 	// Reuse TLS cert if XoT cert not specifically configured

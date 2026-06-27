@@ -21,17 +21,21 @@ import (
 // XoTServer handles DNS Zone Transfer over TLS (XoT) as specified in RFC 9103.
 // XoT uses TLS 1.3 (preferred) or TLS 1.2 to encrypt zone transfer communications.
 type XoTServer struct {
-	tlsConfig    *tls.Config
-	listener     net.Listener
-	zones        map[string]*zone.Zone
-	zonesMu      *sync.RWMutex
-	address      string
-	port         int
-	closed       bool
-	mu           sync.Mutex
-	allowList    []net.IPNet
-	logger       *util.Logger
-	journalStore JournalStore // For IXFR incremental transfers
+	tlsConfig *tls.Config
+	listener  net.Listener
+	zones     map[string]*zone.Zone
+	zonesMu   *sync.RWMutex
+	address   string
+	port      int
+	closed    bool
+	mu        sync.Mutex
+	allowList []net.IPNet
+	// requireClientCert is true when mTLS is enforced (CAFile configured). In
+	// that case the TLS handshake has already verified the client certificate,
+	// so transfers are authenticated independently of allowList.
+	requireClientCert bool
+	logger            *util.Logger
+	journalStore      JournalStore // For IXFR incremental transfers
 
 	stopCh chan struct{}  // closed to signal AcceptLoop stop
 	wg     sync.WaitGroup // waits for AcceptLoop and active connections
@@ -45,6 +49,8 @@ const (
 	TLSASuggested
 	TLSAIgnored
 )
+
+const maxXoTCAFileSize = 1 << 20
 
 // XoTConfig contains XoT-specific configuration.
 type XoTConfig struct {
@@ -132,6 +138,18 @@ func NewXoTServer(zones map[string]*zone.Zone, config *XoTConfig, logger *util.L
 		server.allowList = append(server.allowList, *network)
 	}
 
+	// mTLS (CAFile) is the strongest gate: buildXoTTLSConfig sets
+	// RequireAndVerifyClientCert when CAFile is configured.
+	server.requireClientCert = tlsConfig.ClientAuth == tls.RequireAndVerifyClientCert
+
+	// Deny-by-default: without mTLS and without an IP allowlist, every zone is
+	// exposed to any client that completes a server-auth-only TLS handshake.
+	// Refuse to start in that configuration so a full zone disclosure cannot be
+	// introduced by an empty/forgotten allowlist (matches AXFRServer's posture).
+	if !server.requireClientCert && len(server.allowList) == 0 {
+		return nil, fmt.Errorf("XoT requires access control: configure server.xot.ca_file (mTLS) or server.xot.allowed_networks")
+	}
+
 	return server, nil
 }
 
@@ -184,7 +202,7 @@ func buildXoTTLSConfig(config *XoTConfig) (*tls.Config, error) {
 // certs were validated against public roots and the private-CA allowlist was
 // silently bypassed. Fails closed if the file is unreadable or has no certs.
 func readCAFile(filename string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(filename)
+	pem, err := readXoTCAFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("xot: read CA file %q: %w", filename, err)
 	}
@@ -193,6 +211,23 @@ func readCAFile(filename string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("xot: CA file %q contains no valid PEM certificates", filename)
 	}
 	return pool, nil
+}
+
+func readXoTCAFile(filename string) ([]byte, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxXoTCAFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxXoTCAFileSize {
+		return nil, fmt.Errorf("XoT CA file exceeds %d bytes", maxXoTCAFileSize)
+	}
+	return data, nil
 }
 
 // Serve starts the XoT server listening for incoming connections.
@@ -489,11 +524,13 @@ func xotClientIP(conn net.Conn) net.IP {
 	return net.ParseIP(host)
 }
 
-// isAllowed checks if a client IP is allowed for XoT.
-// Returns true if no allowlist is configured (allow all) or if client IP matches an allowed network.
+// isAllowed checks if a client IP is allowed for XoT. Deny-by-default: access is
+// granted only when mTLS authenticated the client (requireClientCert) or the
+// client IP matches a configured allowed network. NewXoTServer guarantees at
+// least one of those controls is present, so an empty allowList denies all.
 func (s *XoTServer) isAllowed(clientIP net.IP) bool {
-	if len(s.allowList) == 0 {
-		return true // Allow all if no list configured
+	if s.requireClientCert {
+		return true // client certificate already verified during TLS handshake
 	}
 	for _, network := range s.allowList {
 		if network.Contains(clientIP) {

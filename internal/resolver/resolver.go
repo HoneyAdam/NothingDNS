@@ -179,7 +179,17 @@ func (r *Resolver) Resolve(ctx context.Context, name string, qtype uint16) (*pro
 	msg, err, _ := r.sfGroup.Do(key, func() (*protocol.Message, error) {
 		return r.resolve(ctx, name, qtype, 0)
 	})
-	return msg, err
+	if err != nil || msg == nil {
+		return msg, err
+	}
+	// Return a per-caller COPY. singleflight hands the SAME *protocol.Message to
+	// every coalesced caller (including the first), but the pipeline mutates the
+	// result in place (Header.ID, flags, section minimization in reply()). Without
+	// this copy, concurrent identical queries from different clients race on one
+	// shared message and corrupt each other's transaction IDs. Copy for ALL callers
+	// — copying only waiters would still race the first caller's in-place mutation
+	// against the waiters' reads.
+	return msg.Copy(), err
 }
 
 func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cnameDepth int) (*protocol.Message, error) {

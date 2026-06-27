@@ -9,12 +9,15 @@ import (
 	"encoding/xml"
 	"fmt"
 	"hash"
+	"io"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
+
+const maxTrustAnchorXMLSize = 1 << 20 // 1 MiB is ample for RFC 7958 root trust anchors.
 
 // TrustAnchor represents a DNSSEC trust anchor.
 // Trust anchors are the starting points for DNSSEC validation chains.
@@ -191,7 +194,7 @@ func (s *TrustAnchorStore) FindClosestAnchor(name string) (*TrustAnchor, []strin
 
 // LoadFromFile loads trust anchors from an RFC 7958 format XML file.
 func (s *TrustAnchorStore) LoadFromFile(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := readTrustAnchorFile(path)
 	if err != nil {
 		return fmt.Errorf("reading trust anchor file: %w", err)
 	}
@@ -206,6 +209,23 @@ func (s *TrustAnchorStore) LoadFromFile(path string) error {
 	}
 
 	return nil
+}
+
+func readTrustAnchorFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxTrustAnchorXMLSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxTrustAnchorXMLSize {
+		return nil, fmt.Errorf("trust anchor file exceeds %d bytes", maxTrustAnchorXMLSize)
+	}
+	return data, nil
 }
 
 // GetAllZones returns all zones that have trust anchors.

@@ -22,7 +22,7 @@ func TestSnapshot_BootFromSnapshotAfterRestart(t *testing.T) {
 
 	// --- First incarnation: apply a record, snapshot, compact, stop. ---
 	store1 := newTestZoneStore()
-	ci1, err := NewClusterIntegration("n1", nil, nil, freeTCPAddr(t), dir, "", "", util.DefaultLogger())
+	ci1, err := NewClusterIntegration("n1", nil, nil, freeTCPAddr(t), dir, "", "", nil, util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("ci1: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestSnapshot_BootFromSnapshotAfterRestart(t *testing.T) {
 
 	// --- Second incarnation over the same data dir, fresh store. ---
 	store2 := newTestZoneStore()
-	ci2, err := NewClusterIntegration("n1", nil, nil, freeTCPAddr(t), dir, "", "", util.DefaultLogger())
+	ci2, err := NewClusterIntegration("n1", nil, nil, freeTCPAddr(t), dir, "", "", nil, util.DefaultLogger())
 	if err != nil {
 		t.Fatalf("ci2: %v", err)
 	}

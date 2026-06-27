@@ -36,8 +36,14 @@ func (n *Node) ProposeEntry(command []byte, entryType EntryType) (Index, error) 
 	}
 
 	n.log = append(n.log, e)
-	// Durably record the entry before it can be replicated/committed.
-	n.persistEntriesLocked(n.log[len(n.log)-1:])
+	// Durably record the entry before it can be replicated/committed. If the
+	// WAL write/fsync fails, roll back the in-memory append so the log matches
+	// durable state and refuse the proposal — never replicate or commit an
+	// entry the leader itself could not persist.
+	if err := n.persistEntriesLocked(n.log[len(n.log)-1:]); err != nil {
+		n.log = n.log[:len(n.log)-1]
+		return 0, fmt.Errorf("persist proposed entry: %w", err)
+	}
 
 	// Try to advance commit immediately: when the leader's own copy is
 	// already a quorum (single-node cluster), the entry commits here with no

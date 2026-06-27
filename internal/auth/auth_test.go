@@ -662,6 +662,26 @@ func TestSaveLoadMissingFile(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsOversizedUsersFile(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		TokenExpiry: Duration{Duration: 24 * time.Hour},
+	})
+
+	path := filepath.Join(t.TempDir(), "users.json")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxAuthPersistFileSize+1), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := store.Load(path)
+	if err == nil {
+		t.Fatal("Load() should reject oversized users file")
+	}
+	if !strings.Contains(err.Error(), "auth persistence file exceeds") {
+		t.Fatalf("Load() error = %v, want oversized file error", err)
+	}
+}
+
 // TestSave_AtomicReplaceLeavesNoPartialFile asserts that Save uses
 // the temp + rename pattern: an existing valid users.json should not
 // be replaced by a partial write. Hard to crash mid-write in a unit
@@ -2084,6 +2104,26 @@ func TestLoadTokensSigned_TruncatedFile(t *testing.T) {
 	err := store.LoadTokensSigned(path)
 	if err == nil {
 		t.Error("Expected error loading truncated file")
+	}
+}
+
+func TestLoadTokensSignedRejectsOversizedFile(t *testing.T) {
+	store, _ := NewStore(&Config{
+		Secret:      "test-secret",
+		TokenExpiry: Duration{Duration: 1 * time.Hour},
+	})
+
+	path := filepath.Join(t.TempDir(), "tokens.enc")
+	if err := os.WriteFile(path, bytes.Repeat([]byte{'x'}, maxAuthPersistFileSize+1), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	err := store.LoadTokensSigned(path)
+	if err == nil {
+		t.Fatal("LoadTokensSigned() should reject oversized token file")
+	}
+	if !strings.Contains(err.Error(), "auth persistence file exceeds") {
+		t.Fatalf("LoadTokensSigned() error = %v, want oversized file error", err)
 	}
 }
 

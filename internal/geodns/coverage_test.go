@@ -175,6 +175,22 @@ func TestLoadMMDBEmptyFile(t *testing.T) {
 	}
 }
 
+func TestReadMMDBFileRejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "oversized.mmdb")
+	if err := os.WriteFile(path, []byte("oversized"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readMMDBFile(path, 4)
+	if err == nil {
+		t.Fatal("expected oversized MMDB file error")
+	}
+	if got := err.Error(); got != "mmdb file exceeds 4 bytes" {
+		t.Fatalf("error = %q, want size limit context", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // mmdbLookup – direct testing via internal state
 // ---------------------------------------------------------------------------

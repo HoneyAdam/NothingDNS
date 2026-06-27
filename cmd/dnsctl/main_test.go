@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -1195,6 +1196,43 @@ func TestCmdDNSSECDSFromDNSKEY_FlagValidation(t *testing.T) {
 // readDNSKEYFromFile tests
 // ============================================================================
 
+func TestWriteDNSCTLFileDoesNotFollowSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputFile := filepath.Join(tmpDir, "signed.zone")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	const outsideData = "keep me"
+	if err := os.WriteFile(outside, []byte(outsideData), 0600); err != nil {
+		t.Fatalf("failed to write outside file: %v", err)
+	}
+	if err := os.Symlink(outside, outputFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := writeDNSCTLFile(outputFile, []byte("signed zone\n"), 0644); err != nil {
+		t.Fatalf("writeDNSCTLFile: %v", err)
+	}
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("failed to read outside file: %v", err)
+	}
+	if string(got) != outsideData {
+		t.Fatalf("output symlink target was modified: got %q", string(got))
+	}
+	if info, err := os.Lstat(outputFile); err != nil {
+		t.Fatalf("expected output file: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("output file must not remain a symlink")
+	}
+	outputData, err := os.ReadFile(outputFile)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if string(outputData) != "signed zone\n" {
+		t.Fatalf("output file = %q, want %q", string(outputData), "signed zone\n")
+	}
+}
+
 func TestReadDNSKEYFromFile(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1242,6 +1280,37 @@ func TestReadDNSKEYFromFile(t *testing.T) {
 			t.Errorf("error = %q, want substring 'no valid DNSKEY'", err.Error())
 		}
 	})
+
+	t.Run("oversized DNSKEY file", func(t *testing.T) {
+		keyPath := filepath.Join(tmpDir, "oversized.key")
+		if err := os.WriteFile(keyPath, bytes.Repeat([]byte{'x'}, maxDNSCTLKeyFileSize+1), 0644); err != nil {
+			t.Fatalf("failed to write oversized key file: %v", err)
+		}
+
+		_, err := readDNSKEYFromFile(keyPath)
+		if err == nil {
+			t.Fatal("expected error for oversized DNSKEY file")
+		}
+		if !strings.Contains(err.Error(), "file exceeds") {
+			t.Errorf("error = %q, want size limit context", err.Error())
+		}
+	})
+}
+
+func TestLoadPrivateKey_Oversized(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "oversized.private")
+	if err := os.WriteFile(keyPath, bytes.Repeat([]byte{'x'}, maxDNSCTLKeyFileSize+1), 0600); err != nil {
+		t.Fatalf("failed to write oversized private key file: %v", err)
+	}
+
+	_, err := loadPrivateKey(keyPath, protocol.AlgorithmECDSAP256SHA256)
+	if err == nil {
+		t.Fatal("expected error for oversized private key file")
+	}
+	if !strings.Contains(err.Error(), "file exceeds") {
+		t.Errorf("error = %q, want size limit context", err.Error())
+	}
 }
 
 // ============================================================================
@@ -1718,6 +1787,12 @@ func TestCmdDNSSECValidateZone_FlagValidation(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "no valid records",
 		},
+		{
+			name:      "oversized zone file",
+			args:      nil, // will be set with temp file
+			wantErr:   true,
+			errSubstr: "file exceeds",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1730,6 +1805,14 @@ func TestCmdDNSSECValidateZone_FlagValidation(t *testing.T) {
 					t.Fatalf("failed to create empty file: %v", err)
 				}
 				args = []string{"--zone", emptyFile}
+			}
+			if tt.name == "oversized zone file" {
+				tmpDir := t.TempDir()
+				oversizedFile := filepath.Join(tmpDir, "oversized.zone")
+				if err := os.WriteFile(oversizedFile, bytes.Repeat([]byte{'x'}, maxDNSCTLZoneFileSize+1), 0644); err != nil {
+					t.Fatalf("failed to create oversized file: %v", err)
+				}
+				args = []string{"--zone", oversizedFile}
 			}
 
 			err := cmdDNSSECValidateZone(args)

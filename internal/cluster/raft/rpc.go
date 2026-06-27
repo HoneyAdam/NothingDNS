@@ -115,6 +115,14 @@ func (s *RPCServer) Stop() {
 // acceptLoop accepts incoming connections.
 func (s *RPCServer) acceptLoop() {
 	defer s.wg.Done()
+	// Defense-in-depth (V14): a panic in the accept path must not crash the
+	// whole process. The DNS data path already recovers; cluster goroutines did
+	// not.
+	defer func() {
+		if r := recover(); r != nil {
+			util.Errorf("raft rpc: panic in acceptLoop: %v", r)
+		}
+	}()
 
 	for {
 		select {
@@ -165,6 +173,14 @@ func setListenerDeadline(listener net.Listener, deadline time.Time) error {
 
 // handleConn handles a single connection.
 func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
+	// Recover from any panic decoding attacker-controlled bytes so a single
+	// malformed/malicious connection tears down only itself, not the process
+	// (V14). Registered first so it runs after the cleanup defers below.
+	defer func() {
+		if r := recover(); r != nil {
+			util.Errorf("raft rpc: panic handling connection from %s: %v", nodeID, r)
+		}
+	}()
 	defer s.wg.Done()
 	defer func() {
 		if err := closeRaftConn(conn); err != nil {
@@ -401,13 +417,7 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 	}
 
 	// Dial new connection
-	var dialConn net.Conn
-	var err error
-	if t.tlsConfig != nil {
-		dialConn, err = tls.Dial("tcp", addr, t.tlsConfig)
-	} else {
-		dialConn, err = net.DialTimeout("tcp", addr, t.dialTimeout)
-	}
+	dialConn, err := t.dial(addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial %s: %w", addr, err)
 	}
@@ -428,6 +438,14 @@ func (t *TCPTransport) getConn(peerID NodeID) (net.Conn, error) {
 	t.mu.Unlock()
 
 	return dialConn, nil
+}
+
+func (t *TCPTransport) dial(addr string) (net.Conn, error) {
+	if t.tlsConfig != nil {
+		dialer := &net.Dialer{Timeout: t.dialTimeout}
+		return tls.DialWithDialer(dialer, "tcp", addr, t.tlsConfig)
+	}
+	return net.DialTimeout("tcp", addr, t.dialTimeout)
 }
 
 func closeRaftConn(conn net.Conn) error {

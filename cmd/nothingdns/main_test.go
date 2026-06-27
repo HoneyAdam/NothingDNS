@@ -3,6 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -1819,6 +1824,43 @@ func TestGracefulShutdown(t *testing.T) {
 	// Verify PID file is removed
 	if _, err := os.Stat(pidFile); !os.IsNotExist(err) {
 		t.Error("pid file should be removed")
+	}
+}
+
+func TestWritePIDFileDoesNotFollowSymlink(t *testing.T) {
+	tmpDir := t.TempDir()
+	pidFile := filepath.Join(tmpDir, "nothingdns.pid")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	const outsideData = "keep me"
+	if err := os.WriteFile(outside, []byte(outsideData), 0600); err != nil {
+		t.Fatalf("failed to write outside file: %v", err)
+	}
+	if err := os.Symlink(outside, pidFile); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := writePIDFile(pidFile, []byte("12345\n")); err != nil {
+		t.Fatalf("writePIDFile: %v", err)
+	}
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("failed to read outside file: %v", err)
+	}
+	if string(got) != outsideData {
+		t.Fatalf("pid symlink target was modified: got %q", string(got))
+	}
+	if info, err := os.Lstat(pidFile); err != nil {
+		t.Fatalf("expected pid file: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("pid file must not remain a symlink")
+	}
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("failed to read pid file: %v", err)
+	}
+	if string(pidData) != "12345\n" {
+		t.Fatalf("pid file = %q, want %q", string(pidData), "12345\n")
 	}
 }
 
@@ -4903,7 +4945,7 @@ func TestTryDNS64Synthesis_NoUpstream(t *testing.T) {
 	}
 
 	w := newCaptureWriter("10.0.0.1", "udp")
-	result := h.tryDNS64Synthesis(w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp)
+	result := h.tryDNS64Synthesis(context.Background(), w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp)
 	if result {
 		t.Error("expected false when no upstream configured")
 	}
@@ -4927,7 +4969,7 @@ func TestTryDNS64Synthesis_Success(t *testing.T) {
 		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 	}
 
-	if !h.tryDNS64Synthesis(w, newTestQuery(t, "test.example.", protocol.TypeAAAA), q, resp) {
+	if !h.tryDNS64Synthesis(context.Background(), w, newTestQuery(t, "test.example.", protocol.TypeAAAA), q, resp) {
 		t.Fatal("expected DNS64 synthesis to succeed")
 	}
 	if w.msg == nil {
@@ -5436,6 +5478,22 @@ func TestLoadConfig_NonExistent(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_OversizedFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "oversized.yaml")
+	if err := os.WriteFile(configFile, bytes.Repeat([]byte{'x'}, maxConfigFileSize+1), 0644); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	_, err := loadConfig(configFile)
+	if err == nil {
+		t.Fatal("expected oversized config file error")
+	}
+	if !strings.Contains(err.Error(), "file exceeds") {
+		t.Fatalf("error = %q, want size limit context", err)
+	}
+}
+
 func TestValidateConfigOnly(t *testing.T) {
 	// validateConfigOnly must NOT silently accept a missing file —
 	// the operator is explicitly trying to validate this path; if it
@@ -5594,6 +5652,7 @@ func TestNewClusterManager_Enabled(t *testing.T) {
 func TestNewDNSSECManager_Enabled(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DNSSEC.Enabled = true
+	cfg.DNSSEC.RequireDNSSEC = true
 	adapter := &dnssecResolverAdapter{upstream: nil}
 	mgr, err := NewDNSSECManager(cfg, adapter, util.NewLogger(util.ERROR, util.TextFormat, nil))
 	if err != nil {
@@ -5601,6 +5660,12 @@ func TestNewDNSSECManager_Enabled(t *testing.T) {
 	}
 	if mgr == nil {
 		t.Fatal("expected non-nil manager")
+	}
+	if mgr.Validator == nil {
+		t.Fatal("expected DNSSEC validator")
+	}
+	if status := mgr.Validator.DNSSECStatus(); !status.RequireDNSSEC {
+		t.Fatal("expected require_dnssec to be passed into validator")
 	}
 }
 
@@ -6837,7 +6902,7 @@ func TestLoadZoneSigner_SignatureValidity(t *testing.T) {
 	}
 }
 
-func TestLoadZoneSigner_GenerateKeyError(t *testing.T) {
+func TestLoadZoneSigner_PrivateKeyLoadError(t *testing.T) {
 	z := zone.NewZone("example.com.")
 	_, err := loadZoneSigner(z, config.SigningConfig{
 		Enabled: true,
@@ -6847,6 +6912,55 @@ func TestLoadZoneSigner_GenerateKeyError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for unsupported algorithm")
+	}
+}
+
+func TestLoadZoneSigner_LoadsConfiguredPrivateKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	keyPath := filepath.Join(tmpDir, "zsk.pem")
+	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	der, err := x509.MarshalECPrivateKey(ecdsaKey)
+	if err != nil {
+		t.Fatalf("MarshalECPrivateKey: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(keyPath, pemBytes, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	z := zone.NewZone("example.com.")
+	signer, err := loadZoneSigner(z, config.SigningConfig{
+		Enabled: true,
+		Keys: []config.KeyConfig{
+			{PrivateKey: keyPath, Algorithm: protocol.AlgorithmECDSAP256SHA256, Type: "zsk"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("loadZoneSigner: %v", err)
+	}
+	keys := signer.GetKeys()
+	if len(keys) != 1 {
+		t.Fatalf("len(keys) = %d, want 1", len(keys))
+	}
+	key := keys[0]
+	if key.IsKSK || !key.IsZSK {
+		t.Fatalf("key role mismatch: IsKSK=%v IsZSK=%v", key.IsKSK, key.IsZSK)
+	}
+	if key.DNSKEY.Algorithm != protocol.AlgorithmECDSAP256SHA256 {
+		t.Fatalf("algorithm = %d, want %d", key.DNSKEY.Algorithm, protocol.AlgorithmECDSAP256SHA256)
+	}
+	expectedPublicKey, err := dnssec.GeneratePublicKeyData(protocol.AlgorithmECDSAP256SHA256, &dnssec.PrivateKey{
+		Algorithm: protocol.AlgorithmECDSAP256SHA256,
+		Key:       ecdsaKey,
+	})
+	if err != nil {
+		t.Fatalf("GeneratePublicKeyData: %v", err)
+	}
+	if !bytes.Equal(key.DNSKEY.PublicKey, expectedPublicKey) {
+		t.Fatal("loaded signer DNSKEY public key does not match configured private key")
 	}
 }
 
@@ -6959,7 +7073,7 @@ func TestTryDNS64Synthesis_AlreadyHasAAAA(t *testing.T) {
 		}},
 	}
 	w := newCaptureWriter("10.0.0.1", "udp")
-	if h.tryDNS64Synthesis(w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
+	if h.tryDNS64Synthesis(context.Background(), w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
 		t.Error("expected false when response already has AAAA")
 	}
 }
@@ -7001,7 +7115,7 @@ func TestTryDNS64Synthesis_UpstreamFail(t *testing.T) {
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAAAA, QClass: protocol.ClassIN}
 	resp := &protocol.Message{Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)}}
 	w := newCaptureWriter("10.0.0.1", "udp")
-	if h.tryDNS64Synthesis(w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
+	if h.tryDNS64Synthesis(context.Background(), w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
 		t.Error("expected false when upstream returns SERVFAIL")
 	}
 }
@@ -7044,7 +7158,7 @@ func TestTryDNS64Synthesis_UpstreamNoData(t *testing.T) {
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAAAA, QClass: protocol.ClassIN}
 	resp := &protocol.Message{Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)}}
 	w := newCaptureWriter("10.0.0.1", "udp")
-	if h.tryDNS64Synthesis(w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
+	if h.tryDNS64Synthesis(context.Background(), w, newTestQuery(t, "example.com.", protocol.TypeAAAA), q, resp) {
 		t.Error("expected false when upstream returns NOERROR with no answers")
 	}
 }
@@ -7143,6 +7257,22 @@ func TestLoadCache_InvalidJSON(t *testing.T) {
 	os.WriteFile(filepath.Join(tmpDir, "cache.json"), []byte("not json"), 0644)
 	mgr.LoadCache()
 	mgr.Stop()
+}
+
+func TestReadCachePersistFile_Oversized(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheFile := filepath.Join(tmpDir, cachePersistFile)
+	if err := os.WriteFile(cacheFile, bytes.Repeat([]byte{'x'}, maxCachePersistFileSize+1), 0644); err != nil {
+		t.Fatalf("WriteFile cache: %v", err)
+	}
+
+	_, err := readCachePersistFile(cacheFile)
+	if err == nil {
+		t.Fatal("expected oversized cache persistence file error")
+	}
+	if !strings.Contains(err.Error(), "cache persistence file exceeds") {
+		t.Fatalf("error = %q, want cache size limit context", err)
+	}
 }
 
 func TestLoadCache_OversizedWire(t *testing.T) {
@@ -7483,6 +7613,41 @@ func TestSaveToFile_RenameError(t *testing.T) {
 	cm.saveToFile() // should not panic; rename fails silently
 }
 
+func TestSaveToFile_DoesNotFollowFixedTmpSymlink(t *testing.T) {
+	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
+	dir := t.TempDir()
+	target := filepath.Join(dir, "cache.json")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	const outsideData = "keep me"
+	if err := os.WriteFile(outside, []byte(outsideData), 0600); err != nil {
+		t.Fatalf("failed to write outside file: %v", err)
+	}
+	if err := os.Symlink(outside, target+".tmp"); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	cm := &CacheManager{
+		Cache:       cache.New(cache.Config{Capacity: 10}),
+		logger:      logger,
+		persistPath: target,
+	}
+	cm.Cache.Set("key", &protocol.Message{Header: protocol.Header{ID: 1}}, 1)
+	cm.saveToFile()
+
+	got, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatalf("failed to read outside file: %v", err)
+	}
+	if string(got) != outsideData {
+		t.Fatalf("fixed tmp symlink target was modified: got %q", string(got))
+	}
+	if info, err := os.Lstat(target); err != nil {
+		t.Fatalf("expected cache file: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("cache file must not be the fixed tmp symlink")
+	}
+}
+
 func TestServeDNS_RPZClientIP(t *testing.T) {
 	h := newTestHandler()
 	tmpDir := t.TempDir()
@@ -7591,6 +7756,63 @@ func TestServeDNS_DNSSEC_Bogus(t *testing.T) {
 	}
 	if w.msg.Header.Flags.RCODE != protocol.RcodeServerFailure {
 		t.Errorf("expected SERVFAIL for bogus DNSSEC, got %d", w.msg.Header.Flags.RCODE)
+	}
+}
+
+func TestServeDNS_DNSSEC_UnsignedResponseStillValidated(t *testing.T) {
+	h := newTestHandler()
+	h.config.DNSSEC.Enabled = true
+	anchors := dnssec.NewTrustAnchorStore()
+	anchors.AddAnchor(&dnssec.TrustAnchor{Zone: ".", KeyTag: 1, Algorithm: 8, DigestType: 2, Digest: []byte{1, 2, 3}})
+	h.validator = dnssec.NewValidator(dnssec.ValidatorConfig{Enabled: true, RequireDNSSEC: true}, anchors, nil)
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen: %v", err)
+	}
+	defer pc.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, addr, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			msg, err := protocol.UnpackMessage(buf[:n])
+			if err != nil {
+				continue
+			}
+			resp := &protocol.Message{
+				Header:    protocol.Header{ID: msg.Header.ID, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess), QDCount: 1, ANCount: 1},
+				Questions: msg.Questions,
+				Answers: []*protocol.ResourceRecord{{
+					Name:  msg.Questions[0].Name,
+					Type:  protocol.TypeA,
+					Class: protocol.ClassIN,
+					TTL:   300,
+					Data:  &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}},
+				}},
+			}
+			packBuf := make([]byte, 4096)
+			n, _ = resp.Pack(packBuf)
+			pc.WriteTo(packBuf[:n], addr)
+		}
+	}()
+
+	client, err := upstream.NewClient(upstream.Config{Servers: []string{pc.LocalAddr().String()}, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	defer client.Close()
+	h.upstream = client
+
+	w := newCaptureWriter("10.0.0.1", "udp")
+	h.ServeDNS(w, newTestQuery(t, "unsigned-dnssec.example.com.", protocol.TypeA))
+	if w.msg == nil {
+		t.Fatal("expected response")
+	}
+	if w.msg.Header.Flags.RCODE != protocol.RcodeServerFailure {
+		t.Errorf("expected SERVFAIL for unsigned DNSSEC response, got %d", w.msg.Header.Flags.RCODE)
 	}
 }
 
@@ -7910,7 +8132,7 @@ func TestTryDNS64Synthesis_NotEnabled(t *testing.T) {
 	// dns64Synth is nil -> returns false
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAAAA, QClass: protocol.ClassIN}
 	resp := &protocol.Message{Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)}}
-	result := h.tryDNS64Synthesis(&captureWriter{}, &protocol.Message{}, q, resp)
+	result := h.tryDNS64Synthesis(context.Background(), &captureWriter{}, &protocol.Message{}, q, resp)
 	if result {
 		t.Error("expected false when dns64Synth is nil")
 	}

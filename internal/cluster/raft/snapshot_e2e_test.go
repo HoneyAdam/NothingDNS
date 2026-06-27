@@ -86,7 +86,7 @@ func TestSnapshot_FreshFollowerGetsFullStateViaInstallSnapshot(t *testing.T) {
 				peers = append(peers, o)
 			}
 		}
-		ci, err := NewClusterIntegration(id, peers, nil, addrs[i], t.TempDir(), "", "", util.DefaultLogger())
+		ci, err := NewClusterIntegration(id, peers, nil, addrs[i], t.TempDir(), "", "", nil, util.DefaultLogger())
 		if err != nil {
 			t.Fatalf("NewClusterIntegration %s: %v", id, err)
 		}

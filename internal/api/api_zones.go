@@ -12,6 +12,8 @@ import (
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
+const maxBulkPTRPatternLength = 255
+
 func (s *Server) handleZones(w http.ResponseWriter, r *http.Request) {
 	if s.requireOperator(w, r) {
 		return
@@ -473,6 +475,10 @@ func (s *Server) handleBulkPTR(w http.ResponseWriter, r *http.Request, zoneName 
 
 	if req.CIDR == "" || req.Pattern == "" {
 		s.writeError(w, http.StatusBadRequest, "cidr and pattern are required")
+		return
+	}
+	if len(req.Pattern) > maxBulkPTRPatternLength {
+		s.writeError(w, http.StatusBadRequest, "pattern too long")
 		return
 	}
 

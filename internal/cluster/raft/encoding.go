@@ -74,8 +74,14 @@ func (fw *frameWriter) writeFramed(msgType uint8, msg any) error {
 	if _, err := io.ReadFull(rand.Reader, fw.nonceBuf); err != nil {
 		return fmt.Errorf("nonce: %w", err)
 	}
-	// Seal appends ciphertext+tag to nonceBuf in-place.
-	ciphertext := fw.aead.Seal(fw.nonceBuf[:0], fw.nonceBuf, plainPayload, []byte{msgType})
+	// Seal appends ciphertext+tag AFTER the nonce so the wire payload is
+	// nonce || ciphertext || tag, matching readFrameBytes which slices the nonce
+	// from the front (ciphertext[:NonceSize]). Using nonceBuf[:0] as the dst would
+	// drop the nonce from the wire entirely, making every frame undecryptable and
+	// silently breaking encrypted Raft clusters. Since nonceBuf has cap==NonceSize,
+	// Seal reallocates a fresh backing array (leaving nonceBuf intact for the next
+	// random nonce) and reads the nonce before writing output, so aliasing is safe.
+	ciphertext := fw.aead.Seal(fw.nonceBuf, fw.nonceBuf, plainPayload, []byte{msgType})
 	// Write length prefix.
 	var lengthBuf [4]byte
 	binary.BigEndian.PutUint32(lengthBuf[:], uint32(len(ciphertext)))
@@ -567,7 +573,10 @@ func decodeEntrySlice(entries *[]entry, data []byte) error {
 		off++
 		cmdLen := binary.BigEndian.Uint32(data[off:])
 		off += 4
-		if off+int(cmdLen)+8 > len(data) {
+		// Bounds-check in uint64: on 32-bit platforms off+int(cmdLen)+8 (cmdLen
+		// is uint32) can overflow int and wrap negative, bypassing the guard and
+		// allowing a huge make()/out-of-bounds copy below (V15).
+		if uint64(off)+uint64(cmdLen)+8 > uint64(len(data)) {
 			return fmt.Errorf("entry slice: command %d overflow", i)
 		}
 		if cmdLen > 0 {

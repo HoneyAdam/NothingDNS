@@ -118,16 +118,22 @@ func (s *Snapshotter) Save(snap *Snapshot) error {
 	defer s.mu.Unlock()
 
 	filename := filepath.Join(s.snapshotsDir, snapFilename(snap.Index))
-	tmpFile := filename + ".tmp"
+	base := filepath.Base(filename)
 
-	f, err := os.OpenFile(tmpFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	f, err := os.CreateTemp(s.snapshotsDir, "."+base+"-*.tmp")
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
+	tmpFile := f.Name()
+	keepTemp := false
+	defer func() {
+		if !keepTemp {
+			os.Remove(tmpFile)
+		}
+	}()
 
 	if err := s.writeSnapshot(f, snap); err != nil {
 		f.Close()
-		os.Remove(tmpFile)
 		return err
 	}
 
@@ -136,19 +142,17 @@ func (s *Snapshotter) Save(snap *Snapshot) error {
 	// bytes reach the disk platter.
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(tmpFile)
 		return fmt.Errorf("sync: %w", err)
 	}
 
 	if err := f.Close(); err != nil {
-		os.Remove(tmpFile)
 		return fmt.Errorf("close: %w", err)
 	}
 
 	if err := os.Rename(tmpFile, filename); err != nil {
-		os.Remove(tmpFile)
 		return fmt.Errorf("rename: %w", err)
 	}
+	keepTemp = true
 
 	// fsync the directory so the rename's dirent commit reaches
 	// stable storage.

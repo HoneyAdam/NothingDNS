@@ -2,6 +2,7 @@ package raft
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net"
 	"strings"
@@ -167,6 +168,54 @@ func TestTCPTransportExchangeReturnsDeadlineErrorAndDropsConn(t *testing.T) {
 	}
 	if _, ok := transport.conns["peer"]; ok {
 		t.Fatal("deadline failure should remove the cached connection")
+	}
+}
+
+func TestTCPTransportTLSDialUsesDialTimeoutForHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	release := make(chan struct{})
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- conn
+		<-release
+		_ = conn.Close()
+	}()
+	defer close(release)
+
+	transport := NewTCPTransport(&tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	}, nil)
+	transport.dialTimeout = 50 * time.Millisecond
+	transport.SetPeerAddr("peer", ln.Addr().String())
+
+	start := time.Now()
+	conn, err := transport.getConn("peer")
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("expected TLS handshake timeout, got nil")
+	}
+	if elapsed > time.Second {
+		t.Fatalf("TLS dial took %v, expected timeout near %v", elapsed, transport.dialTimeout)
+	}
+	if _, ok := transport.conns["peer"]; ok {
+		t.Fatal("failed TLS dial should not cache a peer connection")
+	}
+
+	select {
+	case conn := <-accepted:
+		_ = conn.Close()
+	default:
 	}
 }
 

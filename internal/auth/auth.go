@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,8 @@ const (
 )
 
 var ErrLastAdmin = errors.New("cannot delete the last admin user")
+
+const maxAuthPersistFileSize = 16 << 20
 
 // User represents a user account.
 type User struct {
@@ -765,7 +768,7 @@ func (s *Store) Save(path string) error {
 
 // Load reads users from a file.
 func (s *Store) Load(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := readAuthPersistFile(path)
 	if err != nil {
 		return err
 	}
@@ -782,6 +785,23 @@ func (s *Store) Load(path string) error {
 	defer s.mu.Unlock()
 	s.users = users
 	return nil
+}
+
+func readAuthPersistFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxAuthPersistFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAuthPersistFileSize {
+		return nil, fmt.Errorf("auth persistence file exceeds %d bytes", maxAuthPersistFileSize)
+	}
+	return data, nil
 }
 
 func validateLoadedUsers(users map[string]*User) error {
@@ -939,7 +959,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) (err error) {
 // LoadTokensSigned loads tokens from a file encrypted with AES-256-GCM.
 // Returns error if file doesn't exist or decryption/integrity check fails.
 func (s *Store) LoadTokensSigned(path string) error {
-	data, err := os.ReadFile(path)
+	data, err := readAuthPersistFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // No tokens file yet, that's ok

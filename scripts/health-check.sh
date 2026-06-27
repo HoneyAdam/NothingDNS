@@ -40,43 +40,60 @@ else
     echo "SKIP (dig not installed)"
 fi
 
-# 4. API auth
+# 4. API auth (optional — requires real credentials, never a hardcoded default)
 echo -n "API Auth: "
-TOKEN=$(curl -sf -X POST "http://$HOST/api/v1/auth/login" \
-    -H "Content-Type: application/json" \
-    -d '{"username":"admin","password":"admin"}' 2>/dev/null | \
-    jq -r '.token // empty' 2>/dev/null || echo "")
-if [ -n "$TOKEN" ]; then
-    echo "OK"
+NOTHINGDNS_USER="${NOTHINGDNS_USER:-}"
+NOTHINGDNS_PASS="${NOTHINGDNS_PASS:-}"
+TOKEN=""
+if [ -n "$NOTHINGDNS_USER" ] && [ -n "$NOTHINGDNS_PASS" ]; then
+    login_body=$(jq -nc --arg u "$NOTHINGDNS_USER" --arg p "$NOTHINGDNS_PASS" \
+        '{username:$u,password:$p}')
+    TOKEN=$(curl -sf -X POST "http://$HOST/api/v1/auth/login" \
+        -H "Content-Type: application/json" \
+        -d "$login_body" 2>/dev/null | \
+        jq -r '.token // empty' 2>/dev/null || echo "")
+    if [ -n "$TOKEN" ]; then
+        echo "OK"
+    else
+        echo "FAIL"
+        FAILED=1
+    fi
 else
-    echo "FAIL"
-    FAILED=1
+    echo "SKIP (set NOTHINGDNS_USER and NOTHINGDNS_PASS to test authenticated endpoints)"
 fi
 
-# 5. Cache stats
+# 5. Cache stats (requires a token from step 4)
 echo -n "Cache: "
-CACHE_SIZE=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-    "http://$HOST/api/v1/cache/stats" 2>/dev/null | \
-    jq -r '.size // empty' 2>/dev/null || echo "0")
-if [ "$CACHE_SIZE" -ge 0 ] 2>/dev/null; then
-    echo "OK (size=$CACHE_SIZE)"
+if [ -z "$TOKEN" ]; then
+    echo "SKIP (no auth token)"
 else
-    echo "FAIL"
-    FAILED=1
+    CACHE_SIZE=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+        "http://$HOST/api/v1/cache/stats" 2>/dev/null | \
+        jq -r '.size // empty' 2>/dev/null || echo "0")
+    if [ "$CACHE_SIZE" -ge 0 ] 2>/dev/null; then
+        echo "OK (size=$CACHE_SIZE)"
+    else
+        echo "FAIL"
+        FAILED=1
+    fi
 fi
 
-# 6. Cluster (if enabled)
+# 6. Cluster (if enabled; requires a token from step 4)
 echo -n "Cluster: "
-CLUSTER_STATUS=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-    "http://$HOST/api/v1/cluster/status" 2>/dev/null | \
-    jq -r '.enabled // false' 2>/dev/null || echo "false")
-if [ "$CLUSTER_STATUS" = "false" ]; then
-    echo "DISABLED"
+if [ -z "$TOKEN" ]; then
+    echo "SKIP (no auth token)"
 else
-    NODES=$(curl -sf -H "Authorization: Bearer $TOKEN" \
-        "http://$HOST/api/v1/cluster/nodes" 2>/dev/null | \
-        jq -r '.nodes | length' 2>/dev/null || echo "0")
-    echo "OK ($NODES nodes)"
+    CLUSTER_STATUS=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+        "http://$HOST/api/v1/cluster/status" 2>/dev/null | \
+        jq -r '.enabled // false' 2>/dev/null || echo "false")
+    if [ "$CLUSTER_STATUS" = "false" ]; then
+        echo "DISABLED"
+    else
+        NODES=$(curl -sf -H "Authorization: Bearer $TOKEN" \
+            "http://$HOST/api/v1/cluster/nodes" 2>/dev/null | \
+            jq -r '.nodes | length' 2>/dev/null || echo "0")
+        echo "OK ($NODES nodes)"
+    fi
 fi
 
 # 7. Metrics

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -46,6 +47,25 @@ func TestRPCConfig_NewTLSConfig_SetsBothCAPools(t *testing.T) {
 	}
 	if tlsCfg.ClientCAs != tlsCfg.RootCAs {
 		t.Error("ClientCAs and RootCAs should be the same private CA pool; Raft peer auth is symmetric")
+	}
+}
+
+func TestRPCConfig_NewTLSConfig_RejectsOversizedCAFile(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath, _ := writeTestCertPEM(t, dir)
+	caPath := filepath.Join(dir, "oversized-ca.crt")
+	if err := os.WriteFile(caPath, bytes.Repeat([]byte{'x'}, maxRPCCACertFileSize+1), 0o600); err != nil {
+		t.Fatalf("write oversized CA: %v", err)
+	}
+
+	cfg := RPCConfig{
+		Enabled:       true,
+		TLSCertFile:   certPath,
+		TLSKeyFile:    keyPath,
+		TLSCACertFile: caPath,
+	}
+	if _, err := cfg.NewTLSConfig(); err == nil {
+		t.Fatal("NewTLSConfig should reject oversized CA file")
 	}
 }
 

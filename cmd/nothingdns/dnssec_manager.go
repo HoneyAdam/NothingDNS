@@ -38,8 +38,9 @@ func NewDNSSECManager(cfg *config.Config, resolverAdapter dnssec.Resolver, logge
 	}
 
 	mgr.Validator = dnssec.NewValidator(dnssec.ValidatorConfig{
-		Enabled:    cfg.DNSSEC.Enabled,
-		IgnoreTime: cfg.DNSSEC.IgnoreTime,
+		Enabled:       cfg.DNSSEC.Enabled,
+		RequireDNSSEC: cfg.DNSSEC.RequireDNSSEC,
+		IgnoreTime:    cfg.DNSSEC.IgnoreTime,
 	}, trustAnchors, resolverAdapter)
 
 	logger.Info("DNSSEC validation enabled")

@@ -11,6 +11,21 @@ import (
 	"time"
 )
 
+func TestConstantTimeTokenEqual(t *testing.T) {
+	if !constantTimeTokenEqual("test-token", "test-token") {
+		t.Fatal("expected matching tokens to compare equal")
+	}
+	if constantTimeTokenEqual("wrong-token", "test-token") {
+		t.Fatal("expected different same-length token to fail")
+	}
+	if constantTimeTokenEqual("short", "test-token") {
+		t.Fatal("expected different-length token to fail")
+	}
+	if constantTimeTokenEqual("", "") {
+		t.Fatal("empty configured token must not authenticate")
+	}
+}
+
 func TestMetricsCollector(t *testing.T) {
 	cfg := Config{
 		Enabled:   true,

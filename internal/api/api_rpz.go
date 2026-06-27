@@ -135,6 +135,10 @@ func (s *Server) handleRPZRules(w http.ResponseWriter, r *http.Request) {
 
 // handleRPZActions handles RPZ enable/disable toggle.
 func (s *Server) handleRPZActions(w http.ResponseWriter, r *http.Request) {
+	if s.requireOperator(w, r) {
+		return
+	}
+
 	s.runtimeMu.RLock()
 	rpzEngine := s.rpzEngine
 	s.runtimeMu.RUnlock()
@@ -145,7 +149,7 @@ func (s *Server) handleRPZActions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/rpz/")
-	if strings.HasPrefix(path, "toggle") {
+	if path == "toggle" {
 		if r.Method != http.MethodPost {
 			s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return

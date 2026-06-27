@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"sync"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+const maxReloadConfigFileSize = 4 << 20
 
 // ReloadHandler manages configuration hot-reload via SIGHUP
 type ReloadHandler struct {
@@ -102,7 +105,7 @@ func (h *ReloadHandler) reloadFromPath(configPath string) {
 	if configPath == "" {
 		return
 	}
-	data, err := os.ReadFile(configPath)
+	data, err := readReloadConfigFile(configPath)
 	if err != nil {
 		util.Errorf("reload: failed to read config %s: %v", configPath, err)
 		return
@@ -117,6 +120,23 @@ func (h *ReloadHandler) reloadFromPath(configPath string) {
 		return
 	}
 	h.Reload(newCfg)
+}
+
+func readReloadConfigFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxReloadConfigFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxReloadConfigFileSize {
+		return nil, fmt.Errorf("config file exceeds %d bytes", maxReloadConfigFileSize)
+	}
+	return data, nil
 }
 
 // Stop stops listening for reload signals. Idempotent — a second

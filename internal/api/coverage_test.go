@@ -420,6 +420,28 @@ func TestHandleBulkPTR_PatternMissingPlaceholders(t *testing.T) {
 	}
 }
 
+func TestHandleBulkPTR_PatternTooLong(t *testing.T) {
+	s, user := newServerWithReverseZone(t)
+
+	pattern := strings.Repeat("a", maxBulkPTRPatternLength+1) + "-[A]-[B]-[C]-[D].example.com."
+	body, err := json.Marshal(map[string]string{
+		"cidr":    "192.168.1.0/30",
+		"pattern": pattern,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/zones/1.168.192.in-addr.arpa./ptr-bulk", bytes.NewReader(body))
+	req = req.WithContext(WithUser(req.Context(), user))
+	rec := httptest.NewRecorder()
+
+	s.handleBulkPTR(rec, req, "1.168.192.in-addr.arpa.")
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestHandleBulkPTR_ZoneNotFound(t *testing.T) {
 	s, user := newServerWithReverseZone(t)
 
@@ -1090,6 +1112,44 @@ func TestHandleStatus_WithCluster(t *testing.T) {
 	}
 	if cacheInfo["capacity"].(float64) != 200 {
 		t.Errorf("expected cache capacity 200, got %v", cacheInfo["capacity"])
+	}
+}
+
+// TestHandleStatus_RoleTiering verifies V10: operational detail (cache stats,
+// cluster topology) is exposed to operators but withheld from viewers, while
+// both still get the basic running status.
+func TestHandleStatus_RoleTiering(t *testing.T) {
+	statusFor := func(role auth.Role) StatusResponse {
+		s, user := newAuthenticatedServer(t, "u-"+string(role), role)
+		s.cache = cache.New(cache.Config{Capacity: 64, MinTTL: 60, MaxTTL: 3600, DefaultTTL: 300})
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil).
+			WithContext(newAuthenticatedContext(user))
+		rec := httptest.NewRecorder()
+		s.handleStatus(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("role %s: expected 200, got %d", role, rec.Code)
+		}
+		var resp StatusResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("role %s: decode: %v", role, err)
+		}
+		return resp
+	}
+
+	op := statusFor(auth.RoleOperator)
+	if op.Status != "running" {
+		t.Errorf("operator status = %q, want running", op.Status)
+	}
+	if op.Cache == nil {
+		t.Error("operator should see cache stats")
+	}
+
+	viewer := statusFor(auth.RoleViewer)
+	if viewer.Status != "running" {
+		t.Errorf("viewer status = %q, want running", viewer.Status)
+	}
+	if viewer.Cache != nil {
+		t.Error("viewer must NOT see cache stats (V10)")
 	}
 }
 

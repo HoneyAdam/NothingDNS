@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -89,6 +90,10 @@ type Config struct {
 	Peers                []PeerConfig                   // Raft peer nodes
 	ZoneManager          *zone.Manager                  // zone manager for replication
 	ConfigReloadCallback func(*ClusterConfigJSON) error // called when leader sends config
+	// RPCTLS, when non-nil, wraps the Raft RPC listener and peer dials in
+	// (m)TLS. Built by the caller from cluster.rpc.* (config.RPCConfig). nil =
+	// plain TCP transport (AEAD via EncryptionKey is still applied).
+	RPCTLS *tls.Config
 }
 
 // PeerConfig describes a Raft cluster peer.
@@ -270,6 +275,20 @@ func (c *Cluster) initRaft() error {
 		return fmt.Errorf("raft consensus requires at least one peer in config")
 	}
 
+	// VULN-005 (Raft): refuse to start a Raft cluster in plaintext. Raft RPCs
+	// carry zone state and log entries; without the transport encryption key the
+	// RPC framing has no AEAD, so any host that can reach the Raft port can inject
+	// AppendEntries/InstallSnapshot and replace cluster zone state. The AEAD key
+	// doubles as peer authentication — only holders of the shared key can produce
+	// frames that decrypt. Mirror the gossip guard: require cluster.encryption_key,
+	// or an explicit cluster.allow_insecure=true opt-in for dev/test.
+	if c.config.EncryptionKey == "" && !c.config.AllowInsecureCluster {
+		return fmt.Errorf("cluster encryption key is required for Raft consensus (set cluster.encryption_key, or cluster.allow_insecure=true for dev)")
+	}
+	if c.config.EncryptionKey == "" && c.config.AllowInsecureCluster {
+		c.logger.Warnf("SECURITY: cluster.allow_insecure=true — Raft RPC transport is PLAINTEXT and UNAUTHENTICATED; any host reaching the Raft port can inject cluster state. Set cluster.encryption_key for production deployments")
+	}
+
 	// Build peer list and the NodeID→RPC-address map. Skip an entry that
 	// names this node itself: the Raft peer set must EXCLUDE self (quorum is
 	// computed as a majority of peers+1), and a node must not try to dial
@@ -313,7 +332,9 @@ func (c *Cluster) initRaft() error {
 	raftAddr := fmt.Sprintf("%s:%d", c.config.BindAddr, c.config.GossipPort)
 
 	// Create Raft cluster integration. L-6 added the optional
-	// snapshot-at-rest key as the trailing arg.
+	// snapshot-at-rest key; RPCTLS is the optional RPC transport (m)TLS, built
+	// from cluster.rpc.* by the caller. It is independent of the mandatory
+	// message-level AEAD: when set it adds mutual TLS authentication on top.
 	raftNode, err := raft.NewClusterIntegration(
 		raft.NodeID(c.config.NodeID),
 		peerIDs,
@@ -322,6 +343,7 @@ func (c *Cluster) initRaft() error {
 		dataDir,
 		c.config.EncryptionKey,
 		c.config.SnapshotEncryptionKey,
+		c.config.RPCTLS,
 		c.logger,
 	)
 	if err != nil {

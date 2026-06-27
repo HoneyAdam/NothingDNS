@@ -161,9 +161,7 @@ func NewObliviousClient(config *ODoHConfig) (*ObliviousClient, error) {
 	}
 	return &ObliviousClient{
 		config: config,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		client: newODoHHTTPClient(),
 	}, nil
 }
 
@@ -376,10 +374,17 @@ func NewObliviousProxy(config *ODoHConfig) (*ObliviousProxy, error) {
 	}
 	return &ObliviousProxy{
 		config: config,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		client: newODoHHTTPClient(),
 	}, nil
+}
+
+func newODoHHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 }
 
 // ServeHTTP implements the HTTP handler for the ODoH proxy. The proxy

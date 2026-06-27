@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"testing"
@@ -714,6 +715,32 @@ func TestReloadManagerReloadLoggingNoLogger(t *testing.T) {
 	errs := handler.Reload(nil)
 	if len(errs) > 0 {
 		t.Errorf("Unexpected errors: %v", errs)
+	}
+}
+
+func TestReloadFromPathRejectsOversizedConfig(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "config-oversized-*.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := tmpFile.Write(bytes.Repeat([]byte{'x'}, maxReloadConfigFileSize+1)); err != nil {
+		t.Fatalf("write oversized config: %v", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close oversized config: %v", err)
+	}
+
+	handler := NewReloadHandler()
+	called := false
+	handler.Register("test", func(*Config) error {
+		called = true
+		return nil
+	})
+	handler.reloadFromPath(tmpFile.Name())
+	if called {
+		t.Fatal("reload callback must not run for oversized config")
 	}
 }
 

@@ -1,0 +1,79 @@
+name: Release
+
+# Builds the cross-platform release binaries and a SHA256SUMS manifest, then
+# attaches them to the GitHub Release. install.sh / setup.sh download these
+# assets and verify each binary against SHA256SUMS before executing it, so this
+# workflow is what makes the installer's integrity check function (security scan
+# 2026-06-26, H4). Asset names match the installer's expectation:
+# <binary>-<os>-<arch> (e.g. nothingdns-linux-amd64).
+
+on:
+  release:
+    types: [published]
+  # Manual re-run against an existing tag (e.g. to (re)publish assets).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach assets to"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  release-binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to upload release assets
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Verify module integrity
+        run: go mod download && go mod verify
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="${{ github.event.release.tag_name }}"
+          fi
+          if [ -z "${tag}" ]; then
+            echo "could not resolve a release tag" >&2
+            exit 1
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build release binaries and checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Targets must match install.sh / setup.sh PLATFORM detection.
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "Building ${os}/${arch}..."
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
+              -trimpath -ldflags "-s -w" \
+              -o "dist/nothingdns-${os}-${arch}" ./cmd/nothingdns
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
+              -trimpath -ldflags "-s -w" \
+              -o "dist/dnsctl-${os}-${arch}" ./cmd/dnsctl
+          done
+          ( cd dist && sha256sum nothingdns-* dnsctl-* > SHA256SUMS )
+          echo "Published checksums:"
+          cat dist/SHA256SUMS
+
+      - name: Upload assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" dist/* \
+            --clobber --repo "${{ github.repository }}"

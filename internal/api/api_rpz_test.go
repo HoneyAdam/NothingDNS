@@ -439,12 +439,28 @@ func TestHandleRPZActions_ToggleWrongMethod(t *testing.T) {
 	engine := newEnabledEngine()
 	s := newRPZServer(t, engine)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/rpz/toggle", nil)
+	req := rpzAuthenticatedRequest(http.MethodGet, "/api/v1/rpz/toggle", nil)
 	rec := httptest.NewRecorder()
 	s.handleRPZActions(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", rec.Code)
+	}
+}
+
+func TestHandleRPZActions_ToggleRequiresExactPath(t *testing.T) {
+	engine := newEnabledEngine()
+	s := newRPZServer(t, engine)
+
+	req := rpzAdminRequest(http.MethodPost, "/api/v1/rpz/toggle-extra", nil)
+	rec := httptest.NewRecorder()
+	s.handleRPZActions(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for non-toggle path, got %d", rec.Code)
+	}
+	if !engine.IsEnabled() {
+		t.Fatal("RPZ state changed for non-toggle path")
 	}
 }
 
@@ -458,6 +474,22 @@ func TestHandleRPZActions_NilEngine(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503, got %d", rec.Code)
+	}
+}
+
+func TestHandleRPZActions_ViewerDeniedBeforeEngineCheck(t *testing.T) {
+	store := newAuthStoreWithUser(t, "viewer", "secret123", auth.RoleViewer)
+	s := NewServer(config.HTTPConfig{Enabled: true, Bind: "127.0.0.1:0"}, nil, nil, nil, nil, nil, nil)
+	s.authStore = store
+	// Leave rpzEngine nil. Authorization must fail before service availability
+	// is reported to an authenticated but underprivileged user.
+
+	req := rpzRequestWithRole(http.MethodPost, "/api/v1/rpz/toggle", nil, auth.RoleViewer)
+	rec := httptest.NewRecorder()
+	s.handleRPZActions(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 before RPZ availability check, got %d", rec.Code)
 	}
 }
 
