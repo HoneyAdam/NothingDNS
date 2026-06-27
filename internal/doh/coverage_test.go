@@ -17,7 +17,7 @@ import (
 // unsafeName constructs a protocol.Name without validation. Use only in tests
 // that intentionally exercise pack-time name validation failures.
 func unsafeName(labels []string, fqdn bool) *protocol.Name {
-	return &protocol.Name{Labels: labels, FQDN: fqdn}
+	return protocol.NewUnsafeName(labels, fqdn)
 }
 
 // TestDoHPOST_BodyExceedsMaxSize tests that handlePOST rejects bodies

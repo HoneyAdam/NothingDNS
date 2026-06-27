@@ -615,8 +615,8 @@ func TestSet_WithNonNilMessage(t *testing.T) {
 	if len(entry.Message.Questions) != 1 {
 		t.Errorf("expected 1 question, got %d", len(entry.Message.Questions))
 	}
-	if entry.Message.Questions[0].Name.String() != "example.com" {
-		t.Errorf("expected question name 'example.com', got %q", entry.Message.Questions[0].Name.String())
+	if entry.Message.Questions[0].Name.String() != "example.com." {
+		t.Errorf("expected question name 'example.com.', got %q", entry.Message.Questions[0].Name.String())
 	}
 }
 

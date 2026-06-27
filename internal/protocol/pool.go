@@ -3,10 +3,10 @@ package protocol
 import "sync"
 
 var (
-	labelSlicePool = sync.Pool{
+	wireNamePool = sync.Pool{
 		New: func() any {
-			labels := make([]string, 0, 4)
-			return &labels
+			wire := make([]byte, 0, MaxNameLength)
+			return &wire
 		},
 	}
 
@@ -55,25 +55,24 @@ var (
 	rdataHTTPSPool      = sync.Pool{New: func() any { return &RDataHTTPS{} }}
 )
 
-func acquireLabelSlice() []string {
-	return (*labelSlicePool.Get().(*[]string))[:0]
+func acquireWireNameBuffer() []byte {
+	return (*wireNamePool.Get().(*[]byte))[:0]
 }
 
-func releaseLabelSlice(labels []string) {
-	if labels == nil {
+func releaseWireNameBuffer(wire []byte) {
+	if wire == nil {
 		return
 	}
-	for i := range labels {
-		labels[i] = ""
+	for i := range wire {
+		wire[i] = 0
 	}
-	labels = labels[:0]
-	labelSlicePool.Put(&labels)
+	wire = wire[:0]
+	wireNamePool.Put(&wire)
 }
 
 func acquireName() *Name {
 	n := namePool.Get().(*Name)
-	n.Labels = nil
-	n.FQDN = false
+	n.wire = nil
 	n.stringCache = ""
 	return n
 }
