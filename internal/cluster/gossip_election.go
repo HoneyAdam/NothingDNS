@@ -224,8 +224,13 @@ func (gp *GossipProtocol) checkLeaderHealth() {
 		return
 	}
 
-	// If last heartbeat is too old, leader is dead — start new election
+	// If last heartbeat is too old, leader is dead — start new election.
+	// Use single-flight guard to prevent concurrent election goroutines.
 	if heartbeatTimedOutAt(gp.lastHeartbeat, time.Now(), 15*time.Second) {
+		if gp.electionRunning {
+			return
+		}
+		gp.electionRunning = true
 		gp.leaderTerm++ // Increment term — old leader's term is no longer valid
 		go gp.startElection()
 	}
@@ -267,6 +272,12 @@ func (gp *GossipProtocol) muLeaderSendHeartbeat() {
 
 // startElection begins a new leader election.
 func (gp *GossipProtocol) startElection() {
+	defer func() {
+		gp.leaderMu.Lock()
+		gp.electionRunning = false
+		gp.leaderMu.Unlock()
+	}()
+
 	gp.leaderMu.Lock()
 	gp.electionTerm++
 	selfID := gp.nodeList.GetSelf().ID

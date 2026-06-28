@@ -199,6 +199,7 @@ type GossipProtocol struct {
 	isLeader          bool          // True if this node is the leader
 	leaderTerm        uint64        // Current term
 	electionTerm      uint64        // Current election term
+	electionRunning   bool          // Single-flight guard for startElection
 	heartbeatInterval time.Duration // Interval for leader heartbeats
 	lastHeartbeat     time.Time     // Last heartbeat received
 
