@@ -10,7 +10,6 @@ import (
 	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/ed25519"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -526,25 +525,17 @@ func marshalRSAPublicKey(pub *rsa.PublicKey) []byte {
 }
 
 func marshalECDSAPublicKey(algorithm uint8, pub *ecdsa.PublicKey) ([]byte, error) {
-	var keyLen int
-	switch algorithm {
-	case protocol.AlgorithmECDSAP256SHA256:
-		keyLen = 32
-	case protocol.AlgorithmECDSAP384SHA384:
-		keyLen = 48
-	default:
-		return nil, fmt.Errorf("unsupported ECDSA algorithm: %d", algorithm)
+	if _, _, err := ecdsaCurveForAlgorithm(algorithm); err != nil {
+		return nil, err
 	}
-
-	xBytes := pub.X.Bytes()
-	yBytes := pub.Y.Bytes()
-
-	buf := make([]byte, keyLen*2)
-	// Pad to fixed length
-	copy(buf[keyLen-len(xBytes):keyLen], xBytes)
-	copy(buf[2*keyLen-len(yBytes):2*keyLen], yBytes)
-	return buf, nil
+	// Encode to SEC 1 uncompressed (0x04 || X || Y), then strip the prefix
+	// for DNSSEC wire format (X || Y).
+	encoded, err := pub.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode ECDSA public key: %w", err)
+	}
+	if len(encoded) < 1 || encoded[0] != 0x04 {
+		return nil, fmt.Errorf("unexpected ECDSA encoding format")
+	}
+	return encoded[1:], nil
 }
-
-// Ensure we use elliptic (imported but used only in unmarshal path via x509)
-var _ = elliptic.P256

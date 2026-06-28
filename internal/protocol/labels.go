@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // Label compression constants.
@@ -41,9 +42,9 @@ type Name struct {
 	// including the terminating root label.
 	wire []byte
 	// stringCache memoizes String() for request-path callers that repeatedly
-	// stringify the same unpacked name. It must be cleared on every mutation or
-	// pool reuse.
-	stringCache string
+	// stringify the same unpacked name. Must be cleared on every pool reuse.
+	// Uses atomic.Pointer for safe concurrent access.
+	stringCache atomic.Pointer[string]
 }
 
 // NewName creates a Name from a slice of labels.
@@ -116,7 +117,7 @@ func (n *Name) Release() {
 		releaseWireNameBuffer(n.wire)
 		n.wire = nil
 	}
-	n.stringCache = ""
+	n.stringCache.Store(nil)
 	namePool.Put(n)
 }
 
@@ -159,11 +160,11 @@ func (n *Name) String() string {
 	if n == nil {
 		return "."
 	}
-	if n.stringCache != "" {
-		return n.stringCache
+	if p := n.stringCache.Load(); p != nil {
+		return *p
 	}
 	result := presentationFromWire(n.wire)
-	n.stringCache = result
+	n.stringCache.Store(&result)
 	return result
 }
 
@@ -481,7 +482,7 @@ func UnpackName(buf []byte, offset int) (*Name, int, error) {
 			offset++
 			name := acquireName()
 			name.wire = wire
-			name.stringCache = ""
+			name.stringCache.Store(nil)
 			if ptrOffset > 0 {
 				return name, ptrOffset - startOffset, nil
 			}

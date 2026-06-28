@@ -117,19 +117,19 @@ func parseECDSAPublicKey(algorithm uint8, keyData []byte) (*PublicKey, error) {
 		return nil, fmt.Errorf("ECDSA key data length mismatch: expected %d, got %d", coordLen*2, len(keyData))
 	}
 
-	x := new(big.Int).SetBytes(keyData[:coordLen])
-	y := new(big.Int).SetBytes(keyData[coordLen:])
-	if !curve.IsOnCurve(x, y) {
-		return nil, fmt.Errorf("invalid ECDSA public key")
+	// SEC 1 uncompressed format: 0x04 || X || Y
+	uncompressed := make([]byte, 0, 1+len(keyData))
+	uncompressed = append(uncompressed, 0x04)
+	uncompressed = append(uncompressed, keyData...)
+
+	ecdsaKey, err := ecdsa.ParseUncompressedPublicKey(curve, uncompressed)
+	if err != nil {
+		return nil, fmt.Errorf("invalid ECDSA public key: %w", err)
 	}
 
 	return &PublicKey{
 		Algorithm: algorithm,
-		Key: &ecdsa.PublicKey{
-			Curve: curve,
-			X:     x,
-			Y:     y,
-		},
+		Key:       ecdsaKey,
 	}, nil
 }
 
@@ -149,11 +149,15 @@ func validateECDSAPublicKey(key *ecdsa.PublicKey, algorithm uint8) error {
 	if err != nil {
 		return err
 	}
-	if key == nil || key.Curve == nil || key.X == nil || key.Y == nil {
+	if key == nil || key.Curve == nil {
 		return fmt.Errorf("invalid ECDSA public key")
 	}
-	if key.Curve.Params().BitSize != curve.Params().BitSize || !curve.IsOnCurve(key.X, key.Y) {
+	if key.Curve.Params().BitSize != curve.Params().BitSize {
 		return fmt.Errorf("invalid ECDSA public key")
+	}
+	// Validate on-curve via Bytes() encoding (Go 1.26+ non-deprecated path)
+	if _, err := key.Bytes(); err != nil {
+		return fmt.Errorf("invalid ECDSA public key: %w", err)
 	}
 	return nil
 }
@@ -349,8 +353,13 @@ func signECDSA(data []byte, key *PrivateKey) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("key is not ECDSA")
 	}
-	if ecdsaKey == nil || ecdsaKey.D == nil || ecdsaKey.D.Sign() <= 0 {
+	if ecdsaKey == nil {
 		return nil, fmt.Errorf("invalid ECDSA private key")
+	}
+	// Validate the public key component; Bytes() will reject invalid keys
+	// without accessing deprecated X/Y fields.
+	if _, err := ecdsaKey.PublicKey.Bytes(); err != nil {
+		return nil, fmt.Errorf("invalid ECDSA private key: %w", err)
 	}
 
 	var hash []byte
@@ -525,6 +534,7 @@ func packRSAPublicKey(key *PublicKey) ([]byte, error) {
 }
 
 // packECDSAPublicKey packs an ECDSA public key into DNSKEY wire format.
+// Wire format: X coordinate || Y coordinate (without SEC 1 0x04 prefix).
 func packECDSAPublicKey(key *PublicKey) ([]byte, error) {
 	ecdsaKey, ok := key.Key.(*ecdsa.PublicKey)
 	if !ok {
@@ -534,23 +544,16 @@ func packECDSAPublicKey(key *PublicKey) ([]byte, error) {
 		return nil, err
 	}
 
-	_, coordLen, err := ecdsaCurveForAlgorithm(key.Algorithm)
+	// Encode to SEC 1 uncompressed (0x04 || X || Y), then strip the prefix
+	// for DNSSEC wire format (X || Y).
+	encoded, err := ecdsaKey.Bytes()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to encode ECDSA public key: %w", err)
 	}
-
-	xBytes := ecdsaKey.X.Bytes()
-	yBytes := ecdsaKey.Y.Bytes()
-
-	// Pad to fixed length
-	if len(xBytes) < coordLen {
-		xBytes = append(make([]byte, coordLen-len(xBytes)), xBytes...)
+	if len(encoded) < 1 || encoded[0] != 0x04 {
+		return nil, fmt.Errorf("unexpected ECDSA encoding format")
 	}
-	if len(yBytes) < coordLen {
-		yBytes = append(make([]byte, coordLen-len(yBytes)), yBytes...)
-	}
-
-	return append(xBytes, yBytes...), nil
+	return encoded[1:], nil
 }
 
 // packEd25519PublicKey packs an Ed25519 public key into DNSKEY wire format.

@@ -7040,7 +7040,7 @@ func TestHandleAXFR_WriteError(t *testing.T) {
 
 func TestDoQResponseWriter_Write_PackError(t *testing.T) {
 	rw := &doqResponseWriter{stream: nil}
-	invalidName := &protocol.Name{Labels: []string{strings.Repeat("a", 64)}}
+	invalidName := protocol.NewUnsafeName([]string{strings.Repeat("a", 64)}, true)
 	msg := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 		Answers: []*protocol.ResourceRecord{{

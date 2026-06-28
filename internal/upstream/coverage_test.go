@@ -5,13 +5,14 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/util"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 func mustNameP(s string) *protocol.Name {

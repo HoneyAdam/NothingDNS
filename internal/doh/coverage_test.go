@@ -5,13 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/server"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/server"
 )
 
 // unsafeName constructs a protocol.Name without validation. Use only in tests

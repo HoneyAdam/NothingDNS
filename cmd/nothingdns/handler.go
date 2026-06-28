@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +34,19 @@ import (
 	"github.com/nothingdns/nothingdns/internal/util"
 	"github.com/nothingdns/nothingdns/internal/zone"
 )
+
+// handlerLogger is a package-level reference used by package-level helper
+// functions (reply, sendError, sendErrorWithEDE) that don't have access to
+// h.logger. Set during initialization in main.go.
+var handlerLogger *util.Logger
+
+// logErrorf logs an error via the package-level handlerLogger if set.
+// Falls back silently when nil (e.g. during tests).
+func logErrorf(format string, args ...interface{}) {
+	if handlerLogger != nil {
+		handlerLogger.Errorf(format, args...)
+	}
+}
 
 // integratedHandler is the DNS request handler that uses all components.
 type integratedHandler struct {
@@ -223,7 +235,7 @@ func (h *integratedHandler) validateDNSSECResponse(ctx context.Context, w server
 func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) bool {
 	handled, err := h.applyRPZResponsePolicyWithError(w, r, q, resp, label)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+		h.logger.Errorf("failed to write RPZ response: %v", err)
 	}
 	return handled
 }
@@ -266,7 +278,7 @@ func (h *integratedHandler) applyRPZResponsePolicyWithError(w server.ResponseWri
 func (h *integratedHandler) checkRPZResponseIP(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
 	handled, err := h.checkRPZResponseIPWithError(w, r, q, resp)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+		h.logger.Errorf("failed to write RPZ response: %v", err)
 	}
 	return handled
 }
@@ -280,7 +292,11 @@ func (h *integratedHandler) checkRPZResponseIPWithError(w server.ResponseWriter,
 		return false, nil
 	}
 	if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
-		h.logger.Debugf("RPZ response IP match for %s (policy: %s)", q.Name.String(), rule.PolicyName)
+		qname := "<nil>"
+		if q != nil && q.Name != nil {
+			qname = q.Name.String()
+		}
+		h.logger.Debugf("RPZ response IP match for %s (policy: %s)", qname, rule.PolicyName)
 		return h.applyRPZRuleWithError(w, r, q, rule)
 	}
 	return false, nil
@@ -304,7 +320,7 @@ func reply(w server.ResponseWriter, query, response *protocol.Message) {
 	}
 	minimizeResponse(response)
 	if _, err := w.Write(response); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write response: %v\n", err)
+		logErrorf("failed to write response: %v", err)
 	}
 }
 
@@ -324,7 +340,7 @@ func sendError(w server.ResponseWriter, query *protocol.Message, rcode uint8) {
 		Questions: questions,
 	}
 	if _, err := w.Write(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write error response: %v\n", err)
+		logErrorf("failed to write error response: %v", err)
 	}
 }
 
@@ -332,7 +348,11 @@ func sendError(w server.ResponseWriter, query *protocol.Message, rcode uint8) {
 // per RFC 8482 §3. This forces the client to retry over TCP, which
 // prevents TypeANY amplification attacks (VULN-065).
 func (h *integratedHandler) handleANYTruncated(w server.ResponseWriter, r *protocol.Message, q *protocol.Question) {
-	h.logger.Debugf("TypeANY over UDP — forcing TCP retry for %s", q.Name.String())
+	qname := "<nil>"
+	if q != nil && q.Name != nil {
+		qname = q.Name.String()
+	}
+	h.logger.Debugf("TypeANY over UDP — forcing TCP retry for %s", qname)
 	resp := &protocol.Message{
 		Header: protocol.Header{
 			ID:    r.Header.ID,
@@ -342,7 +362,7 @@ func (h *integratedHandler) handleANYTruncated(w server.ResponseWriter, r *proto
 	}
 	resp.Header.Flags.TC = true // Truncated — retry over TCP
 	if _, err := w.Write(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write TC response: %v\n", err)
+		h.logger.Errorf("failed to write TC response: %v", err)
 	}
 }
 
@@ -383,7 +403,7 @@ func sendErrorWithEDE(w server.ResponseWriter, query *protocol.Message, rcode ui
 		resp.AddAdditional(optRR)
 	}
 	if _, err := w.Write(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write error response: %v\n", err)
+		logErrorf("failed to write error response: %v", err)
 	}
 }
 
@@ -413,7 +433,7 @@ func (h *integratedHandler) handleACLRedirect(w server.ResponseWriter, r *protoc
 	resp.AddAnswer(rr)
 
 	if _, err := w.Write(resp); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write redirect response: %v\n", err)
+		h.logger.Errorf("failed to write redirect response: %v", err)
 	}
 }
 
@@ -701,7 +721,7 @@ func (cw *cookieResponseWriter) MaxSize() int {
 func (h *integratedHandler) applyRPZRule(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, rule *rpz.Rule) bool {
 	handled, err := h.applyRPZRuleWithError(w, r, q, rule)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to write RPZ response: %v\n", err)
+		h.logger.Errorf("failed to write RPZ response: %v", err)
 	}
 	return handled
 }

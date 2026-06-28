@@ -679,6 +679,7 @@ func run() error {
 		serverCtx:    serverCtx,
 		cancelServer: cancelServer,
 	}
+	handlerLogger = logger
 
 	// Initialize iterative recursive resolver if enabled
 	if cfg.Resolution.Recursive {

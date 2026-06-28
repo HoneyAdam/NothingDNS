@@ -9,12 +9,12 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"math/big"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 // ---------------------------------------------------------------------------
@@ -1779,26 +1779,17 @@ func TestDSFromDNSKEY_SHA1_Detailed(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPackECDSAPublicKey_PaddingNeeded(t *testing.T) {
-	curve := elliptic.P256()
-	var x, y *big.Int
-	for scalar := int64(1); scalar < 10000; scalar++ {
-		x, y = curve.ScalarBaseMult(big.NewInt(scalar).Bytes())
-		if len(x.Bytes()) < 32 || len(y.Bytes()) < 32 {
-			break
-		}
-		x, y = nil, nil
-	}
-	if x == nil || y == nil {
-		t.Fatal("failed to find valid P-256 key coordinates that need padding")
+	// Generate a P-256 key and verify that packECDSAPublicKey correctly
+	// encodes it as 64 bytes (X || Y without SEC 1 0x04 prefix, each
+	// coordinate padded to 32 bytes).
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
 	}
 
 	key := &PublicKey{
 		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-		Key: &ecdsa.PublicKey{
-			Curve: curve,
-			X:     x,
-			Y:     y,
-		},
+		Key:       &priv.PublicKey,
 	}
 
 	data, err := packECDSAPublicKey(key)

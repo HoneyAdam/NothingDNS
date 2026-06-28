@@ -252,7 +252,7 @@ func splitHorizonStage(h *integratedHandler) Stage {
 					for origin, z := range vzMap {
 						if isSubdomain(q.qname, origin) {
 							h.logger.Debugf("View %s: checking zone %s for %s", view.Name, origin, q.qname)
-							if h.handleAuthoritative(z, w, q.msg, q.q) {
+							if h.handleAuthoritative(z, w, q.msg, q.q, q.qname) {
 								return true, nil
 							}
 						}
@@ -284,7 +284,7 @@ func authoritativeStage(h *integratedHandler) Stage {
 
 		for _, m := range matchedZones {
 			h.logger.Debugf("Checking zone %s for %s", m.name, q.qname)
-			if h.handleAuthoritative(m.z, w, q.msg, q.q) {
+			if h.handleAuthoritative(m.z, w, q.msg, q.q, q.qname) {
 				return true, nil
 			}
 		}
@@ -391,6 +391,7 @@ func resolverStage(h *integratedHandler) Stage {
 			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "iterative resolution failed")
 			return true, nil
 		}
+		defer resp.Release()
 		sanitizePipelineResponse(resp)
 
 		resp.Header.ID = q.msg.Header.ID
@@ -468,6 +469,7 @@ func upstreamStage(h *integratedHandler) Stage {
 			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
 			return true, nil
 		}
+		defer resp.Release()
 		sanitizePipelineResponse(resp)
 
 		if resp.Header.ID != q.msg.Header.ID {

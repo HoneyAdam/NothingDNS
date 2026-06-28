@@ -1,10 +1,11 @@
 package cache
 
 import (
-	"github.com/nothingdns/nothingdns/internal/protocol"
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 // TestRemainingTTL_NegativeDurationCoversNegativeBranch tests the

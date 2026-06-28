@@ -362,6 +362,7 @@ func (s *XoTServer) handleMessage(conn net.Conn, msg []byte) {
 		}
 		return
 	}
+	defer protocolMsg.Release()
 
 	// Get client IP for access control. Tests and wrapped connections may not
 	// expose a *net.TCPAddr even though production XoT uses TCP/TLS.

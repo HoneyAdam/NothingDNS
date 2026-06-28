@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/cache"
-	"github.com/nothingdns/nothingdns/internal/cluster/raft"
-	"github.com/nothingdns/nothingdns/internal/util"
 	"net"
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/cache"
+	"github.com/nothingdns/nothingdns/internal/cluster/raft"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // TestInitRaft_RequiresEncryptionKey verifies the VULN-005 Raft guard: a Raft

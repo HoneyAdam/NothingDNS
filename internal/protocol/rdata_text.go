@@ -50,34 +50,46 @@ func ParseRDataText(rtype, rdata string) RData {
 			}
 			var addr [4]byte
 			copy(addr[:], ipv4)
-			return &RDataA{Address: addr}
+			rd := rdataAPool.Get().(*RDataA)
+			rd.Address = addr
+			return rd
 		}
 	case "AAAA":
 		ip := net.ParseIP(rdata)
 		if ip != nil {
 			var addr [16]byte
 			copy(addr[:], ip.To16())
-			return &RDataAAAA{Address: addr}
+			rd := rdataAAAAPool.Get().(*RDataAAAA)
+			rd.Address = addr
+			return rd
 		}
 	case "CNAME":
 		name, err := ParseName(rdata)
 		if err == nil {
-			return &RDataCNAME{CName: name}
+			rd := rdataCNAMEPool.Get().(*RDataCNAME)
+			rd.CName = name
+			return rd
 		}
 	case "DNAME":
 		name, err := ParseName(rdata)
 		if err == nil {
-			return &RDataDNAME{DName: name}
+			rd := rdataDNAMEPool.Get().(*RDataDNAME)
+			rd.DName = name
+			return rd
 		}
 	case "NS":
 		name, err := ParseName(rdata)
 		if err == nil {
-			return &RDataNS{NSDName: name}
+			rd := rdataNSPool.Get().(*RDataNS)
+			rd.NSDName = name
+			return rd
 		}
 	case "PTR":
 		name, err := ParseName(rdata)
 		if err == nil {
-			return &RDataPTR{PtrDName: name}
+			rd := rdataPTRPool.Get().(*RDataPTR)
+			rd.PtrDName = name
+			return rd
 		}
 	case "MX":
 		parts := strings.Fields(rdata)
@@ -88,10 +100,10 @@ func ParseRDataText(rtype, rdata string) RData {
 			}
 			exchange, err := ParseName(parts[1])
 			if err == nil {
-				return &RDataMX{
-					Preference: uint16(pref),
-					Exchange:   exchange,
-				}
+				rd := rdataMXPool.Get().(*RDataMX)
+				rd.Preference = uint16(pref)
+				rd.Exchange = exchange
+				return rd
 			}
 		}
 	case "TXT":
@@ -202,15 +214,15 @@ func parseSOARData(rdata string) RData {
 	if !ok {
 		return nil
 	}
-	return &RDataSOA{
-		MName:   mname,
-		RName:   rname,
-		Serial:  uint32(serial),
-		Refresh: uint32(refresh),
-		Retry:   uint32(retry),
-		Expire:  uint32(expire),
-		Minimum: uint32(minimum),
-	}
+	rd := rdataSOAPool.Get().(*RDataSOA)
+	rd.MName = mname
+	rd.RName = rname
+	rd.Serial = uint32(serial)
+	rd.Refresh = uint32(refresh)
+	rd.Retry = uint32(retry)
+	rd.Expire = uint32(expire)
+	rd.Minimum = uint32(minimum)
+	return rd
 }
 
 // parseSRVRData parses SRV RData: "priority weight port target"
@@ -235,12 +247,12 @@ func parseSRVRData(rdata string) RData {
 	if err != nil {
 		return nil
 	}
-	return &RDataSRV{
-		Priority: uint16(priority),
-		Weight:   uint16(weight),
-		Port:     uint16(port),
-		Target:   target,
-	}
+	rd := rdataSRVPool.Get().(*RDataSRV)
+	rd.Priority = uint16(priority)
+	rd.Weight = uint16(weight)
+	rd.Port = uint16(port)
+	rd.Target = target
+	return rd
 }
 
 // parseCAARData parses CAA RData: "flags tag value"
@@ -274,7 +286,9 @@ func parseTXTRData(rdata string) RData {
 			stringsToPack = fields
 		}
 	}
-	return &RDataTXT{Strings: splitCharacterStrings(stringsToPack)}
+	rd := rdataTXTPool.Get().(*RDataTXT)
+	rd.Strings = splitCharacterStrings(stringsToPack)
+	return rd
 }
 
 func splitCharacterStrings(fields []string) []string {

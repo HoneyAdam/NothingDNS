@@ -73,7 +73,7 @@ func releaseWireNameBuffer(wire []byte) {
 func acquireName() *Name {
 	n := namePool.Get().(*Name)
 	n.wire = nil
-	n.stringCache = ""
+	n.stringCache.Store(nil)
 	return n
 }
 

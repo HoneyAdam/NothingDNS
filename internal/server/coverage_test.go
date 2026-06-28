@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/protocol"
 	"io"
 	"math/big"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 // mustParseName is a helper that panics on parse failure.
