@@ -13,15 +13,11 @@ import (
 
 // ---------------------------------------------------------------------------
 // client.go:451-452 - healthCheckLoop ticker fires
-// The Client healthCheckLoop uses a hardcoded 30s ticker. We run a real
-// server so that checkHealth() completes within the tick and then cancel.
-// This test takes ~31s to complete.
+// The Client healthCheckLoop uses the configured health check interval. We run
+// a real server so that checkHealth() completes within the tick and then cancel.
 // ---------------------------------------------------------------------------
 
 func TestClient_HealthCheckLoop_TickerFires(t *testing.T) {
-	if testing.Short() {
-		t.Skip("requires 30s health check interval")
-	}
 	// Start a UDP server that responds to queries
 	addr, cleanup := startUDPMockServer2(t, func(conn *net.UDPConn, data []byte, remote *net.UDPAddr) {
 		if len(data) < 2 {
@@ -35,33 +31,19 @@ func TestClient_HealthCheckLoop_TickerFires(t *testing.T) {
 	defer cleanup()
 
 	config := Config{
-		Servers:  []string{addr},
-		Strategy: "random",
-		Timeout:  2 * time.Second,
+		Servers:     []string{addr},
+		Strategy:    "random",
+		Timeout:     2 * time.Second,
+		HealthCheck: 10 * time.Millisecond,
 	}
 	client, err := NewClient(config)
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
+	defer client.Close()
 
-	// Wait for the 30s ticker to fire at least once.
-	// We wait a bit longer than 30s to ensure the ticker fires.
-	waitCh := make(chan struct{})
-	go func() {
-		time.Sleep(31 * time.Second)
-		close(waitCh)
-	}()
-
-	select {
-	case <-waitCh:
-		// Ticker should have fired by now
-	case <-time.After(35 * time.Second):
-		t.Fatal("timed out waiting for health check ticker to fire")
-	}
-
-	if err := client.Close(); err != nil {
-		t.Fatalf("close failed: %v", err)
-	}
+	// Wait long enough for the configured ticker to fire at least once.
+	time.Sleep(50 * time.Millisecond)
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +90,7 @@ func TestClient_QueryTCP_SendLengthZeroDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	defer ln.Close()
 
 	go func() {
 		for {

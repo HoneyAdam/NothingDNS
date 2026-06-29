@@ -769,11 +769,12 @@ func TestLoadBalancerCheckHealthWithAnycast(t *testing.T) {
 				AnycastIP:   "192.0.2.1",
 				HealthCheck: "30s",
 				Backends: []AnycastBackendConfig{
-					{PhysicalIP: "10.0.1.1", Port: 53, Region: "us-east-1", Zone: "a", Weight: 50},
+					{PhysicalIP: "127.0.0.1", Port: 1, Region: "us-east-1", Zone: "a", Weight: 50},
 				},
 			},
 		},
 		Strategy:        "random",
+		Timeout:         10 * time.Millisecond,
 		HealthCheck:     30 * time.Second,
 		FailoverTimeout: 5 * time.Second,
 	}
