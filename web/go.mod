@@ -1,3 +1,3 @@
 module github.com/nothingdns/nothingdns/web
 
-go 1.26.0
+go 1.26.4
