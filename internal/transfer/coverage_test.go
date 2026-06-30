@@ -13,9 +13,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/util"
-	"github.com/nothingdns/nothingdns/internal/zone"
 	"io"
 	"math/big"
 	"net"
@@ -25,6 +22,10 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
+	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
 // ---------------------------------------------------------------------------

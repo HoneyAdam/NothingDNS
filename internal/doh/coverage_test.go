@@ -5,14 +5,21 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/server"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/server"
 )
+
+// unsafeName constructs a protocol.Name without validation. Use only in tests
+// that intentionally exercise pack-time name validation failures.
+func unsafeName(labels []string, fqdn bool) *protocol.Name {
+	return protocol.NewUnsafeName(labels, fqdn)
+}
 
 // TestDoHPOST_BodyExceedsMaxSize tests that handlePOST rejects bodies
 // above MaxDNSMessageSize instead of silently truncating them.
@@ -56,7 +63,7 @@ func TestDoHResponseWriter_PackError(t *testing.T) {
 			},
 			Questions: []*protocol.Question{
 				{
-					Name:   &protocol.Name{Labels: []string{longLabel, "com"}, FQDN: true},
+					Name:   unsafeName([]string{longLabel, "com"}, true),
 					QType:  protocol.TypeA,
 					QClass: protocol.ClassIN,
 				},

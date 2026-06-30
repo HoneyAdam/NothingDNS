@@ -1090,8 +1090,8 @@ func TestRDataTXTStringWithSpecialChars(t *testing.T) {
 
 func TestNameEqualEdgeCase(t *testing.T) {
 	// Both nil names
-	n1 := &Name{Labels: nil, FQDN: true}
-	n2 := &Name{Labels: nil, FQDN: true}
+	n1 := NewName(nil, true)
+	n2 := NewName(nil, true)
 	if !n1.Equal(n2) {
 		t.Error("Two nil-label names should be equal")
 	}
@@ -2899,7 +2899,7 @@ func TestMessagePackAnswerLabelTooLong(t *testing.T) {
 	for i := range longLabel {
 		longLabel[i] = 'a'
 	}
-	badName := NewName([]string{string(longLabel)}, true)
+	badName := unsafeName([]string{string(longLabel)}, true)
 
 	msg.AddAnswer(&ResourceRecord{
 		Name:  badName,
@@ -2932,7 +2932,7 @@ func TestMessagePackAuthorityLabelTooLong(t *testing.T) {
 	for i := range longLabel {
 		longLabel[i] = 'a'
 	}
-	badName := NewName([]string{string(longLabel)}, true)
+	badName := unsafeName([]string{string(longLabel)}, true)
 
 	msg.AddAuthority(&ResourceRecord{
 		Name:  badName,
@@ -2965,7 +2965,7 @@ func TestMessagePackAdditionalLabelTooLong(t *testing.T) {
 	for i := range longLabel {
 		longLabel[i] = 'a'
 	}
-	badName := NewName([]string{string(longLabel)}, true)
+	badName := unsafeName([]string{string(longLabel)}, true)
 
 	msg.AddAdditional(&ResourceRecord{
 		Name:  badName,
@@ -2995,7 +2995,7 @@ func TestMessagePackQuestionLabelTooLong(t *testing.T) {
 	for i := range longLabel {
 		longLabel[i] = 'a'
 	}
-	badName := NewName([]string{string(longLabel)}, true)
+	badName := unsafeName([]string{string(longLabel)}, true)
 
 	// Manually add the question with the bad name
 	msg.Questions = append(msg.Questions, &Question{

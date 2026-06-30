@@ -371,11 +371,11 @@ func (s *IXFRServer) generateIncrementalIXFR(z *zone.Zone, clientSerial uint32) 
 func (s *IXFRServer) createSOAWithSerial(soa *zone.SOARecord, origin *protocol.Name, serial uint32) *protocol.ResourceRecord {
 	mname, merr := protocol.ParseName(soa.MName)
 	if merr != nil {
-		mname = &protocol.Name{Labels: []string{}, FQDN: true}
+		mname = protocol.NewName([]string{}, true)
 	}
 	rname, rerr := protocol.ParseName(soa.RName)
 	if rerr != nil {
-		rname = &protocol.Name{Labels: []string{}, FQDN: true}
+		rname = protocol.NewName([]string{}, true)
 	}
 
 	soaData := &protocol.RDataSOA{

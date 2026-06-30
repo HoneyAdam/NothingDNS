@@ -761,7 +761,7 @@ func (c *Client) checkHealth() {
 	// matching trivial to spoof for any in-path attacker that can
 	// see the source-port-randomised UDP socket.
 	rootQuestion := &protocol.Question{
-		Name:   &protocol.Name{Labels: []string{}, FQDN: true},
+		Name:   protocol.NewName([]string{}, true),
 		QType:  protocol.TypeNS,
 		QClass: protocol.ClassIN,
 	}

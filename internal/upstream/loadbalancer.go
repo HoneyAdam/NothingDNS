@@ -878,7 +878,7 @@ func (lb *LoadBalancer) healthCheckLoop(ctx context.Context) {
 // response trivially spoofable for any in-path attacker that saw one).
 func (lb *LoadBalancer) checkHealth() {
 	rootQuestion := &protocol.Question{
-		Name:   &protocol.Name{Labels: []string{}, FQDN: true},
+		Name:   protocol.NewName([]string{}, true),
 		QType:  protocol.TypeNS,
 		QClass: protocol.ClassIN,
 	}

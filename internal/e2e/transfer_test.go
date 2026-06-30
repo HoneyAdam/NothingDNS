@@ -285,8 +285,8 @@ func TestIXFRServerWithTCPServer(t *testing.T) {
 				Class: protocol.ClassIN,
 				TTL:   3600,
 				Data: &protocol.RDataSOA{
-					MName:   &protocol.Name{Labels: []string{"ns", "ixfr", "test"}, FQDN: true},
-					RName:   &protocol.Name{Labels: []string{"admin", "ixfr", "test"}, FQDN: true},
+					MName:   mustName(t, "ns.ixfr.test."),
+					RName:   mustName(t, "admin.ixfr.test."),
 					Serial:  100, // Same as server serial
 					Refresh: 3600,
 					Retry:   600,

@@ -799,3 +799,19 @@ func must[T any](v T, err error) T {
 	}
 	return v
 }
+
+// unsafeName constructs a Name without validation. Use only in tests that
+// intentionally exercise pack-time validation/error paths.
+func unsafeName(labels []string, fqdn bool) *Name {
+	wire := make([]byte, 0, MaxNameLength)
+	for _, label := range labels {
+		wire = append(wire, byte(len(label)))
+		for i := 0; i < len(label); i++ {
+			wire = append(wire, toLower(label[i]))
+		}
+	}
+	if fqdn || len(labels) == 0 {
+		wire = append(wire, 0)
+	}
+	return &Name{wire: wire}
+}

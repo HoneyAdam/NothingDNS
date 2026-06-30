@@ -109,12 +109,12 @@ func (r *RDataMX) Copy() RData {
 	}
 	var exchange *Name
 	if r.Exchange != nil {
-		exchange = NewName(r.Exchange.Labels, r.Exchange.FQDN)
+		exchange = r.Exchange.Copy()
 	}
-	return &RDataMX{
-		Preference: r.Preference,
-		Exchange:   exchange,
-	}
+	copyR := rdataMXPool.Get().(*RDataMX)
+	copyR.Preference = r.Preference
+	copyR.Exchange = exchange
+	return copyR
 }
 
 // ============================================================================
@@ -224,7 +224,9 @@ func (r *RDataTXT) Copy() RData {
 	if r == nil {
 		return nil
 	}
-	strings := make([]string, len(r.Strings))
-	copy(strings, r.Strings)
-	return &RDataTXT{Strings: strings}
+	stringsCopy := make([]string, len(r.Strings))
+	copy(stringsCopy, r.Strings)
+	copyR := rdataTXTPool.Get().(*RDataTXT)
+	copyR.Strings = stringsCopy
+	return copyR
 }

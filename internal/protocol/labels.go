@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 )
 
 // Label compression constants.
@@ -35,21 +36,89 @@ var (
 	ErrInvalidWireData = errors.New("invalid wire format data")
 )
 
-// Name represents a DNS domain name as a sequence of labels.
+// Name represents a DNS domain name in canonical wire format.
 type Name struct {
-	// Labels contains the labels in normal order (e.g., ["www", "example", "com"]).
-	// The root label (empty string) is implicit and not stored.
-	Labels []string
-	// FQDN indicates if the name is fully qualified (ends with root).
-	FQDN bool
+	// wire contains the canonical lowercase, uncompressed wire-format name,
+	// including the terminating root label.
+	wire []byte
+	// stringCache memoizes String() for request-path callers that repeatedly
+	// stringify the same unpacked name. Must be cleared on every pool reuse.
+	// Uses atomic.Pointer for safe concurrent access.
+	stringCache atomic.Pointer[string]
 }
 
 // NewName creates a Name from a slice of labels.
 func NewName(labels []string, fqdn bool) *Name {
-	// Make a copy of the labels
-	l := make([]string, len(labels))
-	copy(l, labels)
-	return &Name{Labels: l, FQDN: fqdn}
+	name := acquireName()
+	name.wire = canonicalWireFromLabels(labels, fqdn)
+	return name
+}
+
+// Copy creates a deep copy of the Name.
+func (n *Name) Copy() *Name {
+	if n == nil {
+		return nil
+	}
+	copyName := acquireName()
+	copyName.wire = append(acquireWireNameBuffer(), n.wire...)
+	return copyName
+}
+
+// NewUnsafeName constructs a Name without validation. It exists to support
+// tests that intentionally exercise pack-time validation failures.
+func NewUnsafeName(labels []string, fqdn bool) *Name {
+	name := acquireName()
+	name.wire = canonicalWireFromLabels(labels, fqdn)
+	return name
+}
+
+// CanonicalWire returns the canonical lowercase wire-format name.
+func (n *Name) CanonicalWire() []byte {
+	if n == nil {
+		return []byte{0}
+	}
+	canonical := make([]byte, len(n.wire))
+	for i, b := range n.wire {
+		if b >= 'A' && b <= 'Z' {
+			canonical[i] = b + ('a' - 'A')
+		} else {
+			canonical[i] = b
+		}
+	}
+	return canonical
+}
+
+// LabelsSlice returns a copy-compatible view of the labels.
+// Compatibility helper during migration away from direct field-based cloning.
+func (n *Name) LabelsSlice() []string {
+	if n == nil {
+		return nil
+	}
+	return labelsFromWire(n.wire)
+}
+
+// ForEachLabel iterates labels in left-to-right order.
+func (n *Name) ForEachLabel(fn func(label string) bool) {
+	if n == nil || fn == nil {
+		return
+	}
+	forEachWireLabel(n.wire, func(label []byte) bool {
+		return fn(string(label))
+	})
+}
+
+// Release returns the Name and its label-slice backing storage to internal pools.
+// After Release the Name must not be used again.
+func (n *Name) Release() {
+	if n == nil {
+		return
+	}
+	if n.wire != nil {
+		releaseWireNameBuffer(n.wire)
+		n.wire = nil
+	}
+	n.stringCache.Store(nil)
+	namePool.Put(n)
 }
 
 // ParseName parses a domain name string into a Name struct.
@@ -62,7 +131,9 @@ func ParseName(s string) (*Name, error) {
 
 	// Root domain
 	if s == "" {
-		return &Name{Labels: []string{}, FQDN: fqdn}, nil
+		name := acquireName()
+		name.wire = append(acquireWireNameBuffer(), 0)
+		return name, nil
 	}
 
 	// Split into labels
@@ -79,7 +150,9 @@ func ParseName(s string) (*Name, error) {
 		}
 	}
 
-	return &Name{Labels: labels, FQDN: fqdn}, nil
+	name := acquireName()
+	name.wire = canonicalWireFromLabels(labels, fqdn)
+	return name, nil
 }
 
 // String returns the domain name as a string.
@@ -87,10 +160,11 @@ func (n *Name) String() string {
 	if n == nil {
 		return "."
 	}
-	result := strings.Join(n.Labels, ".")
-	if n.FQDN {
-		result += "."
+	if p := n.stringCache.Load(); p != nil {
+		return *p
 	}
+	result := presentationFromWire(n.wire)
+	n.stringCache.Store(&result)
 	return result
 }
 
@@ -99,7 +173,7 @@ func (n *Name) IsRoot() bool {
 	if n == nil {
 		return true
 	}
-	return len(n.Labels) == 0
+	return len(n.wire) == 1 && n.wire[0] == 0
 }
 
 // IsWildcard returns true if this is a wildcard name (starts with *).
@@ -107,7 +181,7 @@ func (n *Name) IsWildcard() bool {
 	if n == nil {
 		return false
 	}
-	return len(n.Labels) > 0 && n.Labels[0] == "*"
+	return len(n.wire) >= 2 && n.wire[0] == 1 && n.wire[1] == '*'
 }
 
 // HasPrefix returns true if the name has the given prefix labels.
@@ -115,15 +189,24 @@ func (n *Name) HasPrefix(prefix []string) bool {
 	if n == nil {
 		return len(prefix) == 0
 	}
-	if len(prefix) > len(n.Labels) {
+	labels := labelsFromWire(n.wire)
+	if len(prefix) > len(labels) {
 		return false
 	}
 	for i, label := range prefix {
-		if !strings.EqualFold(label, n.Labels[i]) {
+		if !strings.EqualFold(label, labels[i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// HasPrefixName returns true if the name has the given prefix name.
+func (n *Name) HasPrefixName(prefix *Name) bool {
+	if prefix == nil {
+		return true
+	}
+	return n.HasPrefix(prefix.LabelsSlice())
 }
 
 // HasSuffix returns true if the name has the given suffix labels.
@@ -131,16 +214,25 @@ func (n *Name) HasSuffix(suffix []string) bool {
 	if n == nil {
 		return len(suffix) == 0
 	}
-	if len(suffix) > len(n.Labels) {
+	labels := labelsFromWire(n.wire)
+	if len(suffix) > len(labels) {
 		return false
 	}
-	offset := len(n.Labels) - len(suffix)
+	offset := len(labels) - len(suffix)
 	for i, label := range suffix {
-		if !strings.EqualFold(label, n.Labels[offset+i]) {
+		if !strings.EqualFold(label, labels[offset+i]) {
 			return false
 		}
 	}
 	return true
+}
+
+// HasSuffixName returns true if the name has the given suffix name.
+func (n *Name) HasSuffixName(suffix *Name) bool {
+	if suffix == nil {
+		return true
+	}
+	return n.HasSuffix(suffix.LabelsSlice())
 }
 
 // Equal returns true if the names are equal (case-insensitive).
@@ -148,15 +240,17 @@ func (n *Name) Equal(other *Name) bool {
 	if n == nil || other == nil {
 		return false
 	}
-	if len(n.Labels) != len(other.Labels) {
+	labelsA := labelsFromWire(n.wire)
+	labelsB := labelsFromWire(other.wire)
+	if len(labelsA) != len(labelsB) {
 		return false
 	}
-	for i, label := range n.Labels {
-		if !strings.EqualFold(label, other.Labels[i]) {
+	for i := range labelsA {
+		if !strings.EqualFold(labelsA[i], labelsB[i]) {
 			return false
 		}
 	}
-	return n.FQDN == other.FQDN
+	return true
 }
 
 // WireLength returns the length of the name in wire format.
@@ -164,12 +258,7 @@ func (n *Name) WireLength() int {
 	if n == nil {
 		return 1
 	}
-	length := 0
-	for _, label := range n.Labels {
-		length += 1 + len(label) // length byte + label data
-	}
-	length++ // terminating zero
-	return length
+	return len(n.wire)
 }
 
 func validateNameLabels(labels []string) error {
@@ -184,6 +273,44 @@ func validateNameLabels(labels []string) error {
 		}
 	}
 	return nil
+}
+
+func validateWireName(wire []byte) error {
+	if len(wire) == 0 {
+		return nil
+	}
+	if len(wire) > MaxNameLength {
+		return ErrNameTooLong
+	}
+	labelCount := 0
+	nameLen := 0
+	for i := 0; i < len(wire); {
+		labelLen := int(wire[i])
+		nameLen += 1
+		i++
+		if labelLen == 0 {
+			if i != len(wire) {
+				return ErrInvalidWireData
+			}
+			return nil
+		}
+		if labelLen > MaxLabelLength {
+			return ErrLabelTooLong
+		}
+		if i+labelLen > len(wire) {
+			return ErrBufferTooSmall
+		}
+		nameLen += labelLen
+		if nameLen > MaxNameLength {
+			return ErrNameTooLong
+		}
+		labelCount++
+		if labelCount > maxLabels {
+			return ErrNameTooLong
+		}
+		i += labelLen
+	}
+	return ErrInvalidWireData
 }
 
 // ValidateLabel validates a single label.
@@ -233,92 +360,77 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 		buf[offset] = 0
 		return 1, nil
 	}
-	if err := validateNameLabels(name.Labels); err != nil {
+	if err := validateWireName(name.wire); err != nil {
 		return 0, err
 	}
+	if compression == nil {
+		if offset+len(name.wire) > len(buf) {
+			return 0, ErrBufferTooSmall
+		}
+		for i, b := range name.wire {
+			buf[offset+i] = toLower(b)
+		}
+		return len(name.wire), nil
+	}
 
-	startOffset := offset
 	originalOffset := offset
-
-	if compression != nil && len(name.Labels) > 0 {
-		// Build the full lowercase name once. Sub-suffixes are derived by
-		// slicing this single string, avoiding repeated strings.Join calls.
-		fullName := strings.ToLower(strings.Join(name.Labels, "."))
-
-		// Pre-compute cumulative byte offsets for each suffix start position.
-		// suffixStarts[i] is the byte index in fullName where label[i] begins.
-		// For labels ["www","example","com"] → offsets [0, 4, 12].
-		var suffixStarts [maxLabels]byte // stack-allocated; max 127 labels
-		pos := 0
-		for i, label := range name.Labels {
-			suffixStarts[i] = byte(pos)
-			pos += len(label) + 1 // +1 for dot separator
+	presentation := trimTrailingDot(name.String())
+	if presentation == "" {
+		if offset >= len(buf) {
+			return 0, ErrBufferTooSmall
 		}
+		buf[offset] = 0
+		return 1, nil
+	}
 
-		// Lookup phase: check all suffixes for an existing compression pointer.
-		for i := 0; i < len(name.Labels); i++ {
-			suffix := fullName[suffixStarts[i]:]
-			if ptrOffset, ok := compression[suffix]; ok && ptrOffset < PointerOffsetMask {
-				if offset+2 > len(buf) {
-					return 0, ErrBufferTooSmall
-				}
-				pointer := uint16(PointerMask<<8) | uint16(ptrOffset)
-				PutUint16(buf[offset:], pointer)
-				return offset + 2 - originalOffset, nil
+	var suffixStarts [maxLabels]byte
+	pos := 0
+	labelIndex := 0
+	for i := 0; i <= len(presentation); i++ {
+		if i == len(presentation) || presentation[i] == '.' {
+			if labelIndex >= maxLabels {
+				return 0, ErrNameTooLong
 			}
-		}
-
-		// No match: write labels and store compression entries.
-		for i, label := range name.Labels {
-			compression[fullName[suffixStarts[i]:]] = offset
-
-			labelLen := len(label)
-			if labelLen > MaxLabelLength {
-				return 0, ErrLabelTooLong
-			}
-			if offset+1+labelLen > len(buf) {
-				return 0, ErrBufferTooSmall
-			}
-
-			buf[offset] = byte(labelLen)
-			offset++
-			for j := 0; j < labelLen; j++ {
-				buf[offset] = toLower(label[j])
-				offset++
-			}
-		}
-	} else {
-		// No compression — write labels directly.
-		for _, label := range name.Labels {
-			labelLen := len(label)
-			if labelLen > MaxLabelLength {
-				return 0, ErrLabelTooLong
-			}
-			if offset+1+labelLen > len(buf) {
-				return 0, ErrBufferTooSmall
-			}
-
-			buf[offset] = byte(labelLen)
-			offset++
-			for j := 0; j < labelLen; j++ {
-				buf[offset] = toLower(label[j])
-				offset++
-			}
+			suffixStarts[labelIndex] = byte(pos)
+			labelIndex++
+			pos = i + 1
 		}
 	}
 
-	// Write terminating zero
+	for i := 0; i < labelIndex; i++ {
+		suffix := presentation[suffixStarts[i]:]
+		if ptrOffset, ok := compression[suffix]; ok && ptrOffset < PointerOffsetMask {
+			if offset+2 > len(buf) {
+				return 0, ErrBufferTooSmall
+			}
+			pointer := uint16(PointerMask<<8) | uint16(ptrOffset)
+			PutUint16(buf[offset:], pointer)
+			return offset + 2 - originalOffset, nil
+		}
+	}
+
+	wireOffset := 0
+	for i := 0; i < len(name.wire); {
+		labelLen := int(name.wire[i])
+		if labelLen == 0 {
+			break
+		}
+		suffix := presentation[suffixStarts[wireOffset]:]
+		compression[suffix] = offset
+		if offset+1+labelLen > len(buf) {
+			return 0, ErrBufferTooSmall
+		}
+		copy(buf[offset:offset+1+labelLen], name.wire[i:i+1+labelLen])
+		offset += 1 + labelLen
+		i += 1 + labelLen
+		wireOffset++
+	}
+
 	if offset >= len(buf) {
 		return 0, ErrBufferTooSmall
 	}
 	buf[offset] = 0
 	offset++
-
-	// Check total name length
-	if offset-startOffset > MaxNameLength {
-		return 0, ErrNameTooLong
-	}
-
 	return offset - originalOffset, nil
 }
 
@@ -329,83 +441,71 @@ func UnpackName(buf []byte, offset int) (*Name, int, error) {
 		return nil, 0, ErrInvalidOffset
 	}
 
-	// Pre-allocate labels slice for typical 3-label names (e.g., www.example.com)
-	labels := make([]string, 0, 4)
 	var nameLen int
 	startOffset := offset
 	ptrDepth := 0
 	ptrOffset := -1
+	wire := acquireWireNameBuffer()
 
 	for {
-		// Check bounds
 		if offset >= len(buf) {
+			releaseWireNameBuffer(wire)
 			return nil, 0, ErrBufferTooSmall
 		}
 
-		// Check for compression pointer
 		if buf[offset]&PointerMask == PointerMask {
-			// Compression pointer
 			if offset+2 > len(buf) {
+				releaseWireNameBuffer(wire)
 				return nil, 0, ErrBufferTooSmall
 			}
 
 			pointer := int(Uint16(buf[offset:]) & PointerOffsetMask)
-
-			// Validate pointer is within buffer bounds and points backward (RFC 1035)
-			if pointer >= len(buf) {
+			if pointer >= len(buf) || pointer >= offset {
+				releaseWireNameBuffer(wire)
 				return nil, 0, ErrInvalidPointer
 			}
-			if pointer >= offset {
-				return nil, 0, ErrInvalidPointer
-			}
-
-			// Check pointer chain depth to prevent infinite loops
 			if ptrDepth >= MaxPointerDepth {
+				releaseWireNameBuffer(wire)
 				return nil, 0, ErrPointerTooDeep
 			}
-
-			// Record the pointer offset for byte counting
 			if ptrOffset == -1 {
 				ptrOffset = offset + 2
 			}
-
-			// Follow the pointer
 			offset = pointer
 			ptrDepth++
 			continue
 		}
 
-		// Regular label
 		labelLen := int(buf[offset])
-
-		// Check for root (empty label)
 		if labelLen == 0 {
+			wire = append(wire, 0)
 			offset++
+			name := acquireName()
+			name.wire = wire
+			name.stringCache.Store(nil)
 			if ptrOffset > 0 {
-				return &Name{Labels: labels, FQDN: true}, ptrOffset - startOffset, nil
+				return name, ptrOffset - startOffset, nil
 			}
-			return &Name{Labels: labels, FQDN: true}, offset - startOffset, nil
+			return name, offset - startOffset, nil
 		}
 
-		// Validate label length
 		if labelLen > MaxLabelLength {
+			releaseWireNameBuffer(wire)
 			return nil, 0, ErrLabelTooLong
 		}
-
-		// Check for buffer overflow
 		if offset+1+labelLen > len(buf) {
+			releaseWireNameBuffer(wire)
 			return nil, 0, ErrBufferTooSmall
 		}
 
-		// Check total name length
 		nameLen += 1 + labelLen
-		if nameLen > MaxNameLength {
+		if nameLen > MaxNameLength || len(wire)+1+labelLen+1 > MaxNameLength {
+			releaseWireNameBuffer(wire)
 			return nil, 0, ErrNameTooLong
 		}
 
-		// Extract label - convert to string directly from buffer
-		labels = append(labels, string(buf[offset+1:offset+1+labelLen]))
-
+		wire = append(wire, byte(labelLen))
+		wire = append(wire, buf[offset+1:offset+1+labelLen]...)
 		offset += 1 + labelLen
 	}
 }
@@ -416,6 +516,74 @@ func toLower(b byte) byte {
 		return b + ('a' - 'A')
 	}
 	return b
+}
+
+func trimTrailingDot(s string) string {
+	if len(s) > 0 && s[len(s)-1] == '.' {
+		return s[:len(s)-1]
+	}
+	return s
+}
+
+func canonicalWireFromLabels(labels []string, fqdn bool) []byte {
+	_ = fqdn // all protocol names are stored in fully-qualified wire form
+	wire := acquireWireNameBuffer()
+	for _, label := range labels {
+		wire = append(wire, byte(len(label)))
+		wire = append(wire, label...)
+	}
+	wire = append(wire, 0)
+	return wire
+}
+
+func labelsFromWire(wire []byte) []string {
+	labels := make([]string, 0, maxLabels)
+	forEachWireLabel(wire, func(label []byte) bool {
+		labels = append(labels, string(label))
+		return true
+	})
+	return labels
+}
+
+func presentationFromWire(wire []byte) string {
+	if len(wire) == 0 {
+		return ""
+	}
+	if len(wire) == 1 && wire[0] == 0 {
+		return "."
+	}
+	var b strings.Builder
+	first := true
+	forEachWireLabel(wire, func(label []byte) bool {
+		if !first {
+			b.WriteByte('.')
+		}
+		b.Write(label)
+		first = false
+		return true
+	})
+	b.WriteByte('.')
+	return b.String()
+}
+
+func forEachWireLabel(wire []byte, fn func(label []byte) bool) {
+	if fn == nil {
+		return
+	}
+	for i := 0; i < len(wire); {
+		labelLen := int(wire[i])
+		i++
+		if labelLen == 0 {
+			return
+		}
+		if i+labelLen > len(wire) {
+			return
+		}
+		if !fn(wire[i : i+labelLen]) {
+			return
+		}
+		i += labelLen
+	}
 }
 
 // CanonicalWireName converts a DNS name string to canonical lowercase wire
@@ -526,10 +694,10 @@ func WireNameLength(buf []byte, offset int) (int, error) {
 func CompareNames(a, b *Name) int {
 	var aLabels, bLabels []string
 	if a != nil {
-		aLabels = a.Labels
+		aLabels = a.LabelsSlice()
 	}
 	if b != nil {
-		bLabels = b.Labels
+		bLabels = b.LabelsSlice()
 	}
 
 	// Compare from the rightmost label (TLD) to the leftmost
@@ -562,5 +730,5 @@ func IsSubdomain(child, parent *Name) bool {
 	if parent == nil {
 		return true
 	}
-	return child.HasSuffix(parent.Labels)
+	return child.HasSuffixName(parent)
 }

@@ -547,6 +547,7 @@ func (t *ObliviousTarget) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid DNS message", http.StatusBadRequest)
 		return
 	}
+	defer query.Release()
 
 	rw := &odohResponseWriter{}
 	(&server.ServeDNSWithRecovery{Handler: t.handler}).ServeDNS(rw, query)

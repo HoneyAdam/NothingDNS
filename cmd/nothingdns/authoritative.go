@@ -13,8 +13,7 @@ import (
 // It performs: delegation check → exact match → CNAME → wildcard → NXDOMAIN.
 // CNAME chasing is deferred to the caller (ServeDNS) which can resolve
 // across zones, cache, and upstream.
-func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseWriter, r *protocol.Message, q *protocol.Question) bool {
-	qname := q.Name.String()
+func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseWriter, r *protocol.Message, q *protocol.Question, qname string) bool {
 	qtype := q.QType
 
 	// Check if client wants DNSSEC (DO bit in OPT record)
@@ -107,7 +106,7 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 	// Check for a DNAME record whose owner is a suffix of the query name.
 	// If found, synthesize a CNAME response and resolve the target.
 	if dnameRec, synthTarget, found := z.FindDNAME(qname); found {
-		h.handleDNAMERecord(w, r, q, dnameRec, synthTarget)
+		h.handleDNAMERecord(w, r, q, qname, dnameRec, synthTarget)
 		return true
 	}
 
@@ -311,8 +310,7 @@ func (h *integratedHandler) addSOAAuthority(resp *protocol.Message, z *zone.Zone
 // the target, returning a complete DNS response with both DNAME and CNAME
 // records plus the resolved target answers.
 // Per RFC 6672, a DNAME at a superdomain synthesizes a CNAME for subdomains.
-func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, dnameRecord zone.Record, synthCNAMETarget string) {
-	qname := q.Name.String()
+func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, qname string, dnameRecord zone.Record, synthCNAMETarget string) {
 	qtype := q.QType
 
 	// Build the DNAME resource record
@@ -361,7 +359,7 @@ func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protoc
 	}
 	if handled, err := h.checkRPZResponseIPWithError(w, r, q, resp); handled || err != nil {
 		if err != nil {
-			h.logger.Warnf("RPZ response write failed for %s: %v", q.Name.String(), err)
+			h.logger.Warnf("RPZ response write failed for %s: %v", qname, err)
 		}
 		return
 	}

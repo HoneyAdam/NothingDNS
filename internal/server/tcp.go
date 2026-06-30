@@ -305,6 +305,7 @@ func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mute
 		atomic.AddUint64(&s.errors, 1)
 		return
 	}
+	defer msg.Release()
 
 	// Build client info
 	client := &ClientInfo{

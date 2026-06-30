@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/protocol"
 	"io"
 	"math/big"
 	"net"
@@ -17,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
 // mustParseName is a helper that panics on parse failure.
@@ -3248,7 +3249,7 @@ func TestSendSERVFAIL_ValidRequest(t *testing.T) {
 	rw := &servfailMockWriter{}
 	req := &protocol.Message{
 		Header:    protocol.Header{ID: 42},
-		Questions: []*protocol.Question{{Name: &protocol.Name{Labels: []string{"example", "com"}, FQDN: true}, QType: protocol.TypeA}},
+		Questions: []*protocol.Question{{Name: mustParseName("example.com."), QType: protocol.TypeA}},
 	}
 
 	sendSERVFAIL(rw, req)

@@ -769,7 +769,7 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 		byte(rrsig.Inception>>8), byte(rrsig.Inception),
 		byte(rrsig.KeyTag>>8), byte(rrsig.KeyTag),
 	)
-	result = append(result, protocol.CanonicalWireName(rrsig.SignerName.String())...)
+	result = append(result, rrsig.SignerName.CanonicalWire()...)
 
 	// 2. Each RR in canonical wire form, in canonical RRset order.
 	sorted := make([]*protocol.ResourceRecord, len(rrSet))
@@ -809,7 +809,7 @@ func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) ([]b
 	buf := make([]byte, 0, 512)
 
 	// 1. Canonical owner name (lowercase, wire format, no compression)
-	buf = append(buf, protocol.CanonicalWireName(rr.Name.String())...)
+	buf = append(buf, rr.Name.CanonicalWire()...)
 
 	// 2. Type (2 bytes, big-endian)
 	typeBytes := make([]byte, 2)

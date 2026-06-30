@@ -8,7 +8,7 @@ Tracks remaining performance work after the audit landed in commits
 
 ---
 
-## Baseline (after current commits)
+## Baseline (historical, after current commits)
 
 Hardware: AMD Ryzen 9 9950X3D, Go 1.26.2, Windows. Bench command:
 
@@ -28,12 +28,48 @@ go test -bench=. -benchmem -run='^$' -benchtime=500ms ./internal/...
 | `IsSubdomain` | 312 | 320 | 9 |
 | `ReverseDNS_v6` | 1453 | 1105 | 6 |
 
-At 100 k QPS the dominant residual cost is the **~37 allocations per
-inbound query** in `protocol.UnpackMessage`. About 24 of those come
-from per-record structs (Question, ResourceRecord, Name, label slices,
-RData) that aren't yet pooled. The other ~12 are label strings, which
-cannot be pooled while names are stored as `[]string` (strings are
-immutable).
+## Current protocol medians (5-run, June 2026)
+
+Hardware: AMD Ryzen 5 7430U, Linux. Bench command:
+
+```bash
+go test ./internal/protocol -run '^$' -bench . -benchmem -count 5
+```
+
+| Bench | median ns/op | median B/op | median allocs/op |
+|---|---:|---:|---:|
+| `MessagePack` | 679.7 | 64 | 4 |
+| `MessageUnpack` | 2188.0 | 1217 | 36 |
+| `MessageUnpack_Released` | 1129.0 | 249 | 12 |
+| `MessagePackUnpackRoundTrip` | 3137.0 | 1282 | 40 |
+| `PackName` | 94.48 | 16 | 1 |
+| `PackNameNoCompression` | 16.87 | 0 | 0 |
+| `UnpackName` | 222.6 | 136 | 4 |
+| `CanonicalWireName` | 69.27 | 48 | 2 |
+| `CanonicalWireName_Long` | 139.5 | 144 | 2 |
+| `ParseName` | 91.19 | 80 | 2 |
+| `HeaderPack` | 6.662 | 0 | 0 |
+| `HeaderUnpack` | 9.379 | 0 | 0 |
+
+## Comparison: historical baseline vs current medians
+
+The historical baseline and the current medians were captured on different
+hardware and OSes, so `ns/op` is not directly comparable. The allocator metrics
+are the meaningful cross-run comparison:
+
+| Bench | Historical allocs/op | Current allocs/op | Delta | Historical B/op | Current B/op | Delta |
+|---|---:|---:|---:|---:|---:|---:|
+| `MessageUnpack` (no release) | 42 | 36 | -6 (-14.3%) | 1041 | 1217 | +176 (+16.9%) |
+| `MessageUnpack_Released` | 37 | 12 | -25 (-67.6%) | 849 | 249 | -600 (-70.7%) |
+
+Interpretation:
+- The pooling work clearly landed for the released path: `MessageUnpack_Released`
+  dropped from 37 -> 12 allocs/op and 849 -> 249 B/op.
+- The unreleased path improved only modestly, as expected: pooled objects only
+  pay off fully when callers actually `Release()` the decoded message.
+- The current residual cost is no longer dominated by per-record object churn;
+  it is now concentrated in name decoding / string materialization and the
+  remaining decode-time work around `UnpackName`.
 
 ---
 

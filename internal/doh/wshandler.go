@@ -98,6 +98,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(query.Questions) == 0 {
+			query.Release()
 			continue
 		}
 
@@ -107,6 +108,7 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			query:   query,
 		}
 		h.dnsHandler.ServeDNS(rw, query)
+		query.Release()
 	}
 }
 

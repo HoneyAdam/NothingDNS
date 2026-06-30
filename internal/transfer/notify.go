@@ -89,6 +89,7 @@ func (s *NOTIFYSender) SendNOTIFY(zoneName string, serial uint32, slaveAddr stri
 	if err != nil {
 		return fmt.Errorf("unpacking NOTIFY response: %w", err)
 	}
+	defer resp.Release()
 
 	// Check response
 	if resp.Header.Flags.RCODE != protocol.RcodeSuccess {

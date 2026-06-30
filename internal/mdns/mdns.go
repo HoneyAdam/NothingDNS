@@ -401,6 +401,7 @@ func (r *Responder) handleQuery(data []byte, src *net.UDPAddr) {
 	if err != nil {
 		return
 	}
+	defer msg.Release()
 	if len(msg.Questions) == 0 {
 		return
 	}

@@ -160,7 +160,7 @@ func (m *Message) SetEDNS0(udpPayloadSize uint16, do bool) {
 	ttl := BuildEDNSTTL(0, 0, do, 0)
 
 	opt := &ResourceRecord{
-		Name:  &Name{Labels: []string{}, FQDN: true}, // Root name for OPT
+		Name:  NewName([]string{}, true), // Root name for OPT
 		Type:  TypeOPT,
 		Class: udpPayloadSize, // UDP payload size goes in Class field
 		TTL:   ttl,
@@ -238,22 +238,32 @@ func (m *Message) Release() {
 	if m == nil {
 		return
 	}
-	// Nil out element pointers so the released sub-records can be GC'd
-	// even though the slice backing array stays in the pool.
 	for i := range m.Questions {
-		m.Questions[i] = nil
+		if m.Questions[i] != nil {
+			m.Questions[i].Release()
+			m.Questions[i] = nil
+		}
 	}
 	m.Questions = m.Questions[:0]
 	for i := range m.Answers {
-		m.Answers[i] = nil
+		if m.Answers[i] != nil {
+			m.Answers[i].Release()
+			m.Answers[i] = nil
+		}
 	}
 	m.Answers = m.Answers[:0]
 	for i := range m.Authorities {
-		m.Authorities[i] = nil
+		if m.Authorities[i] != nil {
+			m.Authorities[i].Release()
+			m.Authorities[i] = nil
+		}
 	}
 	m.Authorities = m.Authorities[:0]
 	for i := range m.Additionals {
-		m.Additionals[i] = nil
+		if m.Additionals[i] != nil {
+			m.Additionals[i].Release()
+			m.Additionals[i] = nil
+		}
 	}
 	m.Additionals = m.Additionals[:0]
 	m.Header = Header{}

@@ -4,14 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/nothingdns/nothingdns/internal/auth"
-	"github.com/nothingdns/nothingdns/internal/cache"
-	"github.com/nothingdns/nothingdns/internal/cluster"
-	"github.com/nothingdns/nothingdns/internal/config"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/server"
-	"github.com/nothingdns/nothingdns/internal/transfer"
-	"github.com/nothingdns/nothingdns/internal/zone"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +12,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/cache"
+	"github.com/nothingdns/nothingdns/internal/cluster"
+	"github.com/nothingdns/nothingdns/internal/config"
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/server"
+	"github.com/nothingdns/nothingdns/internal/transfer"
+	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
 // ---------------------------------------------------------------------------

@@ -436,6 +436,7 @@ func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
 		atomic.AddUint64(&s.errors, 1)
 		return
 	}
+	defer msg.Release()
 
 	// Build client info
 	client := &ClientInfo{

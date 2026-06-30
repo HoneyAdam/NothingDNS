@@ -362,6 +362,7 @@ func (s *UDPServer) handleRequest(req *udpRequest) {
 		atomic.AddUint64(&s.errors, 1)
 		return
 	}
+	defer msg.Release()
 
 	// Build client info
 	client := &ClientInfo{

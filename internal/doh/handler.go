@@ -107,6 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid DNS message", http.StatusBadRequest)
 		return
 	}
+	defer query.Release()
 
 	// Validate query has questions
 	if len(query.Questions) == 0 {

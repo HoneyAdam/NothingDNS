@@ -24,11 +24,11 @@ func NewQuestion(name string, qtype, qclass uint16) (*Question, error) {
 		return nil, err
 	}
 
-	return &Question{
-		Name:   n,
-		QType:  qtype,
-		QClass: qclass,
-	}, nil
+	q := acquireQuestion()
+	q.Name = n
+	q.QType = qtype
+	q.QClass = qclass
+	return q, nil
 }
 
 // NewAQuestion creates a new Question for an A record query.
@@ -118,6 +118,20 @@ func (q *Question) Pack(buf []byte, offset int, compression map[string]int) (int
 	return offset - (offset - n - 4), nil
 }
 
+// Release returns the Question and any pooled children to internal pools.
+func (q *Question) Release() {
+	if q == nil {
+		return
+	}
+	if q.Name != nil {
+		q.Name.Release()
+		q.Name = nil
+	}
+	q.QType = 0
+	q.QClass = 0
+	questionPool.Put(q)
+}
+
 // Unpack deserializes a question from wire format.
 // Returns the question and the number of bytes consumed.
 func UnpackQuestion(buf []byte, offset int) (*Question, int, error) {
@@ -130,22 +144,18 @@ func UnpackQuestion(buf []byte, offset int) (*Question, int, error) {
 
 	// Check bounds for QType and QClass
 	if offset+4 > len(buf) {
+		name.Release()
 		return nil, 0, ErrBufferTooSmall
 	}
 
-	// Unpack QType
-	qtype := Uint16(buf[offset:])
+	q := acquireQuestion()
+	q.Name = name
+	q.QType = Uint16(buf[offset:])
+	offset += 2
+	q.QClass = Uint16(buf[offset:])
 	offset += 2
 
-	// Unpack QClass
-	qclass := Uint16(buf[offset:])
-	offset += 2
-
-	return &Question{
-		Name:   name,
-		QType:  qtype,
-		QClass: qclass,
-	}, offset - (offset - n - 4), nil
+	return q, offset - (offset - n - 4), nil
 }
 
 // String returns a human-readable representation of the question.
@@ -175,14 +185,14 @@ func (q *Question) Copy() *Question {
 
 	var name *Name
 	if q.Name != nil {
-		name = NewName(q.Name.Labels, q.Name.FQDN)
+		name = q.Name.Copy()
 	}
 
-	return &Question{
-		Name:   name,
-		QType:  q.QType,
-		QClass: q.QClass,
-	}
+	copyQ := acquireQuestion()
+	copyQ.Name = name
+	copyQ.QType = q.QType
+	copyQ.QClass = q.QClass
+	return copyQ
 }
 
 // IsEDNS returns true if this is an EDNS (OPT) query.

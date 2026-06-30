@@ -400,12 +400,15 @@ func TestLoadBalancer_CheckHealth_AnycastBackends(t *testing.T) {
 		},
 		udpPool:     make(map[string]*sync.Pool),
 		tcpPool:     make(map[string]*sync.Pool),
+		timeout:     10 * time.Millisecond,
 		healthCheck: 30 * time.Second,
 	}
 
 	lb.checkHealth()
-	time.Sleep(500 * time.Millisecond)
-	// Backend should be marked as failed (unreachable address)
+	_, _, failCount, _ := backend.Stats()
+	if failCount != 1 {
+		t.Fatalf("backend failCount = %d, want 1", failCount)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +640,7 @@ func newTestQuery2(id uint16) *protocol.Message {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"test", "com"}, FQDN: true},
+				Name:   mustNameP("test.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},

@@ -133,7 +133,7 @@ func TestNameEqual(t *testing.T) {
 	n1, _ := ParseName("www.example.com.")
 	n2, _ := ParseName("WWW.EXAMPLE.COM.") // Case insensitive
 	n3, _ := ParseName("example.com.")
-	n4, _ := ParseName("www.example.com") // Not FQDN
+	n4, _ := ParseName("www.example.com") // canonicalized to FQDN form
 
 	if !n1.Equal(n2) {
 		t.Error("Equal should be case insensitive")
@@ -141,8 +141,8 @@ func TestNameEqual(t *testing.T) {
 	if n1.Equal(n3) {
 		t.Error("Equal should return false for different names")
 	}
-	if n1.Equal(n4) {
-		t.Error("Equal should return false when FQDN differs")
+	if !n1.Equal(n4) {
+		t.Error("Equal should canonicalize missing trailing dot to the same protocol name")
 	}
 }
 

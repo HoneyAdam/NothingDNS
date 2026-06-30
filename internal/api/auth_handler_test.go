@@ -13,20 +13,42 @@ import (
 	"github.com/nothingdns/nothingdns/internal/config"
 )
 
+var testPasswordHashes sync.Map
+
 func newAuthStoreWithUser(t *testing.T, username, password string, role auth.Role) *auth.Store {
 	t.Helper()
 	cfg, err := auth.DefaultConfig()
 	if err != nil {
 		t.Fatalf("DefaultConfig: %v", err)
 	}
+	hash := cachedTestPasswordHash(t, password)
 	cfg.Users = []auth.User{
-		{Username: username, Password: password, Role: role},
+		{Username: username, Hash: hash, Role: role},
 	}
 	store, err := auth.NewStore(cfg)
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
 	return store
+}
+
+func cachedTestPasswordHash(t *testing.T, password string) []byte {
+	t.Helper()
+	if cached, ok := testPasswordHashes.Load(password); ok {
+		return cloneBytes(cached.([]byte))
+	}
+	hash, err := auth.HashPasswordWithError(password, nil)
+	if err != nil {
+		t.Fatalf("HashPasswordWithError: %v", err)
+	}
+	actual, _ := testPasswordHashes.LoadOrStore(password, cloneBytes(hash))
+	return cloneBytes(actual.([]byte))
+}
+
+func cloneBytes(in []byte) []byte {
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 func newServerWithAuth(store *auth.Store) *Server {

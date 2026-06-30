@@ -5,14 +5,23 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/util"
 	"io"
 	"net"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+func mustNameP(s string) *protocol.Name {
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		panic("mustNameP: " + err.Error())
+	}
+	return n
+}
 
 // ---------------------------------------------------------------------------
 // anycast.go:246 - weightedSelect fallback to last backend
@@ -1916,7 +1925,7 @@ func newTestQuery(id uint16) *protocol.Message {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"test", "com"}, FQDN: true},
+				Name:   mustNameP("test.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
@@ -2335,7 +2344,7 @@ func TestCheckHealth_UDPFailTCPSuccess(t *testing.T) {
 		resp := buildTestDNSResponse(queryID)
 		resp.Questions = []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{}, FQDN: true},
+				Name:   mustNameP("."),
 				QType:  protocol.TypeNS,
 				QClass: protocol.ClassIN,
 			},

@@ -88,7 +88,10 @@ func TestVerify0x20_Mismatch(t *testing.T) {
 }
 
 func TestVerify0x20Response(t *testing.T) {
-	name := protocol.NewName([]string{"www", "example", "com"}, true)
+	name, err := protocol.ParseName("www.example.com.")
+	if err != nil {
+		t.Fatalf("ParseName: %v", err)
+	}
 
 	// Response with matching question name
 	resp := &protocol.Message{

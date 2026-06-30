@@ -3,13 +3,14 @@ package dashboard
 import (
 	"encoding/json"
 	"errors"
-	"github.com/nothingdns/nothingdns/internal/auth"
-	"github.com/nothingdns/nothingdns/internal/zone"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/auth"
+	"github.com/nothingdns/nothingdns/internal/zone"
 )
 
 // ============================================================================

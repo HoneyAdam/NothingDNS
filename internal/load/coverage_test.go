@@ -2,13 +2,14 @@ package load
 
 import (
 	"context"
-	"github.com/nothingdns/nothingdns/internal/protocol"
-	"github.com/nothingdns/nothingdns/internal/util"
 	"io"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/protocol"
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 // ---------------------------------------------------------------------------

@@ -7,6 +7,15 @@ import (
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
+func mustName(t *testing.T, s string) *protocol.Name {
+	t.Helper()
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		t.Fatalf("ParseName(%q): %v", s, err)
+	}
+	return n
+}
+
 // ---------------------------------------------------------------------------
 // TestNewSynthesizer
 // ---------------------------------------------------------------------------
@@ -185,12 +194,12 @@ func TestShouldSynthesize(t *testing.T) {
 	}
 
 	aaaaQuestion := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}
 	aQuestion := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeA,
 		QClass: protocol.ClassIN,
 	}
@@ -212,7 +221,7 @@ func TestShouldSynthesize(t *testing.T) {
 		},
 		Answers: []*protocol.ResourceRecord{
 			{
-				Name:  protocol.NewName([]string{"example", "com"}, true),
+				Name:  mustName(t, "example.com."),
 				Type:  protocol.TypeAAAA,
 				Class: protocol.ClassIN,
 				TTL:   300,
@@ -267,7 +276,7 @@ func TestSynthesizeResponse_SkipsExcludedAddresses(t *testing.T) {
 	}
 
 	question := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}
@@ -275,7 +284,7 @@ func TestSynthesizeResponse_SkipsExcludedAddresses(t *testing.T) {
 		var addr [4]byte
 		copy(addr[:], net.ParseIP(ip).To4())
 		return &protocol.ResourceRecord{
-			Name:  protocol.NewName([]string{"example", "com"}, true),
+			Name:  mustName(t, "example.com."),
 			Type:  protocol.TypeA,
 			Class: protocol.ClassIN,
 			TTL:   300,
@@ -309,7 +318,7 @@ func TestSynthesizeResponse_SkipsMalformedAnswers(t *testing.T) {
 		t.Fatal(err)
 	}
 	question := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}
@@ -319,9 +328,9 @@ func TestSynthesizeResponse_SkipsMalformedAnswers(t *testing.T) {
 		Answers: []*protocol.ResourceRecord{
 			nil,
 			{Type: protocol.TypeA},
-			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
-			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeAAAA, Data: &protocol.RDataA{Address: addr}},
-			{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeA, TTL: 300, Data: &protocol.RDataA{Address: addr}},
+			{Name: mustName(t, "example.com."), Type: protocol.TypeA, Data: (*protocol.RDataA)(nil)},
+			{Name: mustName(t, "example.com."), Type: protocol.TypeAAAA, Data: &protocol.RDataA{Address: addr}},
+			{Name: mustName(t, "example.com."), Type: protocol.TypeA, TTL: 300, Data: &protocol.RDataA{Address: addr}},
 		},
 	}
 
@@ -344,7 +353,7 @@ func TestSynthesizeResponse(t *testing.T) {
 	}
 
 	question := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}
@@ -372,7 +381,7 @@ func TestSynthesizeResponse(t *testing.T) {
 		var addr [4]byte
 		copy(addr[:], ip)
 		rr := &protocol.ResourceRecord{
-			Name:  protocol.NewName([]string{"example", "com"}, true),
+			Name:  mustName(t, "example.com."),
 			Type:  protocol.TypeA,
 			Class: protocol.ClassIN,
 			TTL:   ttls[i],
@@ -554,7 +563,7 @@ func TestSynthesizeResponse_NilInputs(t *testing.T) {
 	}
 
 	q := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}
@@ -572,7 +581,7 @@ func TestSynthesizeResponse_NilInputs(t *testing.T) {
 func TestSynthesizerNilReceiverSafe(t *testing.T) {
 	var s *Synthesizer
 	q := &protocol.Question{
-		Name:   protocol.NewName([]string{"example", "com"}, true),
+		Name:   mustName(t, "example.com."),
 		QType:  protocol.TypeAAAA,
 		QClass: protocol.ClassIN,
 	}

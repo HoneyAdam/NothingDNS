@@ -962,7 +962,7 @@ func TestEvictPercent(t *testing.T) {
 	// Fill cache with entries
 	msg := &protocol.Message{
 		Header:    protocol.Header{ID: 1, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
-		Questions: []*protocol.Question{{Name: &protocol.Name{Labels: []string{"test", "com"}, FQDN: true}, QType: protocol.TypeA, QClass: protocol.ClassIN}},
+		Questions: []*protocol.Question{{Name: mustName("test.com."), QType: protocol.TypeA, QClass: protocol.ClassIN}},
 	}
 	for i := 0; i < 50; i++ {
 		cache.Set(fmt.Sprintf("key%d.example.com:1", i), msg, 300)
@@ -1042,9 +1042,9 @@ func TestSaveLoad_RoundTrip(t *testing.T) {
 	// Add entries
 	msg := &protocol.Message{
 		Header:    protocol.Header{ID: 1, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
-		Questions: []*protocol.Question{{Name: &protocol.Name{Labels: []string{"test", "com"}, FQDN: true}, QType: protocol.TypeA, QClass: protocol.ClassIN}},
+		Questions: []*protocol.Question{{Name: mustName("test.com."), QType: protocol.TypeA, QClass: protocol.ClassIN}},
 		Answers: []*protocol.ResourceRecord{
-			{Name: &protocol.Name{Labels: []string{"test", "com"}, FQDN: true}, Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
+			{Name: mustName("test.com."), Type: protocol.TypeA, Class: protocol.ClassIN, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
 		},
 	}
 	cache.Set("test.com:1", msg, 300)
@@ -1175,7 +1175,7 @@ func validWireMessage(t *testing.T) []byte {
 	t.Helper()
 	msg := &protocol.Message{
 		Header:    protocol.Header{ID: 1, Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
-		Questions: []*protocol.Question{{Name: &protocol.Name{Labels: []string{"test", "com"}, FQDN: true}, QType: protocol.TypeA, QClass: protocol.ClassIN}},
+		Questions: []*protocol.Question{{Name: mustName("test.com."), QType: protocol.TypeA, QClass: protocol.ClassIN}},
 	}
 	buf := make([]byte, msg.WireLength())
 	n, err := msg.Pack(buf)

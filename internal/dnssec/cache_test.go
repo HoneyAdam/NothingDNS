@@ -10,6 +10,15 @@ import (
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
+func mustName(t *testing.T, s string) *protocol.Name {
+	t.Helper()
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		t.Fatalf("ParseName(%q): %v", s, err)
+	}
+	return n
+}
+
 func TestNewValidationCache(t *testing.T) {
 	ttl := 5 * time.Minute
 	cache := NewValidationCache(ttl)
@@ -425,7 +434,7 @@ func TestRRSIGCache_SetGet(t *testing.T) {
 	cache := NewRRSIGCache(5 * time.Minute)
 
 	rrsig := &protocol.ResourceRecord{
-		Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+		Name:  mustName(t, "example.com."),
 		Type:  protocol.TypeRRSIG,
 		Class: protocol.ClassIN,
 		TTL:   300,
@@ -505,7 +514,7 @@ func TestRRSIGCache_GetExpired(t *testing.T) {
 	cache := NewRRSIGCache(1 * time.Millisecond)
 
 	rrsig := &protocol.ResourceRecord{
-		Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+		Name:  mustName(t, "example.com."),
 		Type:  protocol.TypeRRSIG,
 		Class: protocol.ClassIN,
 	}
@@ -546,7 +555,7 @@ func TestRRSIGCache_ClearRRSIG(t *testing.T) {
 	cache := NewRRSIGCache(5 * time.Minute)
 
 	rrsig := &protocol.ResourceRecord{
-		Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+		Name:  mustName(t, "example.com."),
 		Type:  protocol.TypeRRSIG,
 		Class: protocol.ClassIN,
 	}
@@ -565,13 +574,13 @@ func TestRRSIGCache_DifferentData(t *testing.T) {
 	cache := NewRRSIGCache(5 * time.Minute)
 
 	rrsig1 := &protocol.ResourceRecord{
-		Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+		Name:  mustName(t, "example.com."),
 		Type:  protocol.TypeRRSIG,
 		Class: protocol.ClassIN,
 		TTL:   300,
 	}
 	rrsig2 := &protocol.ResourceRecord{
-		Name:  &protocol.Name{Labels: []string{"example", "com"}, FQDN: true},
+		Name:  mustName(t, "example.com."),
 		Type:  protocol.TypeRRSIG,
 		Class: protocol.ClassIN,
 		TTL:   600,

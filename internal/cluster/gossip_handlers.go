@@ -74,13 +74,15 @@ func (gp *GossipProtocol) handleCacheInvalidate(msg Message, from *net.UDPAddr) 
 	}
 
 	gp.callbacksMu.RLock()
-	if gp.onCacheInvalid != nil {
+	onCacheInvalid := gp.onCacheInvalid
+	gp.callbacksMu.RUnlock()
+
+	if onCacheInvalid != nil {
 		func() {
 			defer gp.recoverCallback("cache invalidation")
-			gp.onCacheInvalid(payload.Keys)
+			onCacheInvalid(payload.Keys)
 		}()
 	}
-	gp.callbacksMu.RUnlock()
 }
 
 // ── Zone ───────────────────────────────────────────────────────────

@@ -11,6 +11,14 @@ import (
 	"github.com/nothingdns/nothingdns/internal/server"
 )
 
+func mustName(s string) *protocol.Name {
+	n, err := protocol.ParseName(s)
+	if err != nil {
+		panic("mustName: " + err.Error())
+	}
+	return n
+}
+
 // mockDNSHandler is a test DNS handler that returns a simple response.
 type mockDNSHandler struct {
 	response *protocol.Message
@@ -42,7 +50,7 @@ func createTestQuery() ([]byte, *protocol.Message) {
 		},
 		Questions: []*protocol.Question{
 			{
-				Name:   &protocol.Name{Labels: []string{"www", "example", "com"}, FQDN: true},
+				Name:   mustName("www.example.com."),
 				QType:  protocol.TypeA,
 				QClass: protocol.ClassIN,
 			},
