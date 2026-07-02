@@ -10,11 +10,14 @@ import {
 } from './record-utils';
 
 export function FormField({ label, children }: { label: string; children: ReactNode }) {
+  // Nest the control inside the <label> so the text is associated with it
+  // implicitly (clicking the label focuses the field; screen readers announce
+  // the name) — no id/htmlFor plumbing needed for these single-field rows.
   return (
-    <div className="space-y-1.5">
-      <label className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</label>
+    <label className="block space-y-1.5">
+      <span className="block text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</span>
       {children}
-    </div>
+    </label>
   );
 }
 
