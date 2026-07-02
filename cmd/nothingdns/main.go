@@ -987,6 +987,15 @@ func run() error {
 					}
 				}
 
+				// Drain dashboard/DoWS WebSocket clients before stopping the
+				// API server. These connections are hijacked off the API
+				// http.Server, so httpServer.Shutdown() does not track them;
+				// without this they are abandoned rather than gracefully
+				// closed, losing in-flight writes and leaking their goroutines.
+				if dashboardServer != nil {
+					dashboardServer.Stop()
+				}
+
 				// Stop API server
 				if apiServer != nil {
 					if err := apiServer.Stop(); err != nil {
@@ -1033,7 +1042,7 @@ func run() error {
 			case <-done:
 				logger.Info("Server shutdown complete")
 			case <-shutdownCtx.Done():
-				logger.Warnf("Server shutdown timed out after 30s")
+				logger.Warnf("Server shutdown timed out after %s", shutdownTimeout)
 			}
 
 			// Clean up PID file

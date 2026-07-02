@@ -294,10 +294,16 @@ func (s *Server) handleConfigCache(w http.ResponseWriter, r *http.Request) {
 	if req.ServeStale != nil {
 		cfg.ServeStale = *req.ServeStale
 	}
-	// \`Enabled\` has no corresponding field on cache.Config; the
-	// cache's lifecycle is owned by the manager. Accept it on input
-	// (for future symmetry) but no-op for now.
-	_ = req.Enabled
+	// The cache's on/off lifecycle is owned by the manager and fixed at
+	// startup — it cannot be toggled at runtime. Reaching this handler means
+	// the cache IS enabled (guarded above), so a request to DISABLE it can't
+	// be honored: reject it with a clear 400 instead of returning 200 while
+	// silently ignoring the change (an operator footgun). Sending the current
+	// value (enabled=true) is accepted as a no-op.
+	if req.Enabled != nil && !*req.Enabled {
+		s.writeError(w, http.StatusBadRequest, "cache cannot be disabled at runtime; set cache.enabled=false in the config file and reload")
+		return
+	}
 
 	s.cache.UpdateConfig(cfg)
 

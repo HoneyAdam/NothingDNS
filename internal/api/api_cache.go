@@ -36,7 +36,10 @@ func (s *Server) handleCacheFlush(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.cacheService.Flush(); err != nil {
-		s.writeError(w, http.StatusInternalServerError, "Cache flush failed: "+err.Error())
+		// Route the internal error through sanitizeError so file paths /
+		// panic details never leak to the client (consistent with the rest
+		// of the API); fall back to a generic message otherwise.
+		s.writeError(w, http.StatusInternalServerError, sanitizeError(err, "Cache flush failed"))
 		return
 	}
 	s.writeJSON(w, http.StatusOK, &MessageResponse{

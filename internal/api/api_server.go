@@ -19,9 +19,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := &ServerConfigResponse{
-		Version:    util.Version,
-		ListenPort: 0,  // Not available in HTTPConfig
-		LogLevel:   "", // Not available in HTTPConfig
+		Version: util.Version,
 	}
 
 	s.runtimeMu.RLock()
@@ -30,6 +28,10 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 	if configGetter != nil {
 		cfg := configGetter()
 		if cfg != nil {
+			// Real values from config — the dashboard's server-config tile
+			// showed a permanent port 0 / empty log level before this.
+			resp.ListenPort = cfg.Server.Port
+			resp.LogLevel = cfg.Logging.Level
 			resp.DNS64 = DNS64ConfigInfo{
 				Enabled:     cfg.DNS64.Enabled,
 				Prefix:      cfg.DNS64.Prefix,

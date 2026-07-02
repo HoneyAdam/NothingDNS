@@ -33,7 +33,10 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // loggingMiddleware logs every HTTP request: method, path, status, latency.
-// Logs at Info level for non-GET, Debug for GET health checks.
+// Management/API requests log at Info; health probes and the DNS query
+// transports (DoH/DoWS/ODoH/dashboard-WS) log at Debug — those carry
+// per-query traffic and would otherwise flood the log at query rate on a
+// resolver taking real DoH load.
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -42,12 +45,32 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		latency := time.Since(start)
 		status := wrapped.status
 		path := r.URL.Path
-		if path == "/health" || path == "/livez" || path == "/readyz" {
+		if s.isHotPathRequest(path) {
 			util.Debugf("%s %s %d %v", r.Method, path, status, latency)
 		} else {
 			util.Infof("%s %s %d %v", r.Method, path, status, latency)
 		}
 	})
+}
+
+// isHotPathRequest reports whether a path is a health probe or a DNS query
+// transport — i.e. request classes that arrive at traffic rate and must not
+// be logged at Info.
+func (s *Server) isHotPathRequest(path string) bool {
+	switch path {
+	case "/health", "/livez", "/readyz", "/ws":
+		return true
+	}
+	if s.config.DoHPath != "" && path == s.config.DoHPath {
+		return true
+	}
+	if s.config.DoWSPath != "" && path == s.config.DoWSPath {
+		return true
+	}
+	if s.config.ODoHPath != "" && path == s.config.ODoHPath {
+		return true
+	}
+	return false
 }
 
 // statusRecorder wraps http.ResponseWriter to capture the actual status code

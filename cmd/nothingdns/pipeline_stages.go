@@ -225,7 +225,10 @@ func nsecCacheStage(h *integratedHandler) Stage {
 func blocklistStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if h.blocklist != nil && h.blocklist.IsBlocked(q.qname) {
-			h.logger.Infof("Blocked query for %s", q.qname)
+			// Debug, not Info: blocked queries are a large fraction of traffic
+			// with ad/tracker blocklists active, so Info here floods the log at
+			// query rate. The block is still counted via RecordBlocklistBlock.
+			h.logger.Debugf("Blocked query for %s", q.qname)
 			q.blocked = true
 			if h.metrics != nil {
 				h.metrics.RecordBlocklistBlock()

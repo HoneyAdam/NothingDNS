@@ -712,10 +712,11 @@ func (s *Server) Start() error {
 	mux.HandleFunc("/api/v1/queries", s.handleQueryLog)
 	mux.HandleFunc("/api/v1/topdomains", s.handleTopDomains)
 
-	// Metrics history
-	if runtimeSnapshot.metrics != nil {
-		mux.HandleFunc("/api/v1/metrics/history", s.handleMetricsHistory)
-	}
+	// Metrics history — registered unconditionally so a disabled collector
+	// returns a clean 503 JSON (the handler null-checks and does so) instead
+	// of falling through to the SPA catch-all, which served index.html on a
+	// 200 and made the frontend show "no data" forever.
+	mux.HandleFunc("/api/v1/metrics/history", s.handleMetricsHistory)
 
 	// OpenAPI / Swagger
 	mux.HandleFunc("/api/openapi.json", s.handleOpenAPISpec)
