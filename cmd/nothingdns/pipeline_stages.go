@@ -169,6 +169,16 @@ func cacheStage(h *integratedHandler) Stage {
 					h.metrics.RecordCacheHit()
 					h.metrics.RecordResponse(entry.RCode)
 				}
+				// Prefer the stored negative message: it carries the SOA
+				// (RFC 2308 — downstream resolvers need it for their own
+				// negative TTL) and any NSEC/NSEC3 proofs. COPY — reply()
+				// mutates in place. Bare rcode fallback for legacy entries.
+				if entry.Message != nil {
+					resp := entry.Message.Copy()
+					resp.Header.Flags.RCODE = entry.RCode
+					reply(q.currentWriter, q.msg, resp)
+					return true, nil
+				}
 				sendError(q.currentWriter, q.msg, entry.RCode)
 				return true, nil
 			}
@@ -396,6 +406,13 @@ func resolverStage(h *integratedHandler) Stage {
 
 		resp.Header.ID = q.msg.Header.ID
 
+		// Validate DNSSEC on recursively-resolved answers, exactly like the
+		// upstream path — recursion without validation would silently skip
+		// the validator for every query the resolver handles.
+		if handled, _ := h.validateDNSSECResponse(ctx, q.currentWriter, q.msg, q.qname, resp); handled {
+			return true, nil
+		}
+
 		handled, err := h.applyRPZResponsePolicyWithError(w, q.msg, q.q, resp, q.qname)
 		if handled || err != nil {
 			return handled, err
@@ -437,10 +454,19 @@ func upstreamStage(h *integratedHandler) Stage {
 		var err error
 		origID := q.msg.Header.ID
 		q.msg.Header.ID = upstream.RandomTXID()
+		// When validation is on, the upstream query must request DNSSEC
+		// records (DO bit) or the answer arrives without RRSIGs and the
+		// validator rejects it as a stripped-signature downgrade. The copy
+		// keeps the client's own message (and its OPT, or lack of one)
+		// untouched for the downstream reply.
+		outMsg := q.msg
+		if h.validator != nil {
+			outMsg = withDOBit(q.msg)
+		}
 		if h.loadBalancer != nil {
-			resp, err = h.loadBalancer.Query(q.msg)
+			resp, err = h.loadBalancer.Query(outMsg)
 		} else {
-			resp, err = h.upstream.Query(q.msg)
+			resp, err = h.upstream.Query(outMsg)
 		}
 		if err != nil {
 			q.msg.Header.ID = origID
@@ -506,12 +532,11 @@ func upstreamStage(h *integratedHandler) Stage {
 			h.cache.Set(q.cacheKey, resp, ttl)
 		} else if resp.Header.Flags.RCODE == protocol.RcodeNameError ||
 			(resp.Header.Flags.RCODE == protocol.RcodeSuccess && len(resp.Answers) == 0) {
-			negTTL, hasNegTTL := negativeCacheTTL(resp)
-			if hasNegTTL {
-				h.cache.SetNegativeWithTTL(q.cacheKey, resp.Header.Flags.RCODE, negTTL)
-			} else {
-				h.cache.SetNegative(q.cacheKey, resp.Header.Flags.RCODE)
-			}
+			// Store the full message so negative cache hits can serve the
+			// SOA (RFC 2308) and any NSEC/NSEC3 proofs back to the client.
+			// negTTL==0 falls back to the cache's configured negative TTL.
+			negTTL, _ := negativeCacheTTL(resp)
+			h.cache.SetNegativeMessage(q.cacheKey, resp.Header.Flags.RCODE, resp, negTTL)
 			h.logger.Debugf("Cached negative response for %s (rcode=%d, negTTL=%d)", q.qname, resp.Header.Flags.RCODE, negTTL)
 
 			if h.nsecCache != nil && resp.Header.Flags.RCODE == protocol.RcodeNameError {
@@ -567,6 +592,46 @@ func negativeCacheTTL(resp *protocol.Message) (uint32, bool) {
 		return negTTL, true
 	}
 	return 0, false
+}
+
+// withDOBit returns msg unchanged if it already carries EDNS0 with the DO bit
+// set; otherwise it returns a shallow copy whose OPT record requests DNSSEC
+// records (RFC 4035 §3.2.1). Existing EDNS0 options (cookies, ECS) and the
+// client's advertised payload size are preserved; a client without EDNS0 gets
+// a fresh OPT on the copy only — the original message is never mutated, so
+// the downstream reply still honors what the client actually sent.
+func withDOBit(msg *protocol.Message) *protocol.Message {
+	opt := msg.GetOPT()
+	if opt != nil {
+		if h := protocol.ParseEDNS0Header(opt); h != nil && h.DO {
+			return msg
+		}
+	}
+
+	fwd := *msg
+	fwd.Additionals = make([]*protocol.ResourceRecord, 0, len(msg.Additionals)+1)
+	for _, rr := range msg.Additionals {
+		if rr == nil || rr.Type == protocol.TypeOPT {
+			continue
+		}
+		fwd.Additionals = append(fwd.Additionals, rr)
+	}
+
+	newOPT := &protocol.ResourceRecord{
+		Name:  protocol.NewName(nil, true), // OPT owner name is root
+		Type:  protocol.TypeOPT,
+		Class: 4096,
+		TTL:   protocol.BuildEDNSTTL(0, 0, true, 0),
+		Data:  &protocol.RDataOPT{},
+	}
+	if opt != nil {
+		newOPT.Class = opt.Class
+		newOPT.TTL = opt.TTL | 0x8000 // set DO, keep extended RCODE/version/Z
+		newOPT.Data = opt.Data
+	}
+	fwd.AddAdditional(newOPT) // also refreshes fwd.Header.ARCount
+
+	return &fwd
 }
 
 func sanitizePipelineResponse(resp *protocol.Message) {

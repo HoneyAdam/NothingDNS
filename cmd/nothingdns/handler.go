@@ -318,10 +318,84 @@ func reply(w server.ResponseWriter, query, response *protocol.Message) {
 	if len(response.Questions) == 0 {
 		response.Questions = query.Questions
 	}
+	scrubForClient(query, response)
 	minimizeResponse(response)
 	if _, err := w.Write(response); err != nil {
 		logErrorf("failed to write response: %v", err)
 	}
+}
+
+// scrubForClient trims a response down to what the client's EDNS0 negotiation
+// allows. A client that sent no OPT record must not get one back (RFC 6891
+// §7), and a client that did not set the DO bit must not receive DNSSEC
+// records it never asked for (RFC 4035 §3.2.2) — unless it queried those
+// types explicitly. This matters since the upstream query is upgraded to
+// DO=1 for validation, so responses carry RRSIGs regardless of what the
+// client requested.
+func scrubForClient(query, response *protocol.Message) {
+	if query == nil || response == nil {
+		return
+	}
+	clientOPT := query.GetOPT()
+
+	if clientOPT == nil && response.GetOPT() != nil {
+		filtered := make([]*protocol.ResourceRecord, 0, len(response.Additionals))
+		for _, rr := range response.Additionals {
+			if rr != nil && rr.Type == protocol.TypeOPT {
+				continue
+			}
+			filtered = append(filtered, rr)
+		}
+		response.Additionals = filtered
+	}
+
+	do := false
+	if clientOPT != nil {
+		if h := protocol.ParseEDNS0Header(clientOPT); h != nil {
+			do = h.DO
+		}
+	}
+	if !do {
+		qtype := uint16(0)
+		if len(query.Questions) > 0 && query.Questions[0] != nil {
+			qtype = query.Questions[0].QType
+		}
+		response.Answers = removeDNSSECRecords(response.Answers, qtype)
+		response.Authorities = removeDNSSECRecords(response.Authorities, qtype)
+	}
+}
+
+// removeDNSSECRecords filters out RRSIG/NSEC/NSEC3 records from a section for
+// clients that did not set the DO bit. Records whose type the client queried
+// explicitly (or a TypeANY query) are kept.
+func removeDNSSECRecords(rrs []*protocol.ResourceRecord, qtype uint16) []*protocol.ResourceRecord {
+	if len(rrs) == 0 || qtype == protocol.TypeANY {
+		return rrs
+	}
+	needsFilter := false
+	for _, rr := range rrs {
+		if rr != nil && rr.Type != qtype && isDNSSECType(rr.Type) {
+			needsFilter = true
+			break
+		}
+	}
+	if !needsFilter {
+		return rrs
+	}
+	filtered := make([]*protocol.ResourceRecord, 0, len(rrs))
+	for _, rr := range rrs {
+		if rr != nil && rr.Type != qtype && isDNSSECType(rr.Type) {
+			continue
+		}
+		filtered = append(filtered, rr)
+	}
+	return filtered
+}
+
+// isDNSSECType reports whether the record type exists purely to prove
+// signatures/denial (RFC 4035 §3.2.2's "DNSSEC RR types").
+func isDNSSECType(t uint16) bool {
+	return t == protocol.TypeRRSIG || t == protocol.TypeNSEC || t == protocol.TypeNSEC3
 }
 
 // sendError sends an error response.
@@ -394,6 +468,7 @@ func sendErrorWithEDE(w server.ResponseWriter, query *protocol.Message, rcode ui
 		// Create EDE option
 		ede := protocol.NewEDNS0ExtendedError(infoCode, extraText)
 		optRR := &protocol.ResourceRecord{
+			Name:  protocol.NewName(nil, true), // OPT owner name is root
 			Type:  protocol.TypeOPT,
 			Class: udpPayload,
 			Data: &protocol.RDataOPT{

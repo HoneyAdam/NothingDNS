@@ -191,6 +191,7 @@ func applyConfiguredViews(handler *integratedHandler, plan *viewReloadPlan, coun
 type upstreamReloadPlan struct {
 	upstreamManager *UpstreamManager
 	dnssecManager   *DNSSECManager
+	dnssecFetch     *dnssecResolverAdapter
 }
 
 func prepareUpstreamComponents(cfg *config.Config, logger *util.Logger) (*upstreamReloadPlan, error) {
@@ -198,7 +199,8 @@ func prepareUpstreamComponents(cfg *config.Config, logger *util.Logger) (*upstre
 	if err != nil {
 		return nil, err
 	}
-	nextDNSSECManager, err := NewDNSSECManager(cfg, nextUpstreamManager.Resolver(), logger)
+	nextDNSSECFetch := nextUpstreamManager.Resolver()
+	nextDNSSECManager, err := NewDNSSECManager(cfg, nextDNSSECFetch, logger)
 	if err != nil {
 		nextUpstreamManager.Stop()
 		return nil, err
@@ -206,6 +208,7 @@ func prepareUpstreamComponents(cfg *config.Config, logger *util.Logger) (*upstre
 	return &upstreamReloadPlan{
 		upstreamManager: nextUpstreamManager,
 		dnssecManager:   nextDNSSECManager,
+		dnssecFetch:     nextDNSSECFetch,
 	}, nil
 }
 
@@ -218,6 +221,11 @@ func applyUpstreamComponents(plan *upstreamReloadPlan, current *UpstreamManager,
 		handler.upstream = plan.upstreamManager.Client
 		handler.loadBalancer = plan.upstreamManager.LoadBalancer
 		handler.validator = plan.dnssecManager.Validator
+		// Preserve the iterative fetch path across hot reloads — the
+		// resolver itself is not rebuilt on SIGHUP, but the fresh
+		// validator's adapter starts without it (recursive-only setups
+		// would otherwise lose DNSSEC fetches until restart).
+		plan.dnssecFetch.SetIterative(handler.resolver)
 		handler.runtimeMu.Unlock()
 	}
 	if apiServer != nil {
@@ -439,8 +447,11 @@ func run() error {
 		logger.Infof("Metrics server listening on %s%s", cfg.Metrics.Bind, cfg.Metrics.Path)
 	}
 
-	// Initialize DNSSEC manager
-	dnssecManager, err := NewDNSSECManager(cfg, upstreamManager.Resolver(), logger)
+	// Initialize DNSSEC manager. Keep the fetch adapter: when the iterative
+	// resolver is enabled below, it becomes the validator's fetch path
+	// (mandatory in recursive-only deployments, which have no upstream).
+	dnssecFetch := upstreamManager.Resolver()
+	dnssecManager, err := NewDNSSECManager(cfg, dnssecFetch, logger)
 	if err != nil {
 		return fmt.Errorf("creating DNSSEC manager: %w", err)
 	}
@@ -691,6 +702,7 @@ func run() error {
 			EDNS0BufSize:      uint16(cfg.Resolution.EDNS0BufferSize),
 			QnameMinimization: cfg.Resolution.QnameMinimization,
 			Use0x20:           cfg.Resolution.Use0x20,
+			DNSSECOK:          cfg.DNSSEC.Enabled,
 		}
 		if cfg.Resolution.Timeout != "" {
 			if d, err := time.ParseDuration(cfg.Resolution.Timeout); err == nil {
@@ -713,6 +725,10 @@ func run() error {
 			logger.Infof("Loaded %d custom root hints from %s", len(hints), cfg.Resolution.RootHints)
 		}
 		handler.resolver = resolver.NewResolver(resolverConfig, &resolverCacheAdapter{cache: dnsCache}, resolverTransport)
+		// Route the validator's chain fetches through the iterative resolver:
+		// in recursive mode it is the authoritative fetch path (and the ONLY
+		// one when no upstream is configured).
+		dnssecFetch.SetIterative(handler.resolver)
 		logger.Info("Iterative recursive resolver enabled")
 		if resolverConfig.QnameMinimization {
 			logger.Info("QNAME minimization enabled (RFC 7816)")

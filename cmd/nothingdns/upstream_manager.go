@@ -118,9 +118,15 @@ func logManagerStopError(logger *util.Logger, component string, err error) {
 }
 
 // Resolver returns an adapter that implements the dnssec.Resolver interface.
+// With no upstream configured the adapter's upstream stays nil (a typed-nil
+// *upstream.Client in the interface would nil-panic on Query); the caller is
+// expected to wire in the iterative resolver via SetIterative for that case.
 func (m *UpstreamManager) Resolver() *dnssecResolverAdapter {
 	if m.LoadBalancer != nil {
 		return &dnssecResolverAdapter{upstream: m.LoadBalancer}
 	}
-	return &dnssecResolverAdapter{upstream: m.Client}
+	if m.Client != nil {
+		return &dnssecResolverAdapter{upstream: m.Client}
+	}
+	return &dnssecResolverAdapter{}
 }

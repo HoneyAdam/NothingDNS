@@ -24,10 +24,30 @@ type dnssecResolverAdapter struct {
 	upstream interface {
 		Query(msg *protocol.Message) (*protocol.Message, error)
 	}
+	// iterative, when set, routes the validator's chain fetches (DNSKEY/DS/
+	// NSEC3PARAM) through the iterative resolver instead of an upstream
+	// forwarder. This is the only working fetch path in recursive-only
+	// deployments, where no upstream client exists at all.
+	iterative *resolver.Resolver
+}
+
+// SetIterative wires the iterative resolver in as the fetch path. Called from
+// main after the resolver is constructed (the DNSSEC manager is built before
+// the resolver, so this cannot happen at construction time).
+func (d *dnssecResolverAdapter) SetIterative(r *resolver.Resolver) {
+	if d != nil {
+		d.iterative = r
+	}
 }
 
 // Query implements dnssec.Resolver interface
 func (d *dnssecResolverAdapter) Query(ctx context.Context, name string, qtype uint16) (*protocol.Message, error) {
+	if d.iterative != nil {
+		return d.iterative.Resolve(ctx, name, qtype)
+	}
+	if d.upstream == nil {
+		return nil, fmt.Errorf("dnssec fetch: no upstream or iterative resolver configured")
+	}
 	parsedName, err := protocol.ParseName(name)
 	if err != nil {
 		return nil, fmt.Errorf("parsing name %q: %w", name, err)
@@ -47,6 +67,11 @@ func (d *dnssecResolverAdapter) Query(ctx context.Context, name string, qtype ui
 			},
 		},
 	}
+	// The validator fetches DNSKEY/DS RRsets and needs their covering RRSIGs;
+	// upstreams only include those when the query carries EDNS0 with the DO
+	// bit set (RFC 4035 §3.2.1). Without it every chain build fails and all
+	// validated answers go Bogus.
+	msg.SetEDNS0(4096, true)
 	return d.upstream.Query(msg)
 }
 
@@ -94,6 +119,12 @@ func (a *resolverCacheAdapter) SetNegative(key string, rcode uint8) {
 
 func (a *resolverCacheAdapter) SetNegativeWithTTL(key string, rcode uint8, ttl uint32) {
 	a.cache.SetNegativeWithTTL(key, rcode, ttl)
+}
+
+// SetNegativeMessage keeps the full negative response (SOA + NSEC/NSEC3
+// denial proofs) so DNSSEC chain building can validate cached negatives.
+func (a *resolverCacheAdapter) SetNegativeMessage(key string, rcode uint8, msg *protocol.Message, ttl uint32) {
+	a.cache.SetNegativeMessage(key, rcode, msg, ttl)
 }
 
 // doqHandlerAdapter adapts a server.Handler (ServeDNS) into a quic.DoQHandler (ServeDoQ).
