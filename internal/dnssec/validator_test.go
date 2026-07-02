@@ -1211,24 +1211,27 @@ func TestBuildChainWithDelegation(t *testing.T) {
 	childDnskeyRR := &protocol.ResourceRecord{Name: childName, Type: protocol.TypeDNSKEY, Data: childDnskey}
 	childDnskeySig := makeDNSKEYRRSIG(t, "example.", childPrivKey, childDnskey, []*protocol.ResourceRecord{childDnskeyRR})
 
+	// The DS RRset lives in the parent zone, so it must carry an RRSIG by
+	// the parent's key — buildChain rejects unsigned DS RRsets as forgeable.
+	childDSRR := &protocol.ResourceRecord{
+		Name: childName,
+		Type: protocol.TypeDS,
+		Data: &protocol.RDataDS{
+			KeyTag:     childKeyTag,
+			Algorithm:  protocol.AlgorithmECDSAP256SHA256,
+			DigestType: 2,
+			Digest:     childDigest,
+		},
+	}
+	childDSSig := makeDNSKEYRRSIG(t, "com.", privKey, parentDnskey, []*protocol.ResourceRecord{childDSRR})
+
 	mock := &mockResolver{
 		responses: map[string]*protocol.Message{
 			"com.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
 				Answers: []*protocol.ResourceRecord{parentDnskeyRR, parentDnskeySig},
 			},
 			"example.|" + strconv.Itoa(int(protocol.TypeDS)): {
-				Answers: []*protocol.ResourceRecord{
-					{
-						Name: childName,
-						Type: protocol.TypeDS,
-						Data: &protocol.RDataDS{
-							KeyTag:     childKeyTag,
-							Algorithm:  protocol.AlgorithmECDSAP256SHA256,
-							DigestType: 2,
-							Digest:     childDigest,
-						},
-					},
-				},
+				Answers: []*protocol.ResourceRecord{childDSRR, childDSSig},
 			},
 			"example.|" + strconv.Itoa(int(protocol.TypeDNSKEY)): {
 				Answers: []*protocol.ResourceRecord{childDnskeyRR, childDnskeySig},
@@ -1899,12 +1902,11 @@ func TestValidateNSECExactMatchTypeMissing(t *testing.T) {
 		TypeBitMap: []uint16{protocol.TypeA, protocol.TypeNS},
 	}
 
-	// When owner == queryName, but type is NOT in bitmap
-	// Need nameInRange to return true: name > owner && name < next won't work since name==owner
-	// So this will fail at the nameInRange check first
+	// owner == queryName and the type is NOT in the bitmap: the name exists
+	// but the type doesn't — a valid NoData proof (RFC 4035 §3.1.3.1).
 	result := v.validateNSEC("a.example.com.", "a.example.com.", protocol.TypeMX, nsec)
-	if result {
-		t.Error("validateNSEC should return false when nameInRange fails (name==owner)")
+	if !result {
+		t.Error("validateNSEC should accept an exact-match NSEC whose bitmap lacks the queried type (NoData proof)")
 	}
 }
 

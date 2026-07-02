@@ -1139,8 +1139,11 @@ func TestSignRRSet_Ed25519(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// validator.go:108-135 ValidateResponse with a trust anchor that matches
-// but buildChain fails due to resolver returning error.
+// ValidateResponse with a matching trust anchor whose chain build fails on a
+// resolver (network) error. A fetch failure proves nothing about the zone's
+// signatures, so the result is INDETERMINATE — the handler still fails
+// closed (SERVFAIL), but with the right EDE and without polluting Bogus
+// telemetry on every upstream blip. Cryptographic failures remain Bogus.
 // ---------------------------------------------------------------------------
 
 func TestValidateResponse_BuildChainFails(t *testing.T) {
@@ -1188,8 +1191,8 @@ func TestValidateResponse_BuildChainFails(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when buildChain fails")
 	}
-	if result != ValidationBogus {
-		t.Errorf("expected BOGUS when buildChain fails, got %s", result)
+	if result != ValidationIndeterminate {
+		t.Errorf("expected INDETERMINATE when the chain FETCH fails (network error), got %s", result)
 	}
 }
 
@@ -1543,30 +1546,26 @@ func TestCanonicalizeRR_NameWithoutTrailingDot(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// validator.go:538-556 validateNSEC - test exact match where owner == queryName
-// and nameInRange returns false (the function returns false early).
-// This tests the exact match code path for the NSEC type bitmap check.
-// Currently at 66.7% because the HasType check is rarely reached.
-// We need owner == queryName to be true, but also nameInRange to return true.
-// Since nameInRange checks name > owner && name < next, and owner == queryName,
-// nameInRange will return false. So the HasType check is unreachable with
-// current logic. Test what we can: the nameInRange returning false case.
+// validateNSEC exact match: owner == queryName means the NAME exists and the
+// NSEC is a NoData proof (RFC 4035 §3.1.3.1) — valid exactly when the queried
+// type is absent from the bitmap. (Historical note: this test used to pin a
+// bug where the strict range check ran before the bitmap branch, making it
+// unreachable and rejecting every valid NoData proof.)
 // ---------------------------------------------------------------------------
 
 func TestValidateNSEC_ExactMatchOwnerEqualsQueryName(t *testing.T) {
 	v := NewValidator(DefaultValidatorConfig(), nil, nil)
 
-	// When owner == queryName, nameInRange returns false because name > owner is false
 	nextDomain, _ := protocol.ParseName("z.example.com.")
 	nsec := &protocol.RDataNSEC{
 		NextDomain: nextDomain,
 		TypeBitMap: []uint16{protocol.TypeA, protocol.TypeNS},
 	}
 
-	// owner == queryName, nameInRange returns false
+	// owner == queryName and MX absent from the bitmap: valid NoData proof
 	result := v.validateNSEC("a.example.com.", "a.example.com.", protocol.TypeMX, nsec)
-	if result {
-		t.Error("validateNSEC should return false when nameInRange fails for exact match")
+	if !result {
+		t.Error("validateNSEC should accept an exact-match NSEC whose bitmap lacks the queried type (NoData proof)")
 	}
 }
 

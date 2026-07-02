@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -195,6 +196,16 @@ func (v *Validator) ValidateResponse(ctx context.Context, msg *protocol.Message,
 	// Build validation chain from anchor to query name
 	chain, insecure, err := v.buildChain(ctx, anchor, remaining)
 	if err != nil {
+		// A chain FETCH failure (network/upstream, not crypto) proves
+		// nothing about the zone: return Indeterminate, not Bogus. The
+		// caller still fails closed (SERVFAIL) — treating it as Bogus
+		// would only mislabel the EDE and pollute Bogus metrics/logs on
+		// every transient upstream blip. Actual verification failures
+		// (bad self-signature, unsigned DS, denial-proof gaps) stay Bogus.
+		var fetchErr *chainFetchError
+		if errors.As(err, &fetchErr) {
+			return ValidationIndeterminate, fmt.Errorf("building validation chain: %w", err)
+		}
 		return ValidationBogus, fmt.Errorf("building validation chain: %w", err)
 	}
 
@@ -216,6 +227,17 @@ func (v *Validator) ValidateResponse(ctx context.Context, msg *protocol.Message,
 	result := v.validateMessage(ctx, msg, queryName, chain)
 	return result, nil
 }
+
+// chainFetchError marks a chain-build failure caused by the FETCH of
+// DNSKEY/DS material (network, upstream, resolver), as opposed to a
+// cryptographic verification failure. ValidateResponse maps it to
+// Indeterminate instead of Bogus.
+type chainFetchError struct {
+	err error
+}
+
+func (e *chainFetchError) Error() string { return e.err.Error() }
+func (e *chainFetchError) Unwrap() error { return e.err }
 
 // chainLink represents one link in the validation chain.
 type chainLink struct {
@@ -247,7 +269,7 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 	// Fetch DNSKEY (+ its RRSIGs) for the trust anchor zone and validate.
 	dnsKeys, dnskeySigs, err := v.fetchDNSKEYAndSigs(ctx, currentZone)
 	if err != nil {
-		return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", currentZone, err)
+		return nil, false, &chainFetchError{err: fmt.Errorf("fetching DNSKEY for %s: %w", currentZone, err)}
 	}
 
 	// The anchor authenticates the KSK; the KSK's self-signature over the whole
@@ -272,10 +294,17 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 		nsec3Param: nsec3Param,
 	})
 
-	// Build chain through remaining labels
-	for i := 0; i < len(remaining); i++ {
-		childLabels := remaining[i:]
-		childZone := joinLabels(childLabels)
+	// Build chain through remaining labels, walking from the anchor DOWN
+	// toward the query name. `remaining` is leaf-first ([example com] for
+	// example.com. under the root anchor), so iterate it from the END: the
+	// suffix slice remaining[i:] is the next child zone (com., then
+	// example.com.). Walking leaf-first instead would append links out of
+	// order, and validateMessage — which authenticates the answer with the
+	// LAST link's keys — would check example.com.'s signatures against
+	// com.'s DNSKEYs and mark every correctly-signed answer Bogus.
+	for i := len(remaining) - 1; i >= 0; i-- {
+		childZone := joinLabels(remaining[i:])
+		parentLink := chain[len(chain)-1]
 
 		// Check depth limit
 		if len(chain) >= v.config.MaxDelegationDepth {
@@ -285,7 +314,7 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 		// Fetch DS records for child zone
 		dsRecords, dsMsg, err := v.fetchDS(ctx, childZone)
 		if err != nil {
-			return nil, false, fmt.Errorf("fetching DS for %s: %w", childZone, err)
+			return nil, false, &chainFetchError{err: fmt.Errorf("fetching DS for %s: %w", childZone, err)}
 		}
 
 		if len(dsRecords) == 0 {
@@ -308,10 +337,19 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 			break
 		}
 
+		// The DS RRset itself lives in (and is signed by) the PARENT zone.
+		// Its RRSIG must validate under the parent's already-authenticated
+		// DNSKEYs, or an on-path attacker could substitute a DS matching a
+		// forged child KSK and mint a fully "Secure" fake chain — the digest
+		// match in keysMatchingDS alone authenticates nothing.
+		if !v.verifyDSRRSIG(dsMsg, dsRecords, parentLink.dnsKeys) {
+			return nil, false, fmt.Errorf("DS RRset for %s not signed by parent zone %s", childZone, parentLink.zone)
+		}
+
 		// Fetch DNSKEY (+ its RRSIGs) for the child zone.
 		childKeys, childSigs, err := v.fetchDNSKEYAndSigs(ctx, childZone)
 		if err != nil {
-			return nil, false, fmt.Errorf("fetching DNSKEY for %s: %w", childZone, err)
+			return nil, false, &chainFetchError{err: fmt.Errorf("fetching DNSKEY for %s: %w", childZone, err)}
 		}
 
 		// The DS authenticates the child's KSK; the KSK's self-signature over
@@ -503,6 +541,28 @@ func (v *Validator) verifyDNSKEYSelfSignature(keys, sigs, trustedKSKs []*protoco
 			continue
 		}
 		if v.validateRRSIG(keys, rrsig, trustedKSKs) {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyDSRRSIG authenticates a non-empty DS RRset against the parent zone's
+// already-validated DNSKEYs. The DS response carries the RRSIG(s) covering the
+// DS RRset in its Answer section; at least one must validate.
+func (v *Validator) verifyDSRRSIG(dsMsg *protocol.Message, dsRecords, parentKeys []*protocol.ResourceRecord) bool {
+	if dsMsg == nil || len(dsRecords) == 0 || len(parentKeys) == 0 {
+		return false
+	}
+	for _, rr := range dsMsg.Answers {
+		if rr == nil || rr.Type != protocol.TypeRRSIG {
+			continue
+		}
+		rrsig, ok := rr.Data.(*protocol.RDataRRSIG)
+		if !ok || rrsig.TypeCovered != protocol.TypeDS {
+			continue
+		}
+		if v.validateRRSIG(dsRecords, rrsig, parentKeys) {
 			return true
 		}
 	}
@@ -1279,20 +1339,19 @@ func (v *Validator) validateNSEC(owner, queryName string, qtype uint16, nsec *pr
 	queryName = strings.ToLower(queryName)
 	next := strings.ToLower(nsec.NextDomain.String())
 
-	// Check if query name is in the gap
-	if !nameInRange(queryName, owner, next) {
-		return false
-	}
-
-	// If it's an exact match, check type bitmap
+	// Exact match: the name EXISTS, so this NSEC can only prove the TYPE is
+	// absent (NoData, RFC 4035 §3.1.3.1). This must be checked before the
+	// range test — nameInRange is strict (owner < name), so an owner==query
+	// NSEC never falls "in the gap" and NoData proofs (including the
+	// owner-matching NSECs Cloudflare-style compact denial returns for DS
+	// queries) would all be rejected, turning legitimately-unsigned
+	// delegations Bogus.
 	if owner == queryName {
-		// Type should not be in the bitmap
-		if nsec.HasType(qtype) {
-			return false
-		}
+		return !nsec.HasType(qtype)
 	}
 
-	return true
+	// Otherwise the name must fall in the NSEC gap (proof of nonexistence).
+	return nameInRange(queryName, owner, next)
 }
 
 // validateNSEC3 validates an NSEC3 record for authenticated denial.
@@ -1335,26 +1394,17 @@ func (v *Validator) validateNSEC3(owner, queryName string, qtype uint16, nsec3 *
 	ownerHash := strings.ToUpper(extractNSEC3Hash(owner))
 	nextHashStr := strings.ToUpper(protocol.Base32Encode(nsec3.NextHashed))
 
-	// Check if hashed query name falls in the range [ownerHash, nextHashed)
-	if !nameInRange(hashedNameStr, ownerHash, nextHashStr) {
-		return false
+	// When the hashed query name exactly matches the owner hash, the name
+	// EXISTS and this NSEC3 can only prove the TYPE is absent (NoData,
+	// RFC 5155 §8.5). Check before the range test — nameInRange is strict
+	// (owner < name), so an exact-match NSEC3 never falls "in the gap" and
+	// valid NoData proofs would all be rejected.
+	if hashedNameStr == ownerHash {
+		return !nsec3.HasType(qtype)
 	}
 
-	// When the hashed query name exactly matches the owner hash,
-	// the NSEC3 proves that the name exists but the type may not.
-	// Per RFC 5155 §8.2, we must verify the type bitmap.
-	// If the type IS in the bitmap, the (name, type) exists → not NXDOMAIN.
-	// If the type is NOT in the bitmap, the name exists but lacks this type.
-	if hashedNameStr == ownerHash && !nsec3.HasType(qtype) {
-		// Name exists but type is absent — valid proof of NODATA/NXDOMAIN
-		return true
-	}
-	if hashedNameStr == ownerHash && nsec3.HasType(qtype) {
-		// Name and type both exist — this NSEC3 proves existence, not denial
-		return false
-	}
-
-	return true
+	// Otherwise the hashed name must fall in the NSEC3 gap (nonexistence).
+	return nameInRange(hashedNameStr, ownerHash, nextHashStr)
 }
 
 // extractNSEC3Hash extracts the hash portion from an NSEC3 owner name.
@@ -1368,22 +1418,50 @@ func extractNSEC3Hash(owner string) string {
 	return labels[0]
 }
 
+// canonicalNameCompare orders two domain names per RFC 4034 §6.1 canonical
+// ordering: compare label sequences right-to-left (most significant label
+// first), each label as a case-insensitive byte string; when one name is a
+// proper suffix of the other, the shorter (parent) sorts first. Plain string
+// comparison is NOT a substitute — it sorts "sub.a.example." after
+// "b.example." even though canonical order puts everything under "a.example."
+// before "b.example.", which would misjudge NSEC gap membership.
+func canonicalNameCompare(a, b string) int {
+	la := splitLabels(strings.ToLower(a))
+	lb := splitLabels(strings.ToLower(b))
+	for i := 1; i <= len(la) && i <= len(lb); i++ {
+		if c := strings.Compare(la[len(la)-i], lb[len(lb)-i]); c != 0 {
+			return c
+		}
+	}
+	switch {
+	case len(la) < len(lb):
+		return -1
+	case len(la) > len(lb):
+		return 1
+	default:
+		return 0
+	}
+}
+
 // nameInRange checks if a name falls between owner and next (in canonical order).
 // It handles both the normal case and NSEC wrap-around where the last record
-// in the zone has a next domain name that is lexicographically before the owner,
+// in the zone has a next domain name that is canonically before the owner,
 // meaning the range covers names from owner to the end of the zone AND from the
 // beginning of the zone up to next.
 func nameInRange(name, owner, next string) bool {
-	if owner < next {
+	ownerNext := canonicalNameCompare(owner, next)
+	nameOwner := canonicalNameCompare(name, owner)
+	nameNext := canonicalNameCompare(name, next)
+	if ownerNext < 0 {
 		// Normal case: name must be strictly between owner and next
-		return name > owner && name < next
+		return nameOwner > 0 && nameNext < 0
 	}
-	if owner > next {
+	if ownerNext > 0 {
 		// Wrap-around case: name is in range if it is after owner OR before next
-		return name > owner || name < next
+		return nameOwner > 0 || nameNext < 0
 	}
 	// owner == next: single NSEC covering entire zone; any name except owner is in range
-	return name != owner
+	return nameOwner != 0
 }
 
 // groupRecordsByRRSet groups records by name and type.
