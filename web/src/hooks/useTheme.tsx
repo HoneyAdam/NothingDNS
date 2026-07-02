@@ -20,7 +20,12 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
     return 'system';
   });
-  const [resolved, setResolved] = useState<'light' | 'dark'>('dark');
+  // Initialize from the class that theme-init.js already set pre-paint, so
+  // `resolved` is correct on the very first render (consumers like the themed
+  // Toaster would otherwise flash the wrong theme for one frame).
+  const [resolved, setResolved] = useState<'light' | 'dark'>(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark') ? 'dark' : 'light'
+  );
 
   useEffect(() => {
     const apply = (isDark: boolean) => {

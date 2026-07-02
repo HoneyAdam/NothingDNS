@@ -16,6 +16,12 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 
   const resp = await fetch(path, { ...options, headers });
 
+  // Global 401 handling — see api.ts. Expired token bounces to login.
+  if (resp.status === 401) {
+    useAuthStore.getState().clearAuth();
+    throw new Error('Session expired. Please sign in again.');
+  }
+
   if (!resp.ok) {
     const contentType = resp.headers.get('content-type');
     if (contentType?.includes('application/json')) {

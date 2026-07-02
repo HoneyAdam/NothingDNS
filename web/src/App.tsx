@@ -1,5 +1,6 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useLocation, Link } from 'react-router-dom';
 import { ThemeProvider } from '@/hooks/useTheme';
+import { useTheme } from '@/hooks/useThemeHook';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'sonner';
 import { queryClient } from '@/lib/queryClient';
@@ -7,6 +8,10 @@ import { useAuthStore } from '@/stores/authStore';
 import { useQueryStream } from '@/stores/queryStream';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Sidebar } from '@/components/layout/sidebar';
+import { ErrorBoundary } from '@/components/error-boundary';
+import { EmptyState } from '@/components/states';
+import { Button } from '@/components/ui/button';
+import { FileQuestion } from 'lucide-react';
 import { LoginPage } from '@/pages/login';
 import { lazy, Suspense, useEffect } from 'react';
 
@@ -43,6 +48,54 @@ function PageFallback() {
   );
 }
 
+function NotFoundPage() {
+  return (
+    <EmptyState
+      icon={FileQuestion}
+      title="Page not found"
+      description="The page you're looking for doesn't exist or may have moved."
+      action={
+        <Button asChild variant="outline" size="sm">
+          <Link to="/">Back to dashboard</Link>
+        </Button>
+      }
+    />
+  );
+}
+
+// RoutedContent lives inside BrowserRouter so it can read the active path and
+// key the error boundary to it — a crash on one page self-heals on navigation.
+function RoutedContent() {
+  const location = useLocation();
+  return (
+    <ErrorBoundary resetKey={location.pathname}>
+      <Suspense fallback={<PageFallback />}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/zones" element={<ZonesPage />} />
+          <Route path="/zones/:name" element={<ZoneDetailPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/about" element={<AboutPage />} />
+          <Route path="/query-log" element={<QueryLogPage />} />
+          <Route path="/top-domains" element={<TopDomainsPage />} />
+          <Route path="/blocklist" element={<BlocklistPage />} />
+          <Route path="/upstreams" element={<UpstreamsPage />} />
+          <Route path="/users" element={<UsersPage />} />
+          <Route path="/charts" element={<HistoricalChartsPage />} />
+          <Route path="/dnssec" element={<DNSSECPage />} />
+          <Route path="/cluster" element={<ClusterPage />} />
+          <Route path="/rpz" element={<RPZPage />} />
+          <Route path="/acl" element={<ACLPage />} />
+          <Route path="/geoip" element={<GeoIPPage />} />
+          <Route path="/dns64-cookies" element={<DNS64CookiesPage />} />
+          <Route path="/zone-transfer" element={<ZoneTransferPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
 function AppContent() {
   const { isAuthenticated, token } = useAuthStore();
   const pushEvent = useQueryStream((s) => s.pushEvent);
@@ -70,28 +123,7 @@ function AppContent() {
         <Sidebar connected={connected} streamError={streamError} />
         <main className="flex-1 overflow-y-auto h-screen">
           <div className="p-6 max-w-6xl mx-auto">
-            <Suspense fallback={<PageFallback />}>
-              <Routes>
-                <Route path="/" element={<DashboardPage />} />
-                <Route path="/zones" element={<ZonesPage />} />
-                <Route path="/zones/:name" element={<ZoneDetailPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                <Route path="/about" element={<AboutPage />} />
-                <Route path="/query-log" element={<QueryLogPage />} />
-                <Route path="/top-domains" element={<TopDomainsPage />} />
-                <Route path="/blocklist" element={<BlocklistPage />} />
-                <Route path="/upstreams" element={<UpstreamsPage />} />
-                <Route path="/users" element={<UsersPage />} />
-                <Route path="/charts" element={<HistoricalChartsPage />} />
-                <Route path="/dnssec" element={<DNSSECPage />} />
-                <Route path="/cluster" element={<ClusterPage />} />
-                <Route path="/rpz" element={<RPZPage />} />
-                <Route path="/acl" element={<ACLPage />} />
-                <Route path="/geoip" element={<GeoIPPage />} />
-                <Route path="/dns64-cookies" element={<DNS64CookiesPage />} />
-                <Route path="/zone-transfer" element={<ZoneTransferPage />} />
-              </Routes>
-            </Suspense>
+            <RoutedContent />
           </div>
         </main>
       </div>
@@ -99,12 +131,19 @@ function AppContent() {
   );
 }
 
+// ThemedToaster keeps sonner in sync with the app theme — a light-themed toast
+// stack over the dark UI (the default) reads as a bug.
+function ThemedToaster() {
+  const { resolved } = useTheme();
+  return <Toaster position="bottom-right" theme={resolved} richColors closeButton />;
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <AppContent />
-        <Toaster position="bottom-right" richColors closeButton />
+        <ThemedToaster />
       </ThemeProvider>
     </QueryClientProvider>
   );

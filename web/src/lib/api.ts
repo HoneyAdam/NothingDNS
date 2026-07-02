@@ -46,6 +46,14 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   if (body) opts.body = JSON.stringify(body);
   const resp = await fetch(`${API_BASE}${path}`, opts);
 
+  // Global 401 handling: a token that expired mid-session must bounce the
+  // user back to login, not surface "HTTP 401" on every page. Clearing auth
+  // flips isAuthenticated → AppContent reactively renders <LoginPage/>.
+  if (resp.status === 401) {
+    useAuthStore.getState().clearAuth();
+    throw new Error('Session expired. Please sign in again.');
+  }
+
   // Handle non-JSON responses gracefully
   const contentType = resp.headers.get('content-type');
   if (!resp.ok) {
