@@ -526,8 +526,18 @@ func EDEInfoCodeString(code uint16) string {
 		return "DNSSEC Indeterminate"
 	case EDEDNSSECBogus:
 		return "DNSSEC Bogus"
-	case EDENSECMissing:
+	case EDESignatureExpired:
 		return "Signature Expired"
+	case EDESignatureNotYetValid:
+		return "Signature Not Yet Valid"
+	case EDEDNSKEYMissing:
+		return "DNSKEY Missing"
+	case EDERRSIGsMissing:
+		return "RRSIGs Missing"
+	case EDENoZoneKeyBitSet:
+		return "No Zone Key Bit Set"
+	case EDENSECMissing:
+		return "NSEC Missing"
 	case EDECachedError:
 		return "Cached Error"
 	case EDENotReady:
@@ -553,19 +563,17 @@ func EDEInfoCodeString(code uint16) string {
 	case EDEInvalidData:
 		return "Invalid Data"
 	case EDESignatureExpiredBefore:
-		return "Signature Expired Before Valid Period"
-	case EDESignatureNotYetValid:
-		return "Signature Not Yet Valid"
+		return "Signature Expired before Valid"
 	case EDETooEarly:
-		return "DNSKEY Missing"
+		return "Too Early"
 	case EDEUnsupportedNSEC3Iter:
 		return "Unsupported NSEC3 Iterations Value"
-	case EDENoNSECRecords:
-		return "Unable to Conform to Policy"
-	case EDENoZoneKeyBitSet:
+	case EDEUnableToConformPolicy:
+		return "Unable to conform to policy"
+	case EDESynthesized:
 		return "Synthesized"
-	case EDENSECMissingCoverage:
-		return "NSEC Missing Coverage"
+	case EDEInvalidQueryType:
+		return "Invalid Query Type"
 	default:
 		return fmt.Sprintf("EDE%d", code)
 	}

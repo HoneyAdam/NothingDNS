@@ -325,7 +325,7 @@ func cnameStage(h *integratedHandler) Stage {
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDERecursiveLoop, "CNAME loop detected")
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDEOtherError, "CNAME loop detected")
 			return true, nil
 		}
 		if len(result.cnameRecords) > 0 {

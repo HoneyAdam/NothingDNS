@@ -97,45 +97,56 @@ func TestEDEPackUnpackEmpty(t *testing.T) {
 	}
 }
 
-// TestEDEInfoCodeString verifies all EDE info code names.
+// TestEDEInfoCodeString verifies all EDE info code names — and pins the
+// numeric values to the IANA "Extended DNS Error Codes" registry. These go
+// out on the wire; a shifted table (as shipped before) makes every client
+// display the wrong error ("Filtered" arrived as 12 = "NSEC Missing").
 func TestEDEInfoCodeString(t *testing.T) {
 	tests := []struct {
 		code uint16
+		iana uint16 // value assigned by the IANA registry
 		want string
 	}{
-		{EDEOtherError, "Other Error"},
-		{EDEUnsupportedDNSKEYAlgo, "Unsupported DNSKEY Algorithm"},
-		{EDEUnsupportedDSDigest, "Unsupported DS Digest Type"},
-		{EDEStaleAnswer, "Stale Answer"},
-		{EDEForgedAnswer, "Forged Answer"},
-		{EDEDNSSECIndeterminate, "DNSSEC Indeterminate"},
-		{EDEDNSSECBogus, "DNSSEC Bogus"},
-		{EDENSECMissing, "Signature Expired"},
-		{EDECachedError, "Cached Error"},
-		{EDENotReady, "Not Ready"},
-		{EDEBlocked, "Blocked"},
-		{EDECensored, "Censored"},
-		{EDEFiltered, "Filtered"},
-		{EDEProhibited, "Prohibited"},
-		{EDEStaleNXDOMAIN, "Stale NXDOMAIN Answer"},
-		{EDENotAuthoritative, "Not Authoritative"},
-		{EDENotSupported, "Not Supported"},
-		{EDENoReachableAuthority, "No Reachable Authority"},
-		{EDENetworkError, "Network Error"},
-		{EDEInvalidData, "Invalid Data"},
-		{EDESignatureExpiredBefore, "Signature Expired Before Valid Period"},
-		{EDESignatureNotYetValid, "Signature Not Yet Valid"},
-		{EDETooEarly, "DNSKEY Missing"},
-		{EDEUnsupportedNSEC3Iter, "Unsupported NSEC3 Iterations Value"},
-		{EDENoNSECRecords, "Unable to Conform to Policy"},
-		{EDENoZoneKeyBitSet, "Synthesized"},
-		{EDENSECMissingCoverage, "NSEC Missing Coverage"},
+		{EDEOtherError, 0, "Other Error"},
+		{EDEUnsupportedDNSKEYAlgo, 1, "Unsupported DNSKEY Algorithm"},
+		{EDEUnsupportedDSDigest, 2, "Unsupported DS Digest Type"},
+		{EDEStaleAnswer, 3, "Stale Answer"},
+		{EDEForgedAnswer, 4, "Forged Answer"},
+		{EDEDNSSECIndeterminate, 5, "DNSSEC Indeterminate"},
+		{EDEDNSSECBogus, 6, "DNSSEC Bogus"},
+		{EDESignatureExpired, 7, "Signature Expired"},
+		{EDESignatureNotYetValid, 8, "Signature Not Yet Valid"},
+		{EDEDNSKEYMissing, 9, "DNSKEY Missing"},
+		{EDERRSIGsMissing, 10, "RRSIGs Missing"},
+		{EDENoZoneKeyBitSet, 11, "No Zone Key Bit Set"},
+		{EDENSECMissing, 12, "NSEC Missing"},
+		{EDECachedError, 13, "Cached Error"},
+		{EDENotReady, 14, "Not Ready"},
+		{EDEBlocked, 15, "Blocked"},
+		{EDECensored, 16, "Censored"},
+		{EDEFiltered, 17, "Filtered"},
+		{EDEProhibited, 18, "Prohibited"},
+		{EDEStaleNXDOMAIN, 19, "Stale NXDOMAIN Answer"},
+		{EDENotAuthoritative, 20, "Not Authoritative"},
+		{EDENotSupported, 21, "Not Supported"},
+		{EDENoReachableAuthority, 22, "No Reachable Authority"},
+		{EDENetworkError, 23, "Network Error"},
+		{EDEInvalidData, 24, "Invalid Data"},
+		{EDESignatureExpiredBefore, 25, "Signature Expired before Valid"},
+		{EDETooEarly, 26, "Too Early"},
+		{EDEUnsupportedNSEC3Iter, 27, "Unsupported NSEC3 Iterations Value"},
+		{EDEUnableToConformPolicy, 28, "Unable to conform to policy"},
+		{EDESynthesized, 29, "Synthesized"},
+		{EDEInvalidQueryType, 30, "Invalid Query Type"},
 		// Unknown code falls back to EDExx format
-		{9999, "EDE9999"},
-		{65535, "EDE65535"},
+		{9999, 9999, "EDE9999"},
+		{65535, 65535, "EDE65535"},
 	}
 
 	for _, tt := range tests {
+		if tt.code != tt.iana {
+			t.Errorf("EDE constant for %q = %d, want IANA-assigned %d", tt.want, tt.code, tt.iana)
+		}
 		got := EDEInfoCodeString(tt.code)
 		if got != tt.want {
 			t.Errorf("EDEInfoCodeString(%d) = %q, want %q", tt.code, got, tt.want)
@@ -155,7 +166,7 @@ func TestEDEString(t *testing.T) {
 			name:      "with extra text",
 			infoCode:  EDEBlocked,
 			extraText: "domain is on blocklist",
-			want:      "Blocked (10): domain is on blocklist",
+			want:      "Blocked (15): domain is on blocklist",
 		},
 		{
 			name:      "without extra text",
@@ -173,7 +184,7 @@ func TestEDEString(t *testing.T) {
 			name:      "censored without text",
 			infoCode:  EDECensored,
 			extraText: "",
-			want:      "Censored (11)",
+			want:      "Censored (16)",
 		},
 	}
 
@@ -314,7 +325,7 @@ func TestAddExtendedError(t *testing.T) {
 		}
 
 		// Also verify the raw wire bytes
-		expectedData := []byte{0x00, 0x0D} // info code 13 big-endian
+		expectedData := []byte{0x00, 0x12} // EDEProhibited = 18 (IANA), big-endian
 		expectedData = append(expectedData, []byte("not allowed")...)
 		if !bytes.Equal(option.Data, expectedData) {
 			t.Errorf("wire data = %x, want %x", option.Data, expectedData)
