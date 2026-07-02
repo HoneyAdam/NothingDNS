@@ -31,7 +31,7 @@ export function AdvancedSettings({ config }: { config: ServerConfig }) {
         </CardContent>
       </Card>
       <Card>
-        <SectionHeader title="DNS64" description="NAT64 translation (RFC 6140)" icon={<Network className="h-4 w-4" />} />
+        <SectionHeader title="DNS64" description="NAT64 translation (RFC 6147)" icon={<Network className="h-4 w-4" />} />
         <CardContent className="space-y-1">
           <KVRow label="Enabled" value={config.DNS64?.Enabled ? 'Enabled' : 'Disabled'} />
           <KVRow label="Prefix" value={config.DNS64?.Prefix || '64:ff9b::'} mono />
@@ -71,7 +71,7 @@ export function AdvancedSettings({ config }: { config: ServerConfig }) {
         </CardContent>
       </Card>
       <Card>
-        <SectionHeader title="DSO" description="DNS Stateful Operations (RFC 1034)" icon={<Database className="h-4 w-4" />} />
+        <SectionHeader title="DSO" description="DNS Stateful Operations (RFC 8490)" icon={<Database className="h-4 w-4" />} />
         <CardContent className="space-y-1">
           <KVRow label="Enabled" value={config.DSO?.Enabled ? 'Enabled' : 'Disabled'} />
           <KVRow label="Session Timeout" value={config.DSO?.SessionTimeout || '10m'} />

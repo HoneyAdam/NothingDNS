@@ -9,6 +9,17 @@ import { useUpdateRRLConfig } from '@/hooks/useApi';
 import { type ServerConfig } from './types';
 import { Card, CardContent, SectionHeader, ReadOnlyNotice, KVRow, SaveBar } from './shared';
 
+// Parse numbers, falling back to `def` only when the input is not a number.
+// A legitimate 0 must be preserved (a plain `parse(x) || def` coerces 0 → def).
+const intOr = (x: string, def: number): number => {
+  const n = parseInt(x, 10);
+  return Number.isNaN(n) ? def : n;
+};
+const floatOr = (x: string, def: number): number => {
+  const n = parseFloat(x);
+  return Number.isNaN(n) ? def : n;
+};
+
 export function SecuritySettings({ config, onReload }: { config: ServerConfig; onReload: () => Promise<void> }) {
   const dnssec = config.DNSSEC;
   const acl = config.ACL;
@@ -39,8 +50,8 @@ export function SecuritySettings({ config, onReload }: { config: ServerConfig; o
     try {
       await updateRRL.mutateAsync({
         enabled: rrlEnabled,
-        rate: parseFloat(rrlRate) || 5,
-        burst: parseInt(rrlBurst, 10) || 20,
+        rate: floatOr(rrlRate, 5),
+        burst: intOr(rrlBurst, 20),
       });
       await onReload();
       toast.success('RRL settings saved');

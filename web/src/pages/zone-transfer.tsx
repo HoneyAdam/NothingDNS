@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
 import { api } from '@/lib/api';
 
 interface ZoneTransfer {
@@ -22,11 +23,16 @@ export function ZoneTransferPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
+    setIsLoading(true);
     api<SlaveZonesResponse>('GET', '/api/v1/zones/transfers')
-      .then((res) => setTransfers(res.slave_zones || []))
+      .then((res) => { setTransfers(res.slave_zones || []); setError(null); })
       .catch(() => setError('Failed to load zone transfer status'))
       .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => {
+    load();
   }, []);
 
   const statusBadge = (s: ZoneTransfer['status']) => {
@@ -35,6 +41,7 @@ export function ZoneTransferPage() {
       case 'syncing': return <Badge variant="warning">Syncing</Badge>;
       case 'failed': return <Badge variant="destructive">Failed</Badge>;
       case 'pending': return <Badge variant="secondary">Pending</Badge>;
+      default: return <Badge variant="secondary">{s || 'Unknown'}</Badge>;
     }
   };
 
@@ -59,7 +66,7 @@ export function ZoneTransferPage() {
           </CardContent>
         </Card>
       ) : error ? (
-        <p className="text-destructive">{error}</p>
+        <ErrorState message={error} onRetry={load} />
       ) : (
         <>
           <Card>
@@ -83,10 +90,10 @@ export function ZoneTransferPage() {
                         </div>
                         {statusBadge(t.status)}
                       </div>
-                      <div className="grid grid-cols-4 gap-4 text-sm">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                         <div>
                           <p className="text-muted-foreground">Serial</p>
-                          <p className="font-mono">{t.serial}</p>
+                          <p className="font-mono">{t.serial.toLocaleString()}</p>
                         </div>
                         <div>
                           <p className="text-muted-foreground">Last Transfer</p>
@@ -94,7 +101,7 @@ export function ZoneTransferPage() {
                         </div>
                         <div>
                           <p className="text-muted-foreground">Records</p>
-                          <p className="font-mono">{t.records}</p>
+                          <p className="font-mono">{t.records.toLocaleString()}</p>
                         </div>
                         <div>
                           <p className="text-muted-foreground">Status</p>

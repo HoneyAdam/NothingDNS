@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
 import { api } from '@/lib/api';
 
 interface GeoDNSStats {
@@ -18,11 +19,16 @@ export function GeoIPPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
+    setIsLoading(true);
     api<GeoDNSStats>('GET', '/api/v1/geoip/stats')
-      .then(setStats)
+      .then(s => { setStats(s); setError(null); })
       .catch(() => setError('Failed to load GeoDNS statistics'))
       .finally(() => setIsLoading(false));
+  };
+
+  useEffect(() => {
+    load();
   }, []);
 
   return (
@@ -46,7 +52,7 @@ export function GeoIPPage() {
           ))}
         </div>
       ) : error ? (
-        <p className="text-destructive">{error}</p>
+        <ErrorState message={error} onRetry={load} />
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-3">
@@ -116,34 +122,34 @@ export function GeoIPPage() {
               </div>
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>GeoDNS Status</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">GeoDNS Engine</span>
+                  <Badge variant={stats?.enabled ? 'success' : 'secondary'}>
+                    {stats?.enabled ? 'Enabled' : 'Disabled'}
+                  </Badge>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">MMDB Database</span>
+                  <Badge variant={stats?.mmdb_loaded ? 'success' : 'secondary'}>
+                    {stats?.mmdb_loaded ? 'Loaded' : 'Not loaded'}
+                  </Badge>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Rules Active</span>
+                  <Badge variant={(stats?.rules ?? 0) > 0 ? 'success' : 'secondary'}>{stats?.rules ?? 0} rules</Badge>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </>
       )}
-
-      <Card>
-        <CardHeader>
-          <CardTitle>GeoDNS Status</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3 text-sm">
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">GeoDNS Engine</span>
-              <Badge variant={stats?.enabled ? 'success' : 'secondary'}>
-                {stats?.enabled ? 'Enabled' : 'Disabled'}
-              </Badge>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">MMDB Database</span>
-              <Badge variant={stats?.mmdb_loaded ? 'success' : 'secondary'}>
-                {stats?.mmdb_loaded ? 'Loaded' : 'Not loaded'}
-              </Badge>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Rules Active</span>
-              <Badge variant="success">{stats?.rules ?? 0} rules</Badge>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 }

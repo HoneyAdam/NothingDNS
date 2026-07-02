@@ -3,16 +3,18 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, type UpstreamsResponse } from '@/lib/api';
+import { ErrorState } from '@/components/states';
 import { Wifi, WifiOff, Activity, RefreshCw } from 'lucide-react';
 
 export function UpstreamsPage() {
   const [data, setData] = useState<UpstreamsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const fetchUpstreams = () => {
     api<UpstreamsResponse>('GET', '/api/v1/upstreams')
-      .then(setData)
-      .catch(console.error)
+      .then((d) => { setData(d); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load upstreams'))
       .finally(() => setLoading(false));
   };
 
@@ -26,6 +28,13 @@ export function UpstreamsPage() {
     <div className="space-y-6">
       <div><h1 className="text-2xl font-bold tracking-tight">Upstreams</h1><p className="text-muted-foreground text-sm">Upstream DNS server management</p></div>
       <div className="space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-24 w-full" />)}</div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="space-y-6">
+      <div><h1 className="text-2xl font-bold tracking-tight">Upstreams</h1><p className="text-muted-foreground text-sm">Upstream DNS server health and status</p></div>
+      <ErrorState message={error} onRetry={fetchUpstreams} />
     </div>
   );
 
@@ -63,11 +72,11 @@ export function UpstreamsPage() {
                   <div className="flex items-center gap-6 text-right">
                     <div>
                       <p className="text-xs text-muted-foreground">Queries</p>
-                      <p className="text-lg font-bold">{u.queries.toLocaleString()}</p>
+                      <p className="text-lg font-bold">{(u.queries ?? 0).toLocaleString()}</p>
                     </div>
                     <div>
                       <p className="text-xs text-muted-foreground">Failed</p>
-                      <p className={`text-lg font-bold ${u.failed > 0 ? 'text-destructive' : ''}`}>{u.failed.toLocaleString()}</p>
+                      <p className={`text-lg font-bold ${u.failed > 0 ? 'text-destructive' : ''}`}>{(u.failed ?? 0).toLocaleString()}</p>
                     </div>
                   </div>
                 </div>
@@ -86,7 +95,7 @@ export function UpstreamsPage() {
         <CardContent>
           <div className="space-y-3">
             {upstreams.map((u) => {
-              const total = u.queries + u.failed;
+              const total = (u.queries ?? 0) + (u.failed ?? 0);
               return (
                 <div key={u.address} className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
@@ -96,7 +105,7 @@ export function UpstreamsPage() {
                   <div className="h-2 rounded-full bg-muted overflow-hidden">
                     <div
                       className={`h-full rounded-full transition-all ${u.healthy ? 'bg-success' : 'bg-destructive'}`}
-                      style={{ width: `${total > 0 ? Math.max((u.queries / total) * 100, 1) : 100}%` }}
+                      style={{ width: `${total > 0 ? Math.max(((u.queries ?? 0) / total) * 100, 1) : 100}%` }}
                     />
                   </div>
                 </div>

@@ -1,22 +1,29 @@
 import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
 import { api, type DNSSECStatus } from '@/lib/api';
 import { Shield, AlertTriangle, CheckCircle2, XCircle, Info } from 'lucide-react';
 
 export function DNSSECPage() {
   const [status, setStatus] = useState<DNSSECStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = () => {
+    setLoading(true);
+    api<DNSSECStatus>('GET', '/api/v1/dnssec/status')
+      .then(s => { setStatus(s); setError(''); })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load DNSSEC status'))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
-    api<DNSSECStatus>('GET', '/api/v1/dnssec/status')
-      .then(setStatus)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    load();
 
     const interval = setInterval(() => {
       api<DNSSECStatus>('GET', '/api/v1/dnssec/status')
-        .then(setStatus)
+        .then(s => { setStatus(s); setError(''); })
         .catch(() => {});
     }, 30000);
     return () => clearInterval(interval);
@@ -38,6 +45,8 @@ export function DNSSECPage() {
         <p className="text-muted-foreground text-sm">DNS Security Extensions status and configuration</p>
       </div>
 
+      {error ? <ErrorState message={error} onRetry={load} /> : (
+      <>
       {/* Status Overview */}
       <Card>
         <CardHeader>
@@ -46,7 +55,7 @@ export function DNSSECPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-6 sm:grid-cols-2">
             <StatusItem
               icon={status?.enabled ? <CheckCircle2 className="h-5 w-5 text-success" /> : <XCircle className="h-5 w-5 text-destructive" />}
               label="DNSSEC Status"
@@ -96,6 +105,8 @@ export function DNSSECPage() {
           </div>
         </CardContent>
       </Card>
+      </>
+      )}
     </div>
   );
 }

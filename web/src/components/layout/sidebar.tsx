@@ -30,6 +30,8 @@ export function Sidebar({ connected, streamError }: { connected: boolean; stream
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const { theme, setTheme } = useTheme();
+  const username = useAuthStore((s) => s.username);
+  const role = useAuthStore((s) => s.role);
   const loc = useLocation();
   const ThemeIcon = theme === 'dark' ? Moon : theme === 'light' ? Sun : Monitor;
   const streamLabel = connected ? 'Live queries' : streamError ? 'Stream offline' : 'Stream idle';
@@ -90,6 +92,19 @@ export function Sidebar({ connected, streamError }: { connected: boolean; stream
           })}
         </nav>
         <div className="border-t p-2 space-y-1">
+          {username && (
+            <div className={cn('flex items-center gap-2 px-3 py-2', collapsed && 'justify-center px-2')} title={`${username}${role ? ` (${role})` : ''}`}>
+              <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary/10 text-primary text-[11px] font-semibold uppercase shrink-0">
+                {username.charAt(0)}
+              </div>
+              {!collapsed && (
+                <div className="min-w-0 overflow-hidden">
+                  <div className="truncate text-xs font-medium">{username}</div>
+                  {role && <div className="truncate text-[11px] capitalize text-muted-foreground">{role}</div>}
+                </div>
+              )}
+            </div>
+          )}
           <div className={cn('flex items-center gap-2 px-3 py-2 text-xs', collapsed && 'justify-center px-2')} title={streamError || streamLabel}>
             {connected ? <Wifi className="h-3.5 w-3.5 text-success shrink-0" /> : <WifiOff className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
             {!collapsed && <span className={connected ? 'text-success' : 'text-muted-foreground'}>{streamLabel}</span>}

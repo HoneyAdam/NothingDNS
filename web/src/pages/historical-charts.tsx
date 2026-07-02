@@ -2,21 +2,28 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, type MetricsHistory } from '@/lib/api';
+import { ErrorState } from '@/components/states';
 import { Activity, Database, Zap } from 'lucide-react';
 
 export function HistoricalChartsPage() {
   const [data, setData] = useState<MetricsHistory | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    setLoading(true);
+    api<MetricsHistory>('GET', '/api/v1/metrics/history')
+      .then((d) => { setData(d); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load metrics history'))
+      .finally(() => setLoading(false));
+  };
 
   useEffect(() => {
-    api<MetricsHistory>('GET', '/api/v1/metrics/history')
-      .then(setData)
-      .catch(console.error)
-      .finally(() => setLoading(false));
+    load();
 
     const iv = setInterval(() => {
       api<MetricsHistory>('GET', '/api/v1/metrics/history')
-        .then(setData)
+        .then((d) => { setData(d); setError(null); })
         .catch(() => {});
     }, 30000);
     return () => clearInterval(iv);
@@ -26,6 +33,13 @@ export function HistoricalChartsPage() {
     <div className="space-y-6">
       <div><h1 className="text-2xl font-bold tracking-tight">Metrics History</h1><p className="text-muted-foreground text-sm">Time-series performance data</p></div>
       <div className="space-y-4">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-48 w-full" />)}</div>
+    </div>
+  );
+
+  if (error) return (
+    <div className="space-y-6">
+      <div><h1 className="text-2xl font-bold tracking-tight">Metrics History</h1><p className="text-muted-foreground text-sm">Time-series performance data</p></div>
+      <ErrorState message={error} onRetry={load} />
     </div>
   );
 
@@ -59,7 +73,7 @@ export function HistoricalChartsPage() {
         </CardContent></Card>
         <Card><CardContent className="p-6">
           <div className="flex items-center gap-2 mb-1"><Database className="h-4 w-4 text-chart-2" /><span className="text-xs text-muted-foreground">Peak Cache Hits</span></div>
-          <div className="text-2xl font-bold">{Math.max(...data.cache_hits).toLocaleString()}</div>
+          <div className="text-2xl font-bold">{(data.cache_hits.length ? Math.max(...data.cache_hits) : 0).toLocaleString()}</div>
         </CardContent></Card>
         <Card><CardContent className="p-6">
           <div className="flex items-center gap-2 mb-1"><Zap className="h-4 w-4 text-warning" /><span className="text-xs text-muted-foreground">Max Latency</span></div>
@@ -114,7 +128,7 @@ function BarChart({ data, max, color, timestamps }: { data: number[]; max: numbe
             style={{ height: `${Math.max((v / max) * 100, 2)}%` }}
           />
           <div className="absolute bottom-full mb-1 hidden group-hover:block bg-background border rounded px-1 text-[10px] whitespace-nowrap z-10">
-            {v.toLocaleString()}{timestamps ? ` @ ${new Date(timestamps[i] * 1000).toLocaleTimeString()}` : ''}
+            {v.toLocaleString()}{timestamps && timestamps[i] != null ? ` @ ${new Date(timestamps[i] * 1000).toLocaleTimeString()}` : ''}
           </div>
         </div>
       ))}

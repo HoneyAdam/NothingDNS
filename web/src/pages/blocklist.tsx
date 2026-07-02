@@ -5,19 +5,22 @@ import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { api, type BlocklistStatus } from '@/lib/api';
+import { ErrorState } from '@/components/states';
+import { toast } from 'sonner';
 import { Shield, Plus, RefreshCw, Wifi, WifiOff } from 'lucide-react';
 
 export function BlocklistPage() {
   const [status, setStatus] = useState<BlocklistStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [newFile, setNewFile] = useState('');
   const [toggling, setToggling] = useState(false);
 
   const fetchStatus = () => {
     api<BlocklistStatus>('GET', '/api/v1/blocklists')
-      .then(setStatus)
-      .catch(console.error)
+      .then((d) => { setStatus(d); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load blocklist status'))
       .finally(() => setLoading(false));
   };
 
@@ -33,19 +36,22 @@ export function BlocklistPage() {
     try {
       await api('POST', '/api/v1/blocklists', { file: newFile.trim() });
       setNewFile('');
+      toast.success('Blocklist file added');
       fetchStatus();
     } catch (e) {
-      console.error('Failed to add blocklist:', e);
+      toast.error(e instanceof Error ? e.message : 'Failed');
     } setAdding(false);
   };
 
   const handleToggle = async () => {
+    const target = status?.enabled ? 'disabled' : 'enabled';
     setToggling(true);
     try {
       await api('POST', '/api/v1/blocklists/toggle');
+      toast.success(`Blocklist ${target}`);
       fetchStatus();
     } catch (e) {
-      console.error('Failed to toggle blocklist:', e);
+      toast.error(e instanceof Error ? e.message : 'Failed');
     } setToggling(false);
   };
 
@@ -53,6 +59,13 @@ export function BlocklistPage() {
     <div className="space-y-6">
       <div><h1 className="text-2xl font-bold tracking-tight">Blocklist</h1><p className="text-muted-foreground text-sm">Domain blocking configuration</p></div>
       <Skeleton className="h-48 w-full rounded-xl" />
+    </div>
+  );
+
+  if (error) return (
+    <div className="space-y-6">
+      <div><h1 className="text-2xl font-bold tracking-tight">Blocklist</h1><p className="text-muted-foreground text-sm">Domain blocking management</p></div>
+      <ErrorState message={error} onRetry={fetchStatus} />
     </div>
   );
 

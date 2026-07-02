@@ -8,6 +8,13 @@ import { useUpdateCacheConfig } from '@/hooks/useApi';
 import { type ServerConfig } from './types';
 import { Card, CardContent, SectionHeader, SaveBar } from './shared';
 
+// Parse an integer, falling back to `def` only when the input is not a number.
+// A legitimate 0 must be preserved (a plain `parseInt(x) || def` coerces 0 → def).
+const intOr = (x: string, def: number): number => {
+  const n = parseInt(x, 10);
+  return Number.isNaN(n) ? def : n;
+};
+
 export function CacheSettings({ config, onReload }: { config: ServerConfig; onReload: () => Promise<void> }) {
   const cache = config.Cache;
   const updateCache = useUpdateCacheConfig();
@@ -61,18 +68,24 @@ export function CacheSettings({ config, onReload }: { config: ServerConfig; onRe
     staleGrace !== String(cache?.StaleGraceSecs ?? 86400);
 
   const handleSave = async () => {
+    const min = intOr(minTTL, 5);
+    const max = intOr(maxTTL, 86400);
+    if (min > max) {
+      toast.error('Min TTL cannot be greater than Max TTL');
+      return;
+    }
     try {
       await updateCache.mutateAsync({
         enabled: cacheEnabled,
-        size: parseInt(cacheSize) || 10000,
-        default_ttl: parseInt(defaultTTL) || 300,
-        max_ttl: parseInt(maxTTL) || 86400,
-        min_ttl: parseInt(minTTL) || 5,
-        negative_ttl: parseInt(negativeTTL) || 60,
+        size: intOr(cacheSize, 10000),
+        default_ttl: intOr(defaultTTL, 300),
+        max_ttl: max,
+        min_ttl: min,
+        negative_ttl: intOr(negativeTTL, 60),
         prefetch: prefetch,
-        prefetch_threshold: parseInt(prefetchThreshold) || 60,
+        prefetch_threshold: intOr(prefetchThreshold, 60),
         serve_stale: serveStale,
-        stale_grace_secs: parseInt(staleGrace) || 86400,
+        stale_grace_secs: intOr(staleGrace, 86400),
       });
       await onReload();
       toast.success('Cache settings saved');
@@ -93,23 +106,23 @@ export function CacheSettings({ config, onReload }: { config: ServerConfig; onRe
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Max Size</Label>
-              <Input type="number" value={cacheSize} onChange={(e) => setCacheSize(e.target.value)} />
+              <Input type="number" min="0" value={cacheSize} onChange={(e) => setCacheSize(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Default TTL (seconds)</Label>
-              <Input type="number" value={defaultTTL} onChange={(e) => setDefaultTTL(e.target.value)} />
+              <Input type="number" min="0" value={defaultTTL} onChange={(e) => setDefaultTTL(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Max TTL (seconds)</Label>
-              <Input type="number" value={maxTTL} onChange={(e) => setMaxTTL(e.target.value)} />
+              <Input type="number" min="0" value={maxTTL} onChange={(e) => setMaxTTL(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Min TTL (seconds)</Label>
-              <Input type="number" value={minTTL} onChange={(e) => setMinTTL(e.target.value)} />
+              <Input type="number" min="0" value={minTTL} onChange={(e) => setMinTTL(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Negative TTL (seconds)</Label>
-              <Input type="number" value={negativeTTL} onChange={(e) => setNegativeTTL(e.target.value)} />
+              <Input type="number" min="0" value={negativeTTL} onChange={(e) => setNegativeTTL(e.target.value)} />
             </div>
           </div>
         </CardContent>
@@ -123,7 +136,7 @@ export function CacheSettings({ config, onReload }: { config: ServerConfig; onRe
           </div>
           <div className="space-y-2">
             <Label>Prefetch Threshold (seconds)</Label>
-            <Input type="number" value={prefetchThreshold} onChange={(e) => setPrefetchThreshold(e.target.value)} disabled={!prefetch} />
+            <Input type="number" min="0" value={prefetchThreshold} onChange={(e) => setPrefetchThreshold(e.target.value)} disabled={!prefetch} />
           </div>
           <div className="flex items-center justify-between">
             <Label>Serve Stale</Label>
@@ -131,7 +144,7 @@ export function CacheSettings({ config, onReload }: { config: ServerConfig; onRe
           </div>
           <div className="space-y-2">
             <Label>Stale Grace Period (seconds)</Label>
-            <Input type="number" value={staleGrace} onChange={(e) => setStaleGrace(e.target.value)} disabled={!serveStale} />
+            <Input type="number" min="0" value={staleGrace} onChange={(e) => setStaleGrace(e.target.value)} disabled={!serveStale} />
           </div>
           <SaveBar dirty={cacheDirty} saving={updateCache.isPending} onSave={handleSave} onReset={resetCacheForm} />
         </CardContent>

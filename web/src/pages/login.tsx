@@ -17,6 +17,7 @@ type LoginValues = z.infer<typeof loginSchema>;
 
 export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const setAuth = useAuthStore((state) => state.setAuth);
 
   const {
@@ -33,6 +34,7 @@ export function LoginPage() {
   });
 
   const onSubmit = async (data: LoginValues) => {
+    setFormError(null);
     try {
       const r = await fetch('/api/v1/auth/login', {
         method: 'POST',
@@ -60,16 +62,16 @@ export function LoginPage() {
         setError('password', { message: 'Invalid credentials. Please check your username and password.' });
       } else if (r.status === 429) {
         const retryAfter = r.headers.get('Retry-After');
-        setError('password', {
-          message: retryAfter
+        setFormError(
+          retryAfter
             ? `Too many attempts. Please try again in ${retryAfter} seconds.`
             : 'Too many attempts. Please try again later.',
-        });
+        );
       } else {
-        setError('password', { message: `Connection error (${r.status}). Please try again.` });
+        setFormError(`Connection error (${r.status}). Please try again.`);
       }
     } catch {
-      setError('password', { message: 'Connection error. Please check your network.' });
+      setFormError('Connection error. Please check your network.');
     }
   };
 
@@ -87,12 +89,18 @@ export function LoginPage() {
         </div>
 
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          {formError && (
+            <div role="alert" className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              {formError}
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="username">Username</Label>
             <Input
               id="username"
               type="text"
               placeholder="Enter username"
+              autoComplete="username"
               {...register('username')}
               className={errors.username ? 'border-destructive' : ''}
               autoFocus
@@ -109,6 +117,7 @@ export function LoginPage() {
                 id="password"
                 type={showPassword ? 'text' : 'password'}
                 placeholder="Enter password"
+                autoComplete="current-password"
                 {...register('password')}
                 className={errors.password ? 'border-destructive' : ''}
               />

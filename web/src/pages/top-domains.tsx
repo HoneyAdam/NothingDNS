@@ -3,18 +3,23 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, type TopDomainsResponse } from '@/lib/api';
+import { ErrorState } from '@/components/states';
 import { TrendingUp } from 'lucide-react';
 
 export function TopDomainsPage() {
   const [data, setData] = useState<TopDomainsResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const load = () => {
+    setLoading(true);
     api<TopDomainsResponse>('GET', '/api/v1/topdomains?limit=20')
-      .then(setData)
-      .catch(console.error)
+      .then((d) => { setData(d); setError(null); })
+      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load top domains'))
       .finally(() => setLoading(false));
-  }, []);
+  };
+
+  useEffect(() => { load(); }, []);
 
   const domains = data?.domains ?? [];
 
@@ -31,6 +36,8 @@ export function TopDomainsPage() {
         <CardContent>
           {loading ? (
             <div className="space-y-3">{Array.from({ length: 10 }).map((_, i) => <Skeleton key={i} className="h-10 w-full" />)}</div>
+          ) : error ? (
+            <ErrorState message={error} onRetry={load} />
           ) : domains.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground"><p>No data available</p></div>
           ) : (
@@ -45,7 +52,7 @@ export function TopDomainsPage() {
                   <div className="w-24 h-2 rounded-full bg-muted overflow-hidden">
                     <div
                       className="h-full rounded-full bg-primary transition-all"
-                      style={{ width: `${domains.length > 0 ? (d.count / domains[0].count) * 100 : 0}%` }}
+                      style={{ width: `${(d.count / (domains[0].count || 1)) * 100}%` }}
                     />
                   </div>
                 </div>

@@ -3,8 +3,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
 import { api } from '@/lib/api';
-import { Server, Plus, RefreshCw, Trash2, Network, AlertCircle } from 'lucide-react';
+import { Server, RefreshCw, Network, AlertCircle, Info } from 'lucide-react';
 
 interface ClusterNode {
   id: string;
@@ -37,6 +38,7 @@ export function ClusterPage() {
   const [nodes, setNodes] = useState<ClusterNode[]>([]);
   const [status, setStatus] = useState<ClusterStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
   const load = async () => {
@@ -48,8 +50,9 @@ export function ClusterPage() {
       ]);
       setNodes(data.nodes || []);
       setStatus(st);
-    } catch (e) {
-      console.error(e);
+      setError('');
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to load cluster status');
     } finally {
       setLoading(false);
     }
@@ -60,14 +63,6 @@ export function ClusterPage() {
     const interval = setInterval(load, 10000);
     return () => clearInterval(interval);
   }, []);
-
-  const handleRemoveNode = async () => {
-    alert('Node removal requires configuration change and server restart. Use the Reload Config action after editing your configuration file.');
-  };
-
-  const handleJoinNode = () => {
-    alert('Adding nodes requires configuration change and server restart. Edit your configuration file to add new cluster nodes.');
-  };
 
   if (loading && nodes.length === 0) {
     return (
@@ -95,11 +90,22 @@ export function ClusterPage() {
           <Button variant="outline" size="sm" onClick={load}>
             <RefreshCw className="h-4 w-4 mr-2" /> Refresh
           </Button>
-          <Button size="sm" onClick={handleJoinNode}>
-            <Plus className="h-4 w-4 mr-2" /> Join Node
-          </Button>
         </div>
       </div>
+
+      {error ? <ErrorState message={error} onRetry={load} /> : (
+      <>
+      {/* Membership is config-driven, not editable from the dashboard */}
+      <Card className="border-border">
+        <CardContent className="p-4">
+          <div className="flex items-start gap-3">
+            <Info className="h-5 w-5 text-muted-foreground mt-0.5 shrink-0" />
+            <p className="text-sm text-muted-foreground">
+              Cluster membership is configured in the server config file and applied on restart. Add or remove nodes by editing the configuration and reloading the server.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Overview */}
       <div className="grid gap-4 md:grid-cols-4">
@@ -207,12 +213,9 @@ export function ClusterPage() {
             <div className="text-center py-12">
               <Server className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" />
               <h3 className="text-lg font-semibold mb-1">No nodes in cluster</h3>
-              <p className="text-sm text-muted-foreground mb-4">
-                Add your first node to start clustering.
+              <p className="text-sm text-muted-foreground">
+                Configure cluster nodes in the server config file and restart to start clustering.
               </p>
-              <Button onClick={handleJoinNode}>
-                <Plus className="h-4 w-4 mr-2" /> Add Node
-              </Button>
             </div>
           ) : (
             <div className="space-y-3">
@@ -222,7 +225,6 @@ export function ClusterPage() {
                   node={node}
                   selected={selectedNode === node.id}
                   onSelect={() => setSelectedNode(selectedNode === node.id ? null : node.id)}
-                  onRemove={() => handleRemoveNode()}
                 />
               ))}
             </div>
@@ -259,15 +261,16 @@ export function ClusterPage() {
           </div>
         </CardContent>
       </Card>
+      </>
+      )}
     </div>
   );
 }
 
-function NodeCard({ node, selected, onSelect, onRemove }: {
+function NodeCard({ node, selected, onSelect }: {
   node: ClusterNode;
   selected: boolean;
   onSelect: () => void;
-  onRemove: () => void;
 }) {
   const statusColors: Record<string, string> = {
     alive: 'text-success bg-success/10 border-success/20',
@@ -277,8 +280,10 @@ function NodeCard({ node, selected, onSelect, onRemove }: {
   };
 
   return (
-    <div
-      className={`border rounded-lg p-4 cursor-pointer transition-all hover:shadow-md ${
+    <button
+      type="button"
+      aria-expanded={selected}
+      className={`w-full text-left border rounded-lg p-4 transition-all hover:shadow-md ${
         selected ? 'border-primary shadow-md' : 'border-border'
       }`}
       onClick={onSelect}
@@ -300,11 +305,6 @@ function NodeCard({ node, selected, onSelect, onRemove }: {
               {node.addr}:{node.port} • v{node.version}
             </div>
           </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" className="h-8 w-8" onClick={e => { e.stopPropagation(); onRemove(); }}>
-            <Trash2 className="h-4 w-4 text-destructive" />
-          </Button>
         </div>
       </div>
 
@@ -328,6 +328,6 @@ function NodeCard({ node, selected, onSelect, onRemove }: {
           </div>
         </div>
       )}
-    </div>
+    </button>
   );
 }

@@ -40,11 +40,11 @@ export function DashboardPage() {
   }, []);
 
   const cards = [
-    { t: 'Total Queries', v: stats?.queriesTotal?.toLocaleString() ?? '-', s: `${(stats?.queriesPerSec ?? 0).toFixed(1)} q/s`, i: Activity, c: 'text-primary', b: 'bg-primary/10' },
+    { t: 'Total Queries', v: (stats?.queriesTotal ?? 0).toLocaleString(), s: `${(stats?.queriesPerSec ?? 0).toFixed(1)} q/s`, i: Activity, c: 'text-primary', b: 'bg-primary/10' },
     { t: 'Cache Hit Rate', v: `${(stats?.cacheHitRate ?? 0).toFixed(1)}%`, s: 'Efficiency', i: Database, c: 'text-success', b: 'bg-success/10' },
-    { t: 'Blocked', v: stats?.blockedQueries?.toLocaleString() ?? '-', s: 'Ad / malware', i: Shield, c: 'text-destructive', b: 'bg-destructive/10' },
-    { t: 'Zones', v: String(stats?.zoneCount ?? '-'), s: 'Active', i: Globe, c: 'text-warning', b: 'bg-warning/10' },
-    { t: 'Avg Latency', v: `${stats?.upstreamLatency ?? 0}ms`, s: 'Upstream', i: Zap, c: 'text-chart-5', b: 'bg-chart-5/10' },
+    { t: 'Blocked', v: (stats?.blockedQueries ?? 0).toLocaleString(), s: 'Ad / malware', i: Shield, c: 'text-destructive', b: 'bg-destructive/10' },
+    { t: 'Zones', v: String(stats?.zoneCount ?? 0), s: 'Active', i: Globe, c: 'text-warning', b: 'bg-warning/10' },
+    { t: 'Avg Latency', v: `${(stats?.upstreamLatency ?? 0).toFixed(1)}ms`, s: 'Upstream', i: Zap, c: 'text-chart-5', b: 'bg-chart-5/10' },
     { t: 'Uptime', v: fmtUptime(stats?.uptime ?? 0), s: 'Since start', i: Clock, c: 'text-chart-1', b: 'bg-chart-1/10' },
     { t: 'Live Feed', v: connected ? 'Connected' : 'Offline', s: 'WebSocket', i: TrendingUp, c: connected ? 'text-success' : 'text-muted-foreground', b: connected ? 'bg-success/10' : 'bg-muted' },
   ];
@@ -55,7 +55,7 @@ export function DashboardPage() {
         <div><h1 className="text-2xl font-bold tracking-tight">Dashboard</h1><p className="text-muted-foreground text-sm">Real-time DNS server monitoring</p></div>
         <div className="flex items-center gap-2">
           {lastUpdate && <span className="text-xs text-muted-foreground">Updated {lastUpdate.toLocaleTimeString()}</span>}
-          <Button variant="outline" size="sm" onClick={loadStats}><RefreshCw className="h-4 w-4" /></Button>
+          <Button variant="outline" size="sm" onClick={loadStats} aria-label="Refresh stats"><RefreshCw className="h-4 w-4" /></Button>
         </div>
       </div>
 
@@ -82,8 +82,8 @@ export function DashboardPage() {
         <CardContent><div ref={streamRef} className="space-y-1 max-h-[400px] overflow-y-auto font-mono text-xs">
           {queries.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground"><Activity className="h-8 w-8 mx-auto mb-2 opacity-50" /><p>Waiting for DNS queries...</p><p className="text-[11px] mt-1">Queries will appear here in real-time</p></div>
-          ) : queries.map((q) => (
-            <div key={`${q.domain}-${q.timestamp}`} className="flex items-center gap-3 py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors">
+          ) : queries.map((q, i) => (
+            <div key={`${q.timestamp}-${q.clientIp}-${q.queryType}-${i}`} className="flex items-center gap-3 py-1.5 px-2 rounded-md hover:bg-muted/50 transition-colors">
               <span className="text-muted-foreground w-[70px] shrink-0">{new Date(q.timestamp).toLocaleTimeString()}</span>
               <Badge variant={q.responseCode === 'NOERROR' ? 'success' : q.blocked ? 'destructive' : 'warning'} className="w-[60px] justify-center text-[10px]">{q.responseCode}</Badge>
               <span className="text-muted-foreground w-[40px]">{q.queryType}</span>

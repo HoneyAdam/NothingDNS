@@ -4,6 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
+import { ErrorState } from '@/components/states';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { toast } from 'sonner';
 import { api, type UserInfo } from '@/lib/api';
 import { UserPlus, Trash2, Shield, Clock, User } from 'lucide-react';
 
@@ -13,11 +16,15 @@ export function UsersPage() {
   const [creating, setCreating] = useState(false);
   const [newUser, setNewUser] = useState({ username: '', password: '', role: 'viewer' });
   const [error, setError] = useState('');
+  const [listError, setListError] = useState('');
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchUsers = () => {
+    setLoading(true);
     api<UserInfo[]>('GET', '/api/v1/auth/users')
-      .then(setUsers)
-      .catch(console.error)
+      .then(u => { setUsers(u); setListError(''); })
+      .catch((e: unknown) => setListError(e instanceof Error ? e.message : 'Failed to load users'))
       .finally(() => setLoading(false));
   };
 
@@ -31,20 +38,28 @@ export function UsersPage() {
     setError('');
     try {
       await api('POST', '/api/v1/auth/users', newUser);
+      toast.success(`User "${newUser.username.trim()}" created`);
       setNewUser({ username: '', password: '', role: 'viewer' });
       fetchUsers();
     } catch (e: unknown) {
-      if (e instanceof Error) setError(e.message);
+      const msg = e instanceof Error ? e.message : 'Failed to create user';
+      setError(msg);
+      toast.error(msg);
     } setCreating(false);
   };
 
-  const handleDelete = async (username: string) => {
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await api('DELETE', `/api/v1/auth/users?username=${encodeURIComponent(username)}`);
+      await api('DELETE', `/api/v1/auth/users?username=${encodeURIComponent(deleteTarget)}`);
+      toast.success(`User "${deleteTarget}" deleted`);
+      setDeleteTarget(null);
       fetchUsers();
-    } catch (e) {
-      console.error('Failed to delete user:', e);
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : 'Failed to delete user');
     }
+    setDeleting(false);
   };
 
   if (loading) return (
@@ -81,6 +96,7 @@ export function UsersPage() {
             <Input
               type="password"
               placeholder="Password"
+              autoComplete="new-password"
               value={newUser.password}
               onChange={e => setNewUser(u => ({ ...u, password: e.target.value }))}
             />
@@ -110,12 +126,15 @@ export function UsersPage() {
           <CardTitle className="text-base">User Accounts</CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {users.length === 0 ? (
+          {listError ? (
+            <div className="p-6"><ErrorState message={listError} onRetry={fetchUsers} /></div>
+          ) : users.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <User className="h-8 w-8 mx-auto mb-2 opacity-50" />
               <p>No users configured</p>
             </div>
           ) : (
+            <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="border-b bg-muted/50">
                 <tr>
@@ -142,7 +161,7 @@ export function UsersPage() {
                       {u.updated_at ? <span className="flex items-center gap-1"><Clock className="h-3 w-3" />{new Date(u.updated_at).toLocaleDateString()}</span> : '-'}
                     </td>
                     <td className="p-3">
-                      <Button variant="ghost" size="sm" onClick={() => handleDelete(u.username)} className="text-destructive hover:text-destructive">
+                      <Button variant="ghost" size="sm" aria-label={`Delete user ${u.username}`} onClick={() => setDeleteTarget(u.username)} className="text-destructive hover:text-destructive">
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </td>
@@ -150,9 +169,21 @@ export function UsersPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete user"
+        description={deleteTarget ? `Permanently delete user "${deleteTarget}"? This action cannot be undone.` : ''}
+        confirmLabel="Delete"
+        destructive
+        loading={deleting}
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

@@ -4,6 +4,9 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { toast } from 'sonner';
 import { api, type RPZStats, type RPZRule } from '@/lib/api';
 import { Shield, Plus, RefreshCw, Wifi, WifiOff, Trash2, AlertTriangle } from 'lucide-react';
 
@@ -11,19 +14,24 @@ export function RPZPage() {
   const [stats, setStats] = useState<RPZStats | null>(null);
   const [rules, setRules] = useState<RPZRule[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [toggling, setToggling] = useState(false);
   const [adding, setAdding] = useState(false);
   const [newPattern, setNewPattern] = useState('');
   const [newAction, setNewAction] = useState('NXDOMAIN');
+  const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const fetchData = () => {
+    setLoading(true);
     Promise.all([
       api<RPZStats>('GET', '/api/v1/rpz'),
       api<{ rules: RPZRule[] }>('GET', '/api/v1/rpz/rules').then(r => r.rules).catch(() => []),
     ]).then(([s, r]) => {
       setStats(s);
       setRules(r);
-    }).catch(console.error).finally(() => setLoading(false));
+      setError('');
+    }).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load RPZ data')).finally(() => setLoading(false));
   };
 
   useEffect(() => {
@@ -34,8 +42,11 @@ export function RPZPage() {
 
   const handleToggle = async () => {
     setToggling(true);
-    try { await api('POST', '/api/v1/rpz/toggle'); fetchData(); }
-    catch (e) { console.error(e); }
+    try {
+      await api('POST', '/api/v1/rpz/toggle');
+      toast.success(stats?.enabled ? 'RPZ disabled' : 'RPZ enabled');
+      fetchData();
+    } catch (e: unknown) { toast.error(e instanceof Error ? e.message : 'Failed to toggle RPZ'); }
     setToggling(false);
   };
 
@@ -44,16 +55,23 @@ export function RPZPage() {
     setAdding(true);
     try {
       await api('POST', '/api/v1/rpz/rules', { pattern: newPattern.trim(), action: newAction });
+      toast.success('Rule added');
       setNewPattern('');
       fetchData();
-    } catch (e) { console.error(e); }
+    } catch (e: unknown) { toast.error(e instanceof Error ? e.message : 'Failed to add rule'); }
     setAdding(false);
   };
 
-  const handleDeleteRule = async (pattern: string) => {
-    if (!confirm(`Delete rule "${pattern}"?`)) return;
-    try { await api('DELETE', `/api/v1/rpz/rules?pattern=${encodeURIComponent(pattern)}`); fetchData(); }
-    catch (e) { console.error(e); }
+  const handleDeleteRule = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await api('DELETE', `/api/v1/rpz/rules?pattern=${encodeURIComponent(deleteTarget)}`);
+      toast.success('Rule deleted');
+      setDeleteTarget(null);
+      fetchData();
+    } catch (e: unknown) { toast.error(e instanceof Error ? e.message : 'Failed to delete rule'); }
+    setDeleting(false);
   };
 
   if (loading) return (
@@ -86,6 +104,8 @@ export function RPZPage() {
         </div>
       </div>
 
+      {error ? <ErrorState message={error} onRetry={fetchData} /> : (
+      <>
       <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
         <Card><CardContent className="p-6">
           <div className="text-2xl font-bold">{stats?.total_rules?.toLocaleString() ?? '-'}</div>
@@ -135,6 +155,7 @@ export function RPZPage() {
               className="flex-1"
             />
             <select
+              aria-label="RPZ rule action"
               value={newAction}
               onChange={e => setNewAction(e.target.value)}
               className="h-10 px-3 rounded-md border border-input bg-background text-sm"
@@ -164,18 +185,18 @@ export function RPZPage() {
             </div>
           ) : (
             <div className="divide-y">
-              {rules.map((rule, i) => (
-                <div key={i} className="flex items-center justify-between p-4 hover:bg-muted/50">
+              {rules.map((rule) => (
+                <div key={rule.pattern} className="flex items-center justify-between p-4 hover:bg-muted/50">
                   <div className="flex items-center gap-4">
                     <div className={`px-2 py-1 rounded text-xs font-medium ${actionColors[rule.action] || ''}`}>
-                      {rule.action.toUpperCase()}
+                      {(rule.action || 'UNKNOWN').toUpperCase()}
                     </div>
                     <div>
                       <p className="font-mono text-sm">{rule.pattern}</p>
                       <p className="text-xs text-muted-foreground">Priority: {rule.priority} • Trigger: {rule.trigger}</p>
                     </div>
                   </div>
-                  <Button variant="ghost" size="icon" onClick={() => handleDeleteRule(rule.pattern)}>
+                  <Button variant="ghost" size="icon" aria-label={`Delete rule ${rule.pattern}`} onClick={() => setDeleteTarget(rule.pattern)}>
                     <Trash2 className="h-4 w-4 text-destructive" />
                   </Button>
                 </div>
@@ -184,6 +205,19 @@ export function RPZPage() {
           )}
         </CardContent>
       </Card>
+      </>
+      )}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete RPZ rule"
+        description={deleteTarget ? `Delete rule "${deleteTarget}"? This cannot be undone.` : ''}
+        confirmLabel="Delete"
+        destructive
+        loading={deleting}
+        onConfirm={handleDeleteRule}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   );
 }

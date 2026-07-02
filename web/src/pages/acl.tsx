@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/states';
 import { api } from '@/lib/api';
 import { Shield, Network } from 'lucide-react';
 
@@ -15,11 +16,13 @@ interface ACLRule {
 export function ACLPage() {
   const [rules, setRules] = useState<ACLRule[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const fetchRules = () => {
+    setLoading(true);
     api<{ rules: ACLRule[] }>('GET', '/api/v1/acl')
-      .then(d => setRules(d.rules || []))
-      .catch(console.error)
+      .then(d => { setRules(d.rules || []); setError(''); })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load ACL rules'))
       .finally(() => setLoading(false));
   };
 
@@ -63,6 +66,8 @@ export function ACLPage() {
         <CardContent className="p-0">
           {loading ? (
             <div className="p-6 space-y-3">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
+          ) : error ? (
+            <div className="p-6"><ErrorState message={error} onRetry={fetchRules} /></div>
           ) : rules.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
               <Network className="h-8 w-8 mx-auto mb-2 opacity-50" />
@@ -76,12 +81,12 @@ export function ACLPage() {
                   <div className="flex items-start justify-between">
                     <div className="flex items-start gap-4">
                       <div className={`px-3 py-1.5 rounded-lg border text-sm font-medium ${actionColors[rule.action] || 'border-muted'}`}>
-                        {rule.action.toUpperCase()}
+                        {(rule.action || 'UNKNOWN').toUpperCase()}
                       </div>
                       <div>
                         <p className="font-medium text-sm">{rule.name}</p>
                         <div className="flex flex-wrap gap-2 mt-2">
-                          {rule.networks.map((net, j) => (
+                          {(rule.networks || []).map((net, j) => (
                             <Badge key={j} variant="outline" className="font-mono text-xs">{net}</Badge>
                           ))}
                         </div>

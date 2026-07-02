@@ -7,6 +7,9 @@ import { Textarea } from '@/components/ui/textarea';
 import { Dialog, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { api, type Zone } from '@/lib/api';
+import { ErrorState, EmptyState } from '@/components/states';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { toast } from 'sonner';
 import { Globe, Plus, Trash2, ExternalLink, Search } from 'lucide-react';
 
 function normalizeZoneName(name: string): string {
@@ -27,12 +30,30 @@ function defaultAdminEmailFor(zoneName: string): string {
 export function ZonesPage() {
   const [zones, setZones] = useState<Zone[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [search, setSearch] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const navigate = useNavigate();
-  const load = () => api<{ zones: Zone[] }>('GET', '/api/v1/zones').then((d) => setZones(d.zones || [])).catch(console.error).finally(() => setLoading(false));
+  const load = () => { setLoading(true); api<{ zones: Zone[] }>('GET', '/api/v1/zones').then((d) => { setZones(d.zones || []); setError(null); }).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load zones')).finally(() => setLoading(false)); };
   useEffect(() => { load(); }, []);
   const filtered = zones.filter((z) => z.name.toLowerCase().includes(search.toLowerCase()));
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    try {
+      await api('DELETE', `/api/v1/zones/${encodeURIComponent(pendingDelete)}`);
+      toast.success(`Zone ${pendingDelete} deleted`);
+      setPendingDelete(null);
+      load();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Failed');
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -42,19 +63,21 @@ export function ZonesPage() {
       </div>
       <div className="relative max-w-sm"><Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" /><Input placeholder="Search zones..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" /></div>
       {loading ? <div className="space-y-3">{Array.from({ length: 3 }).map((_, i) => <Card key={i}><CardContent className="p-6"><Skeleton className="h-12 w-full" /></CardContent></Card>)}</div>
-      : filtered.length === 0 ? <Card><CardContent className="py-16 text-center"><Globe className="h-12 w-12 mx-auto text-muted-foreground/50 mb-4" /><h3 className="text-lg font-semibold mb-1">{zones.length === 0 ? 'No zones configured' : 'No matching zones'}</h3><p className="text-sm text-muted-foreground mb-4">{zones.length === 0 ? 'Create your first DNS zone to get started.' : 'Try a different search term.'}</p>{zones.length === 0 && <Button onClick={() => setShowCreate(true)}><Plus className="h-4 w-4" /> Create Zone</Button>}</CardContent></Card>
+      : error ? <ErrorState message={error} onRetry={load} />
+      : filtered.length === 0 ? <EmptyState icon={Globe} title={zones.length === 0 ? 'No zones configured' : 'No matching zones'} description={zones.length === 0 ? 'Create your first DNS zone to get started.' : 'Try a different search term.'} action={zones.length === 0 ? <Button onClick={() => setShowCreate(true)}><Plus className="h-4 w-4" /> Create Zone</Button> : undefined} />
       : <div className="grid gap-3">{filtered.map((z) => (
           <Card key={z.name} className="group hover:shadow-md transition-shadow cursor-pointer" onClick={() => navigate(`/zones/${encodeURIComponent(z.name)}`)}>
             <CardContent className="flex items-center justify-between p-5">
-              <div className="flex items-center gap-4"><div className="p-2.5 rounded-lg bg-primary/10"><Globe className="h-5 w-5 text-primary" /></div><div><div className="font-semibold font-mono text-sm">{z.name}</div><div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground"><span>Serial: <span className="font-mono">{z.serial || '-'}</span></span><span>{z.records} records</span></div></div></div>
-              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                <Button variant="ghost" size="icon" className="h-8 w-8" onClick={(e) => { e.stopPropagation(); navigate(`/zones/${encodeURIComponent(z.name)}`); }}><ExternalLink className="h-4 w-4" /></Button>
-                <Button variant="ghost" size="icon" className="h-8 w-8" onClick={(e) => { e.stopPropagation(); if (confirm(`Delete zone ${z.name}?`)) api('DELETE', `/api/v1/zones/${encodeURIComponent(z.name)}`).then(load); }}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+              <div className="flex items-center gap-4"><div className="p-2.5 rounded-lg bg-primary/10"><Globe className="h-5 w-5 text-primary" /></div><div><div className="font-semibold font-mono text-sm">{z.name}</div><div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground"><span>Serial: <span className="font-mono">{z.serial ?? '-'}</span></span><span>{z.records ?? '-'} records</span></div></div></div>
+              <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Open zone ${z.name}`} onClick={(e) => { e.stopPropagation(); navigate(`/zones/${encodeURIComponent(z.name)}`); }}><ExternalLink className="h-4 w-4" /></Button>
+                <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Delete zone ${z.name}`} onClick={(e) => { e.stopPropagation(); setPendingDelete(z.name); }}><Trash2 className="h-4 w-4 text-destructive" /></Button>
               </div>
             </CardContent>
           </Card>
         ))}</div>}
       <CreateZoneDialog open={showCreate} onClose={() => setShowCreate(false)} onCreated={load} />
+      <ConfirmDialog open={pendingDelete !== null} title="Delete zone" description={pendingDelete ? `Delete zone ${pendingDelete}? This cannot be undone.` : ''} confirmLabel="Delete" destructive loading={deleting} onConfirm={confirmDelete} onCancel={() => setPendingDelete(null)} />
     </div>
   );
 }
@@ -77,7 +100,8 @@ function CreateZoneDialog({ open, onClose, onCreated }: { open: boolean; onClose
 
   const handle = async () => {
     setError(''); if (!name.trim()) { setError('Zone name is required'); return; } const nameservers = ns.split('\n').map((s) => s.trim()).filter(Boolean); if (!nameservers.length) { setError('At least one nameserver is required'); return; }
-    setSaving(true); try { await api('POST', '/api/v1/zones', { name: normalizeZoneName(name), ttl: parseInt(ttl) || 3600, admin_email: email.trim(), nameservers }); setName(''); setTTL('3600'); setEmail(defaultAdminEmailFor('')); setNs(defaultNameserverFor('')); setEmailTouched(false); setNsTouched(false); onCreated(); onClose(); } catch (e) { setError(e instanceof Error ? e.message : 'Failed'); } finally { setSaving(false); }
+    const zoneName = normalizeZoneName(name);
+    setSaving(true); try { await api('POST', '/api/v1/zones', { name: zoneName, ttl: parseInt(ttl) || 3600, admin_email: email.trim(), nameservers }); setName(''); setTTL('3600'); setEmail(defaultAdminEmailFor('')); setNs(defaultNameserverFor('')); setEmailTouched(false); setNsTouched(false); toast.success(`Zone ${zoneName} created`); onCreated(); onClose(); } catch (e) { setError(e instanceof Error ? e.message : 'Failed'); } finally { setSaving(false); }
   };
   return (<Dialog open={open} onClose={onClose}><DialogTitle>Create New Zone</DialogTitle><div className="space-y-4 mt-5">
     {error && <div className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-lg">{error}</div>}

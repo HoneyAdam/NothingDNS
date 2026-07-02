@@ -52,7 +52,7 @@ export function GeneralSettings({ config }: { config: ServerConfig }) {
         <CardContent className="space-y-1">
           <KVRow label="Zone Directory" value={config.ZoneDir || './zones/'} mono />
           <KVRow label="Zone Files" value={config.Zones?.length || 0} />
-          {config.Zones?.map((z, i) => <KVRow key={i} label={`  ${i + 1}.`} value={z} mono />)}
+          {config.Zones?.map((z, i) => <KVRow key={i} label={`Zone ${i + 1}`} value={z} mono />)}
         </CardContent>
       </Card>
       <Card>
