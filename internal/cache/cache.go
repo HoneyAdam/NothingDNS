@@ -508,6 +508,29 @@ func (c *Cache) SetNegativeWithTTL(key string, rcode uint8, ttl uint32) {
 }
 
 func (c *Cache) setNegative(key string, rcode uint8, ttl time.Duration) {
+	c.setNegativeEntry(key, rcode, nil, ttl)
+}
+
+// SetNegativeMessage adds a negative cache entry that keeps the full response
+// message alongside the rcode. The message carries the SOA and the
+// NSEC/NSEC3 (+RRSIG) denial-proof records from the Authority section —
+// without them a cached negative served back to a DNSSEC validator (e.g. the
+// resolver's own DS-lookup path during chain building) is an unprovable
+// denial and turns Bogus. The ttl is in seconds (RFC 2308, from the SOA);
+// the operator-configured negative TTL acts as a ceiling, as in
+// SetNegativeWithTTL.
+func (c *Cache) SetNegativeMessage(key string, rcode uint8, msg *protocol.Message, ttl uint32) {
+	d := time.Duration(ttl) * time.Second
+	if d <= 0 {
+		d = c.negativeTTL
+	}
+	if c.negativeTTL > 0 && d > c.negativeTTL {
+		d = c.negativeTTL
+	}
+	c.setNegativeEntry(key, rcode, msg.Copy(), d)
+}
+
+func (c *Cache) setNegativeEntry(key string, rcode uint8, msg *protocol.Message, ttl time.Duration) {
 	// Apply min/max TTL constraints to negative TTL.
 	// maxTTL == 0 means "no upper bound" — only clamp when a positive ceiling
 	// has been configured (otherwise zero-clamp expires the entry immediately).
@@ -523,6 +546,7 @@ func (c *Cache) setNegative(key string, rcode uint8, ttl time.Duration) {
 	entry := &Entry{
 		Key:        key,
 		RCode:      rcode,
+		Message:    msg,
 		ExpireTime: expireTime,
 		IsNegative: true,
 	}

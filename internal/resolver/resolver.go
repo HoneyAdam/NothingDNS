@@ -40,6 +40,15 @@ type negativeTTLCache interface {
 	SetNegativeWithTTL(key string, rcode uint8, ttl uint32)
 }
 
+// negativeMessageCache is an optional Cache extension that stores the full
+// negative response (Authority SOA + NSEC/NSEC3 denial proofs) instead of
+// just the rcode. Without it, negative cache hits are re-synthesized as
+// bare empty responses — fine for stub clients, fatal for the DNSSEC
+// validator's DS lookups, which need the authenticated denial records.
+type negativeMessageCache interface {
+	SetNegativeMessage(key string, rcode uint8, msg *protocol.Message, ttl uint32)
+}
+
 // CacheEntry represents a cached DNS response.
 type CacheEntry struct {
 	Message    *protocol.Message
@@ -61,6 +70,13 @@ type Config struct {
 	QnameMinimization bool          // RFC 7816 QNAME minimization (default false)
 	Use0x20           bool          // DNS 0x20 encoding for spoofing resistance (default false)
 	Hints             []RootHint    // Custom root hints (if nil, uses IANA defaults)
+
+	// DNSSECOK sets the EDNS0 DO bit on outgoing iterative queries so
+	// authoritative servers include RRSIG/NSEC/NSEC3 records (RFC 4035
+	// §3.2.1). Required when a validator consumes this resolver's answers;
+	// without it every signed response arrives signature-less and validates
+	// Bogus. Off by default to keep unvalidated deployments lean.
+	DNSSECOK bool
 
 	// AllowPrivateUpstream disables the SSRF filter that rejects glue and
 	// NS-name resolutions pointing at RFC 1918 / loopback / link-local /
@@ -202,6 +218,17 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 		key := cacheKey(name, qtype)
 		if entry := r.cache.Get(key); entry != nil {
 			if entry.IsNegative {
+				// Serve the stored negative message when available — it
+				// carries the SOA and NSEC/NSEC3 denial proofs (COPY: the
+				// caller mutates and Releases its response). Fall back to a
+				// bare synthesized rcode-only response for legacy entries.
+				if entry.Message != nil {
+					resp := entry.Message.Copy()
+					resp.Header.Flags.QR = true
+					resp.Header.Flags.RA = true
+					resp.Header.Flags.RCODE = entry.RCode
+					return resp, nil
+				}
 				resp := protocol.NewMessage(protocol.Header{
 					Flags: protocol.Flags{QR: true, RA: true, RCODE: entry.RCode},
 				})
@@ -281,12 +308,15 @@ func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cname
 			if isNXDomain(resp) {
 				// RFC 8020: NXDOMAIN for an ancestor proves nothing exists
 				// below it. Terminate, but answer for the client's question,
-				// not the minimized probe's.
-				r.cacheNegative(name, qtype, resp.Header.Flags.RCODE, resp)
+				// not the minimized probe's. Rewrite the question BEFORE
+				// caching — the negative cache stores the whole message now,
+				// and a cached probe-name question would be replayed to
+				// every later client of (name, qtype).
 				if q, qerr := protocol.NewQuestion(name, qtype, protocol.ClassIN); qerr == nil {
 					resp.Questions = nil
 					resp.AddQuestion(q)
 				}
+				r.cacheNegative(name, qtype, resp.Header.Flags.RCODE, resp)
 				resp.Header.Flags.RA = true
 				return resp, nil
 			}
@@ -476,8 +506,8 @@ func (r *Resolver) sendQuery(ctx context.Context, name string, qtype uint16, add
 		Questions: []*protocol.Question{q},
 	}
 
-	// Add EDNS0
-	msg.SetEDNS0(r.config.EDNS0BufSize, false)
+	// Add EDNS0 (DO bit per config so validators receive RRSIGs)
+	msg.SetEDNS0(r.config.EDNS0BufSize, r.config.DNSSECOK)
 
 	resp, err := r.transport.QueryContext(ctx, msg, addr)
 	if err != nil {
@@ -802,6 +832,14 @@ func (r *Resolver) cacheResponse(name string, qtype uint16, msg *protocol.Messag
 		default:
 			continue
 		}
+		// Never synthesize over the entry just stored for the query itself:
+		// cacheKey(owner, rr.Type) == cacheKey(name, qtype) would OVERWRITE
+		// the full response cached above with an A/AAAA-only skeleton —
+		// dropping RRSIGs (every later cache hit turns Bogus under
+		// validation), the AA/AD flags, and any CNAME context.
+		if rr.Type == qtype && strings.EqualFold(owner, name) {
+			continue
+		}
 		if !inBailiwick(owner, zoneCut) {
 			continue
 		}
@@ -895,7 +933,18 @@ func (r *Resolver) cacheNegative(name string, qtype uint16, rcode uint8, msgs ..
 	if len(msgs) > 0 {
 		msg = msgs[0]
 	}
-	if ttl, ok := negativeTTLFromAuthority(msg); ok {
+	ttl, hasTTL := negativeTTLFromAuthority(msg)
+	// Prefer storing the whole message: the Authority section carries the
+	// SOA and NSEC/NSEC3+RRSIG denial proofs a validator needs when this
+	// negative is served back (chain building fetches DS through this
+	// cache; a proof-less NODATA there means Bogus).
+	if msg != nil {
+		if c, ok := r.cache.(negativeMessageCache); ok {
+			c.SetNegativeMessage(key, rcode, msg, ttl)
+			return
+		}
+	}
+	if hasTTL {
 		if c, ok := r.cache.(negativeTTLCache); ok {
 			c.SetNegativeWithTTL(key, rcode, ttl)
 			return

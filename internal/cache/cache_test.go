@@ -1216,3 +1216,62 @@ func TestSetNegativeWithTTLCeiling(t *testing.T) {
 		t.Fatalf("negative TTL = %v, want SOA-derived ~5s", remaining)
 	}
 }
+
+// TestSetNegativeMessage verifies negative entries can retain the full
+// response message — the Authority section's SOA (RFC 2308) and NSEC/NSEC3
+// denial proofs must survive so cache hits can serve them back to clients
+// and to the DNSSEC validator's DS-lookup path. The stored message must be a
+// deep copy (caller's message is mutated/Released after caching), and the
+// operator negative-TTL ceiling applies exactly as in SetNegativeWithTTL.
+func TestSetNegativeMessage(t *testing.T) {
+	c := New(Config{
+		Capacity:    16,
+		NegativeTTL: 60 * time.Second,
+		MaxTTL:      24 * time.Hour,
+	})
+
+	msg := &protocol.Message{
+		Header: protocol.Header{Flags: protocol.Flags{QR: true, RCODE: 3}},
+		Questions: []*protocol.Question{
+			{Name: mustParseName(t, "gone.example."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+	}
+	msg.AddAuthority(&protocol.ResourceRecord{
+		Name: mustParseName(t, "example."), Type: protocol.TypeSOA, Class: protocol.ClassIN, TTL: 900,
+		Data: &protocol.RDataSOA{
+			MName:   mustParseName(t, "ns1.example."),
+			RName:   mustParseName(t, "admin.example."),
+			Minimum: 900,
+		},
+	})
+
+	c.SetNegativeMessage("gone.example.|1|0", 3, msg, 86400)
+
+	entry := c.Get("gone.example.|1|0")
+	if entry == nil || !entry.IsNegative {
+		t.Fatal("expected negative cache entry")
+	}
+	if entry.Message == nil || len(entry.Message.Authorities) != 1 {
+		t.Fatal("negative entry lost its message / SOA authority")
+	}
+	// Deep copy: mutating the original must not affect the cached message.
+	msg.Authorities = nil
+	if len(entry.Message.Authorities) != 1 {
+		t.Error("cached negative message shares state with the caller's message")
+	}
+	// Ceiling: SOA TTL 86400 clamped to configured 60s negative TTL.
+	if remaining := time.Until(entry.ExpireTime); remaining > 61*time.Second {
+		t.Fatalf("negative TTL = %v, want <= configured negative_ttl (60s)", remaining)
+	}
+
+	// ttl==0 falls back to the configured negative TTL instead of expiring
+	// immediately.
+	c.SetNegativeMessage("nodata.example.|1|0", 0, msg, 0)
+	entry = c.Get("nodata.example.|1|0")
+	if entry == nil || !entry.IsNegative {
+		t.Fatal("expected negative entry for ttl=0 fallback")
+	}
+	if remaining := time.Until(entry.ExpireTime); remaining < 30*time.Second {
+		t.Fatalf("ttl=0 negative entry expires in %v, want ~negative_ttl (60s)", remaining)
+	}
+}
