@@ -134,12 +134,13 @@ func TestLoadFileSingleFieldLines(t *testing.T) {
 	tmpDir := t.TempDir()
 	blockFile := filepath.Join(tmpDir, "blocklist.txt")
 
-	// Lines with fewer than 2 fields should be skipped
+	// Single-field lines are plain domain entries — same semantics as the
+	// URL loader. (Historical note: the file loader used to skip them,
+	// which silently loaded plain domain lists as 0 entries.)
 	content := `# header comment
-singleword
-127.0.0.1
+plain.example.com
 0.0.0.0 evil.com
-another_single
+another.example.net
 0.0.0.0 malware.org
 `
 	if err := os.WriteFile(blockFile, []byte(content), 0644); err != nil {
@@ -155,17 +156,16 @@ another_single
 		t.Fatalf("Load failed: %v", err)
 	}
 
-	// Only evil.com and malware.org should be blocked (lines with >= 2 fields)
+	// Both hosts-style and plain-domain lines load.
 	stats := bl.Stats()
-	if stats.TotalBlocks != 2 {
-		t.Errorf("expected 2 blocked domains, got %d", stats.TotalBlocks)
+	if stats.TotalBlocks != 4 {
+		t.Errorf("expected 4 blocked domains, got %d", stats.TotalBlocks)
 	}
 
-	if !bl.IsBlocked("evil.com") {
-		t.Error("evil.com should be blocked")
-	}
-	if !bl.IsBlocked("malware.org") {
-		t.Error("malware.org should be blocked")
+	for _, domain := range []string{"evil.com", "malware.org", "plain.example.com", "another.example.net"} {
+		if !bl.IsBlocked(domain) {
+			t.Errorf("%s should be blocked", domain)
+		}
 	}
 }
 

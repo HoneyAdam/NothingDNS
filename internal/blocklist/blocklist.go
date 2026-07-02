@@ -366,15 +366,23 @@ func (bl *Blocklist) loadFile(path string) error {
 			continue
 		}
 
-		// Parse hosts file format: IP domain [comment]
+		// Parse hosts file format ("IP domain [comment]") or plain
+		// domain-per-line format — the URL loader accepts both, and
+		// plain domain lists (oisd, hagezi, …) are at least as common
+		// as hosts files. Silently skipping single-field lines loaded
+		// such files as 0 entries with no error.
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		var domain string
+		switch {
+		case len(fields) == 1:
+			domain = normalizeDomain(fields[0])
+		case len(fields) >= 2:
+			// fields[0] is IP (127.0.0.1, 0.0.0.0, etc.)
+			// fields[1] is the domain to block
+			domain = normalizeDomain(fields[1])
+		default:
 			continue
 		}
-
-		// fields[0] is IP (127.0.0.1, 0.0.0.0, etc.)
-		// fields[1] is the domain to block
-		domain := normalizeDomain(fields[1])
 
 		// Extract comment if present
 		comment := ""

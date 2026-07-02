@@ -619,3 +619,42 @@ func TestBlocklistReloadDisabled(t *testing.T) {
 		t.Errorf("Reload should not fail when disabled: %v", err)
 	}
 }
+
+// TestBlocklistLoadFile_PlainDomainFormat pins that FILE-based blocklists
+// accept the plain domain-per-line format (oisd, hagezi, …), not just
+// hosts-file "IP domain" lines. The URL loader always accepted both; the
+// file loader silently skipped single-field lines, so a plain-domain file
+// loaded as 0 entries with no error and blocked nothing.
+func TestBlocklistLoadFile_PlainDomainFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+	blockFile := filepath.Join(tmpDir, "plain.txt")
+
+	content := `# plain domain list
+ads.example.com
+tracker.example.net
+0.0.0.0 hosts-style.example.org
+`
+	if err := os.WriteFile(blockFile, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	bl := New(Config{
+		Enabled: true,
+		Files:   []string{blockFile},
+	})
+	if err := bl.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if stats := bl.Stats(); stats.TotalBlocks != 3 {
+		t.Errorf("expected 3 blocked domains (2 plain + 1 hosts-style), got %d", stats.TotalBlocks)
+	}
+	for _, domain := range []string{"ads.example.com", "tracker.example.net", "hosts-style.example.org"} {
+		if !bl.IsBlocked(domain) {
+			t.Errorf("IsBlocked(%q) = false, want true", domain)
+		}
+	}
+	if bl.IsBlocked("unrelated.example.com") {
+		t.Error("unrelated domain reported blocked")
+	}
+}
