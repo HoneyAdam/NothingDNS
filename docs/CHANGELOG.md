@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **Go toolchain bump 1.26.2 → 1.26.3** to pull in stdlib fixes for
-  GO-2026-491? (net dialer) and GO-2026-4918 (net/http HTTP/2
-  SETTINGS_MAX_FRAME_SIZE infinite loop). `govulncheck` now reports
-  "No vulnerabilities found".
+- **Go toolchain bump 1.26.2 → 1.26.4** across the root module and
+  embedded web module to pull in patched stdlib releases. `govulncheck`
+  and OSV scanning now report no Go vulnerabilities.
+- **Web tooling Babel pin**: `web/package.json` now overrides transitive
+  `@babel/core` to `7.29.7`, resolving GHSA-4x5r-pxfx-6jf8 /
+  CVE-2026-49356 in development/build tooling. `npm audit --audit-level=low`
+  is clean after the lockfile update.
 - **Data race on `enabled` flag** in `RateLimiter`, `RRL`, and
   `Blocklist`: hot-path predicate read the bool without a lock while
   `SetEnabled`/`Reload` wrote it under the package mutex. Converted
@@ -24,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RFC 8624 §3.2 anyway.
 
 ### Added
+
+#### Dashboard and management API
+
+- **Real active-client metric**: the management metrics API now reports
+  connected dashboard/websocket clients, and the embedded React dashboard
+  displays it as a first-class status tile.
+- **Web build token guard**: `npm run build` in `web/` now runs
+  `scripts/verify-css-tokens.mjs` so required design-system color tokens
+  cannot disappear silently.
 
 #### Real implementations replacing previous honest-fail stubs
 
@@ -77,6 +89,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **DNSSEC validation end-to-end**: direct handler and pipeline serving
+  paths now both perform DNSSEC validation correctly, including chain
+  building, DS authentication, and denial proof handling.
+- **Resolver cache correctness**: side records no longer clobber primary
+  cache entries, and negative DNSSEC denial proofs are preserved instead
+  of being dropped during cache writes.
+- **Extended DNS Error codes**: protocol constants and OPT handling now
+  align with the IANA EDE registry.
+- **Management API hardening**: cache-disable requests are rejected
+  explicitly, duration headers are parsed safely, server configuration is
+  populated consistently, and API responses use stronger error handling.
+- **Web dashboard UX and record editing**: pages now show real error/empty
+  states with mutation feedback and accessibility fixes; the zone editor
+  uses stable record identity/edit semantics instead of ambiguous display
+  values.
+- **Blocklist plain-domain input**: file loading now accepts simple
+  domain-per-line blocklists in addition to hosts-style entries.
 - **JoinSeed nil-deref before Start**: calling `Cluster.JoinSeed`
   on a non-started cluster panicked because the gossip layer
   reached `gp.conn.WriteToUDP` on a nil conn. Added an explicit

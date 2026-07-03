@@ -4,17 +4,24 @@
   <img src="assets/banner.jpeg" alt="NothingDNS" width="100%">
 </p>
 
-[![Go Version](https://img.shields.io/badge/Go-1.25%2B-00ADD8?style=flat&logo=go)](https://golang.org)
+[![Go Version](https://img.shields.io/badge/Go-1.26.4%2B-00ADD8?style=flat&logo=go)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/nothingdns/nothingdns)](https://goreportcard.com/report/github.com/nothingdns/nothingdns)
 [![CI](https://github.com/NothingDNS/NothingDNS/actions/workflows/go.yml/badge.svg?branch=main)](https://github.com/NothingDNS/NothingDNS/actions/workflows/go.yml)
 
 A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be lightweight, fast, and self-contained with minimal external dependencies.
 
+## Recent updates
+
+- Go module requirements are now on Go 1.26.4, including the embedded web module.
+- DNSSEC validation paths have been repaired for direct and pipelined serving modes, including DS authentication, denial proofs, and negative cache preservation.
+- The management API and embedded React dashboard now include operational hardening, clearer UI error/empty states, active-client metrics, and stricter CSS token verification during web builds.
+- Blocklist loading accepts hosts-file input, URL sources, and plain domain-per-line lists.
+
 ## Features
 
 ### Core DNS
-- **Minimal Dependencies** - Pure Go implementation; only `quic-go` (DoQ transport) and `golang.org/x/{sys,net,crypto}` (transitive)
+- **Minimal Dependencies** - Pure Go implementation with a small dependency set: `quic-go` for DoQ, `golang.org/x/{sys,net,crypto}`, and test-only mocking helpers
 - **DNS Protocol Support** - Full RFC 1035 compliant DNS message handling
 - **UDP & TCP** - Support for both UDP and TCP DNS queries with SO_REUSEPORT
 - **Caching** - Thread-safe LRU cache with TTL support, prefetching, and negative caching (RFC 2308)
@@ -36,7 +43,7 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 - **DNS over QUIC (DoQ)** - QUIC-based encrypted DNS transport
 - **Oblivious DNS over HTTPS (ODoH)** - RFC 9230 privacy-preserving DNS proxy with RFC 9180 HPKE (stdlib-only: X25519 / HKDF-SHA256 / AES-GCM; HPKE math validated against RFC 9180 §A.1 test vectors)
 - **DNS Stateful Operations (DSO)** - RFC 8490 long-lived TCP/TLS sessions with keepalive and maximum-payload negotiation
-- **Blocklist Support** - Block domains using hosts file format or URL-based lists
+- **Blocklist Support** - Block domains using hosts files, URL-based lists, or plain domain-per-line lists
 - **Response Policy Zones (RPZ)** - Policy-based DNS filtering with NXDOMAIN, NODATA, redirect, and DROP actions
 - **Response Rate Limiting (RRL)** - Per-client token bucket rate limiting
 - **ACL** - Access control lists for client filtering
@@ -63,9 +70,9 @@ A minimal-dependency DNS server written in pure Go. NothingDNS is designed to be
 - **TLV Serialization** - Efficient binary serialization
 
 ### Management & Observability
-- **Web Dashboard** - React 19 SPA with real-time WebSocket query streaming
-- **Web Zone Manager** - Browser-based CRUD for zones and DNS records
-- **HTTP API** - RESTful API with OpenAPI 3.0 specification and Swagger UI
+- **Web Dashboard** - React 19 SPA with real-time WebSocket query streaming, active-client metrics, and embedded static assets
+- **Web Zone Manager** - Browser-based CRUD for zones and DNS records with stable record identity handling
+- **HTTP API** - RESTful API with OpenAPI 3.0 specification, Swagger UI, typed error responses, and operational hardening
 - **Prometheus Metrics** - Export metrics for monitoring
 - **Audit Logging** - Structured query audit trail with client IP, latency, and cache status
 - **Management CLI** - `dnsctl` tool for zone and server management
@@ -95,6 +102,8 @@ Download binaries from the [latest release](https://github.com/NothingDNS/Nothin
 | Windows | `nothingdns-windows-amd64.exe` |
 
 ### Build from Source
+
+Requires Go 1.26.4 or newer.
 
 ```bash
 # Build the server
