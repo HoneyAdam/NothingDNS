@@ -84,7 +84,16 @@ type DashboardStats struct {
 	ZoneCount       int           `json:"zoneCount"`
 	UpstreamLatency time.Duration `json:"upstreamLatency"`
 	RecentQueries   []*QueryEvent `json:"recentQueries"`
+	// recentClients maps a querying client IP to the unix-second timestamp it
+	// was last seen, so ActiveClients reports distinct DNS clients in a rolling
+	// window (NOT the number of dashboard WebSocket viewers, which is what it
+	// used to conflate). Guarded by mu.
+	recentClients map[string]int64
 }
+
+// activeClientWindow is how long a client IP counts toward ActiveClients after
+// its last query.
+const activeClientWindow = 5 * time.Minute
 
 // GetRecentQueries returns a paginated copy of recent queries.
 func (ds *DashboardStats) GetRecentQueries(offset, limit int) ([]*QueryEvent, int) {
@@ -524,6 +533,22 @@ func (s *Server) RecordQuery(event *QueryEvent) {
 	if len(s.stats.RecentQueries) > 100 {
 		s.stats.RecentQueries = s.stats.RecentQueries[1:]
 	}
+
+	// Track distinct client IPs in a rolling window for ActiveClients.
+	if event.ClientIP != "" {
+		if s.stats.recentClients == nil {
+			s.stats.recentClients = make(map[string]int64)
+		}
+		now := time.Now().Unix()
+		s.stats.recentClients[event.ClientIP] = now
+		cutoff := now - int64(activeClientWindow.Seconds())
+		for ip, seen := range s.stats.recentClients {
+			if seen < cutoff {
+				delete(s.stats.recentClients, ip)
+			}
+		}
+		s.stats.ActiveClients = len(s.stats.recentClients)
+	}
 	s.stats.mu.Unlock()
 
 	// Broadcast to connected clients
@@ -570,9 +595,9 @@ func (s *Server) AddClient(client *Client) {
 		return
 	}
 	s.clients[client] = struct{}{}
-	s.stats.mu.Lock()
-	s.stats.ActiveClients = len(s.clients)
-	s.stats.mu.Unlock()
+	// Note: ActiveClients tracks distinct DNS query clients (see RecordQuery),
+	// NOT the number of dashboard WebSocket viewers — the two were previously
+	// conflated here.
 }
 
 // RemoveClient removes a WebSocket client
@@ -580,9 +605,6 @@ func (s *Server) RemoveClient(client *Client) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.clients, client)
-	s.stats.mu.Lock()
-	s.stats.ActiveClients = len(s.clients)
-	s.stats.mu.Unlock()
 }
 
 // broadcastLoop broadcasts events to all connected clients

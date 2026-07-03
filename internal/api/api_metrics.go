@@ -55,6 +55,15 @@ func (s *Server) handleDashboardStats(w http.ResponseWriter, r *http.Request) {
 		resp.ZoneCount = s.zoneManager.Count()
 	}
 
+	// Distinct DNS query clients seen in a rolling window — the dashboard
+	// server owns this (it receives every query event with the client IP).
+	s.runtimeMu.RLock()
+	dashboardServer := s.dashboardServer
+	s.runtimeMu.RUnlock()
+	if dashboardServer != nil {
+		resp.ActiveClients = dashboardServer.GetStats().ActiveClients
+	}
+
 	s.writeJSON(w, http.StatusOK, resp)
 }
 

@@ -213,12 +213,12 @@ func TestAddRemoveClient(t *testing.T) {
 
 	server.AddClient(client)
 
+	// AddClient/RemoveClient manage the WebSocket-viewer set (server.clients).
+	// They do NOT touch ActiveClients — that tracks distinct DNS query clients
+	// (see TestActiveClientsTracking), which used to be wrongly conflated with
+	// the viewer count.
 	if len(server.clients) != 1 {
 		t.Errorf("Expected 1 client, got %d", len(server.clients))
-	}
-
-	if server.stats.ActiveClients != 1 {
-		t.Errorf("Expected ActiveClients 1, got %d", server.stats.ActiveClients)
 	}
 
 	server.RemoveClient(client)
@@ -226,9 +226,43 @@ func TestAddRemoveClient(t *testing.T) {
 	if len(server.clients) != 0 {
 		t.Errorf("Expected 0 clients, got %d", len(server.clients))
 	}
+}
 
-	if server.stats.ActiveClients != 0 {
-		t.Errorf("Expected ActiveClients 0, got %d", server.stats.ActiveClients)
+// TestActiveClientsTracking verifies ActiveClients counts DISTINCT DNS query
+// client IPs (from RecordQuery), not dashboard WebSocket viewers.
+func TestActiveClientsTracking(t *testing.T) {
+	server := NewServer()
+
+	if got := server.GetStats().ActiveClients; got != 0 {
+		t.Fatalf("Expected 0 active clients initially, got %d", got)
+	}
+
+	// Two queries from the same IP → 1 distinct client.
+	server.RecordQuery(&QueryEvent{ClientIP: "192.0.2.1", Domain: "a.test.", QueryType: "A"})
+	server.RecordQuery(&QueryEvent{ClientIP: "192.0.2.1", Domain: "b.test.", QueryType: "A"})
+	if got := server.GetStats().ActiveClients; got != 1 {
+		t.Errorf("Expected 1 active client after two queries from one IP, got %d", got)
+	}
+
+	// A query from a second IP → 2 distinct clients.
+	server.RecordQuery(&QueryEvent{ClientIP: "192.0.2.2", Domain: "c.test.", QueryType: "A"})
+	if got := server.GetStats().ActiveClients; got != 2 {
+		t.Errorf("Expected 2 active clients across two IPs, got %d", got)
+	}
+
+	// A client that queried outside the window is pruned on the next query.
+	server.stats.mu.Lock()
+	server.stats.recentClients["192.0.2.1"] = 1 // far in the past (unix ~1970)
+	server.stats.mu.Unlock()
+	server.RecordQuery(&QueryEvent{ClientIP: "192.0.2.2", Domain: "d.test.", QueryType: "A"})
+	if got := server.GetStats().ActiveClients; got != 1 {
+		t.Errorf("Expected 1 active client after the stale one is pruned, got %d", got)
+	}
+
+	// Empty client IP must not create a phantom client.
+	server.RecordQuery(&QueryEvent{ClientIP: "", Domain: "e.test.", QueryType: "A"})
+	if got := server.GetStats().ActiveClients; got != 1 {
+		t.Errorf("Expected empty ClientIP to be ignored, got %d active clients", got)
 	}
 }
 
