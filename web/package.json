@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && node scripts/verify-css-tokens.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
-    "smoke": "node scripts/dashboard-smoke.mjs"
+    "smoke": "node scripts/dashboard-smoke.mjs",
+    "verify-tokens": "node scripts/verify-css-tokens.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
