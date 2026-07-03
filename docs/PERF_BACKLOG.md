@@ -113,6 +113,13 @@ names — see P3 below).
 
 ### P1 — Phase 3C: migrate transports to call `Release()`
 
+> **Status (2026-07): DONE.** All transports now release the pooled query
+> message after the response: `internal/server/udp.go` (`defer msg.Release()`),
+> `internal/server/tcp.go`, `internal/server/tls.go`, `internal/doh/handler.go`
+> and `internal/doh/wshandler.go` (`defer query.Release()`). The Phase 3A/3B
+> pools are therefore active in production. The design notes below are kept
+> for historical context.
+
 **Files (~5):** `internal/server/{udp,tcp,tls}.go`,
 `internal/doh/handler.go`, possibly `internal/odoh/odoh.go`.
 

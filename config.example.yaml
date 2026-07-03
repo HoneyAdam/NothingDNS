@@ -422,17 +422,31 @@ logging:
 # =============================================================================
 # MULTICAST DNS (mDNS)
 # =============================================================================
-# mDNS settings are not parsed from this config file yet.
+# mdns:
+#   enabled: true
+#   multicast_ip: 224.0.0.251   # 224.0.0.251 (IPv4) / ff02::fb (IPv6)
+#   port: 5353
+#   hostname: nothingdns.local
+#   browser: false              # answer service-discovery browse queries
 
 # =============================================================================
 # DNS STATEFUL OPERATIONS (RFC 8490)
 # =============================================================================
-# DSO settings are not parsed from this config file yet.
+# dso:
+#   enabled: true
+#   session_timeout: 30s        # inactivity before a session is closed
+#   max_sessions: 1000
+#   heartbeat_interval: 15s
 
 # =============================================================================
 # OBLIVIOUS DNS over HTTPS (ODoH, RFC 9230)
 # =============================================================================
-# ODoH settings are not parsed from this config file yet.
+# ODoH is configured under server.http:
+#   server:
+#     http:
+#       odoh_enabled: true
+#       odoh_path: /odoh          # endpoint path (default: /odoh)
+#       odoh_kem: 4               # HPKE KEM (4 = DHKEM-X25519-HKDF-SHA256)
 
 # =============================================================================
 # SLAVE ZONES (AXFR/IXFR)
