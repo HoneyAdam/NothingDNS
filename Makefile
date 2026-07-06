@@ -33,11 +33,10 @@ build-cli:
 	@echo "Building $(CLI_BINARY)..."
 	@CGO_ENABLED=$(CGO_ENABLED) go build $(BUILD_FLAGS) -o $(CLI_BINARY) ./cmd/dnsctl
 
-## Build static binaries for release (no symbols, smaller size)
+## Build cross-platform release binaries and SHA256SUMS into dist/
 build-release:
 	@echo "Building release binaries..."
-	@CGO_ENABLED=$(CGO_ENABLED) go build -trimpath -ldflags "-s -w -extldflags '-static'" -o $(SERVER_BINARY) ./cmd/nothingdns
-	@CGO_ENABLED=$(CGO_ENABLED) go build -trimpath -ldflags "-s -w -extldflags '-static'" -o $(CLI_BINARY) ./cmd/dnsctl
+	@./scripts/build-release.sh
 
 ## Build the web dashboard
 build-web:

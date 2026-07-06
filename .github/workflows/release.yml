@@ -52,24 +52,9 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
 
       - name: Build release binaries and checksums
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          # Targets must match install.sh / setup.sh PLATFORM detection.
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            os="${target%/*}"
-            arch="${target#*/}"
-            echo "Building ${os}/${arch}..."
-            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
-              -trimpath -ldflags "-s -w" \
-              -o "dist/nothingdns-${os}-${arch}" ./cmd/nothingdns
-            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" go build \
-              -trimpath -ldflags "-s -w" \
-              -o "dist/dnsctl-${os}-${arch}" ./cmd/dnsctl
-          done
-          ( cd dist && sha256sum nothingdns-* dnsctl-* > SHA256SUMS )
-          echo "Published checksums:"
-          cat dist/SHA256SUMS
+        env:
+          VERSION: ${{ steps.tag.outputs.tag }}
+        run: ./scripts/build-release.sh
 
       - name: Upload assets to release
         env:
