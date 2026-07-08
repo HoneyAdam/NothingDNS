@@ -148,16 +148,14 @@ func TestDNSSECValidation(t *testing.T) {
 {strings.Repeat("a", 64), TypeA, false},
 ```
 
-4. **Use assertions** (optional):
+4. **Keep assertions dependency-free**:
 ```go
-// Instead of:
 if got != want {
     t.Errorf("got %d, want %d", got, want)
 }
-
-// Consider using testify:
-require.Equal(t, want, got)
 ```
+
+Prefer the standard `testing` package and small local helpers over external assertion libraries.
 
 ## Integration Testing
 
@@ -708,7 +706,6 @@ if !testenv.HasNetwork() {
 ## References
 
 - [Go Testing Package](https://pkg.go.dev/testing)
-- [Testify](https://github.com/stretchr/testify)
-- [gopter](https://github.com/leanovate/gopter) (property-based testing)
-- [go-fuzz](https://github.com/dvyukov/go-fuzz) (fuzzing)
+- [Go fuzzing](https://go.dev/doc/security/fuzz/)
+- [Go coverage tooling](https://go.dev/blog/cover)
 - [High Performance Go](https://dave.cheney.net/high-performance-go.html)

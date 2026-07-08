@@ -43,17 +43,21 @@ sudo firewall-cmd --add-port=9153/tcp
 ### 1. Binary Installation
 
 ```bash
-# Download latest release
-curl -LO https://github.com/nothingdns/NothingDNS/releases/latest/download/nothingdns_linux_amd64.tar.gz
-tar -xzf nothingdns_linux_amd64.tar.gz
+# Download latest Linux amd64 release artifacts
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/nothingdns-linux-amd64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/dnsctl-linux-amd64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
 
 # Install
-sudo cp nothingdns /usr/local/bin/
-sudo cp dnsctl /usr/local/bin/
+chmod +x nothingdns-linux-amd64 dnsctl-linux-amd64
+sudo install -m 0755 nothingdns-linux-amd64 /usr/local/bin/nothingdns
+sudo install -m 0755 dnsctl-linux-amd64 /usr/local/bin/dnsctl
 sudo setcap 'cap_net_bind_service=+ep' /usr/local/bin/nothingdns
 
 # Verify
-./nothingdns --version
+nothingdns -version
+dnsctl -version
 ```
 
 ### 2. Docker Installation

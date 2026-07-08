@@ -28,6 +28,7 @@ This directory contains NothingDNS design, usage, and operations documentation.
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Common issues and solutions |
 | [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) | Pre-deployment and installation checklists |
 | [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md) | Production deployment best practices |
+| [PRODUCTION_PROOF_CHECKLIST.md](PRODUCTION_PROOF_CHECKLIST.md) | Evidence-driven release and runtime verification checklist |
 | [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) | YAML config reference: fields, types, defaults, hot-reload behavior |
 
 ## Management & CLI
@@ -50,8 +51,10 @@ This directory contains NothingDNS design, usage, and operations documentation.
 | Document | Contents |
 |---|---|
 | [GLOSSARY.md](GLOSSARY.md) | 400+ DNS terms, RFC index (60+ references), quick reference tables |
-| [DEPENDENCIES.md](DEPENDENCIES.md) | Go module dependencies and zero-external-deps philosophy |
-| [ROADMAP.md](ROADMAP.md) | Version roadmap v1.1.0 through v2.0.0 |
+| [DEPENDENCIES.md](DEPENDENCIES.md) | Go module dependencies and minimal-dependency philosophy |
+| [ROADMAP.md](ROADMAP.md) | Version roadmap v0.2.0 through v1.0.0 |
+| [COMPETITOR_MATRIX.md](COMPETITOR_MATRIX.md) | Honest feature/market comparison against major DNS competitors |
+| [MARKET_LEADERSHIP_ROADMAP.md](MARKET_LEADERSHIP_ROADMAP.md) | Execution roadmap for turning product breadth into market leadership |
 
 ## Community & Project
 

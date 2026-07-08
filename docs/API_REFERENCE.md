@@ -4,7 +4,27 @@ REST API for managing NothingDNS server, zones, cache, cluster, and authenticati
 
 **Base URL**: `http://localhost:8080`
 
-**Authentication**: Bearer token (JWT) in `Authorization` header, or session cookie.
+**Authentication**: `Authorization: Bearer <token>` for API writes and CLI automation. Safe reads may also use the `ndns_token` HttpOnly session cookie issued by the dashboard login flow; state-changing requests intentionally require a bearer header to avoid CSRF.
+
+**Errors**: current server responses use JSON such as `{ "error": "message" }` for failures and `{ "message": "..." }` for simple acknowledgements. The dashboard client also tolerates structured `{ "error": { "message": "...", "code": "..." } }` payloads.
+
+**Generated docs**: the live server also exposes OpenAPI JSON at `/api/openapi.json` and Swagger UI at `/api/docs`.
+
+## Current route map
+
+| Area | Routes |
+|---|---|
+| Health/status | `GET /health`, `GET /readyz`, `GET /livez`, `GET /api/v1/status` |
+| Auth/RBAC | `POST /api/v1/auth/login`, `POST /api/v1/auth/bootstrap`, `POST /api/v1/auth/logout`, `GET/POST /api/v1/auth/users`, `DELETE /api/v1/auth/users/{username}`, `GET /api/v1/auth/roles` |
+| Zones/records | `GET/POST /api/v1/zones`, `POST /api/v1/zones/reload`, `GET/DELETE /api/v1/zones/{zone}`, `GET/POST/PUT/DELETE /api/v1/zones/{zone}/records`, `GET /api/v1/zones/{zone}/export`, `POST /api/v1/zones/{zone}/ptr-bulk`, and `GET /api/v1/zones/{zone}/ptr6-lookup` |
+| Cache | `GET /api/v1/cache/stats`, `POST /api/v1/cache/flush` |
+| Cluster | `GET /api/v1/cluster/status`, `GET /api/v1/cluster/nodes`, `POST /api/v1/cluster/join`, `DELETE /api/v1/cluster/leave` |
+| Policy | `GET/POST /api/v1/blocklists`, blocklist actions under `/api/v1/blocklists/...`, `GET/PUT /api/v1/acl`, `GET /api/v1/rpz`, `GET/POST/DELETE /api/v1/rpz/rules`, RPZ actions under `/api/v1/rpz/...` |
+| DNSSEC | `GET /api/v1/dnssec/status`, `GET /api/v1/dnssec/keys` |
+| Upstream/Geo/transfer | `GET /api/v1/upstreams`, `GET /api/v1/geoip/stats`, `GET /api/v1/zones/transfers` |
+| Config | `GET /api/v1/config`, `POST /api/v1/config/reload`, `PUT /api/v1/config/logging`, `PUT /api/v1/config/rrl`, `GET/PUT /api/v1/config/cache`, `GET /api/v1/server/config` |
+| Dashboard data | `GET /api/dashboard/stats`, `GET /api/dashboard/queries`, `GET /api/dashboard/zones`, `GET /api/v1/queries`, `GET /api/v1/topdomains`, `GET /api/v1/metrics/history`, WebSocket `/ws` |
+| DNS privacy | configured DoH/DoWS/ODoH paths, plus `/.well-known/odoh-config` when ODoH is enabled |
 
 ## Table of Contents
 
@@ -43,11 +63,9 @@ Content-Type: application/json
 ```json
 {
   "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expires_at": "2024-05-02T12:00:00Z",
-  "user": {
-    "username": "admin",
-    "role": "admin"
-  }
+  "username": "admin",
+  "role": "admin",
+  "expires": "2026-07-07T12:00:00Z"
 }
 ```
 
@@ -61,8 +79,16 @@ Content-Type: application/json
 
 {
   "username": "admin",
-  "password": "SecurePassword123!",
-  "email": "admin@example.com"
+  "password": "SecurePassword123!"
+}
+```
+
+**Response** (200 OK):
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "username": "admin",
+  "role": "admin"
 }
 ```
 
@@ -91,8 +117,8 @@ Authorization: Bearer <token>
     {
       "username": "admin",
       "role": "admin",
-      "created_at": "2024-01-01T00:00:00Z",
-      "last_login": "2024-05-02T10:30:00Z"
+      "created_at": "2026-07-01T00:00:00Z",
+      "updated_at": "2026-07-02T00:00:00Z"
     }
   ]
 }
@@ -183,13 +209,18 @@ Authorization: Bearer <token>
 **Response** (200 OK):
 ```json
 {
-  "version": "1.0.0",
-  "uptime": 86400,
-  "start_time": "2024-05-01T12:00:00Z",
-  "build": {
-    "go_version": "1.25.0",
-    "compiler": "gc",
-    "arch": "amd64"
+  "status": "ok",
+  "timestamp": "2026-07-06T12:00:00Z",
+  "version": "0.1.1",
+  "cache": {
+    "size": 123,
+    "capacity": 10000,
+    "hits": 456,
+    "misses": 78,
+    "hit_ratio": 0.8537
+  },
+  "cluster": {
+    "enabled": false
   }
 }
 ```
@@ -211,13 +242,11 @@ Authorization: Bearer <token>
   "zones": [
     {
       "name": "example.com.",
-      " ttl": 3600,
-      "records_count": 45,
-      "loaded_at": "2024-05-01T12:00:00Z",
-      "signed": true,
-      "dnssec_status": "signed"
+      "serial": 2026070601,
+      "records": 45
     }
-  ]
+  ],
+  "total": 1
 }
 ```
 

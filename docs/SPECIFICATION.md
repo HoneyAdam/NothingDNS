@@ -1,17 +1,17 @@
 # NothingDNS — Specification Document
 
 > **Nothing but DNS. Nothing else needed.**
-> Zero-dependency, single-binary, full-featured DNS server written in pure Go.
+> Minimal-dependency, single-binary, full-featured DNS server written in Go.
 
 ---
 
 ## 1. Project Overview
 
 ### 1.1 Vision
-NothingDNS is a modern, production-grade DNS server that combines authoritative and recursive DNS resolution in a single binary with zero external dependencies. It supports all modern DNS protocols (UDP/TCP, DoT, DoH, DoQ), provides enterprise-grade features like DNSSEC, GeoDNS, split-horizon, and ad-blocking, and can operate as a standalone instance or a Raft-based cluster for high availability.
+NothingDNS is a modern, production-grade DNS server that combines authoritative and recursive DNS resolution in a single binary with a minimal external dependency set. It supports modern DNS protocols (UDP/TCP, DoT, DoH, DoQ), provides enterprise-grade features like DNSSEC, GeoDNS, split-horizon, and ad-blocking, and can operate as a standalone instance or a Raft-based cluster for high availability.
 
 ### 1.2 Philosophy
-- **Zero Dependencies** — Only Go standard library. No external modules. Ever.
+- **Minimal Dependencies** — Core DNS logic is hand-rolled; external Go deps are limited to necessary transport/platform support.
 - **Single Binary** — One binary to rule them all: DNS server, CLI tool, web dashboard.
 - **BIND Compatible** — Import existing BIND zone files seamlessly. Familiar zone file syntax.
 - **Cloud-Native** — Single binary runs everywhere: bare metal, Docker, Kubernetes, edge.
@@ -21,9 +21,9 @@ NothingDNS is a modern, production-grade DNS server that combines authoritative 
 - **Name:** NothingDNS
 - **Tagline:** "Nothing but DNS. Nothing else needed."
 - **Binary:** `nothingdns` (server) + `dnsctl` (CLI management tool)
-- **Default Ports:** 53 (UDP/TCP), 853 (DoT), 443 (DoH), 853/UDP (DoQ), 8080 (API/Dashboard), 9153 (Metrics), 4222 (Raft), 4223 (gRPC inter-node)
-- **License:** Apache 2.0
-- **Language:** Go 1.22+
+- **Default Ports:** 53 (UDP/TCP), 853 (DoT/DoQ when enabled), 8080 (API/Dashboard/DoH when configured), 9153 (Metrics), 7946 (cluster gossip/Raft RPC)
+- **License:** MIT
+- **Language:** Go 1.26.4+
 - **Repository:** github.com/nothingdns/nothingdns
 
 ---
@@ -789,15 +789,16 @@ Authentication: API key (Bearer token) or basic auth
 ```bash
 # Zone management
 dnsctl zone list
-dnsctl zone create example.com --file zone.txt
-dnsctl zone delete example.com
+dnsctl zone add example.com ns1.example.com.
+dnsctl zone remove example.com
+dnsctl zone reload example.com
 dnsctl zone export example.com > example.com.zone
-dnsctl zone import example.com < bind-zone.txt
 
 # Record management
 dnsctl record list example.com
-dnsctl record add example.com A www 192.168.1.1 --ttl 3600
-dnsctl record delete example.com www A
+dnsctl record add example.com www A 192.168.1.1 3600
+dnsctl record update example.com www A 192.168.1.1 192.168.1.2 3600
+dnsctl record remove example.com www A
 
 # Cache
 dnsctl cache stats
@@ -806,51 +807,47 @@ dnsctl cache flush example.com
 
 # Cluster
 dnsctl cluster status
-dnsctl cluster nodes
-dnsctl cluster add-node node-4 10.0.0.4:4222
-dnsctl cluster remove-node node-4
+dnsctl cluster peers
+dnsctl cluster join 10.0.0.4:7946
+dnsctl cluster leave
 
 # Blocklist
-dnsctl blocklist add ads.example.com
-dnsctl blocklist remove ads.example.com
+dnsctl blocklist status
+dnsctl blocklist sources
 dnsctl blocklist reload
-dnsctl blocklist stats
 
 # DNSSEC
-dnsctl dnssec status example.com
-dnsctl dnssec sign example.com --algorithm ECDSAP256SHA256
-dnsctl dnssec rollover example.com --type zsk
-dnsctl dnssec ds example.com
+dnsctl dnssec status
+dnsctl dnssec keys
+dnsctl dnssec generate-key --algorithm 13 --type KSK --zone example.com
+dnsctl dnssec ds-from-dnskey --zone example.com --keyfile Kexample.com.+013+12345.key
 
 # Diagnostics
 dnsctl dig example.com A                    # Built-in dig-like tool
 dnsctl dig @localhost example.com AAAA +dnssec
-dnsctl health
-dnsctl stats
-dnsctl config show
-dnsctl config set resolver.mode forwarder
+dnsctl server health
+dnsctl server status
+dnsctl config get
+dnsctl config reload
 
 # Server
-dnsctl server start
-dnsctl server stop
-dnsctl server reload
+dnsctl server health
 dnsctl server status
 ```
 
 ### 11.3 Web Dashboard
 
-Embedded vanilla JS dashboard (no React/Vue/Angular — zero dependency philosophy extends to frontend).
+Embedded React 19 dashboard built from `web/src/` and served from `internal/dashboard/static/dist/` by the Go API server.
 
 #### Features
-- **Overview** — queries/sec, cache hit ratio, uptime, active zones
-- **Query Log** — real-time query stream via WebSocket
-- **Zone Manager** — CRUD zones and records via REST API
-- **Cache Viewer** — browse cache entries, flush
-- **Blocklist Manager** — add/remove domains, import lists
-- **Cluster Status** — node health, leader info, replication lag
-- **Metrics Dashboard** — charts for QPS, latency, top domains
-- **Config Editor** — edit runtime config with validation
-- **DNSSEC Status** — key info, signing status, DS records
+- **Overview** — queries/sec, cache hit ratio, active clients, active zones
+- **Query Log** — real-time query stream via WebSocket `/ws`
+- **Zone Manager** — zone listing, zone details, and record editing via REST API
+- **Policy Pages** — blocklist, RPZ, ACL, upstream, GeoIP, DNS64/Cookies, and zone transfer views
+- **Cluster Status** — node health, consensus status, and cluster metrics
+- **Metrics Dashboard** — historical charts, top domains, and API-backed dashboard stats
+- **Settings** — grouped settings pages backed by config APIs where supported
+- **DNSSEC Status** — validator/key status and DNSSEC operations visibility
 
 ### 11.4 Prometheus Metrics
 

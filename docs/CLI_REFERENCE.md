@@ -55,14 +55,13 @@ internal.example.com. 1800    120 records  unsigned
 Add a new zone.
 
 ```bash
-dnsctl zone add <zone-name> [--file=<zone-file>] [--ttl=<seconds>]
+dnsctl zone add <zone-name> [nameserver]
 ```
 
 **Examples**:
 ```bash
 dnsctl zone add example.com
-dnsctl zone add example.com --file=/etc/nothingdns/zones/example.com.zone
-dnsctl zone add example.com --ttl=3600
+dnsctl zone add example.com ns1.example.com.
 ```
 
 ### zone remove
@@ -90,20 +89,13 @@ dnsctl zone reload <zone-name>
 Export zone to BIND format.
 
 ```bash
-dnsctl zone export <zone-name> [--output=<file>]
+dnsctl zone export <zone-name>
 ```
 
 ```bash
 dnsctl zone export example.com
-dnsctl zone export example.com --output=example.com.bak
-```
-
-### zone verify
-
-Verify zone configuration.
-
-```bash
-dnsctl zone verify <zone-name>
+# Save to a file with shell redirection
+dnsctl zone export example.com > example.com.zone
 ```
 
 ---
@@ -119,13 +111,13 @@ dnsctl record [subcommand]
 Add a DNS record.
 
 ```bash
-dnsctl record add <zone> <name> <type> <value> [--ttl=<seconds>]
+dnsctl record add <zone> <name> <type> <value> [ttl]
 ```
 
 **Examples**:
 ```bash
-dnsctl record add example.com www A 192.168.1.100 --ttl=3600
-dnsctl record add example.com @ MX "10 mail.example.com." --ttl=3600
+dnsctl record add example.com www A 192.168.1.100 3600
+dnsctl record add example.com @ MX "10 mail.example.com." 3600
 dnsctl record add example.com _sip._tcp SRV "10 60 5060 sip.example.com."
 dnsctl record add example.com mail TXT "v=spf1 mx ~all"
 ```
@@ -135,12 +127,12 @@ dnsctl record add example.com mail TXT "v=spf1 mx ~all"
 Remove a DNS record.
 
 ```bash
-dnsctl record remove <zone> <name> <type> [value]
+dnsctl record remove <zone> <name> <type>
 ```
 
 ```bash
 dnsctl record remove example.com www A
-dnsctl record remove example.com @ MX "10 mail.example.com."
+dnsctl record remove example.com @ MX
 ```
 
 ### record update
@@ -148,7 +140,7 @@ dnsctl record remove example.com @ MX "10 mail.example.com."
 Update a DNS record.
 
 ```bash
-dnsctl record update <zone> <name> <type> <value> [--ttl=<seconds>]
+dnsctl record update <zone> <name> <type> <old-data> <new-data> [ttl]
 ```
 
 ### record list
@@ -156,13 +148,11 @@ dnsctl record update <zone> <name> <type> <value> [--ttl=<seconds>]
 List records in a zone.
 
 ```bash
-dnsctl record list <zone> [--type=<type>] [--name=<pattern>]
+dnsctl record list <zone>
 ```
 
 ```bash
 dnsctl record list example.com
-dnsctl record list example.com --type=A
-dnsctl record list example.com --name="www*"
 ```
 
 ---
@@ -201,18 +191,6 @@ Flush (clear) the cache.
 dnsctl cache flush
 ```
 
-### cache warm
-
-Warm cache with popular domains.
-
-```bash
-dnsctl cache warm --file=<domain-list>
-```
-
-```bash
-dnsctl cache warm --file=popular-domains.txt
-```
-
 ---
 
 ## cluster — Cluster Management
@@ -241,12 +219,12 @@ Leader:       node-1
 Cache Sync:   Enabled
 ```
 
-### cluster nodes
+### cluster peers
 
-List cluster nodes.
+List cluster peers/nodes.
 
 ```bash
-dnsctl cluster nodes
+dnsctl cluster peers
 ```
 
 **Output**:
@@ -289,34 +267,12 @@ Show blocklist status.
 dnsctl blocklist status
 ```
 
-### blocklist list
+### blocklist sources
 
-List configured blocklists.
-
-```bash
-dnsctl blocklist list
-```
-
-### blocklist add
-
-Add a blocklist source.
+List configured blocklist sources.
 
 ```bash
-dnsctl blocklist add <name> --url=<url> [--type=<type>]
-```
-
-**Examples**:
-```bash
-dnsctl blocklist add ads --url=https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts --type=hosts
-dnsctl blocklist add malware --url=https://urlhaus.abuse.ch/downloads/json/ --type=domain
-```
-
-### blocklist remove
-
-Remove a blocklist.
-
-```bash
-dnsctl blocklist remove <name>
+dnsctl blocklist sources
 ```
 
 ### blocklist reload
@@ -341,20 +297,7 @@ Get current configuration.
 
 ```bash
 dnsctl config get
-```
-
-### config set
-
-Update configuration (partial update).
-
-```bash
-dnsctl config set <key>=<value> [--key=<value>...]
-```
-
-**Examples**:
-```bash
-dnsctl config set cache.size=20000
-dnsctl config set logging.level=debug --key=cache.prefetch=true
+dnsctl config get server.http.bind
 ```
 
 ### config reload
@@ -363,14 +306,6 @@ Reload configuration from file.
 
 ```bash
 dnsctl config reload
-```
-
-### config validate
-
-Validate configuration file.
-
-```bash
-dnsctl config validate [--file=<path>]
 ```
 
 ---
@@ -539,30 +474,18 @@ dnsctl server status
 
 **Output**:
 ```
-NothingDNS Server Status
-------------------------
-Version:      1.0.0
-Uptime:       2 days, 14:32:15
-Go Version:   go1.26.2
-Build Date:   2024-05-01
-```
-
-### server stats
-
-Show server statistics.
-
-```bash
-dnsctl server stats
-```
-
-**Output**:
-```
-Server Statistics
-------------------
-Queries:       2,543,210
-Cache Hits:    2,388,657 (93.9%)
-Queries/Sec:   125
-Uptime:        2 days
+Server Status:
+  Status:    ok
+  Version:   0.1.1
+  Timestamp: 2026-07-06T12:00:00Z
+  Cache:
+    Size:     123
+    Capacity: 10000
+    Hits:     456
+    Misses:   78
+    Hit Ratio: 85.37%
+  Cluster:
+    Enabled: false
 ```
 
 ### server health
@@ -571,14 +494,6 @@ Check server health.
 
 ```bash
 dnsctl server health
-```
-
-### server reload
-
-Send SIGHUP to reload configuration.
-
-```bash
-dnsctl server reload
 ```
 
 ---
@@ -595,10 +510,10 @@ dnsctl version
 
 **Output**:
 ```
-dnsctl version 1.0.0
-NothingDNS version 1.0.0
-Go version go1.26.2
+dnsctl version 0.1.1
 ```
+
+`dnsctl -version` prints the same version line.
 
 ### help
 
@@ -674,11 +589,11 @@ dnsctl dig +dnssec +ad example.com DNSKEY
 ### Scripting Examples
 
 ```bash
-# Monitor queries per second
-watch -n1 'dnsctl server stats | grep Queries'
+# Monitor cache statistics
+watch -n1 'dnsctl cache stats'
 
-# List all A records
-dnsctl record list example.com --type=A
+# List records in a zone
+dnsctl record list example.com
 
 # Backup all zones
 for zone in $(dnsctl zone list | awk '{print $1}'); do

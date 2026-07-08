@@ -192,11 +192,11 @@ upstream:
 ### Memory Monitoring
 
 ```bash
-# Check memory usage via API
-curl http://localhost:8080/api/v1/memory
+# Check dashboard/server stats
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/dashboard/stats
 
-# Or via metrics
-curl http://localhost:8080/metrics | grep nothingdns_memory
+# Or via Prometheus metrics
+curl http://localhost:9153/metrics | grep nothingdns_memory
 ```
 
 ### Memory-Efficient Settings
@@ -289,12 +289,10 @@ Factors affecting hit ratio:
 ### Cache Warming
 
 ```bash
-# Warm cache with popular domains on startup
-./dnsctl cache warm --file popular_domains.txt
-
-# Or via API
-curl -X POST http://localhost:8080/api/v1/cache/warm \
-  -d '{"domains": ["example.com", "api.example.com"]}'
+# Warm cache with normal DNS queries; there is no dedicated cache-warm API.
+while read -r domain; do
+  [ -n "$domain" ] && dig @localhost "$domain" A >/dev/null
+done < popular_domains.txt
 ```
 
 ### Negative Cache (RFC 2308)
@@ -449,8 +447,8 @@ go tool pprof -http=:8081 mem.prof
 3. Check for network issues
 
 ```bash
-# Latency breakdown via tracing
-curl http://localhost:8080/api/v1/metrics/history | jq '.latency_breakdown'
+# Historical latency samples from the metrics ring buffer
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/metrics/history | jq '{timestamps, latency_ms, count}'
 ```
 
 ### Low QPS

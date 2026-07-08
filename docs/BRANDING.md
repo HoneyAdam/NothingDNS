@@ -9,19 +9,19 @@
 
 ### 1.2 Taglines
 - **Primary:** "Nothing but DNS. Nothing else needed."
-- **Technical:** "Zero dependencies. Full resolution."
-- **Marketing:** "The DNS server that needs nothing — and does everything."
-- **Developer:** "One binary. Zero deps. All protocols."
+- **Technical:** "Minimal dependencies. Full resolution."
+- **Marketing:** "The DNS server that keeps the stack small — and does everything."
+- **Developer:** "One binary. Minimal deps. All protocols."
 - **Cluster:** "From single node to sovereign DNS infrastructure."
 
 ### 1.3 Elevator Pitch
-NothingDNS is a production-grade DNS server written in pure Go with zero external dependencies. A single binary delivers authoritative + recursive DNS, supports all modern protocols (UDP, TCP, DoT, DoH, DoQ), includes DNSSEC, ad-blocking, GeoDNS, split-horizon views, and Raft-based clustering — with a built-in web dashboard, REST API, and CLI tool.
+NothingDNS is a production-grade DNS server written in Go with a deliberately small dependency set. A single binary delivers authoritative + recursive DNS, supports modern protocols (UDP, TCP, DoT, DoH, DoQ), includes DNSSEC, ad-blocking, GeoDNS, split-horizon views, and Raft-based clustering — with a built-in web dashboard, REST API, and CLI tool.
 
 ### 1.4 One-Liner Descriptions
-- **GitHub:** Pure Go DNS server — authoritative, recursive, DoT/DoH/DoQ, DNSSEC, clustering. Zero dependencies.
-- **Twitter/X:** DNS server that needs literally nothing. One Go binary. All protocols. Zero deps. 🚀
-- **Hacker News:** Show HN: NothingDNS — Full-featured DNS server in pure Go, zero dependencies
-- **Reddit:** Built a complete DNS server from scratch in Go with zero external dependencies — authoritative + recursive + DoT/DoH/DoQ + DNSSEC + Raft clustering
+- **GitHub:** Pure Go DNS server — authoritative, recursive, DoT/DoH/DoQ, DNSSEC, clustering. Minimal dependencies.
+- **Twitter/X:** DNS server that keeps the stack small. One Go binary. All protocols. Minimal deps. 🚀
+- **Hacker News:** Show HN: NothingDNS — Full-featured DNS server in Go with minimal dependencies
+- **Reddit:** Built a complete DNS server in Go with a tiny dependency set — authoritative + recursive + DoT/DoH/DoQ + DNSSEC + Raft clustering
 
 ---
 
@@ -144,20 +144,20 @@ The letters "DNS" where the letterforms are created entirely from negative space
 ### 4.1 Launch Content
 
 **Blog Post (Technical Deep Dive):**
-"Building a DNS Server from Scratch in Go — With Zero Dependencies"
+"Building a DNS Server from Scratch in Go — With Minimal Dependencies"
 - Wire protocol implementation details
 - QUIC from scratch challenges
 - Raft consensus for DNS
 - Performance benchmarks vs BIND/CoreDNS
 
 **Twitter/X Thread:**
-"I built a complete DNS server in pure Go. Zero external dependencies. Here's what I learned about DNS wire protocol, QUIC, Raft consensus, and why you should care about your DNS infrastructure. 🧵"
+"I built a complete DNS server in Go with a tiny dependency set. Here's what I learned about DNS wire protocol, QUIC, Raft consensus, and why you should care about your DNS infrastructure. 🧵"
 
 **Hacker News:**
-"Show HN: NothingDNS — Full DNS server (auth + recursive + DoT/DoH/DoQ + DNSSEC + clustering) in pure Go, zero deps"
+"Show HN: NothingDNS — Full DNS server (auth + recursive + DoT/DoH/DoQ + DNSSEC + clustering) in Go with minimal deps"
 
 **Reddit Posts:**
-- r/golang: Technical deep dive on zero-dependency approach
+- r/golang: Technical deep dive on the minimal-dependency approach
 - r/selfhosted: Replacement for Pi-hole + authoritative DNS
 - r/homelab: Single binary DNS infrastructure
 - r/netsec: DNSSEC + security features
@@ -173,12 +173,12 @@ TITLE: "NothingDNS" in bold monospace, subtitle "Nothing but DNS. Nothing else n
 SECTIONS:
 1. CENTER: Isometric server cube with DNS symbols flowing through it
 2. TOP LEFT: Protocol icons (UDP, TCP, DoT shield, DoH cloud, DoQ lightning)
-3. TOP RIGHT: Zero dependencies badge with "0" prominently displayed
+3. TOP RIGHT: Minimal dependencies badge with a small dependency graph
 4. MIDDLE: Architecture flow (Query → Filter → Route → Resolve → Sign → Respond)
 5. BOTTOM LEFT: Cluster visualization (3 nodes with Raft arrows)
 6. BOTTOM RIGHT: Management icons (API, Dashboard, CLI, Prometheus graph)
 
-FOOTER: "Pure Go • Single Binary • Zero Dependencies • github.com/nothingdns/nothingdns"
+FOOTER: "Pure Go • Single Binary • Minimal Dependencies • github.com/nothingdns/nothingdns"
 ```
 
 ### 4.3 X/Twitter Post Templates
@@ -187,8 +187,8 @@ FOOTER: "Pure Go • Single Binary • Zero Dependencies • github.com/nothingd
 ```
 🚀 Introducing NothingDNS
 
-A complete DNS server written in pure Go.
-Zero external dependencies.
+A complete DNS server written in Go.
+Minimal external dependencies.
 
 ✅ Authoritative + Recursive
 ✅ DoT / DoH / DoQ

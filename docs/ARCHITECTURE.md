@@ -19,11 +19,11 @@
 
 ## 1. Overview
 
-NothingDNS is a production-grade DNS server written in Go with zero external dependencies. It provides authoritative DNS, recursive resolution, and full transport support (UDP, TCP, TLS, DoH, DoQ, WebSocket, XoT).
+NothingDNS is a production-grade DNS server written in Go with a minimal dependency set. It provides authoritative DNS, recursive resolution, and transport support for UDP, TCP, DoT, DoH, DoQ, DNS over WebSocket, and XoT.
 
 ### Design Principles
 
-- **Zero external dependencies** — Go stdlib only (`golang.org/x/sys` for platform-specific socket ops)
+- **Minimal external dependencies** — core DNS logic is hand-rolled; external Go deps are limited to `quic-go` for DoQ plus Go-maintained `golang.org/x/*` packages for platform/crypto/network support
 - **Single binary** — All components compiled into `cmd/nothingdns/`
 - **Single binary deployment** — CLI companion `cmd/dnsctl/` for management
 - **Hot config reload** — SIGHUP reloads zones, blocklists, RPZ rules, TLS certs without downtime
@@ -857,7 +857,7 @@ graph TB
 | VULN-044 | DoH/DoWS/ODoH no auth | No auth on these endpoints |
 | VULN-059 | TXID randomization | Re-randomizes before forwarding |
 | VULN-060 | Cache key includes DO bit | DO bit in cache key |
-| VULN-063 | Reflected amplification | RRL superlative detection |
+| VULN-063 | Reflected amplification | Response Rate Limiting (RRL) reduces abusive reflection/amplification behavior |
 | VULN-068 | Username lockout DoS | Per-(IP, username) pair lockout |
 
 ---

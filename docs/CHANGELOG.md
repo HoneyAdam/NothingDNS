@@ -201,7 +201,7 @@ Lifted across multiple packages:
 
 ### Changed
 - **`go vet ./...`**: Zero warnings. All code passes strict static analysis.
-- **Build**: `make release` cross-compiles for Linux (amd64/arm64/armv7), macOS (amd64/arm64), Windows (amd64), FreeBSD (amd64) via goreleaser.
+- **Build**: current release builds use `scripts/build-release.sh` via `make build-release`, producing `nothingdns` and `dnsctl` assets for Linux and macOS amd64/arm64 plus `SHA256SUMS`.
 
 ### Fixed
 - `KVStore.Rollback()`: Fixed to handle read-only transactions without spurious write-lock acquisition.
@@ -211,4 +211,4 @@ Lifted across multiple packages:
 - See [SECURITY.md](SECURITY.md) for responsible disclosure policy.
 
 ### Dependencies
-**Zero external dependencies.** NothingDNS is built with pure Go standard library only.
+**Minimal external dependencies.** Core DNS logic is hand-rolled; current external modules are limited to necessary DoQ/platform/crypto/network support.

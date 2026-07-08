@@ -36,13 +36,13 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/cache/stats 
 # Expected: > 0.80 (80%)
 
 # 4. Check error rates
-curl http://localhost:8080/metrics | grep nothingdns_errors_total
+curl http://localhost:9153/metrics | grep nothingdns_errors_total
 
 # 5. Verify disk usage
 df -h /data/nothingdns
 
-# 6. Check memory
-curl http://localhost:8080/api/v1/memory | jq
+# 6. Check dashboard/server metrics
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/dashboard/stats | jq
 ```
 
 ### Server Status Commands
@@ -86,7 +86,7 @@ dig @localhost example.com AXFR +tcp
 
 ### Prometheus Metrics
 
-Available at `http://localhost:8080/metrics`
+Available at `http://localhost:9153/metrics` by default (or the configured `metrics.bind` + `metrics.path`).
 
 **Key Metrics**:
 
@@ -110,7 +110,7 @@ rate(nothingdns_cluster_cache_sync_total[5m])
 
 ### Grafana Dashboard
 
-Import `deploy/grafana/dashboard.json` into Grafana.
+Use the Prometheus metrics endpoint (`metrics.path`, default `/metrics` on the configured metrics listener) to build or import your Grafana dashboard.
 
 **Dashboard Panels**:
 - Query Rate (QPS)
@@ -594,14 +594,12 @@ dnsctl cache flush
 
 ### Cache Warming
 
-```bash
-# Warm with popular domains
-dnsctl cache warm --file=/etc/nothingdns/popular-domains.txt
+There is no dedicated cache-warm API or `dnsctl` subcommand. To prefill cache entries, issue normal DNS queries for the domains you care about:
 
-# Or via API
-curl -X POST -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/v1/cache/warm \
-  -d '{"domains":["example.com","api.example.com","www.example.com"]}'
+```bash
+while read -r domain; do
+  [ -n "$domain" ] && dig @localhost "$domain" A >/dev/null
+done < /etc/nothingdns/popular-domains.txt
 ```
 
 ### Tune Cache TTLs
@@ -818,8 +816,8 @@ go tool pprof -http=:8081 cpu.prof
 ### High Memory Usage
 
 ```bash
-# Check memory
-curl http://localhost:8080/api/v1/memory | jq
+# Check dashboard/server metrics
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/dashboard/stats | jq
 
 # Profile memory
 curl http://localhost:8080/debug/pprof/heap > mem.prof

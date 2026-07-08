@@ -39,15 +39,20 @@
 go mod init github.com/nothingdns/nothingdns
 ```
 
-`go.mod` will contain ONLY the module declaration and Go version. No `require` block. No `go.sum` entries.
+The root module currently targets Go 1.26.4 and keeps the runtime dependency set intentionally small.
 
 ```go
 module github.com/nothingdns/nothingdns
 
-go 1.25.0
+go 1.26.4
 
-toolchain go1.26.3
+require (
+    github.com/quic-go/quic-go v0.60.0
+    golang.org/x/sys v0.46.0
+)
 ```
+
+`web/go.mod` is a separate tiny module that also declares `go 1.26.4`.
 
 ### 1.2 Binary Entry Points
 
@@ -2201,56 +2206,15 @@ func (r *Reloader) Reload() error
 
 ## 14. REST API
 
-```go
-// internal/api/rest/router.go
+The management API lives in `internal/api/` and uses the Go standard library `net/http` `ServeMux`; there is no separate `internal/api/rest` router package.
 
-// Hand-written HTTP router (no gorilla/mux, no chi).
-// Trie-based path matching with parameter extraction.
-//
-// Features:
-// - Path parameters: /zones/{name}/records/{id}
-// - Method routing: GET, POST, PUT, PATCH, DELETE
-// - Middleware chain: auth → CORS → logging → handler
-// - JSON request/response (encoding/json from stdlib)
+Current implementation notes:
 
-type Router struct {
-    tree    *routeNode
-    middlewares []Middleware
-}
-
-type Middleware func(http.Handler) http.Handler
-
-type routeNode struct {
-    children  map[string]*routeNode
-    paramName string              // Non-empty if this is a {param} segment
-    handlers  map[string]http.HandlerFunc  // Method → handler
-}
-
-func (r *Router) Handle(method, path string, handler http.HandlerFunc)
-func (r *Router) Use(mw Middleware)
-func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request)
-
-// Path parameter extraction from context:
-func PathParam(r *http.Request, name string) string
-
-// internal/api/rest/middleware.go
-
-// Auth middleware: Bearer token or Basic auth
-// Reads from Authorization header, validates against config.
-func AuthMiddleware(token string) Middleware
-
-// CORS middleware: Allow configurable origins.
-func CORSMiddleware(origins []string) Middleware
-
-// Logging middleware: Log method, path, status, duration.
-func LoggingMiddleware(logger *util.Logger) Middleware
-
-// internal/api/rest/swagger.go
-
-// Embedded Swagger UI (go:embed).
-// OpenAPI 3.0 spec generated as Go string constant.
-// Serves at /api/v1/swagger (UI) and /api/v1/swagger/spec.json (spec).
-```
+- Route registration is centralized in `internal/api/server.go`.
+- Handlers are split across `api_auth.go`, `api_zones.go`, `api_cache.go`, `api_cluster.go`, `api_config.go`, `api_metrics.go`, `api_dnssec.go`, and related files.
+- Middleware order in `Start()` is `auth -> CORS -> security headers -> logging -> API rate limit` (wrapped as chained `http.Handler` middleware).
+- OpenAPI JSON is served at `/api/openapi.json`; Swagger UI is served at `/api/docs`.
+- The same HTTP server also serves SPA assets, dashboard routes, `/ws`, and optional DoH / DoWS / ODoH endpoints.
 
 ---
 

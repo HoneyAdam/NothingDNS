@@ -70,7 +70,9 @@ Authorization: Bearer <token>
       "serial": 2026050301,
       "records": 23
     }
-  ]
+  ],
+  "total": 2,
+  "truncated": false
 }
 ```
 
@@ -78,10 +80,12 @@ Authorization: Bearer <token>
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `zones` | array | List of zones |
+| `zones` | array | Zone entries returned by the request, capped at 5000 |
 | `zones[].name` | string | Zone origin (FQDN with trailing dot) |
 | `zones[].serial` | uint32 | Current SOA serial number |
 | `zones[].records` | int | Total number of records in zone |
+| `total` | int | Unfiltered zone count |
+| `truncated` | bool | Present/true when the response was capped |
 
 ---
 

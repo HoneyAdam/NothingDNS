@@ -2,15 +2,15 @@
 
 ## Overview
 
-NothingDNS is a production-grade DNS server written in pure Go. This roadmap outlines planned features, improvements, and long-term vision.
+NothingDNS is a production-grade DNS server written in Go with a minimal external dependency set. This roadmap outlines planned features, improvements, and long-term vision.
 
 ## Version History
 
 | Version | Status | Date |
 |---------|--------|------|
-| 1.0.0 | Current | 2024-05-01 |
-| 1.1.0 | Planned | TBD |
-| 2.0.0 | Future | TBD |
+| 0.1.1 | Current | 2026-07-06 |
+| 0.2.0 | Planned | TBD |
+| 1.0.0 | Future | TBD |
 
 ---
 
@@ -20,11 +20,11 @@ Target: Better tooling and reliability improvements.
 
 ### CLI Completeness
 
-- [ ] `dnsctl record` — Add/update/remove records via API
-- [ ] `dnsctl zone add/remove` — Zone lifecycle management
-- [ ] `dnsctl cluster join/leave` — Cluster operations
-- [ ] `dnsctl blocklist reload` — Blocklist refresh
-- [ ] `dnsctl config validate` — Config validation
+- [x] `dnsctl record` — Add/update/remove records via API
+- [x] `dnsctl zone add/remove` — Zone lifecycle management
+- [x] `dnsctl cluster join/leave` — Cluster operations
+- [x] `dnsctl blocklist reload` — Blocklist refresh
+- [ ] `nothingdns -validate-config -config <path>` documentation and UX polish
 
 ### Reliability Improvements
 

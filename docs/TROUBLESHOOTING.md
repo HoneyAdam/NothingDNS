@@ -360,7 +360,7 @@ cluster:
 **Diagnosis**:
 ```bash
 # Check latency metrics
-curl http://localhost:8080/metrics | grep nothingdns_latency
+curl http://localhost:9153/metrics | grep nothingdns_latency
 
 # Check Prometheus dashboard if enabled
 # Look for p99 latency spikes
@@ -434,7 +434,7 @@ grep -i "sign\|crypto" /var/log/nothingdns/*.log
 **Diagnosis**:
 ```bash
 # Check memory usage
-curl http://localhost:8080/api/v1/memory
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/dashboard/stats
 
 # Check cache size
 curl http://localhost:8080/api/v1/cache/stats
@@ -631,5 +631,5 @@ grep "acl\|rate\|block\|rpz" /var/log/nothingdns/*.log
 3. **Enable debug logging** and collect:
    - Config file (sanitized)
    - Relevant log excerpts
-   - Output of `/api/v1/status` and `/metrics`
+   - Output of `/api/v1/status` and the metrics endpoint (default `http://localhost:9153/metrics`)
 4. **For security issues**: See [SECURITY.md](../SECURITY.md)
