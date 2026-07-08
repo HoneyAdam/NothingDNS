@@ -2,20 +2,17 @@
 
 ## Philosophy
 
-NothingDNS follows a **zero external dependencies** philosophy for the core server. Only two non-standard-library packages are used, and both are related to platform-specific functionality that cannot be implemented using the Go standard library.
+NothingDNS follows a **minimal external dependencies** philosophy for the core server. The runtime dependency set is intentionally small: `quic-go` for DNS over QUIC plus Go-maintained `golang.org/x/*` support packages for platform, crypto, and network functionality that cannot be implemented using only the standard library.
 
 ## Go Version Requirements
 
 | Go Version | Support Status |
 |------------|----------------|
-| 1.25.0+ | **Required** (primary development) |
-| 1.24.x | May work, not tested |
-| 1.23.x | May work, not tested |
-| < 1.23 | Not supported |
+| 1.26.4+ | **Required** (primary development) |
+| 1.25.x | May work, not tested |
+| < 1.25 | Not supported |
 
-The `go` directive in `go.mod` specifies `1.25.0` minimum.
-
-The `toolchain` directive specifies `go1.26.2` for building.
+The `go` directive in the root `go.mod` and `web/go.mod` specifies `1.26.4`.
 
 ## Direct Dependencies
 
@@ -25,7 +22,7 @@ These are the packages imported and used directly by NothingDNS:
 
 **Purpose**: DNS over QUIC (DoQ) transport
 
-**Version**: `v0.59.0`
+**Version**: `v0.60.0`
 
 **Why Required**: QUIC is a complex protocol with intricate state machine handling, connection management, and flow control. Implementing a standards-compliant QUIC stack from scratch would be a massive undertaking and would require ongoing maintenance as the RFC evolves.
 
@@ -41,7 +38,7 @@ These are the packages imported and used directly by NothingDNS:
 
 **Purpose**: Platform-specific socket operations
 
-**Version**: `v0.43.0`
+**Version**: `v0.46.0`
 
 **Why Required**: Certain DNS server features require OS-level access:
 - `SO_REUSEPORT` for multi-core UDP scalability on Linux
@@ -64,7 +61,7 @@ These packages are dependencies of `quic-go`:
 
 **Purpose**: Cryptographic operations for QUIC
 
-**Version**: `v0.45.0`
+**Version**: `v0.53.0`
 
 **Used For**:
 - TLS 1.3 connection encryption
@@ -74,16 +71,16 @@ These packages are dependencies of `quic-go`:
 
 **Purpose**: Network primitives for QUIC
 
-**Version**: `v0.47.0`
+**Version**: `v0.56.0`
 
 **Used For**:
 - HTTP/2 framing (used by QUIC internally)
 - WebSocket support in quic-go
 - Various network utilities
 
-## No External Dependencies (Core)
+## Standard-library-only core subsystems
 
-The following categories use only Go standard library:
+The following categories use only the Go standard library:
 
 | Category | Implementation |
 |----------|----------------|
@@ -131,7 +128,7 @@ New dependencies must be approved by meeting ALL criteria:
 1. **Necessity**: Cannot be implemented using Go stdlib
 2. **Maintenance**: Actively maintained (commits within 6 months)
 3. **Security**: No known vulnerabilities (run `govulncheck`)
-4. **License**: Compatible with Apache 2.0
+4. **License**: Compatible with MIT
 5. **Size**: Less than 1MB added to binary size
 6. **Approach**: Verify with project maintainers first
 
@@ -171,12 +168,11 @@ go mod verify
 
 When updating Go version:
 
-1. Test with new Go version: `make test`
-2. Update `go` directive in `go.mod`: `go 1.26.0`
-3. Update `toolchain` directive: `toolchain go1.26.2`
-4. Run `go mod tidy`
-5. Update CI workflows if needed
-6. Update this document
+1. Test with the new Go version: `make test-full`
+2. Update the `go` directive in `go.mod` and `web/go.mod`
+3. Run `go mod tidy` in the affected module(s)
+4. Update CI workflows if needed
+5. Update this document
 
 ## Vulnerability Management
 
@@ -219,35 +215,34 @@ go mod verify
 
 ```
 github.com/nothingdns/nothingdns
-├── github.com/quic-go/quic-go v0.59.0
-│   ├── golang.org/x/crypto (indirect)
-│   │   └── aes, cipher, crypto, hmac, HKDF, SHA-256/512
-│   └── golang.org/x/net (indirect)
-│       └── HTTP/2, WebSocket utilities
-└── golang.org/x/sys v0.43.0
-    └── SO_REUSEPORT, IP_TRANSPARENT, platform-specific
+├── github.com/quic-go/quic-go v0.60.0
+├── golang.org/x/sys v0.46.0
+├── golang.org/x/crypto v0.53.0 (indirect)
+├── golang.org/x/net v0.56.0 (indirect)
+└── go.uber.org/mock v0.6.0 (indirect, tests/tooling)
 ```
 
 ## Compatibility Matrix
 
 | Feature | Go Version | Notes |
 |---------|------------|-------|
-| QUIC/DoQ | 1.25.0+ | Requires quic-go |
-| AES-GCM (cluster) | 1.25.0+ | stdlib crypto |
-| Ed25519 | 1.25.0+ | stdlib crypto |
-| RFC 8439 (chacha20) | 1.25.0+ | stdlib crypto |
-| SO_REUSEPORT | 1.25.0+ | x/sys Linux only |
-| Link-local IPv6 | 1.25.0+ | stdlib net |
+| QUIC/DoQ | 1.26.4+ | Requires quic-go |
+| AES-GCM (cluster) | 1.26.4+ | stdlib crypto |
+| Ed25519 | 1.26.4+ | stdlib crypto |
+| RFC 8439 (chacha20) | 1.26.4+ | stdlib crypto |
+| SO_REUSEPORT | 1.26.4+ | x/sys Linux only |
+| Link-local IPv6 | 1.26.4+ | stdlib net |
 
 ## License Compatibility
 
-| Package | License | Compatible with Apache 2.0 |
-|---------|---------|---------------------------|
+| Package | License | Compatible with MIT |
+|---------|---------|---------------------|
 | quic-go | MIT | Yes |
 | x/sys | BSD 3-Clause | Yes |
 | x/crypto | BSD 3-Clause | Yes |
 | x/net | BSD 3-Clause | Yes |
-| NothingDNS | Apache 2.0 | Yes (self) |
+| go.uber.org/mock | Apache 2.0 | Yes |
+| NothingDNS | MIT | Yes (self) |
 
 ## Frequently Asked Questions
 
