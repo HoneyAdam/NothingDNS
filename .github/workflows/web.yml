@@ -69,8 +69,11 @@ jobs:
         run: cd web && npm audit --audit-level=moderate
 
       - name: Run Retire.js
+        # M-3 / security scan 2026-06-26: pin tool versions instead of @latest.
+        # This job has security-events:write and GITHUB_TOKEN in scope;
+        # bump via Dependabot / Renovate when needed.
         run: |
-          npm install -g retire@latest
+          npm install -g retire@5.4.3
           retire --path web/src --ignorefile retire.json
 
       - name: Run Snyk

@@ -231,9 +231,9 @@ benchmark:
 ## Run security checks (govulncheck, staticcheck)
 security-check:
 	@echo "Running security checks..."
-	@go install golang.org/x/vuln/cmd/govulncheck@latest
+	@go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
 	@govulncheck ./...
-	@go install honnef.co/go/tools/cmd/staticcheck@latest
+	@go install honnef.co/go/tools/cmd/staticcheck@2025.1.1
 	@staticcheck ./...
 	@echo "✓ Security checks passed"
 
