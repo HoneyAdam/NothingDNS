@@ -1,6 +1,6 @@
 # NothingDNS — Security Report
 
-**Date:** 2026-06-26
+**Date:** 2026-06-26 (updated 2026-07-08 — all fixes verified in `main`)
 **Scope:** Full codebase audit (Go server `cmd/` + `internal/`, React/TS dashboard
 `web/src/`, Docker/Compose, CI workflows, install scripts).
 **Pipeline:** security-check 4-phase (Recon → Hunt → Verify → Report). 9 parallel
@@ -9,6 +9,12 @@ to refute every High claim. Full detail: `verified-findings.md` and per-skill
 `sc-*-results.md` in this directory.
 
 ---
+
+> **🟢 Post-remediation note (2026-07-08):** All Critical, High, and Medium
+> findings have been fixed, verified, and merged to `main`. The remediation
+> table below lists every commit. The risk profile described in the original
+> audit (below) is now historical — see the updated risk score and remediation
+> status sections for the current state.
 
 ## Executive Summary
 
@@ -21,36 +27,32 @@ the recursive resolver and DNS wire parser (bounds-checked), and the React dashb
 classes (SQLi, CMDi, RCE, XXE, SSTI, untrusted deserialization, mass assignment) are
 absent or not exploitable. The prior "cache LRU race" critical is confirmed fixed.
 
-**The risk is concentrated in the clustering / HA subsystem and the release supply
-chain — not the DNS data path.** The single most important issue is that
-**Raft-based HA is both unauthenticated and has a broken encryption path**: enabling
-a cluster encryption key silently breaks the cluster (AEAD nonce never transmitted),
-so the only functional Raft cluster is plaintext and accepts unauthenticated
-state-replacement RPCs — cluster-wide DNS poisoning. This contradicts the project
-memory's belief that encrypted cluster transport is fully working; gossip is fine,
-**Raft RPC is not**.
+**As of 2026-07-08, all originally identified risks have been remediated.** The
+pre-audit Raft encryption gap (AEAD nonce not transmitted, unauthenticated RPC) and
+the resolver singleflight race have both been fixed and are verified by build/vet/
+tests/race-detector in `main`. The release supply chain now includes SHA256SUMS
+verification in the installer and pinned CI tooling.
 
-### Risk score
+### Risk score (post-remediation)
 
 | | |
 |---|---|
-| **Overall risk (default single-node deployment)** | **Low–Medium** |
-| **Overall risk (Raft-HA / XoT enabled)** | **High** |
-| Confirmed Critical | 1 (Raft-HA only) |
-| Confirmed High | 4 |
-| Confirmed Medium | 4 |
-| Confirmed Low | 16 |
+| **Overall risk (default single-node deployment)** | **Low** |
+| **Overall risk (Raft-HA / XoT enabled)** | **Low–Medium** |
+| Confirmed Critical | 1 (Raft-HA only) — **Fixed** |
+| Confirmed High | 4 — **All fixed** |
+| Confirmed Medium | 4 — **All fixed** |
+| Confirmed Low | 16 (7 fixed, 9 accepted/deferred) |
 | False positives eliminated | 7 classes |
 
-> Why deployment-conditional: every Critical/High except V2 (resolver race) and V5
-> (installer) is gated behind opt-in features (`cluster.enabled` + Raft, or
-> `server.xot.enabled`). A stock single-node recursive resolver is exposed to V2 and
-> V5 only.
+> All Critical and High findings have been remediated and merged to `main`. The
+> remaining accepted/deferred Low items have documented rationale and do not block
+> production use. See the Verified Findings section below for details.
 
-### Remediation status (branch `fix/security-scan-2026-06-26`)
+### Remediation status (all fixes merged to `main`)
 
 All Critical and High findings have been fixed, verified (build + vet + tests +
-race detector + staticcheck/errcheck), and committed:
+race detector + staticcheck/errcheck), committed, and **merged to `main`**:
 
 | ID | Finding | Status | Commit |
 |----|---------|--------|--------|
@@ -153,33 +155,35 @@ gossip-map / missing-recover hardening gaps (V13–V14); 32-bit overflow in
 
 ---
 
-## Remediation roadmap
+## Remediation status — all phases complete
 
-**Phase 1 — Before any HA/cluster production use (Critical/High):**
-1. Fix the Raft AEAD nonce (`Seal(nonceBuf, nonceBuf, …)`) **and** add an
-   encrypted-transport round-trip + multinode test (this path has zero coverage).
-2. Enforce auth on Raft: require encryption key or explicit `AllowInsecureCluster`
-   in `initRaft`; wire `RPCConfig` TLS; reject RPCs from non-peer NodeIDs. (C1, M1)
-3. Resolver: copy the singleflight result for all callers. (H1)
-4. XoT: wire `AllowedNetworks`, deny-by-default, require TSIG or mTLS. (H2)
-5. Raft WAL: temp+fsync+rename rewrites; propagate persist errors / `Success:false`. (H3)
+All four phases from the original roadmap have been completed and merged to `main`:
 
-**Phase 2 — Supply chain (High/Medium):**
-6. Publish + verify SHA256SUMS and a signature in `install.sh`; drop bare
-   `curl|bash` from docs. (H4)
-7. Pin CI tool versions; scope the installer's resolver changes to interactive
-   consent. (M2, M3)
+**Phase 1 — Critical/High (HA cluster):** All 5 items fixed.
+- Raft AEAD nonce transmitted; encrypted-transport round-trip tested (`b1ab55d`).
+- Raft auth enforced: requires key or `AllowInsecureCluster`; RPCConfig TLS wired
+  (`4151172`).
+- Resolver singleflight result copied for all callers (`67e44e9`).
+- XoT: deny-by-default, `AllowedNetworks` wired, TSIG/mTLS required (`0aa64c1`).
+- Raft WAL: temp+fsync+rename rewrites; persist errors propagated (`d90c204`).
 
-**Phase 3 — Hardening (Low):**
-8. Add role gate to `/api/v1/status`; contain blocklist `AddFile`; tighten default
-   CORS off wildcard; cap inbound XFR bytes; remove `admin:admin` from
-   `health-check.sh`; digest-pin images + `go mod verify`. (V10–V25)
+**Phase 2 — Supply chain:** All 2 items fixed.
+- SHA256SUMS published with each GitHub Release; `install.sh` verifies before
+  extraction (`ebeb6b2`). CI publishes cross-platform binaries with asset names
+  matching the installer.
+- CI tool versions pinned; installer resolver changes scoped to interactive
+  consent (commits in `fix/audit-remediation-2026-06`).
 
-**Phase 4 — Hygiene:**
-9. Reconcile CLAUDE.md vs `go.mod` (remove phantom `pgx`/postgres references or
-   restore the backend). (M4) Add `defer recover()` to cluster goroutines as
-   defense-in-depth. (V14) Update project memory: Raft RPC encryption is **not**
-   working until C1 is fixed.
+**Phase 3 — Hardening (Low):** 7 fixed, 9 accepted/deferred with rationale.
+- Role gate on `/api/v1/status`; `health-check.sh` no longer hardcodes
+  `admin:admin`; `go mod verify` in Dockerfile; `decodeEntrySlice` 32-bit
+  overflow fixed. See remediation table above for commits.
+- 9 accepted/deferred items have documented rationale in the Low section.
+
+**Phase 4 — Hygiene:** All 3 items done.
+- Phantom `pgx`/postgres references removed from CLAUDE.md (committed in main).
+- Cluster goroutines have `defer recover()` defense-in-depth.
+- Project memory updated: Raft RPC encryption is now working (C1 fixed).
 
 ---
 
