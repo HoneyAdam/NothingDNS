@@ -21,6 +21,9 @@ go.work
 /bin/
 /dist/
 /build/
+/web/dist/
+/web/dist-ssr/
+/web/node_modules/
 
 # Binary output from go build
 /nothingdns
@@ -50,6 +53,8 @@ go.work
 /test-results/
 coverage.html
 coverage.out
+*.prof
+*.coverprofile
 
 # Release binaries (built by goreleaser / make release)
 /release/
@@ -62,9 +67,10 @@ coverage.out
 # Database files
 *.db
 
-# Zone files (test zones can be kept)
+# Zone/runtime data (test fixtures can be tracked with force-add when needed)
 *.zone
 /zones/
+/zones-db/
 
 # AI assistant config (personal)
 .claude/
@@ -78,6 +84,8 @@ local-test.yaml
 /temp/
 *.tmp
 *.bak
+*.orig
+*.rej
 
 # Debug files
 debug
@@ -111,10 +119,12 @@ Thumbs.db
 .DS_Store
 *.icloud
 
-# Package lock files
-pnpm-lock.yaml
-package-lock.json
-yarn.lock
+# Accidental package-manager lockfiles outside the tracked npm lockfile.
+/pnpm-lock.yaml
+/package-lock.json
+/yarn.lock
+/web/pnpm-lock.yaml
+/web/yarn.lock
 
 .dfmt/
 .wrongstack/
