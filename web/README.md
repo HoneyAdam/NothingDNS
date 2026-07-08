@@ -1,73 +1,79 @@
-# React + TypeScript + Vite
+# NothingDNS Web Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+React 19 + TypeScript + Vite dashboard for NothingDNS. The source lives in `web/src/`; production assets are built into `internal/dashboard/static/dist/` and embedded/served by the Go API server.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- React 19 with `react-router-dom` routes
+- TypeScript 6
+- Vite 8
+- Tailwind CSS 4 via `@tailwindcss/vite`
+- TanStack Query for API state
+- Zustand for auth/query-stream state
+- Radix UI primitives plus local `components/ui/*`
+- Sonner for toast notifications
 
-## React Compiler
+## Routes
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The dashboard routes are defined in `src/App.tsx`:
 
-## Expanding the ESLint configuration
+| Route | Page |
+|---|---|
+| `/` | Dashboard summary |
+| `/zones` | Zone list |
+| `/zones/:name` | Zone detail and record editing |
+| `/dnssec` | DNSSEC status/keys |
+| `/cluster` | Cluster status |
+| `/query-log` | Live/recent query log |
+| `/top-domains` | Top domains |
+| `/geoip` | GeoIP/GeoDNS stats |
+| `/blocklist` | Blocklist status and controls |
+| `/rpz` | RPZ policy rules |
+| `/acl` | ACL settings |
+| `/upstreams` | Upstream resolver status |
+| `/zone-transfer` | Slave/transfer state |
+| `/dns64-cookies` | DNS64 and DNS Cookie state |
+| `/charts` | Historical metrics charts |
+| `/users` | User/RBAC management |
+| `/settings` | Server settings |
+| `/about` | Build/about page |
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Development
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd web
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The dev server talks to the same relative API paths used in production. Run a NothingDNS API server on the expected origin or proxy traffic as needed for local development.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build and validation
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd web
+npm run lint
+npm run build
+npm run smoke
 ```
+
+`npm run build` runs `tsc -b`, `vite build`, and `scripts/verify-css-tokens.mjs`. The token verifier checks the built CSS under `internal/dashboard/static/dist/assets/` for required design-system utility classes so missing Tailwind v4 color tokens fail the build instead of shipping broken transparent UI surfaces.
+
+## Authentication and API behavior
+
+- API helpers live in `src/lib/api.ts` and call same-origin endpoints such as `/api/v1/status`.
+- Bearer tokens are read from the in-memory Zustand auth store; HttpOnly cookies are not read by JavaScript.
+- A `401` response clears client auth and returns the user to the login page.
+- Structured backend errors are normalized from either `{ "error": "..." }` or `{ "error": { "message": "...", "code": "..." } }` shapes.
+- The shared WebSocket connection is opened at `/ws` after authentication; pages subscribe via `src/stores/queryStream.ts`.
+
+## Production assets
+
+When dashboard code changes, regenerate and commit `internal/dashboard/static/dist/`:
+
+```bash
+cd web
+npm run build
+```
+
+The Go server serves the SPA from `internal/dashboard/static/dist/`, falls back to `index.html` for non-API routes, and serves `/assets/*` directly.

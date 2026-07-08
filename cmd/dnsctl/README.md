@@ -49,7 +49,7 @@ dnsctl zone reload example.com
 dnsctl zone export example.com
 ```
 
-**Note**: All `zone` subcommands are fully implemented.
+Supported subcommands: `list`, `add`, `remove`, `reload`, and `export`.
 
 ---
 
@@ -77,7 +77,7 @@ dnsctl record remove example.com www A
 dnsctl record update example.com www A 192.0.2.1 192.0.2.2 300
 ```
 
-**Note**: All `record` subcommands are fully implemented.
+Supported subcommands: `list`, `add`, `remove`, and `update`.
 
 ---
 
@@ -193,14 +193,11 @@ dnsctl dnssec verify-anchor --file /etc/nothingdns/dnssec/trust-anchor.conf
 
 ### `server` - Server Operations
 
-Check server health and statistics.
+Check server status and health.
 
 ```bash
 # Show server status
 dnsctl server status
-
-# Show query statistics
-dnsctl server stats
 
 # Check server health
 dnsctl server health
@@ -216,10 +213,10 @@ dnsctl server health
 dnsctl -server https://dns.example.com:8080 -api-key "my-api-key" zone list
 ```
 
-Alternatively, set the `NONDNS_API_KEY` environment variable:
+Alternatively, set the `NOTHINGDNS_API_KEY` environment variable:
 
 ```bash
-export NONDNS_API_KEY="my-api-key"
+export NOTHINGDNS_API_KEY="my-api-key"
 dnsctl -server https://dns.example.com:8080 zone list
 ```
 
@@ -239,8 +236,8 @@ dnsctl -server https://dns.example.com:8080 zone list
 
 | Variable | Description |
 |----------|-------------|
-| `NONDNS_SERVER` | Default server URL (overrides `-server` default) |
-| `NONDNS_API_KEY` | API key for authentication |
+| `NOTHINGDNS_SERVER` | Default server URL (overrides `-server` default) |
+| `NOTHINGDNS_API_KEY` | API key for authentication |
 
 ---
 
@@ -304,13 +301,12 @@ All `dnsctl` commands map to REST API endpoints:
 | `config get` | GET | `/api/v1/server/config` |
 | `config reload` | POST | `/api/v1/config/reload` |
 | `server status` | GET | `/api/v1/status` |
-| `server stats` | GET | `/api/dashboard/stats` |
 | `server health` | GET | `/health` |
 
 ---
 
 ## See Also
 
-- [NothingDNS Documentation](../docs/)
-- [API Reference](../docs/SPECIFICATION.md)
-- [Security Policy](../docs/SECURITY.md)
+- [NothingDNS Documentation](../../docs/)
+- [API Reference](../../docs/API_REFERENCE.md)
+- [Security Policy](../../docs/SECURITY.md)

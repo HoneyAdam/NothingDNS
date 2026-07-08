@@ -19,7 +19,7 @@ Violation of any rule is a blocking issue.
 ### Language & Tooling
 
 - Language: Go
-- Min version: 1.25.0 (toolchain go1.26.2 per go.mod)
+- Min version: Go 1.26.4 (per root `go.mod` and `web/go.mod`)
 - Build: `go build ./...`
 - Lint: `go vet ./...`
 - Test: `go test ./... -count=1 -short`
@@ -31,7 +31,7 @@ Violation of any rule is a blocking issue.
 - Custom YAML parser/tokenizer in `internal/config/` (not gopkg.in/yaml)
 - Custom DNS protocol parser in `internal/protocol/` (no miekg/dns)
 - All internal packages follow `internal/<package>/` layout
-- Server transports: UDP, TCP, TLS, DoH — each in `internal/server/`
+- Server transports: UDP/TCP/DoT in `internal/server/`, DoH/DoWS in `internal/doh/`, DoQ in `internal/quic/`, and XoT in `internal/transfer/`
 - Zone file parser handles BIND format in `internal/zone/`
 - API dashboard served from `internal/api/` and `internal/dashboard/`
 

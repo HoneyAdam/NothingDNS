@@ -5,7 +5,7 @@ Get NothingDNS up and running in 5 minutes.
 ## Prerequisites
 
 - Linux/macOS/Windows with Docker **or**
-- Go 1.25+ (for binary installation)
+- Go 1.26.4+ (for building from source)
 
 ## Option 1: Docker (Fastest)
 
@@ -27,20 +27,24 @@ That's it! DNS server running on `localhost:53`.
 ### Download Pre-built Binary
 
 ```bash
-# Linux
-curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/nothingdns_linux_amd64.tar.gz
-tar -xzf nothingdns_linux_amd64.tar.gz
+# Linux amd64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/nothingdns-linux-amd64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/dnsctl-linux-amd64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
 
-# macOS
-curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/nothingdns_darwin_amd64.tar.gz
-tar -xzf nothingdns_darwin_amd64.tar.gz
+# macOS arm64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/nothingdns-darwin-arm64
+curl -LO https://github.com/NothingDNS/NothingDNS/releases/latest/download/dnsctl-darwin-arm64
 
-# Give permissions and install
-chmod +x nothingdns dnsctl
-sudo mv nothingdns dnsctl /usr/local/bin/
+# Give permissions and install (adjust filenames for your OS/arch)
+chmod +x nothingdns-linux-amd64 dnsctl-linux-amd64
+sudo mv nothingdns-linux-amd64 /usr/local/bin/nothingdns
+sudo mv dnsctl-linux-amd64 /usr/local/bin/dnsctl
 
 # Verify
-nothingdns --version
+nothingdns -version
+dnsctl -version
 ```
 
 ### From Source
@@ -140,8 +144,8 @@ dnsctl zone list
 # Flush cache
 dnsctl cache flush
 
-# Query stats
-dnsctl server stats
+# Query cache stats
+dnsctl cache stats
 
 # Test DNSSEC
 dnsctl dig +dnssec example.com A
@@ -255,19 +259,19 @@ docker-compose run --rm nothingdns /bin/sh
 
 ## Next Steps
 
-- Read [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) for all configuration options
-- Read [ARCHITECTURE.md](ARCHITECTURE.md) to understand how NothingDNS works
-- Read [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for common issues
-- Set up [DNSSEC](CONFIG_REFERENCE.md#dnssec) for secure DNS
-- Configure [clustering](CONFIG_REFERENCE.md#cluster) for HA
-- Enable [metrics](CONFIG_REFERENCE.md#metrics) for monitoring
+- Read [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) for all configuration options
+- Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) to understand how NothingDNS works
+- Read [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for common issues
+- Set up [DNSSEC](docs/CONFIG_REFERENCE.md#dnssec) for secure DNS
+- Configure [clustering](docs/CONFIG_REFERENCE.md#cluster) for HA
+- Enable [metrics](docs/CONFIG_REFERENCE.md#metrics) for monitoring
 
 ## Getting Help
 
 ```bash
 # Built-in help
-nothingdns --help
-dnsctl --help
+nothingdns -help
+dnsctl -help
 
 # Check logs
 journalctl -u nothingdns

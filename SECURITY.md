@@ -32,7 +32,7 @@ If you discover a security vulnerability in NothingDNS, please report it respons
 
 ### Minimal External Dependencies
 
-NothingDNS has **zero external dependencies** — only Go standard library and `golang.org/x/sys` for platform-specific socket operations (`SO_REUSEPORT`).
+NothingDNS keeps a **minimal external dependency** set: the core DNS logic is hand-rolled, `quic-go` provides DNS over QUIC, and Go-maintained `golang.org/x/*` packages cover platform, crypto, and network support.
 
 All cryptographic operations use Go's standard library `crypto/*` packages.
 
@@ -83,5 +83,5 @@ All cryptographic operations use Go's standard library `crypto/*` packages.
 | VULN-044 | DoH/DoWS/ODoH auth bypass | No auth required (privacy feature, intentional) |
 | VULN-059 | TXID prediction | Re-randomizes TXID before forwarding |
 | VULN-060 | Cache side-channel | DO bit included in cache key |
-| VULN-063 | Amplification attack | RRL superlative detection |
+| VULN-063 | Amplification attack | Response Rate Limiting (RRL) mitigates abusive reflection/amplification patterns |
 | VULN-068 | Username enumeration | Per-(IP, username) lockout pair |
