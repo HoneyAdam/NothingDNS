@@ -15,6 +15,9 @@ const (
 	initialBias = 72
 	// initialN is the first code point for the encoded suffix.
 	initialN = 128 // 0x80
+	// punyMaxInt is the RFC 3492 overflow ceiling (2^31-1). Intermediate
+	// accumulators are bounded to this so a crafted suffix can't wrap them.
+	punyMaxInt = 0x7FFFFFFF
 )
 
 // digitToChar converts a digit value to its character representation.
@@ -193,7 +196,17 @@ func decodePunycode(src string) string {
 				return string(out)
 			}
 
+			// RFC 3492 overflow guard: a crafted suffix can drive i past the
+			// valid range and wrap negative, after which i %= (len(out)+1) stays
+			// negative and out[:i] panics. The reference decoder fails on
+			// overflow; we bail out with what's decoded so far.
+			if weight != 0 && digit > (punyMaxInt-i)/weight {
+				return string(out)
+			}
 			i += digit * weight
+			if i < 0 {
+				return string(out)
+			}
 
 			t := k - bias
 			if t < tmin {
@@ -207,7 +220,12 @@ func decodePunycode(src string) string {
 				break
 			}
 
-			weight *= (base - t)
+			// weight *= (base - t), guarded against the same overflow.
+			delta := base - t
+			if delta != 0 && weight > punyMaxInt/delta {
+				return string(out)
+			}
+			weight *= delta
 			pos++
 			if pos < len(encoded) {
 				char = rune(encoded[pos])
@@ -217,6 +235,11 @@ func decodePunycode(src string) string {
 		bias = adapt(i-oldI, len(out)+1, oldI == 0)
 
 		n += i / (len(out) + 1)
+		// n must be a valid Unicode code point; a crafted suffix can push it
+		// past 0x10FFFF (RFC 3492 requires rejecting this).
+		if n < 0 || n > 0x10FFFF {
+			return string(out)
+		}
 		i = i % (len(out) + 1)
 
 		// Insert n at position i
