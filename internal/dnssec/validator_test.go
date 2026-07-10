@@ -788,7 +788,7 @@ func TestCanonicalizeRR(t *testing.T) {
 	}
 
 	// Test canonicalization
-	result, err := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600, 255)
 	if err != nil {
 		t.Fatalf("canonicalizeRR: %v", err)
 	}
@@ -842,7 +842,7 @@ func TestCanonicalizeRRRejectsOversizedRDATA(t *testing.T) {
 		},
 	}
 
-	if _, err := v.canonicalizeRR(rr, 300); err == nil {
+	if _, err := v.canonicalizeRR(rr, 300, 255); err == nil {
 		t.Fatal("expected oversized RDATA to fail")
 	}
 }

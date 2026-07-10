@@ -667,6 +667,18 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 		if !v.validateRRSIG(rrSet, rrsig, zoneLink.dnsKeys) {
 			return ValidationBogus
 		}
+
+		// Wildcard-expanded answers (RRSIG.Labels < the owner's label count)
+		// require an authenticated proof that the owner has NO exact match in
+		// the zone (RFC 4035 §5.3.4). Without it, a valid "*.zone" RRSIG could
+		// be replayed onto an explicit name that has its own different record.
+		// rrsig.Labels is part of the signed RRSIG RDATA, so an attacker cannot
+		// forge the wildcard path — tampering Labels breaks the signature above.
+		if int(rrsig.Labels) < len(rrSet[0].Name.LabelsSlice()) {
+			if !v.wildcardExpansionProven(msg, owner, rrSet[0].Type, chain) {
+				return ValidationBogus
+			}
+		}
 	}
 
 	// Validate negative response if applicable
@@ -678,6 +690,37 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 	}
 
 	return ValidationSecure
+}
+
+// wildcardExpansionProven reports whether msg carries an authenticated
+// (zone-signed) NSEC proving that `owner` has NO exact match in the zone — the
+// RFC 4035 §5.3.4 precondition for trusting a wildcard-expanded positive
+// answer. It requires a strict range-cover (the QNAME falling in an NSEC gap),
+// never a NoData (owner==query) match, since a wildcard only applies when the
+// exact name does not exist. Only the NSEC form is implemented; NSEC3-signed
+// wildcard answers return false and therefore stay fail-closed (Bogus) — safe,
+// never fail-open.
+func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string, qtype uint16, chain []*chainLink) bool {
+	authenticated := v.authenticatedDenialRRs(msg, chain)
+	checks := 0
+	for _, rr := range authenticated {
+		if checks >= maxNSECValidations {
+			return false
+		}
+		checks++
+		if rr == nil || rr.Type != protocol.TypeNSEC || rr.Name == nil {
+			continue
+		}
+		nsec, ok := rr.Data.(*protocol.RDataNSEC)
+		if !ok {
+			continue
+		}
+		nsecOwner := rr.Name.String()
+		if !sameDNSName(nsecOwner, owner) && v.validateNSEC(nsecOwner, owner, qtype, nsec) {
+			return true
+		}
+	}
+	return false
 }
 
 // sameDNSName reports whether two DNS owner names are equal, ignoring ASCII
@@ -854,7 +897,7 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 	canonicalSort(sorted)
 
 	for _, rr := range sorted {
-		rrWire, err := v.canonicalizeRR(rr, rrsig.OriginalTTL)
+		rrWire, err := v.canonicalizeRR(rr, rrsig.OriginalTTL, rrsig.Labels)
 		if err != nil {
 			return nil, err
 		}
@@ -864,6 +907,29 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 	return result, nil
 }
 
+// wildcardOwnerWire returns the canonical wire form of the owner name to hash
+// for an RRSIG whose Labels field is `sigLabels`. Per RFC 4034 §3.1.8.1 /
+// §5.3.2, when the RRSIG's Labels count is fewer than the number of labels in
+// the received owner name, the RR is a wildcard expansion: the signer hashed
+// the synthesized wildcard owner "*.<closest-encloser>", where the closest
+// encloser is the rightmost `sigLabels` labels of the owner. Using the literal
+// expanded owner instead makes every signed wildcard answer fail to verify.
+// Returns (wire, wasWildcard).
+func wildcardOwnerWire(owner *protocol.Name, sigLabels uint8) ([]byte, bool) {
+	labels := owner.LabelsSlice()
+	if int(sigLabels) >= len(labels) {
+		return owner.CanonicalWire(), false
+	}
+	ce := labels[len(labels)-int(sigLabels):]
+	wildcardLabels := make([]string, 0, len(ce)+1)
+	wildcardLabels = append(wildcardLabels, "*")
+	wildcardLabels = append(wildcardLabels, ce...)
+	wn := protocol.NewName(wildcardLabels, true)
+	wire := wn.CanonicalWire() // returns a fresh copy; safe to release wn
+	wn.Release()
+	return wire, true
+}
+
 // canonicalizeRR creates a canonical wire format representation of a record.
 // Per RFC 4034 Section 6, canonical form includes:
 // - Owner name in lowercase wire format (no compression)
@@ -871,7 +937,7 @@ func (v *Validator) canonicalizeRRSet(rrSet []*protocol.ResourceRecord, rrsig *p
 // - Class (2 bytes, big-endian)
 // - TTL (4 bytes, big-endian) - from RRSIG's OriginalTTL
 // - RDATA in canonical form
-func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) ([]byte, error) {
+func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32, sigLabels uint8) ([]byte, error) {
 	if rr == nil {
 		return nil, fmt.Errorf("nil RR")
 	}
@@ -885,8 +951,11 @@ func (v *Validator) canonicalizeRR(rr *protocol.ResourceRecord, ttl uint32) ([]b
 	// Estimate buffer size: max name (255) + type (2) + class (2) + ttl (4) + rdata
 	buf := make([]byte, 0, 512)
 
-	// 1. Canonical owner name (lowercase, wire format, no compression)
-	buf = append(buf, rr.Name.CanonicalWire()...)
+	// 1. Canonical owner name (lowercase, wire format, no compression). For a
+	// wildcard-expanded RR the signer hashed "*.<closest-encloser>", not the
+	// received owner (RFC 4034 §3.1.8.1).
+	ownerWire, _ := wildcardOwnerWire(rr.Name, sigLabels)
+	buf = append(buf, ownerWire...)
 
 	// 2. Type (2 bytes, big-endian)
 	typeBytes := make([]byte, 2)

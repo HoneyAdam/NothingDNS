@@ -789,7 +789,7 @@ func TestCanonicalizeRR_RootNameEmptyLabel(t *testing.T) {
 		Data:  &protocol.RDataA{Address: [4]byte{127, 0, 0, 1}},
 	}
 
-	result, err := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600, 255)
 	if err != nil {
 		t.Fatalf("canonicalizeRR: %v", err)
 	}
@@ -1522,7 +1522,7 @@ func TestCanonicalizeRR_NameWithoutTrailingDot(t *testing.T) {
 		Data:  &protocol.RDataA{Address: [4]byte{192, 168, 1, 1}},
 	}
 
-	result, err := v.canonicalizeRR(rr, 3600)
+	result, err := v.canonicalizeRR(rr, 3600, 255)
 	if err != nil {
 		t.Fatalf("canonicalizeRR: %v", err)
 	}
