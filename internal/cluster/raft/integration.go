@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -599,73 +600,28 @@ func (e *ErrNotLeader) Error() string {
 	return fmt.Sprintf("raft: not the leader; retry against %s", e.LeaderID)
 }
 
-// AddNode proposes adding a new node to the Raft cluster using joint
-// consensus. Returns *ErrNotLeader (with the known leader ID, when
-// available) if this node is not the leader.
-func (ci *ClusterIntegration) AddNode(nodeID NodeID, addr string) error {
-	if !ci.IsLeader() {
-		return &ErrNotLeader{LeaderID: ci.node.LeaderID()}
-	}
+// ErrMembershipChangeUnsupported is returned by AddNode/RemoveNode. Runtime
+// membership changes via joint consensus are NOT fully implemented: the joint
+// configuration is never committed into the peer set (advanceJointConfig is
+// never driven), the conf-change entry is appended without being persisted to
+// the WAL, and its index ignores the snapshot base — so invoking these would
+// wedge all future membership ops and diverge the leader/follower logs (a
+// leader-completeness hazard). Rather than silently corrupt the log, these
+// entry points fail closed. Change cluster membership by updating cluster.peers
+// in the config and performing a rolling restart.
+var ErrMembershipChangeUnsupported = errors.New(
+	"raft: runtime membership changes are not supported; update cluster.peers in config and restart")
 
-	return ci.node.AddPeer(nodeID, addr)
+// AddNode is intentionally unsupported at runtime — see
+// ErrMembershipChangeUnsupported. It fails closed to avoid log corruption.
+func (ci *ClusterIntegration) AddNode(nodeID NodeID, addr string) error {
+	return ErrMembershipChangeUnsupported
 }
 
-// RemoveNode proposes removing a node from the Raft cluster. Returns
-// *ErrNotLeader when called on a follower.
+// RemoveNode is intentionally unsupported at runtime — see
+// ErrMembershipChangeUnsupported. It fails closed to avoid log corruption.
 func (ci *ClusterIntegration) RemoveNode(nodeID NodeID) error {
-	if !ci.IsLeader() {
-		return &ErrNotLeader{LeaderID: ci.node.LeaderID()}
-	}
-
-	ci.node.mu.Lock()
-	defer ci.node.mu.Unlock()
-
-	if ci.node.pendingConfChange != nil {
-		return fmt.Errorf("cluster is already processing a configuration change")
-	}
-
-	// Create the joint config entry
-	oldPeers := make(map[NodeID]*Peer)
-	for pid, p := range ci.node.peers {
-		if pid != nodeID {
-			oldPeers[pid] = p
-		}
-	}
-	if _, ok := oldPeers[nodeID]; !ok {
-		return fmt.Errorf("node %s is not in the cluster", nodeID)
-	}
-
-	newPeers := make(map[NodeID]*Peer)
-	for pid, p := range ci.node.peers {
-		if pid != nodeID {
-			newPeers[pid] = p
-		}
-	}
-
-	jointConfig := NewJointConfig(ci.node.peers, newPeers)
-	jcBytes, err := encodeJointConfig(jointConfig)
-	if err != nil {
-		return fmt.Errorf("encode joint config: %w", err)
-	}
-
-	// Append joint config entry
-	entry := entry{
-		Index:   Index(len(ci.node.log)) + 1,
-		Term:    ci.node.currentTerm,
-		Command: jcBytes,
-		Type:    EntryRemoveNode,
-	}
-	ci.node.log = append(ci.node.log, entry)
-
-	// Store joint config reference
-	ci.node.jointConfig = jointConfig
-	ci.node.jointConfigIdx = entry.Index
-	ci.node.pendingConfChange = &JointConfigProposal{
-		Type:   EntryRemoveNode,
-		PeerID: nodeID,
-	}
-
-	return nil
+	return ErrMembershipChangeUnsupported
 }
 
 // Stats returns cluster statistics.
