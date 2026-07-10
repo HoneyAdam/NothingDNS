@@ -21,23 +21,42 @@ func TestTracer_SpanRetentionBounded(t *testing.T) {
 	}
 }
 
-// TestTracer_SampleRate verifies SampleRate is honored: 0 drops all, 1 keeps all.
+// TestTracer_SampleRate verifies SampleRate is honored as a real probability
+// (not an all-or-nothing switch): 0 drops all, 1 keeps all, and a fractional
+// rate samples roughly that fraction across many distinct trace IDs.
 func TestTracer_SampleRate(t *testing.T) {
-	none := NewTracer(Config{Enabled: true, SampleRate: 0.0001})
-	sampled := 0
-	for i := 0; i < 2000; i++ {
-		if _, s := none.StartSpan(context.Background(), "op"); s != nil {
-			sampled++
-		}
-	}
-	if sampled > 100 { // ~0.01% of 2000 ≈ 0-1 expected; allow generous slack
-		t.Errorf("SampleRate 0.0001 sampled %d/2000 spans, want ~0", sampled)
-	}
-
 	all := NewTracer(Config{Enabled: true, SampleRate: 1.0})
 	for i := 0; i < 100; i++ {
 		if _, s := all.StartSpan(context.Background(), "op"); s == nil {
 			t.Fatal("SampleRate 1.0 must sample every span")
 		}
+	}
+
+	// Near-zero rate samples almost nothing (NewTracer treats an explicit 0 as
+	// "unset" and defaults to 1.0, so use a tiny positive rate here).
+	tiny := NewTracer(Config{Enabled: true, SampleRate: 0.0005})
+	tinySampled := 0
+	for i := 0; i < 20000; i++ {
+		if _, s := tiny.StartSpan(context.Background(), "op"); s != nil {
+			tinySampled++
+		}
+	}
+	if float64(tinySampled)/20000 > 0.05 {
+		t.Errorf("SampleRate 0.0005 sampled %d/20000, want near 0", tinySampled)
+	}
+
+	// Fractional rate: the hash of distinct trace IDs must yield ~50%, not 0%
+	// or 100% (the bug where sampled() read the monotonic-timestamp bytes).
+	half := NewTracer(Config{Enabled: true, SampleRate: 0.5})
+	const n = 20000
+	sampled := 0
+	for i := 0; i < n; i++ {
+		if _, s := half.StartSpan(context.Background(), "op"); s != nil {
+			sampled++
+		}
+	}
+	frac := float64(sampled) / n
+	if frac < 0.40 || frac > 0.60 {
+		t.Errorf("SampleRate 0.5 sampled fraction = %.3f, want ~0.5 (all-or-nothing bug?)", frac)
 	}
 }

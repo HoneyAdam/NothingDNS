@@ -2,8 +2,8 @@ package otel
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
+	"hash/fnv"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -100,7 +100,12 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...SpanOption)
 	return context.WithValue(ctx, spanKey, span), span
 }
 
-// sampled applies the configured SampleRate deterministically per trace.
+// sampled applies the configured SampleRate deterministically per trace. It
+// hashes the WHOLE trace ID to a well-distributed uint64 — the raw bytes are
+// NOT uniform (bytes 0-7 are a monotonic wall-clock timestamp, bytes 8-15 a
+// small incrementing counter; see generateTraceID), so sampling off either
+// half directly collapses to an all-or-nothing switch. Hashing gives a real
+// probability while staying consistent per trace.
 func (t *Tracer) sampled(traceID [16]byte) bool {
 	if t.cfg.SampleRate >= 1.0 {
 		return true
@@ -108,8 +113,9 @@ func (t *Tracer) sampled(traceID [16]byte) bool {
 	if t.cfg.SampleRate <= 0 {
 		return false
 	}
-	v := binary.BigEndian.Uint64(traceID[:8])
-	return float64(v)/float64(math.MaxUint64) < t.cfg.SampleRate
+	h := fnv.New64a()
+	_, _ = h.Write(traceID[:])
+	return float64(h.Sum64())/float64(math.MaxUint64) < t.cfg.SampleRate
 }
 
 // EndSpan completes a span.
