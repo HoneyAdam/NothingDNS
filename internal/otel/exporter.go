@@ -71,6 +71,20 @@ func (e *OTLPExporter) batchFlusher() {
 }
 
 // Export adds a span to the batch and flushes if batch is full.
+// maxExporterBatchSpans bounds an exporter's retained batch so that a
+// persistently-unreachable collector (flush keeps failing / Flush is never
+// called) cannot make the batch grow without bound (OOM). When exceeded, the
+// oldest spans are dropped.
+const maxExporterBatchSpans = 8192
+
+func capBatch(batch []*Span) []*Span {
+	if len(batch) <= maxExporterBatchSpans {
+		return batch
+	}
+	drop := len(batch) - maxExporterBatchSpans
+	return append(batch[:0], batch[drop:]...)
+}
+
 func (e *OTLPExporter) Export(span *Span) {
 	e.batchMu.Lock()
 	defer e.batchMu.Unlock()
@@ -79,6 +93,9 @@ func (e *OTLPExporter) Export(span *Span) {
 	if len(e.batch) >= e.config.BatchSize {
 		e.flushLocked()
 	}
+	// flushLocked keeps the batch on send failure (retry); bound it so a
+	// down collector can't drive unbounded growth.
+	e.batch = capBatch(e.batch)
 }
 
 // Flush exports all pending spans immediately.
@@ -267,6 +284,9 @@ func (e *JaegerExporter) Export(span *Span) {
 	e.batchMu.Lock()
 	defer e.batchMu.Unlock()
 	e.batch = append(e.batch, span)
+	// Bound retention: Jaeger's batch only drains on Flush; cap it so a stalled
+	// flusher can't grow it without bound.
+	e.batch = capBatch(e.batch)
 }
 
 // Flush exports all pending spans to Jaeger.

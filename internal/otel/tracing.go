@@ -2,11 +2,20 @@ package otel
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// maxRetainedSpans bounds how many finished spans a Tracer holds in memory.
+// EndSpan appends per finished span and Export() is a non-draining snapshot, so
+// without a cap a live Tracer on the per-query/per-request path would grow
+// without bound (OOM) and retain client IPs / query names indefinitely. When
+// the cap is reached the oldest half is dropped.
+const maxRetainedSpans = 4096
 
 // TraceLevel defines tracing verbosity.
 type TraceLevel int
@@ -49,7 +58,8 @@ type Tracer struct {
 	cfg Config
 	mu  sync.Mutex
 
-	spans []*Span
+	spans        []*Span
+	droppedSpans uint64 // count of spans discarded at the retention cap
 }
 
 // NewTracer creates a new tracer.
@@ -66,9 +76,18 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...SpanOption)
 		return ctx, nil
 	}
 
+	traceID := generateTraceID()
+	// Honor SampleRate with consistent (per-trace) probabilistic sampling: the
+	// first 8 bytes of the random trace ID give a uniform value. An unsampled
+	// span returns a nil *Span (like the disabled path) so callers, which
+	// already nil-check, skip it and no memory is retained.
+	if !t.sampled(traceID) {
+		return ctx, nil
+	}
+
 	span := &Span{
 		Name:      name,
-		TraceID:   generateTraceID(),
+		TraceID:   traceID,
 		SpanID:    generateSpanID(),
 		StartTime: time.Now(),
 		Level:     t.cfg.Level,
@@ -79,6 +98,18 @@ func (t *Tracer) StartSpan(ctx context.Context, name string, opts ...SpanOption)
 	}
 
 	return context.WithValue(ctx, spanKey, span), span
+}
+
+// sampled applies the configured SampleRate deterministically per trace.
+func (t *Tracer) sampled(traceID [16]byte) bool {
+	if t.cfg.SampleRate >= 1.0 {
+		return true
+	}
+	if t.cfg.SampleRate <= 0 {
+		return false
+	}
+	v := binary.BigEndian.Uint64(traceID[:8])
+	return float64(v)/float64(math.MaxUint64) < t.cfg.SampleRate
 }
 
 // EndSpan completes a span.
@@ -94,7 +125,22 @@ func (t *Tracer) EndSpan(span *Span, err error) {
 	}
 	span.EndTime = time.Now()
 	span.Err = err
+
+	// Bound retention: when full, drop the oldest half (amortized O(1)) so a
+	// live tracer whose spans aren't being drained can never grow without bound.
+	if len(t.spans) >= maxRetainedSpans {
+		keep := maxRetainedSpans / 2
+		t.droppedSpans += uint64(len(t.spans) - keep)
+		t.spans = append(t.spans[:0], t.spans[len(t.spans)-keep:]...)
+	}
 	t.spans = append(t.spans, span)
+}
+
+// DroppedSpans returns the number of finished spans discarded at the retention cap.
+func (t *Tracer) DroppedSpans() uint64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.droppedSpans
 }
 
 // SpanOption configures a span.
