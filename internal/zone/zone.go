@@ -225,15 +225,16 @@ func ParseFile(filename string, r io.Reader) (*Zone, error) {
 
 // parser handles the parsing of zone files.
 type parser struct {
-	filename     string
-	scanner      *bufio.Scanner
-	lineNum      int
-	zone         *Zone
-	lastOwner    string // Last seen owner name (for continuation lines)
-	parenDepth   int    // Parenthesis nesting depth for multi-line records
-	lineBuf      string // Accumulated line content across parenthesized spans
-	lineStart    int    // Line number where the current multi-line record started
-	includeDepth int    // Current $INCLUDE nesting depth (0 = top-level file)
+	filename       string
+	scanner        *bufio.Scanner
+	lineNum        int
+	zone           *Zone
+	lastOwner      string // Last seen owner name (for continuation lines)
+	parenDepth     int    // Parenthesis nesting depth for multi-line records
+	lineBuf        string // Accumulated line content across parenthesized spans
+	lineStart      int    // Line number where the current multi-line record started
+	recordIndented bool   // Whether the current multi-line record's opening line was indented (owner inherited)
+	includeDepth   int    // Current $INCLUDE nesting depth (0 = top-level file)
 }
 
 // parse performs the actual parsing.
@@ -261,14 +262,17 @@ func (p *parser) parse() (*Zone, error) {
 				}
 			}
 			if p.parenDepth <= 0 {
-				// Multi-line record complete — parse the joined line
+				// Multi-line record complete — parse the joined line. Owner
+				// inheritance is decided by the record's *opening* line
+				// (captured in p.recordIndented), not by this closing-paren
+				// line which is usually indented.
 				p.parenDepth = 0
 				combined := p.lineBuf
 				p.lineBuf = ""
 				combined = strings.ReplaceAll(combined, "(", " ")
 				combined = strings.ReplaceAll(combined, ")", " ")
 				combined = strings.Join(strings.Fields(combined), " ")
-				if err := p.parseRecord(combined); err != nil {
+				if err := p.parseRecordOwned(combined, p.recordIndented); err != nil {
 					return nil, fmt.Errorf("%s:%d: %w", p.filename, p.lineStart, err)
 				}
 			}
@@ -292,9 +296,12 @@ func (p *parser) parse() (*Zone, error) {
 		hasOpen := strings.Contains(line, "(")
 		hasClose := strings.Contains(line, ")")
 		if hasOpen && !hasClose {
-			// Start accumulating a multi-line record
+			// Start accumulating a multi-line record. Capture whether the
+			// opening line was indented (owner inherited) now, before the
+			// scanner advances to the continuation/closing lines.
 			p.parenDepth = 1
 			p.lineStart = p.lineNum
+			p.recordIndented = len(rawLine) > 0 && (rawLine[0] == ' ' || rawLine[0] == '\t')
 			// Strip comments from first line
 			if idx := strings.Index(line, ";"); idx >= 0 {
 				line = strings.TrimSpace(line[:idx])
@@ -303,8 +310,10 @@ func (p *parser) parse() (*Zone, error) {
 			continue
 		}
 
-		// Parse resource record
-		if err := p.parseRecord(line); err != nil {
+		// Parse resource record. Owner inheritance is decided by this line's
+		// own leading whitespace (rawLine still holds it here).
+		ownerInherited := len(rawLine) > 0 && (rawLine[0] == ' ' || rawLine[0] == '\t')
+		if err := p.parseRecordOwned(line, ownerInherited); err != nil {
 			return nil, fmt.Errorf("%s:%d: %w", p.filename, p.lineNum, err)
 		}
 	}
@@ -490,7 +499,9 @@ func (p *parser) handleGenerate(args []string) error {
 		if err != nil {
 			return fmt.Errorf("$GENERATE at iteration %d: %w", i, err)
 		}
-		if err := p.parseRecord(expanded); err != nil {
+		// $GENERATE templates always carry an explicit owner (the lhs), so the
+		// owner is never inherited.
+		if err := p.parseRecordOwned(expanded, false); err != nil {
 			return fmt.Errorf("$GENERATE at iteration %d: %w", i, err)
 		}
 	}
@@ -650,8 +661,26 @@ func stripZoneComment(line string) string {
 	return line
 }
 
-// parseRecord parses a single resource record line.
+// parseRecord parses a single resource record line, inferring owner-name
+// inheritance from the current scanner line's leading whitespace. This wrapper
+// preserves the historical signature for direct callers (tests). Production
+// callers in the main parse loop use parseRecordOwned with an explicit
+// inheritance flag, because for a parenthesized multi-line record the scanner
+// is parked on the (usually indented) closing-paren line, not the record's
+// opening line — reading scanner.Text() there would wrongly treat the whole
+// record as a continuation and file it under the previous owner (breaking
+// multi-line TXT/DKIM/SPF/DNSKEY/RRSIG records).
 func (p *parser) parseRecord(line string) error {
+	rawLine := p.scanner.Text()
+	ownerInherited := len(rawLine) > 0 && (rawLine[0] == ' ' || rawLine[0] == '\t')
+	return p.parseRecordOwned(line, ownerInherited)
+}
+
+// parseRecordOwned parses a single resource record line. ownerInherited is true
+// when the record's opening line began with whitespace (RFC 1035 §5.1), meaning
+// the owner name is inherited from the previous record rather than present on
+// the line.
+func (p *parser) parseRecordOwned(line string, ownerInherited bool) error {
 	// Remove comments. A naive strings.Index(";") truncates RDATA inside
 	// quoted strings (e.g. TXT records containing literal semicolons), so we
 	// scan the line ourselves and ignore ';' that appears inside "..." or
@@ -678,19 +707,11 @@ func (p *parser) parseRecord(line string) error {
 	fieldIdx := 0
 
 	// First field: owner name. RFC 1035 §5.1 says a line whose first
-	// character is whitespace inherits the previous record's owner
-	// name. The previous check used `strings.HasPrefix(text, " \t")`,
-	// which only matches the literal two-character sequence
-	// space-then-tab — so a normal indent (just tabs, or just spaces)
-	// fell through to the "this line has an owner name" branch and
-	// the parser swallowed the class field (typically `IN`) as the
-	// owner name, producing wrong records for any zone file written
-	// in the canonical BIND style:
-	//   www  IN  A  1.2.3.4
-	//        IN  A  1.2.3.5   ; continuation — owner is "www"
-	rawLine := p.scanner.Text()
-	startsWithWhitespace := len(rawLine) > 0 && (rawLine[0] == ' ' || rawLine[0] == '\t')
-	if !startsWithWhitespace {
+	// character is whitespace inherits the previous record's owner name.
+	// ownerInherited is computed by the caller from the record's *opening*
+	// line (not the scanner's current line, which for a multi-line record is
+	// the closing-paren line).
+	if !ownerInherited {
 		// Line starts with owner name
 		record.Name = fields[fieldIdx]
 		fieldIdx++
