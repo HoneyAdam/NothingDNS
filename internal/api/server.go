@@ -81,6 +81,10 @@ type Server struct {
 
 	// Goroutine leak detection baseline
 	goroutineBaseline int64
+
+	// trustedProxies holds the parsed CIDR networks of reverse proxies whose
+	// X-Forwarded-For / X-Real-IP headers may be trusted (see clientIP).
+	trustedProxies []*net.IPNet
 }
 
 type serverRuntimeSnapshot struct {
@@ -438,7 +442,36 @@ func NewServer(cfg config.HTTPConfig, zm *zone.Manager, c *cache.Cache, reload f
 		},
 		apiRateLimiter: newAPIRateLimiter(),
 	}
+	s.trustedProxies = parseTrustedProxies(cfg.TrustedProxies)
 	return s
+}
+
+// parseTrustedProxies compiles the configured trusted-proxy CIDRs (bare IPs are
+// accepted and treated as /32 or /128). Invalid entries are skipped with a
+// warning rather than failing startup, so one bad entry can't take the server
+// down; validate-config surfaces them earlier.
+func parseTrustedProxies(entries []string) []*net.IPNet {
+	var nets []*net.IPNet
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if _, ipNet, err := net.ParseCIDR(e); err == nil {
+			nets = append(nets, ipNet)
+			continue
+		}
+		if ip := net.ParseIP(e); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		util.Warnf("api: ignoring invalid trusted_proxies entry %q", e)
+	}
+	return nets
 }
 
 // WithBlocklist sets the blocklist for the API server.
@@ -1380,19 +1413,62 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// getClientIP extracts the client IP from the request.
-// SECURITY: X-Forwarded-For is NOT trusted because it can be trivially spoofed.
-// X-Real-IP is only trusted when explicitly configured via TrustedProxies to
-// prevent remote attackers from bypassing rate limiting or IP-based auth checks.
-func getClientIP(r *http.Request) string {
-	// Fall back to RemoteAddr — the only source that cannot be spoofed by clients.
-	// X-Real-IP should only be trusted when behind a known reverse proxy.
-	// To enable X-Real-IP, the proxy must be explicitly configured as trusted.
+// remoteAddrIP returns the peer IP of the TCP connection (never client-spoofable).
+func remoteAddrIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return ip
+}
+
+// clientIP extracts the effective client IP for rate limiting, login lockout,
+// and the localhost bootstrap gate.
+//
+// SECURITY: X-Forwarded-For / X-Real-IP are attacker-controlled and are honored
+// ONLY when the direct peer (RemoteAddr) is a configured trusted proxy. Without
+// a trusted-proxy match the forwarded headers are ignored and RemoteAddr is
+// used — so a client cannot spoof its IP by sending a header. When trusted, the
+// rightmost forwarded entry that is NOT itself a trusted proxy is used (the real
+// client as seen by the outermost trusted hop), falling back to X-Real-IP.
+func (s *Server) clientIP(r *http.Request) string {
+	peer := remoteAddrIP(r)
+	if len(s.trustedProxies) == 0 || !ipInNets(peer, s.trustedProxies) {
+		return peer
+	}
+
+	// X-Forwarded-For: client, proxy1, proxy2, ... (left to right). Walk from
+	// the right, skipping trusted proxies, to find the first untrusted address.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			cand := strings.TrimSpace(parts[i])
+			if cand == "" || net.ParseIP(cand) == nil {
+				continue
+			}
+			if !ipInNets(cand, s.trustedProxies) {
+				return cand
+			}
+		}
+	}
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" && net.ParseIP(xr) != nil {
+		return xr
+	}
+	return peer
+}
+
+// ipInNets reports whether ip (string form) falls within any of nets.
+func ipInNets(ip string, nets []*net.IPNet) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	for _, n := range nets {
+		if n.Contains(parsed) {
+			return true
+		}
+	}
+	return false
 }
 
 // writeJSON writes a JSON response.
