@@ -174,7 +174,10 @@ func cacheStage(h *integratedHandler) Stage {
 				// negative TTL) and any NSEC/NSEC3 proofs. COPY — reply()
 				// mutates in place. Bare rcode fallback for legacy entries.
 				if entry.Message != nil {
-					resp := entry.Message.Copy()
+					// Age-adjusted copy: decrement TTLs (incl. the SOA in the
+					// Authority section) by how long the entry has been cached,
+					// so downstream negative caching honors the remaining TTL.
+					resp := entry.AgeAdjustedMessage(time.Now())
 					resp.Header.Flags.RCODE = entry.RCode
 					reply(q.currentWriter, q.msg, resp)
 					return true, nil
@@ -187,13 +190,15 @@ func cacheStage(h *integratedHandler) Stage {
 				h.metrics.RecordCacheHit()
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			// Serve a COPY of the cached message. reply()/minimizeResponse() and
-			// UDP truncation mutate the response in place (header ID & flags,
-			// authority/additional sections, answer trimming). entry.Message is
-			// the SHARED cached object — mutating it would permanently corrupt the
-			// cache for every future client and race across concurrent hits (a
-			// client could even receive another client's transaction ID).
-			reply(q.currentWriter, q.msg, entry.Message.Copy())
+			// Serve an age-adjusted COPY of the cached message. The copy is
+			// mandatory: reply()/minimizeResponse() and UDP truncation mutate the
+			// response in place (header ID & flags, authority/additional sections,
+			// answer trimming). entry.Message is the SHARED cached object —
+			// mutating it would permanently corrupt the cache for every future
+			// client and race across concurrent hits (a client could even receive
+			// another client's transaction ID). AgeAdjustedMessage also decrements
+			// each RR TTL by the entry's cache age (RFC 1035 §4.1.3 / RFC 2181).
+			reply(q.currentWriter, q.msg, entry.AgeAdjustedMessage(time.Now()))
 			return true, nil
 		}
 
