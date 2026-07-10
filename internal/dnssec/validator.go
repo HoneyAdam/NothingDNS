@@ -627,7 +627,12 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 		return ValidationBogus
 	}
 
-	// Validate each answer RRSet
+	// Validate each answer RRSet. hasUnvalidated tracks whether any Answer RRset
+	// was skipped without validation (a genuinely out-of-bailiwick owner served
+	// by a different zone we don't have a chain for). If so we cannot claim the
+	// WHOLE message is authenticated, so we downgrade Secure→Insecure at the end
+	// (AD=0) rather than falsely stamping AD=1 (RFC 4035 §5.3.4).
+	hasUnvalidated := false
 	for _, rrSet := range answerGroups {
 		if len(rrSet) == 0 {
 			continue
@@ -660,6 +665,9 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 			if v.config.RequireDNSSEC || sameDNSName(owner, queryName) || inBailiwick(owner, zoneLink.zone) {
 				return ValidationBogus
 			}
+			// Out-of-bailiwick, unsigned: we can't authenticate it with this
+			// chain, so the message is not fully validated.
+			hasUnvalidated = true
 			continue
 		}
 
@@ -689,6 +697,12 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 		}
 	}
 
+	// If any in-bailiwick data was validated but some out-of-bailiwick RRset was
+	// skipped, the message is not fully authenticated — return Insecure (AD=0)
+	// rather than Secure. Never fail-open (AD=1 for unvalidated data).
+	if hasUnvalidated {
+		return ValidationInsecure
+	}
 	return ValidationSecure
 }
 

@@ -1447,7 +1447,9 @@ func TestValidateMessageWithAnswersAndRRSIG(t *testing.T) {
 // scoped to the QUERIED name. An unsigned RRset owned by a different name (e.g.
 // a CNAME target served by another/unsigned zone) must NOT turn the whole
 // response Bogus when RequireDNSSEC is off — otherwise legitimate CNAME-to-
-// unsigned resolution would break across the DNS.
+// unsigned resolution would break across the DNS. But since that out-of-bailiwick
+// RRset is not authenticated by this chain, the message is INSECURE (AD=0), not
+// Secure — the validator must not stamp AD=1 over unvalidated data.
 func TestValidateMessage_LenientForNonQueriedOwner(t *testing.T) {
 	zoneName, _ := protocol.ParseName("example.com.")
 	chain := []*chainLink{{
@@ -1472,9 +1474,10 @@ func TestValidateMessage_LenientForNonQueriedOwner(t *testing.T) {
 	v := NewValidator(config, nil, nil)
 
 	// Queried name is example.com.; the answer's only RRset is owned by
-	// elsewhere.net. (outside the signed zone) and unsigned — stay lenient.
-	if result := v.validateMessage(context.Background(), msg, "example.com.", chain); result != ValidationSecure {
-		t.Errorf("expected SECURE (lenient for non-queried owner), got %s", result)
+	// elsewhere.net. (outside the signed zone) and unsigned — stay lenient (not
+	// Bogus) but do NOT claim AD: the correct verdict is INSECURE.
+	if result := v.validateMessage(context.Background(), msg, "example.com.", chain); result != ValidationInsecure {
+		t.Errorf("expected INSECURE (unauthenticated out-of-bailiwick data, no AD), got %s", result)
 	}
 }
 
