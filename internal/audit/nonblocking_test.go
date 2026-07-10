@@ -2,6 +2,7 @@ package audit
 
 import (
 	"io"
+	"sync"
 	"testing"
 	"time"
 )
@@ -12,11 +13,17 @@ func newTestAuditLogger(w io.Writer) *AuditLogger {
 	return newAuditLogger(w, nil)
 }
 
-// blockingWriter blocks the first Write until release is closed, simulating a
-// stalled disk / network volume.
-type blockingWriter struct{ release chan struct{} }
+// blockingWriter blocks inside Write until release is closed, and signals
+// (once) when the first Write is entered, so a test can deterministically catch
+// the background writer while it is stalled.
+type blockingWriter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
 
-func (w blockingWriter) Write(p []byte) (int, error) {
+func (w *blockingWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
 	<-w.release
 	return len(p), nil
 }
@@ -27,18 +34,27 @@ func (w blockingWriter) Write(p []byte) (int, error) {
 // mutex, so a full disk or stalled volume stalled ALL query resolution. Now
 // Log* enqueues non-blocking and drops when the queue is full.
 func TestAuditLogger_LogDoesNotBlockOnStalledWriter(t *testing.T) {
-	release := make(chan struct{})
-	al := newTestAuditLogger(blockingWriter{release: release})
+	w := &blockingWriter{entered: make(chan struct{}), release: make(chan struct{})}
+	al := newTestAuditLogger(w)
 	defer func() {
-		close(release) // unblock the writer so Close can drain and return
+		close(w.release) // unblock the writer so Close can drain and return
 		al.Close()
 	}()
 
-	// Fire far more than the queue can hold while the writer is stuck. None of
-	// these calls may block.
+	// Trigger the writer to pull a line and enter (and stall in) Write.
+	al.LogQuery(QueryAuditEntry{QueryName: "first.example.com", QueryType: "A"})
+	select {
+	case <-w.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("background writer never reached Write")
+	}
+
+	// The writer is now blocked in Write and cannot drain. Fill the queue and
+	// overflow it; every one of these Log* calls must return promptly (no block)
+	// and the overflow must be dropped.
 	done := make(chan struct{})
 	go func() {
-		for i := 0; i < auditQueueSize+1000; i++ {
+		for i := 0; i < auditQueueSize+500; i++ {
 			al.LogQuery(QueryAuditEntry{QueryName: "x.example.com", QueryType: "A"})
 		}
 		close(done)
@@ -52,6 +68,6 @@ func TestAuditLogger_LogDoesNotBlockOnStalledWriter(t *testing.T) {
 	}
 
 	if al.Dropped() == 0 {
-		t.Error("expected some audit lines to be dropped while the writer was stalled")
+		t.Error("expected audit lines to be dropped while the writer was stalled and the queue full")
 	}
 }
