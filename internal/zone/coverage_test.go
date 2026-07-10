@@ -2578,14 +2578,17 @@ func TestSerializeRecordData_MX(t *testing.T) {
 }
 
 func TestSerializeRecordData_MXInvalidPriorityDoesNotCollideWithZero(t *testing.T) {
+	// A malformed MX (unparseable priority) now serializes to empty rather than
+	// canonical wire — but the key property still holds: it must NOT collide
+	// with a valid zero-priority MX (which serializes to real wire bytes).
 	invalid := serializeRecordData(Record{Type: "MX", RData: "bad mail.example.com."})
 	validZero := serializeRecordData(Record{Type: "MX", RData: "0 mail.example.com."})
 
 	if bytes.Equal(invalid, validZero) {
 		t.Fatal("invalid MX priority serialized identically to valid zero priority")
 	}
-	if string(invalid) != "bad mail.example.com." {
-		t.Fatalf("invalid MX priority serialized to %q, want raw RDATA", string(invalid))
+	if len(invalid) != 0 {
+		t.Fatalf("malformed MX serialized to %d bytes, want empty (known type, unparseable)", len(invalid))
 	}
 }
 
