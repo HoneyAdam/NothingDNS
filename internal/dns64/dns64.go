@@ -257,9 +257,12 @@ func (s *Synthesizer) ShouldSynthesize(question *protocol.Question, response *pr
 		}
 	}
 
-	// Synthesis is appropriate when RCODE is NOERROR or NXDOMAIN with no AAAA.
-	rcode := response.Header.Flags.RCODE
-	return rcode == protocol.RcodeSuccess || rcode == protocol.RcodeNameError
+	// Synthesis is appropriate only for a NOERROR/NODATA AAAA response (the name
+	// exists but has no AAAA). An NXDOMAIN means the name has NO records of any
+	// type, so there is nothing to synthesize from and turning it into a
+	// NOERROR + synthetic AAAA would contradict the authoritative answer
+	// (RFC 6147 §5.1.7). Return NXDOMAIN as-is.
+	return response.Header.Flags.RCODE == protocol.RcodeSuccess
 }
 
 // SynthesizeResponse creates a synthetic AAAA response from an A record response.

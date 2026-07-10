@@ -251,6 +251,17 @@ func TestShouldSynthesize(t *testing.T) {
 		t.Fatal("expected ShouldSynthesize=false for A query")
 	}
 
+	// NXDOMAIN AAAA response -> false (RFC 6147 §5.1.7: don't turn an
+	// authoritative NXDOMAIN into a synthetic AAAA).
+	nxResp := &protocol.Message{
+		Header: protocol.Header{
+			Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeNameError},
+		},
+	}
+	if s.ShouldSynthesize(aaaaQuestion, nxResp) {
+		t.Fatal("expected ShouldSynthesize=false for an NXDOMAIN AAAA response")
+	}
+
 	// Disabled -> false
 	s.SetEnabled(false)
 	if s.ShouldSynthesize(aaaaQuestion, emptyResp) {
