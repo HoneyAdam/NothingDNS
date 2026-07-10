@@ -103,6 +103,9 @@ type Responder struct {
 	// Probe state for hostname claiming
 	probedHostnames map[string]bool
 	probeMu         sync.Mutex
+
+	// Per-source response rate limiter (anti-reflection/amplification).
+	respLimiter *mdnsResponseRateLimiter
 }
 
 // Config holds mDNS responder configuration.
@@ -142,6 +145,10 @@ func NewResponder(config Config, logger *util.Logger) *Responder {
 		cache:           NewCache(),
 		logger:          logger,
 		probedHostnames: make(map[string]bool),
+		// 20 responses/sec per source with a burst of 40, up to 4096 tracked
+		// sources — ample for legitimate link-local discovery, throttles a
+		// spoofed-source reflection attempt.
+		respLimiter: newMDNSResponseRateLimiter(20, 40, 4096),
 	}
 }
 
@@ -397,6 +404,12 @@ func (r *Responder) handlePacket(data []byte, src *net.UDPAddr) {
 // substring match on the wire bytes — that produced coincidental matches on
 // crafted payloads and could be spoofed by an off-link attacker.
 func (r *Responder) handleQuery(data []byte, src *net.UDPAddr) {
+	// Anti-reflection: throttle responses per source IP so a spoofed query
+	// source can't turn the responder into an amplifier.
+	if r.respLimiter != nil && src != nil && !r.respLimiter.allow(src.IP.String(), time.Now()) {
+		return
+	}
+
 	msg, err := protocol.UnpackMessage(data)
 	if err != nil {
 		return
