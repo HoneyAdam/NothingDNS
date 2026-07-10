@@ -264,11 +264,19 @@ func (s *AXFRServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceReco
 		return nil, fmt.Errorf("creating SOA record: %w", err)
 	}
 
-	// Collect all zone records (excluding SOA - it's stored separately in z.SOA)
+	// Collect all zone records. The apex SOA is emitted separately as the
+	// first and last record of the AXFR stream (RFC 5936 §2.2), so it must be
+	// skipped here — the parser stores the apex SOA in both z.SOA and
+	// z.Records[apex], and re-emitting it mid-stream makes RFC-compliant
+	// secondaries treat the second SOA as end-of-transfer and discard every
+	// record after it, truncating the zone to just the apex records.
 	var zoneRecords []*protocol.ResourceRecord
 	z.RLock()
 	for name, zoneRecordsList := range z.Records {
 		for _, rec := range zoneRecordsList {
+			if protocol.RecordTypeFromText(rec.Type) == protocol.TypeSOA {
+				continue
+			}
 			rr, err := s.zoneRecordToRR(name, rec)
 			if err != nil {
 				util.Warnf("axfr: skipping record %s/%s: %v", name, rec.Type, err)
