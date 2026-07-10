@@ -396,11 +396,21 @@ transfer:
 # METRICS & OBSERVABILITY
 # =============================================================================
 metrics:
-  enabled: true
+  # Disabled by default so the quickstart / docker-compose works out of the box.
+  # The metrics endpoint FAILS CLOSED: enabling it WITHOUT an auth_token makes
+  # the server refuse to start (it will not serve operational metrics
+  # unauthenticated). To enable, set enabled: true AND provide auth_token
+  # (and ideally bind to localhost).
+  enabled: false
 
   # Prometheus metrics endpoint
   bind: ":9153"
   path: /metrics
+
+  # REQUIRED when enabled: true — a non-empty token scrapers send as
+  # `Authorization: Bearer <token>`. Prefer supplying it via an env var
+  # (e.g. auth_token: "${NOTHINGDNS_METRICS_AUTH_TOKEN}") rather than in cleartext.
+  # auth_token: ""
 
 # =============================================================================
 # LOGGING

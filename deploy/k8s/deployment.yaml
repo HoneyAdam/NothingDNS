@@ -85,16 +85,21 @@ spec:
           limits:
             cpu: 2000m
             memory: 2Gi
+        # /livez = process alive (always 200 while scheduling); /readyz =
+        # ready to serve (503 when all upstreams are down, so a node that can
+        # only return SERVFAIL is pulled from the Service). /health is a plain
+        # liveness/startup ping. Using /health for readiness would keep an
+        # upstream-dead pod in rotation.
         livenessProbe:
           httpGet:
-            path: /health
+            path: /livez
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 30
           timeoutSeconds: 5
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: 8080
           initialDelaySeconds: 5
           periodSeconds: 10
@@ -111,6 +116,10 @@ spec:
           readOnly: true
         - name: data
           mountPath: /var/lib/nothingdns
+        # readOnlyRootFilesystem: true means the container cannot write to /tmp
+        # on the image itself — give it a writable in-memory scratch dir.
+        - name: tmp
+          mountPath: /tmp
         args:
         - --config
         - /etc/nothingdns/config.yaml
@@ -137,3 +146,5 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: nothingdns-data
+      - name: tmp
+        emptyDir: {}
