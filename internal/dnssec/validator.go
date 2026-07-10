@@ -693,30 +693,41 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 }
 
 // wildcardExpansionProven reports whether msg carries an authenticated
-// (zone-signed) NSEC proving that `owner` has NO exact match in the zone — the
-// RFC 4035 §5.3.4 precondition for trusting a wildcard-expanded positive
-// answer. It requires a strict range-cover (the QNAME falling in an NSEC gap),
-// never a NoData (owner==query) match, since a wildcard only applies when the
-// exact name does not exist. Only the NSEC form is implemented; NSEC3-signed
-// wildcard answers return false and therefore stay fail-closed (Bogus) — safe,
-// never fail-open.
+// (zone-signed) NSEC or NSEC3 proving that `owner` has NO exact match in the
+// zone — the RFC 4035 §5.3.4 precondition for trusting a wildcard-expanded
+// positive answer. For NSEC it requires a strict range-cover (the QNAME falling
+// in an NSEC gap), never a NoData (owner==query) match. For NSEC3 it requires
+// the closest-encloser + next-closer proof (RFC 5155 §8.8) WITHOUT the wildcard
+// cover (the wildcard exists — it answered). Without such a proof the answer
+// stays fail-closed (Bogus), never fail-open.
 func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string, qtype uint16, chain []*chainLink) bool {
 	authenticated := v.authenticatedDenialRRs(msg, chain)
+	var nsec3RRs []*protocol.ResourceRecord
 	checks := 0
 	for _, rr := range authenticated {
 		if checks >= maxNSECValidations {
 			return false
 		}
 		checks++
-		if rr == nil || rr.Type != protocol.TypeNSEC || rr.Name == nil {
+		if rr == nil || rr.Name == nil {
 			continue
 		}
-		nsec, ok := rr.Data.(*protocol.RDataNSEC)
-		if !ok {
-			continue
+		switch rr.Type {
+		case protocol.TypeNSEC:
+			nsec, ok := rr.Data.(*protocol.RDataNSEC)
+			if !ok {
+				continue
+			}
+			nsecOwner := rr.Name.String()
+			if !sameDNSName(nsecOwner, owner) && v.validateNSEC(nsecOwner, owner, qtype, nsec) {
+				return true
+			}
+		case protocol.TypeNSEC3:
+			nsec3RRs = append(nsec3RRs, rr)
 		}
-		nsecOwner := rr.Name.String()
-		if !sameDNSName(nsecOwner, owner) && v.validateNSEC(nsecOwner, owner, qtype, nsec) {
+	}
+	if len(nsec3RRs) > 0 {
+		if _, _, ok := v.nsec3ClosestEncloserAndNextCloser(owner, nsec3RRs); ok {
 			return true
 		}
 	}
@@ -1204,76 +1215,118 @@ func (v *Validator) validateNegativeResponse(msg *protocol.Message, queryName st
 // three sub-proofs succeed; any single failure means NXDOMAIN is unproven
 // and the caller must mark the response Bogus.
 func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protocol.ResourceRecord) bool {
-	if len(rrs) == 0 {
+	closestEncloser, params, ok := v.nsec3ClosestEncloserAndNextCloser(queryName, rrs)
+	if !ok {
 		return false
 	}
 
-	// Use the first NSEC3's params as the canonical set. Per RFC 5155 §8.1
-	// all NSEC3 in a single proof MUST share params; mismatches make the
-	// proof unverifiable.
+	// 3. Wildcard "*.<closest_encloser>" cover — required for NXDOMAIN to prove
+	// no wildcard could have answered either. (For a wildcard-POSITIVE answer
+	// this step is intentionally omitted: the wildcard DOES exist and answered.)
+	wildcard := "*." + strings.TrimSuffix(closestEncloser, ".")
+	if closestEncloser == "." {
+		wildcard = "*."
+	}
+	return v.nsec3NameCovered(wildcard, params, rrs)
+}
+
+// nsec3Params holds the shared NSEC3 hash parameters of one proof.
+type nsec3Params struct {
+	algo uint8
+	iter uint16
+	salt []byte
+}
+
+// nsec3SharedParams validates that every NSEC3 RR carries identical hash params
+// (RFC 5155 §8.1) and returns them.
+func nsec3SharedParams(rrs []*protocol.ResourceRecord) (nsec3Params, bool) {
 	var first *protocol.RDataNSEC3
 	for _, rr := range rrs {
 		if rr == nil || rr.Name == nil {
-			return false
+			return nsec3Params{}, false
 		}
 		n, ok := rr.Data.(*protocol.RDataNSEC3)
 		if !ok || n == nil {
-			return false
+			return nsec3Params{}, false
 		}
 		if first == nil {
 			first = n
 			continue
 		}
 		if n.HashAlgorithm != first.HashAlgorithm || n.Iterations != first.Iterations || !bytes.Equal(n.Salt, first.Salt) {
-			return false
+			return nsec3Params{}, false
 		}
 	}
 	if first == nil {
+		return nsec3Params{}, false
+	}
+	return nsec3Params{first.HashAlgorithm, first.Iterations, first.Salt}, true
+}
+
+// nsec3NameCovered reports whether the NSEC3 hash of name falls inside the
+// [owner, next) range of any NSEC3 in rrs (proof that name does not exist).
+func (v *Validator) nsec3NameCovered(name string, p nsec3Params, rrs []*protocol.ResourceRecord) bool {
+	h, err := NSEC3Hash(name, p.algo, p.iter, p.salt)
+	if err != nil {
 		return false
 	}
-	algo, iter, salt := first.HashAlgorithm, first.Iterations, first.Salt
+	target := strings.ToUpper(protocol.Base32Encode(h))
+	for _, rr := range rrs {
+		n, ok := rr.Data.(*protocol.RDataNSEC3)
+		if !ok || n == nil {
+			continue
+		}
+		owner := strings.ToUpper(extractNSEC3Hash(rr.Name.String()))
+		next := strings.ToUpper(protocol.Base32Encode(n.NextHashed))
+		if nsec3HashInRange(target, owner, next) {
+			return true
+		}
+	}
+	return false
+}
+
+// nsec3ClosestEncloserAndNextCloser performs RFC 5155 §8.4 steps 1–2: it finds
+// the closest encloser of queryName (an ancestor whose NSEC3 hash matches a
+// present owner-hash) and verifies the next-closer name is covered — i.e.
+// queryName has NO exact match. It deliberately does NOT check the wildcard
+// cover (step 3), so it serves both NXDOMAIN (which adds the wildcard cover)
+// and wildcard-POSITIVE answers (which need only steps 1–2 per RFC 5155 §8.8).
+func (v *Validator) nsec3ClosestEncloserAndNextCloser(queryName string, rrs []*protocol.ResourceRecord) (string, nsec3Params, bool) {
+	if len(rrs) == 0 {
+		return "", nsec3Params{}, false
+	}
+	params, ok := nsec3SharedParams(rrs)
+	if !ok {
+		return "", nsec3Params{}, false
+	}
 
 	hashName := func(name string) (string, bool) {
-		h, err := NSEC3Hash(name, algo, iter, salt)
+		h, err := NSEC3Hash(name, params.algo, params.iter, params.salt)
 		if err != nil {
 			return "", false
 		}
-		return protocol.Base32Encode(h), true
+		return strings.ToUpper(protocol.Base32Encode(h)), true
 	}
 	ownerHashOf := func(rr *protocol.ResourceRecord) string {
 		return strings.ToUpper(extractNSEC3Hash(rr.Name.String()))
 	}
-	nextHashOf := func(rr *protocol.ResourceRecord) (string, bool) {
-		n, ok := rr.Data.(*protocol.RDataNSEC3)
-		if !ok || n == nil {
-			return "", false
-		}
-		return strings.ToUpper(protocol.Base32Encode(n.NextHashed)), true
-	}
 
-	// 1. Closest encloser: walk queryName's ancestors (longest first,
-	// excluding queryName itself per §8.4 since queryName is presumed
-	// non-existent), find the FIRST one whose hash equals some NSEC3
-	// owner-hash.
+	// 1. Closest encloser: walk queryName's ancestors (longest first, excluding
+	// queryName itself), find the FIRST whose hash equals some NSEC3 owner-hash.
 	labels := splitLabels(queryName)
 	var closestEncloser string
-	var closestEncloserHash string
-	// Iterate from the longest ancestor (root excluded — handled below as
-	// the empty-suffix case) down to "." Inclusive.
 	for i := 1; i <= len(labels); i++ {
 		ancestor := strings.Join(labels[i:], ".")
 		if ancestor == "" {
 			ancestor = "."
 		}
-		h, ok := hashName(ancestor)
+		hUpper, ok := hashName(ancestor)
 		if !ok {
 			continue
 		}
-		hUpper := strings.ToUpper(h)
 		for _, rr := range rrs {
 			if ownerHashOf(rr) == hUpper {
 				closestEncloser = ancestor
-				closestEncloserHash = hUpper
 				break
 			}
 		}
@@ -1282,74 +1335,25 @@ func (v *Validator) validateNSEC3ClosestEncloser(queryName string, rrs []*protoc
 		}
 	}
 	if closestEncloser == "" {
-		return false
+		return "", nsec3Params{}, false
 	}
 
-	// 2. Next closer: one label deeper than closest encloser, toward
-	// queryName. Find it by counting labels.
+	// 2. Next closer: one label deeper than closest encloser, toward queryName;
+	// its hash must be covered by some NSEC3 range.
 	ceLabels := splitLabels(closestEncloser)
 	if len(labels) <= len(ceLabels) {
-		// queryName is shorter than or equal to closest encloser; can't
-		// have a "next closer" label deeper.
-		return false
+		return "", nsec3Params{}, false
 	}
 	nextCloserIdx := len(labels) - len(ceLabels) - 1
 	nextCloser := strings.Join(labels[nextCloserIdx:], ".")
 	if nextCloser == "" {
-		return false
+		return "", nsec3Params{}, false
 	}
-	nextCloserHash, ok := hashName(nextCloser)
-	if !ok {
-		return false
-	}
-	nextCloserHashU := strings.ToUpper(nextCloserHash)
-	nextCloserCovered := false
-	for _, rr := range rrs {
-		o := ownerHashOf(rr)
-		n, ok := nextHashOf(rr)
-		if !ok {
-			return false
-		}
-		if nsec3HashInRange(nextCloserHashU, o, n) {
-			nextCloserCovered = true
-			break
-		}
-	}
-	if !nextCloserCovered {
-		return false
+	if !v.nsec3NameCovered(nextCloser, params, rrs) {
+		return "", nsec3Params{}, false
 	}
 
-	// 3. Wildcard "*.<closest_encloser>" cover.
-	wildcard := "*." + strings.TrimSuffix(closestEncloser, ".")
-	if closestEncloser == "." {
-		wildcard = "*."
-	}
-	wildcardHash, ok := hashName(wildcard)
-	if !ok {
-		return false
-	}
-	wildcardHashU := strings.ToUpper(wildcardHash)
-	wildcardCovered := false
-	for _, rr := range rrs {
-		o := ownerHashOf(rr)
-		n, ok := nextHashOf(rr)
-		if !ok {
-			return false
-		}
-		if nsec3HashInRange(wildcardHashU, o, n) {
-			wildcardCovered = true
-			break
-		}
-	}
-	if !wildcardCovered {
-		return false
-	}
-
-	// Suppress closestEncloserHash unused warning — retained for trace
-	// telemetry if a future patch adds debug logging.
-	_ = closestEncloserHash
-
-	return true
+	return closestEncloser, params, true
 }
 
 // nsec3HashInRange reports whether hash falls inside the half-open range
@@ -1625,6 +1629,45 @@ func (v *Validator) fetchDS(ctx context.Context, zone string) ([]*protocol.Resou
 // References:
 //   - RFC 4035 §5.2 "Authenticating Denial of Existence"
 //   - RFC 5155 §8.6 "Validating Insecure Delegation State"
+// nsecProvesNoDS reports whether an NSEC authenticates an insecure delegation
+// (NoData for the DS type) at `zone`, with the RFC 4035 §5.4 / RFC 6840 §4.4
+// type-bitmap constraints: the NSEC must exactly match the delegation name and
+// have the NS bit SET, the DS bit CLEAR, and the SOA bit CLEAR. The SOA-clear
+// requirement is the security-relevant one — it stops an attacker replaying the
+// zone-apex NSEC (which carries SOA) to fake an insecure delegation for a name
+// that actually has a DS.
+func nsecProvesNoDS(nsecOwner, zone string, nsec *protocol.RDataNSEC) bool {
+	if !sameDNSName(nsecOwner, zone) {
+		return false
+	}
+	return nsec.HasType(protocol.TypeNS) &&
+		!nsec.HasType(protocol.TypeDS) &&
+		!nsec.HasType(protocol.TypeSOA)
+}
+
+// nsec3ProvesNoDS is the NSEC3 analogue of nsecProvesNoDS. A matching NSEC3
+// (owner hash == H(zone)) must have NS set and DS/SOA clear; a covering NSEC3
+// (zone hash in the gap) authenticates an insecure delegation only when the
+// Opt-Out flag is set (RFC 5155 §6). Range-cover without opt-out is rejected.
+func nsec3ProvesNoDS(nsec3Owner, zone string, nsec3 *protocol.RDataNSEC3) bool {
+	hashed, err := NSEC3Hash(zone, nsec3.HashAlgorithm, nsec3.Iterations, nsec3.Salt)
+	if err != nil {
+		return false
+	}
+	target := strings.ToUpper(protocol.Base32Encode(hashed))
+	owner := strings.ToUpper(extractNSEC3Hash(nsec3Owner))
+	next := strings.ToUpper(protocol.Base32Encode(nsec3.NextHashed))
+	if target == owner {
+		return nsec3.HasType(protocol.TypeNS) &&
+			!nsec3.HasType(protocol.TypeDS) &&
+			!nsec3.HasType(protocol.TypeSOA)
+	}
+	if nameInRange(target, owner, next) {
+		return nsec3.Flags&protocol.NSEC3FlagOptOut != 0
+	}
+	return false
+}
+
 func (v *Validator) verifyDSDenial(msg *protocol.Message, zone string, chain []*chainLink) bool {
 	if msg == nil || len(chain) == 0 {
 		return false
@@ -1667,7 +1710,7 @@ func (v *Validator) verifyDSDenial(msg *protocol.Message, zone string, chain []*
 				if !ok {
 					continue
 				}
-				if v.validateNSEC(rr.Name.String(), zone, protocol.TypeDS, nsec) {
+				if nsecProvesNoDS(rr.Name.String(), zone, nsec) {
 					return true
 				}
 			case protocol.TypeNSEC3:
@@ -1675,7 +1718,7 @@ func (v *Validator) verifyDSDenial(msg *protocol.Message, zone string, chain []*
 				if !ok {
 					continue
 				}
-				if v.validateNSEC3(rr.Name.String(), zone, protocol.TypeDS, nsec3, chain) {
+				if nsec3ProvesNoDS(rr.Name.String(), zone, nsec3) {
 					return true
 				}
 			}

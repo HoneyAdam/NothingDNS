@@ -6,10 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
-	"net"
 	"sort"
-	"strconv"
-	"strings"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
@@ -264,70 +261,33 @@ func serializeSOA(soa *SOARecord) []byte {
 	return result
 }
 
-// serializeRecordData serializes record data in canonical format.
+// serializeRecordData serializes a record's RDATA into canonical wire form by
+// routing every type through the shared presentation→wire parser
+// (protocol.ParseRDataText) and its Pack encoder. The previous switch only
+// handled a handful of types and emitted the raw presentation string for
+// everything else (SRV/CAA/DS/DNSKEY/RRSIG/NSEC/…), so the ZONEMD digest never
+// matched an RFC-8976 peer — and, worse, the "exclude RRSIG covering ZONEMD"
+// check read the first two bytes of that presentation text (e.g. 'Z','O') as
+// the Type Covered field instead of the real wire value 63. With proper wire
+// RDATA, an RRSIG's first two bytes are its Type Covered, so that check now
+// works. Unparseable/unknown RDATA falls back to the presentation bytes.
 func serializeRecordData(rec Record) []byte {
-	// This is a simplified implementation
-	// Full implementation would handle each record type appropriately
-	var result []byte
-
-	switch strings.ToUpper(rec.Type) {
-	case "A":
-		// 4 bytes IPv4 address
-		ip := net.ParseIP(rec.RData)
-		if ip != nil {
-			result = append(result, ip.To4()...)
-		}
-	case "AAAA":
-		// 16 bytes IPv6 address
-		ip := net.ParseIP(rec.RData)
-		if ip != nil {
-			result = append(result, ip.To16()...)
-		}
-	case "CNAME", "DNAME":
-		result = append(result, canonicalName(rec.RData)...)
-	case "NS":
-		result = append(result, canonicalName(rec.RData)...)
-	case "PTR":
-		result = append(result, canonicalName(rec.RData)...)
-	case "MX":
-		// Priority (2 bytes) + target name
-		// Format: priority | target
-		parts := strings.Fields(rec.RData)
-		if len(parts) >= 2 {
-			priority, err := strconv.ParseUint(parts[0], 10, 16)
-			if err != nil {
-				return []byte(rec.RData)
-			}
-			result = append(result, byte(priority>>8), byte(priority&0xff))
-			result = append(result, canonicalName(parts[1])...)
-		}
-	case "TXT":
-		// TXT records are stored as length-prefixed character strings.
-		// Per RFC 1035, each string is max 255 bytes. Longer content
-		// must be split into multiple strings.
-		result = appendCharacterStrings(result, []byte(rec.RData))
-	case "SPF":
-		// SPF uses the same <character-string> wire encoding as TXT.
-		result = appendCharacterStrings(result, []byte(rec.RData))
-	default:
-		// For unknown types, just use raw data
-		result = []byte(rec.RData)
+	if protocol.RecordTypeFromText(rec.Type) == 0 {
+		// Genuinely unknown type — best effort, use the raw presentation bytes.
+		return []byte(rec.RData)
 	}
-
-	return result
-}
-
-func appendCharacterStrings(dst []byte, data []byte) []byte {
-	for len(data) > 0 {
-		chunk := data
-		if len(chunk) > 255 {
-			chunk = chunk[:255]
-		}
-		dst = append(dst, byte(len(chunk)))
-		dst = append(dst, chunk...)
-		data = data[len(chunk):]
+	rd := protocol.ParseRDataText(rec.Type, rec.RData)
+	if rd == nil {
+		// Known type but malformed RDATA — cannot produce canonical wire.
+		// Emit nothing rather than injecting presentation garbage that no peer
+		// could reproduce. (A validated zone never reaches this path.)
+		return nil
 	}
-	return dst
+	buf := make([]byte, rd.Len())
+	if _, err := rd.Pack(buf, 0); err != nil {
+		return nil
+	}
+	return buf
 }
 
 // parseRecordType converts a record type string to uint16.
