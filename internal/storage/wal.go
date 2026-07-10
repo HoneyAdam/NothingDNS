@@ -46,6 +46,7 @@ var (
 	ErrCorruptEntry    = errors.New("corrupt wal entry")
 	ErrInvalidChecksum = errors.New("invalid checksum")
 	ErrSegmentFull     = errors.New("segment is full")
+	ErrEntryTooLarge   = errors.New("wal entry exceeds max segment size")
 )
 
 // WALEntry represents a single entry in the WAL
@@ -375,8 +376,16 @@ func (wal *WAL) Append(entryType byte, data []byte) (uint64, error) {
 		return 0, err
 	}
 
-	// Check if we need to rotate to a new segment
+	// Reject an entry that cannot fit in ANY segment. Writing it would succeed
+	// here but recovery (decodeEntry/readSegment) rejects length > MaxSegmentSize
+	// and would silently drop it — a durable-ack of data that is unreadable on
+	// restart (a false-durability / data-loss edge). Fail the Append instead.
 	entrySize := int64(WALHeaderSize + len(data))
+	if entrySize > wal.opts.MaxSegmentSize {
+		return 0, fmt.Errorf("%w: entry %d bytes > segment max %d", ErrEntryTooLarge, entrySize, wal.opts.MaxSegmentSize)
+	}
+
+	// Check if we need to rotate to a new segment
 	if wal.active.size+entrySize > wal.opts.MaxSegmentSize {
 		if err := wal.createNewSegment(); err != nil {
 			return 0, fmt.Errorf("rotate segment: %w", err)
