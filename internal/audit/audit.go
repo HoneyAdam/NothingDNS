@@ -96,9 +96,10 @@ type AuditLogger struct {
 
 	// Async writer: audit logging must never block the DNS request path.
 	// Log* enqueue formatted lines onto a bounded channel that a single
-	// background goroutine drains to a buffered file writer. A synchronous
-	// write under a global mutex (the previous design) meant a full disk or a
-	// stalled network volume would hold the lock and stall ALL resolution.
+	// background goroutine drains, coalescing queued lines into one write to the
+	// output. A synchronous write under a global mutex (the previous design)
+	// meant a full disk or a stalled network volume would hold the lock and
+	// stall ALL resolution.
 	lines     chan string
 	syncReq   chan chan struct{}
 	done      chan struct{}
