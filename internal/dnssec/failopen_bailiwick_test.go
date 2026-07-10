@@ -51,11 +51,11 @@ func TestInBailiwick(t *testing.T) {
 	}{
 		{"foo.example.com.", "example.com.", true},
 		{"example.com.", "example.com.", true},
-		{"foo.example.com", "example.com.", true},   // trailing-dot insensitive
-		{"FOO.Example.Com.", "example.com.", true},   // case insensitive
+		{"foo.example.com", "example.com.", true},  // trailing-dot insensitive
+		{"FOO.Example.Com.", "example.com.", true}, // case insensitive
 		{"target.elsewhere.net.", "example.com.", false},
-		{"notexample.com.", "example.com.", false},   // suffix must be on a label boundary
-		{"anything.", "", true},                       // root contains everything
+		{"notexample.com.", "example.com.", false}, // suffix must be on a label boundary
+		{"anything.", "", true},                    // root contains everything
 		{"anything.", ".", true},
 	}
 	for _, c := range cases {

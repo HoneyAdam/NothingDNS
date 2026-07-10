@@ -14,10 +14,10 @@ func TestValidateRecordData_RejectsControlChars(t *testing.T) {
 		wantErr     bool
 	}{
 		{"www", "192.0.2.1", false},
-		{"www", "192.0.2.1\nevil 3600 IN A 6.6.6.6", true},   // newline injection
-		{"www", "192.0.2.1\r\nevil", true},                    // CRLF
-		{"www", "v=spf1\x00", true},                           // NUL
-		{"ev\nil", "192.0.2.1", true},                         // newline in name
+		{"www", "192.0.2.1\nevil 3600 IN A 6.6.6.6", true}, // newline injection
+		{"www", "192.0.2.1\r\nevil", true},                 // CRLF
+		{"www", "v=spf1\x00", true},                        // NUL
+		{"ev\nil", "192.0.2.1", true},                      // newline in name
 		{"mail", "10 mail.example.com.", false},
 	}
 	for _, c := range cases {

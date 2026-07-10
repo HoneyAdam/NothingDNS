@@ -11,11 +11,11 @@ import (
 // and return the decoded prefix instead.
 func TestDecodePunycode_NoOverflowPanic(t *testing.T) {
 	inputs := []string{
-		strings.Repeat("z", 300),            // max base-36 digit repeated
-		strings.Repeat("9", 300),            // high digits
-		"a-" + strings.Repeat("z", 200),     // with a basic prefix
-		strings.Repeat("z9", 150),           // alternating
-		strings.Repeat("zzzzzzzzzz", 40),    // 400 max digits
+		strings.Repeat("z", 300),         // max base-36 digit repeated
+		strings.Repeat("9", 300),         // high digits
+		"a-" + strings.Repeat("z", 200),  // with a basic prefix
+		strings.Repeat("z9", 150),        // alternating
+		strings.Repeat("zzzzzzzzzz", 40), // 400 max digits
 		"xn--" + strings.Repeat("z", 128),
 	}
 	for _, in := range inputs {

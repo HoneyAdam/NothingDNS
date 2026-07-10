@@ -92,12 +92,12 @@ func TestApplyIncrementalIXFR_AppliesDiff(t *testing.T) {
 
 	// Incremental IXFR 100 -> 101: delete old, add new. keep is untouched.
 	incremental := []*protocol.ResourceRecord{
-		mkSOARR(t, 101),                             // leading SOA (target)
-		mkSOARR(t, 100),                             // old-SOA: begin deletions
+		mkSOARR(t, 101), // leading SOA (target)
+		mkSOARR(t, 100), // old-SOA: begin deletions
 		mkARR(t, "old.example.com.", 192, 0, 2, 20), // delete old
-		mkSOARR(t, 101),                             // new-SOA: begin additions
+		mkSOARR(t, 101), // new-SOA: begin additions
 		mkARR(t, "new.example.com.", 192, 0, 2, 30), // add new
-		mkSOARR(t, 101),                             // trailing SOA
+		mkSOARR(t, 101), // trailing SOA
 	}
 	if err := sm.applyTransferredZone(sz, incremental); err != nil {
 		t.Fatalf("incremental applyTransferredZone: %v", err)

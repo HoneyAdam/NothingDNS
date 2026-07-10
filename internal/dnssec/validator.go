@@ -1665,6 +1665,7 @@ func (v *Validator) fetchDS(ctx context.Context, zone string) ([]*protocol.Resou
 // References:
 //   - RFC 4035 §5.2 "Authenticating Denial of Existence"
 //   - RFC 5155 §8.6 "Validating Insecure Delegation State"
+//
 // nsecProvesNoDS reports whether an NSEC authenticates an insecure delegation
 // (NoData for the DS type) at `zone`, with the RFC 4035 §5.4 / RFC 6840 §4.4
 // type-bitmap constraints: the NSEC must exactly match the delegation name and

@@ -265,10 +265,10 @@ func NewTLSServerWithWorkers(addr string, handler Handler, tlsConfig *tls.Config
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TLSServer{
-		addr:      addr,
-		handler:   &ServeDNSWithRecovery{Handler: handler},
-		tlsConfig: tlsConfig,
-		workers:   workers,
+		addr:        addr,
+		handler:     &ServeDNSWithRecovery{Handler: handler},
+		tlsConfig:   tlsConfig,
+		workers:     workers,
 		ctx:         ctx,
 		cancel:      cancel,
 		connSem:     make(chan struct{}, TLSMaxConnections),

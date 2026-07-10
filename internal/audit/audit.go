@@ -318,8 +318,8 @@ func (a *AuditLogger) Close() {
 	a.closeOnce.Do(func() {
 		a.enabled.Store(false)
 		if a.done != nil {
-			close(a.done)  // signal the writer to drain + flush + exit
-			a.wg.Wait()    // wait for all queued lines to reach the file
+			close(a.done) // signal the writer to drain + flush + exit
+			a.wg.Wait()   // wait for all queued lines to reach the file
 		}
 		a.mu.Lock()
 		if a.file != nil {
