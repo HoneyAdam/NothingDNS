@@ -70,7 +70,7 @@ func WriteZone(z *Zone) (string, error) {
 				continue
 			}
 
-			rname := relativize(r.Name, z.Origin)
+			rname := stripZoneControlChars(relativize(r.Name, z.Origin))
 			ttl := r.TTL
 			if ttl == 0 {
 				ttl = z.DefaultTTL
@@ -84,12 +84,37 @@ func WriteZone(z *Zone) (string, error) {
 	return b.String(), nil
 }
 
+// ValidateRecordData rejects a record whose owner name or RDATA contains a
+// newline, carriage return, or NUL. These characters never appear in a valid
+// single-line presentation-format record, and writing them into the text zone
+// file (see formatRDataForZone) would inject additional, attacker-controlled
+// zone-file lines. Enforced at every untrusted write path (API, DDNS).
+func ValidateRecordData(name, rdata string) error {
+	if i := strings.IndexAny(name, "\n\r\x00"); i >= 0 {
+		return fmt.Errorf("record name contains a control character (\\n/\\r/NUL)")
+	}
+	if i := strings.IndexAny(rdata, "\n\r\x00"); i >= 0 {
+		return fmt.Errorf("record data contains a control character (\\n/\\r/NUL) that could inject a zone-file line")
+	}
+	return nil
+}
+
+// stripZoneControlChars is a defense-in-depth safety net at the serialization
+// boundary: even if a record with control characters somehow reaches the
+// writer, it can never corrupt the zone file or inject a line.
+func stripZoneControlChars(s string) string {
+	if !strings.ContainsAny(s, "\n\r\x00") {
+		return s
+	}
+	return strings.NewReplacer("\n", "", "\r", "", "\x00", "").Replace(s)
+}
+
 func formatRDataForZone(r Record) string {
 	switch strings.ToUpper(r.Type) {
 	case "TXT", "SPF", "DKIM":
-		return quoteZoneCharacterString(r.RData)
+		return quoteZoneCharacterString(stripZoneControlChars(r.RData))
 	default:
-		return r.RData
+		return stripZoneControlChars(r.RData)
 	}
 }
 

@@ -541,6 +541,9 @@ func applyOperationToZone(z *zone.Zone, op UpdateOperation) error {
 	switch op.Operation {
 	case UpdateOpAdd:
 		name := normalizeZoneOwner(op.Name, z.Origin)
+		if err := zone.ValidateRecordData(name, op.RData); err != nil {
+			return err
+		}
 		record := zone.Record{
 			Name:  name,
 			Type:  protocol.TypeString(op.Type),

@@ -408,6 +408,9 @@ func (m *Manager) DeleteZone(name string) error {
 // AddRecord adds a record to an existing zone.
 func (m *Manager) AddRecord(zoneName string, record Record) error {
 	zoneName = normalizeZoneName(zoneName)
+	if err := ValidateRecordData(record.Name, record.RData); err != nil {
+		return err
+	}
 	if record.Class == "" {
 		record.Class = "IN"
 	}
