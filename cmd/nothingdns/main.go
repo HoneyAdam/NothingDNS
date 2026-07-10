@@ -1507,6 +1507,15 @@ func validateRuntimeAssets(cfg *config.Config) error {
 			return fmt.Errorf("validating root hints file %s: %w", cfg.Resolution.RootHints, err)
 		}
 	}
+	// Compile ACL rules so invalid CIDRs, unknown query types, and — most
+	// importantly — unknown/typo'd actions (which would otherwise fail open at
+	// runtime) are reported at validate-config time rather than silently
+	// permitting traffic in production.
+	if len(cfg.ACL) > 0 {
+		if _, err := filter.NewACLChecker(cfg.ACL, true); err != nil {
+			return fmt.Errorf("validating ACL rules: %w", err)
+		}
+	}
 	return nil
 }
 
