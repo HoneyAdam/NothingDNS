@@ -187,14 +187,9 @@ func (c *ObliviousClient) Query(dnsQuery []byte) ([]byte, error) {
 		return nil, fmt.Errorf("sending to proxy: %w", err)
 	}
 
-	// Reconstruct the query plaintext envelope to seed the response
-	// key derivation (RFC 9230 §4.1.2: response_key = Expand(Extract(
-	// query_plaintext, enc), "key", "odoh response", ...)).
-	clientQueryPlain := append([]byte(nil), u16BE(uint16(len(dnsQuery)))...)
-	clientQueryPlain = append(clientQueryPlain, dnsQuery...)
-	clientQueryPlain = append(clientQueryPlain, u16BE(0)...) // pad_len = 0
-
-	plain, err := qCtx.decryptResponse(respBytes, clientQueryPlain)
+	// The response key is now derived from the HPKE exporter secret (bound to
+	// the DH shared secret) inside decryptResponse — no query-plaintext reseed.
+	plain, err := qCtx.decryptResponse(respBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decapsulating response: %w", err)
 	}

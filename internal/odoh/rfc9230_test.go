@@ -96,11 +96,8 @@ func TestRFC9230RoundTrip(t *testing.T) {
 	// the response key derivation is the same plaintext the target saw
 	// when opening the query — for the client it's the bytes it sealed,
 	// reconstructed here.
-	clientQueryPlain := append([]byte(nil), u16BE(uint16(len(queryWire)))...)
-	clientQueryPlain = append(clientQueryPlain, queryWire...)
-	clientQueryPlain = append(clientQueryPlain, u16BE(0)...) // pad_len = 0
 
-	plain, err := qCtx.decryptResponse(respBytes, clientQueryPlain)
+	plain, err := qCtx.decryptResponse(respBytes)
 	if err != nil {
 		t.Fatalf("decryptResponse: %v", err)
 	}

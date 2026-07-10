@@ -320,8 +320,8 @@ func (kp *odohKeyPair) decryptQuery(msgBytes []byte) (dnsQuery []byte, respCtx *
 	// query, and Extract uses the suite's KDF hash.
 	respCtx = &responseContext{
 		suite:         kp.suite,
+		ctx:           ctx,
 		enc:           append([]byte(nil), enc...),
-		queryPlain:    append([]byte(nil), pt...),
 		responseLabel: odohResponseLabel,
 	}
 	return dnsQuery, respCtx, nil
@@ -331,8 +331,8 @@ func (kp *odohKeyPair) decryptQuery(msgBytes []byte) (dnsQuery []byte, respCtx *
 // response to the same client.
 type responseContext struct {
 	suite         hpkeSuite
+	ctx           *hpkeContext
 	enc           []byte
-	queryPlain    []byte
 	responseLabel []byte
 }
 
@@ -346,7 +346,11 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 		return nil, fmt.Errorf("odoh: response nonce: %w", err)
 	}
 
-	aead, nonce, err := rc.suite.deriveResponseAEAD(rc.enc, rc.queryPlain, responseNonce, rc.responseLabel)
+	odohSecret, err := rc.ctx.export(rc.responseLabel, rc.suite.aeadKeyLen())
+	if err != nil {
+		return nil, fmt.Errorf("odoh: export response secret: %w", err)
+	}
+	aead, nonce, err := rc.suite.deriveResponseAEAD(rc.enc, odohSecret, responseNonce, rc.responseLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +390,7 @@ func responseAAD(responseNonce []byte) []byte {
 }
 
 // decryptResponse is the client side of encryptResponse.
-func (qc *queryContext) decryptResponse(msgBytes []byte, queryPlain []byte) ([]byte, error) {
+func (qc *queryContext) decryptResponse(msgBytes []byte) ([]byte, error) {
 	msg, err := parseODoHMessage(msgBytes)
 	if err != nil {
 		return nil, err
@@ -401,7 +405,11 @@ func (qc *queryContext) decryptResponse(msgBytes []byte, queryPlain []byte) ([]b
 		return nil, fmt.Errorf("odoh: response_nonce length %d, want %d", len(responseNonce), qc.suite.aeadKeyLen())
 	}
 
-	aead, nonce, err := qc.suite.deriveResponseAEAD(qc.enc, queryPlain, responseNonce, odohResponseLabel)
+	odohSecret, err := qc.ctx.export(odohResponseLabel, qc.suite.aeadKeyLen())
+	if err != nil {
+		return nil, fmt.Errorf("odoh: export response secret: %w", err)
+	}
+	aead, nonce, err := qc.suite.deriveResponseAEAD(qc.enc, odohSecret, responseNonce, odohResponseLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -422,21 +430,21 @@ func (qc *queryContext) decryptResponse(msgBytes []byte, queryPlain []byte) ([]b
 	return append([]byte(nil), pt[2:2+dnsLen]...), nil
 }
 
-// deriveResponseAEAD turns (enc, query_plaintext, response_nonce) into a fresh
-// AEAD key+nonce for the response transit, per RFC 9230 §4.2. The random
-// per-response responseNonce is folded into the HKDF salt so that even a
-// byte-identical replayed query (same enc, same queryPlain) yields a UNIQUE
-// (key, nonce) for every response. Without it the key+nonce were a pure
-// function of the query, so replaying a query and observing the differing
-// responses (TTL countdown, answer rotation) reused the same AES-GCM nonce —
-// enabling plaintext recovery (C1⊕C2 = P1⊕P2) and GHASH-subkey recovery
-// (forged responses) by an untrusted ODoH proxy.
-func (s hpkeSuite) deriveResponseAEAD(enc, queryPlain, responseNonce, label []byte) (cipher.AEAD, []byte, error) {
-	// salt = enc || response_nonce; ikm = query_plaintext.
+// deriveResponseAEAD turns (enc, odoh_secret, response_nonce) into a fresh AEAD
+// key+nonce for the response transit, per RFC 9230 §4.2. The IKM is odohSecret =
+// Context.Export("odoh response", Nk), cryptographically bound to the HPKE DH
+// shared secret — NOT the guessable query plaintext. Using the low-entropy
+// query as IKM let a malicious proxy mount an offline dictionary attack on the
+// response (confirming the query and forging answers); binding to the DH secret
+// makes that infeasible. The random per-response responseNonce is folded into
+// the HKDF salt so every response gets a unique (key, nonce) even for a
+// byte-identical replayed query (preventing AES-GCM nonce reuse).
+func (s hpkeSuite) deriveResponseAEAD(enc, odohSecret, responseNonce, label []byte) (cipher.AEAD, []byte, error) {
+	// salt = enc || response_nonce; ikm = odoh_secret (DH-bound).
 	salt := make([]byte, 0, len(enc)+len(responseNonce))
 	salt = append(salt, enc...)
 	salt = append(salt, responseNonce...)
-	secret, err := hkdf.Extract(s.hkdfHash(), queryPlain, salt)
+	secret, err := hkdf.Extract(s.hkdfHash(), odohSecret, salt)
 	if err != nil {
 		return nil, nil, fmt.Errorf("odoh: response hkdf extract: %w", err)
 	}

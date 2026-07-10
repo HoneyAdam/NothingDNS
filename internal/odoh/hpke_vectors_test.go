@@ -55,6 +55,23 @@ func TestHPKE_RFC9180_A1_KeySchedule(t *testing.T) {
 		t.Fatalf("base_nonce:\n got %x\nwant %x", ctx.baseNonce, wantBaseNonce)
 	}
 
+	// RFC 9180 §A.1.1: exporter_secret and a Context.Export value. Validates the
+	// exporter derivation ODoH now uses to bind the response key to the DH
+	// secret.
+	wantExporterSecret := mustHex(t, "45ff1c2e220db587171952c0592d5f5ebe103f1561a2614e38f2ffd47e99e3f8")
+	if !bytes.Equal(ctx.exporterSecret, wantExporterSecret) {
+		t.Fatalf("exporter_secret:\n got %x\nwant %x", ctx.exporterSecret, wantExporterSecret)
+	}
+	// exporter_context = "" (L=32) → 3853fe2b...
+	exp, err := ctx.export(nil, 32)
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	wantExport := mustHex(t, "3853fe2b4035195a573ffc53856e77058e15d9ea064de3e59f4961d0095250ee")
+	if !bytes.Equal(exp, wantExport) {
+		t.Fatalf("export(\"\",32):\n got %x\nwant %x", exp, wantExport)
+	}
+
 	// RFC 9180 §A.1.1.1 Encryption[0]:
 	//   aad: Count-0
 	//   pt:  "Beauty is truth, truth beauty"

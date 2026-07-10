@@ -62,12 +62,9 @@ func TestRFC9230_ResponseNonceUnique(t *testing.T) {
 	}
 
 	// Both must still decrypt to the same DNS answer.
-	clientQueryPlain := append([]byte(nil), u16BE(uint16(len(queryWire)))...)
-	clientQueryPlain = append(clientQueryPlain, queryWire...)
-	clientQueryPlain = append(clientQueryPlain, u16BE(0)...)
 
 	for i, resp := range [][]byte{resp1, resp2} {
-		plain, err := qCtx.decryptResponse(resp, clientQueryPlain)
+		plain, err := qCtx.decryptResponse(resp)
 		if err != nil {
 			t.Fatalf("decryptResponse #%d: %v", i, err)
 		}

@@ -238,10 +238,18 @@ func (s hpkeSuite) hpkeDecap(enc []byte, skR *ecdh.PrivateKey) ([]byte, error) {
 // successful Setup. It holds the AEAD key + base nonce + sequence
 // counter (RFC 9180 §5.2).
 type hpkeContext struct {
-	suite     hpkeSuite
-	aead      cipher.AEAD
-	baseNonce []byte
-	seq       uint64
+	suite          hpkeSuite
+	aead           cipher.AEAD
+	baseNonce      []byte
+	exporterSecret []byte
+	seq            uint64
+}
+
+// export implements RFC 9180 §5.3 Context.Export: it derives secrets bound to
+// the HPKE shared secret. Used by ODoH to derive the response key from the DH
+// secret (not the guessable query plaintext).
+func (c *hpkeContext) export(exporterContext []byte, length int) ([]byte, error) {
+	return c.suite.labeledExpand(c.exporterSecret, []byte("sec"), exporterContext, length, labelKindHPKE)
 }
 
 // keySchedule implements RFC 9180 §5.1 KeySchedule (base mode only).
@@ -276,6 +284,11 @@ func (s hpkeSuite) keySchedule(sharedSecret, info []byte) (*hpkeContext, error) 
 	if err != nil {
 		return nil, err
 	}
+	// exporter_secret = LabeledExpand(secret, "exp", key_schedule_context, Nh)
+	exporterSecret, err := s.labeledExpand(secret, []byte("exp"), ksContext, s.hkdfHash()().Size(), labelKindHPKE)
+	if err != nil {
+		return nil, err
+	}
 
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -286,9 +299,10 @@ func (s hpkeSuite) keySchedule(sharedSecret, info []byte) (*hpkeContext, error) 
 		return nil, fmt.Errorf("hpke: aead init: %w", err)
 	}
 	return &hpkeContext{
-		suite:     s,
-		aead:      aead,
-		baseNonce: baseNonce,
+		suite:          s,
+		aead:           aead,
+		baseNonce:      baseNonce,
+		exporterSecret: exporterSecret,
 	}, nil
 }
 
