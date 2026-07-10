@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"sync/atomic"
 	"time"
+
+	"github.com/nothingdns/nothingdns/internal/util"
 )
 
 func (s *Server) handleODoHConfig(w http.ResponseWriter, r *http.Request) {
@@ -72,29 +74,30 @@ func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleLiveness implements the Kubernetes liveness probe.
-// Returns 200 if the server process is alive and not deadlocked.
-// Returns 503 if goroutine leak or deadlock is detected.
+// handleLiveness implements the Kubernetes liveness probe. A liveness probe
+// answers exactly one question: "is this process alive and able to make
+// progress?" If this handler runs at all, the HTTP server's goroutine and
+// accept loop are scheduling and responsive — so the correct answer is always
+// 200. It MUST NOT be tied to goroutine count: goroutines scale with in-flight
+// queries and connections, so a healthy server under load routinely exceeds any
+// fixed multiple of its idle baseline, and returning 503 there makes Kubernetes
+// kill and restart a working pod — turning a load spike into a crash loop.
+//
+// Goroutine growth is still surfaced (logged) for observability, but it drives
+// alerting/metrics, never the liveness verdict.
 func (s *Server) handleLiveness(w http.ResponseWriter, r *http.Request) {
-	status := "alive"
-	code := http.StatusOK
-	current := int64(0)
 	baseline := atomic.LoadInt64(&s.goroutineBaseline)
-
-	// Check for goroutine leak: compare current goroutine count to baseline
 	if baseline > 0 {
-		current = int64(runtime.NumGoroutine())
-		// Allow up to 2x baseline growth to detect actual goroutine leaks.
-		// Baseline is now set via SetGoroutineBaseline() after all servers are running,
-		// so a 2x multiplier is sufficient to catch leaks while avoiding false positives.
-		if current > baseline*2 {
-			status = "goroutine_leak"
-			code = http.StatusServiceUnavailable
+		if current := int64(runtime.NumGoroutine()); current > baseline*4 {
+			// Informational only — do NOT fail the probe. A sustained, unbounded
+			// climb is a real leak, but that is an alerting concern, not a
+			// reason to kill the process.
+			util.Warnf("liveness: goroutine count %d exceeds 4x startup baseline %d (possible leak; not failing liveness)", current, baseline)
 		}
 	}
 
-	s.writeJSON(w, code, &HealthResponse{
-		Status:    status,
+	s.writeJSON(w, http.StatusOK, &HealthResponse{
+		Status:    "alive",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 	})
 }
