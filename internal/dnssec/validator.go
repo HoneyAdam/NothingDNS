@@ -748,8 +748,18 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 		}
 	}
 
-	// Find matching DNSKEY
-	var matchingKey *protocol.RDataDNSKEY
+	// Create canonical signed data once (independent of which key signed it).
+	signedData, err := v.canonicalizeRRSet(rrSet, rrsig)
+	if err != nil {
+		return false
+	}
+
+	// Try EVERY DNSKEY whose (KeyTag, Algorithm) matches the RRSIG. Key tags
+	// are not unique (RFC 4034 §8): during key rollovers or deliberate
+	// collisions two DNSKEYs can share a tag and algorithm, and the actual
+	// signer may be the second one. Selecting only the first match and giving
+	// up rejected otherwise-valid signatures (availability). Return true as soon
+	// as any candidate verifies.
 	for _, rr := range dnsKeys {
 		if rr == nil {
 			continue
@@ -758,32 +768,21 @@ func (v *Validator) validateRRSIG(rrSet []*protocol.ResourceRecord, rrsig *proto
 		if !ok {
 			continue
 		}
-		keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
-		if keyTag == rrsig.KeyTag && dnskey.Algorithm == rrsig.Algorithm {
-			matchingKey = dnskey
-			break
+		if dnskey.Algorithm != rrsig.Algorithm {
+			continue
+		}
+		if protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey) != rrsig.KeyTag {
+			continue
+		}
+		pubKey, err := ParseDNSKEYPublicKey(dnskey.Algorithm, dnskey.PublicKey)
+		if err != nil {
+			continue
+		}
+		if VerifySignature(rrsig, signedData, pubKey) == nil {
+			return true
 		}
 	}
-
-	if matchingKey == nil {
-		return false
-	}
-
-	// Parse the public key
-	pubKey, err := ParseDNSKEYPublicKey(matchingKey.Algorithm, matchingKey.PublicKey)
-	if err != nil {
-		return false
-	}
-
-	// Create canonical signed data
-	signedData, err := v.canonicalizeRRSet(rrSet, rrsig)
-	if err != nil {
-		return false
-	}
-
-	// Verify signature
-	err = VerifySignature(rrsig, signedData, pubKey)
-	return err == nil
+	return false
 }
 
 func validatorClockSkewSeconds(clockSkew time.Duration) uint32 {
