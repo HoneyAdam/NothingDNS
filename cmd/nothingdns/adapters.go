@@ -149,13 +149,14 @@ func (a *doqHandlerAdapter) ServeDoQ(stream *quic.Stream, queryData []byte) {
 		return
 	}
 
-	rw := &doqResponseWriter{stream: stream}
+	rw := &doqResponseWriter{stream: stream, remoteAddr: stream.RemoteAddr()}
 	a.handler.ServeDNS(rw, msg)
 }
 
 // doqResponseWriter implements server.ResponseWriter for QUIC streams.
 type doqResponseWriter struct {
-	stream doqStreamWriter
+	stream     doqStreamWriter
+	remoteAddr net.Addr
 }
 
 type doqStreamWriter interface {
@@ -187,8 +188,16 @@ func (w *doqResponseWriter) Write(msg *protocol.Message) (int, error) {
 }
 
 func (w *doqResponseWriter) ClientInfo() *server.ClientInfo {
+	// Carry the real QUIC client address so per-client pipeline stages (ACL,
+	// rate limiting, RPZ client policy, split-horizon views, DNS cookies) see a
+	// non-nil IP. Falling back to an empty address here would silently exempt
+	// every DoQ query from those controls (open-resolver / RRL-bypass over DoQ).
+	addr := w.remoteAddr
+	if addr == nil {
+		addr = &net.UDPAddr{}
+	}
 	return &server.ClientInfo{
-		Addr:     &net.UDPAddr{},
+		Addr:     addr,
 		Protocol: "quic",
 	}
 }

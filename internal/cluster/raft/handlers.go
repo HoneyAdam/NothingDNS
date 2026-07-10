@@ -338,6 +338,18 @@ func (n *Node) handleAppendResponse(resp AppendResponse) {
 		return
 	}
 
+	if resp.Term != n.currentTerm {
+		// Stale response from a prior term (resp.Term < currentTerm; the
+		// resp.Term > currentTerm case is handled above). The leader must act
+		// only on responses to AppendEntries it sent in its CURRENT term. A node
+		// that briefly stepped down and regained leadership in a higher term
+		// within the RPC window could otherwise accept a delayed term-T success,
+		// advance matchIndex from a since-overwritten follower log, and falsely
+		// commit a current-term entry that is not actually on a quorum (Raft
+		// §5.3/§5.5 safety violation).
+		return
+	}
+
 	if resp.Success {
 		// Advance match/next for this peer from the follower's hint, then
 		// recompute the commit index.

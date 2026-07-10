@@ -174,7 +174,10 @@ func cacheStage(h *integratedHandler) Stage {
 				// negative TTL) and any NSEC/NSEC3 proofs. COPY — reply()
 				// mutates in place. Bare rcode fallback for legacy entries.
 				if entry.Message != nil {
-					resp := entry.Message.Copy()
+					// Age-adjusted copy: decrement TTLs (incl. the SOA in the
+					// Authority section) by how long the entry has been cached,
+					// so downstream negative caching honors the remaining TTL.
+					resp := entry.AgeAdjustedMessage(time.Now())
 					resp.Header.Flags.RCODE = entry.RCode
 					reply(q.currentWriter, q.msg, resp)
 					return true, nil
@@ -187,13 +190,15 @@ func cacheStage(h *integratedHandler) Stage {
 				h.metrics.RecordCacheHit()
 				h.metrics.RecordResponse(protocol.RcodeSuccess)
 			}
-			// Serve a COPY of the cached message. reply()/minimizeResponse() and
-			// UDP truncation mutate the response in place (header ID & flags,
-			// authority/additional sections, answer trimming). entry.Message is
-			// the SHARED cached object — mutating it would permanently corrupt the
-			// cache for every future client and race across concurrent hits (a
-			// client could even receive another client's transaction ID).
-			reply(q.currentWriter, q.msg, entry.Message.Copy())
+			// Serve an age-adjusted COPY of the cached message. The copy is
+			// mandatory: reply()/minimizeResponse() and UDP truncation mutate the
+			// response in place (header ID & flags, authority/additional sections,
+			// answer trimming). entry.Message is the SHARED cached object —
+			// mutating it would permanently corrupt the cache for every future
+			// client and race across concurrent hits (a client could even receive
+			// another client's transaction ID). AgeAdjustedMessage also decrements
+			// each RR TTL by the entry's cache age (RFC 1035 §4.1.3 / RFC 2181).
+			reply(q.currentWriter, q.msg, entry.AgeAdjustedMessage(time.Now()))
 			return true, nil
 		}
 
@@ -510,6 +515,21 @@ func upstreamStage(h *integratedHandler) Stage {
 			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
 			return true, nil
 		}
+
+		// Verify the reply echoes the question we asked (name/type/class).
+		// Together with the random transaction ID and connected-UDP source
+		// filtering this is defense-in-depth against off-path cache poisoning:
+		// a spoofed reply that wins the TXID race but answers a different
+		// question is rejected before it can be cached.
+		if !upstreamResponseMatchesQuestion(resp, q.q) {
+			q.msg.Header.ID = origID
+			h.logger.Warnf("Upstream response question mismatch for %s", q.qname)
+			if h.metrics != nil {
+				h.metrics.RecordResponse(protocol.RcodeServerFailure)
+			}
+			sendErrorWithEDE(q.currentWriter, q.msg, protocol.RcodeServerFailure, protocol.EDENetworkError, "invalid upstream response")
+			return true, nil
+		}
 		q.msg.Header.ID = origID
 
 		handled, dnssecValidated := h.validateDNSSECResponse(ctx, q.currentWriter, q.msg, q.qname, resp)
@@ -574,6 +594,24 @@ func upstreamStage(h *integratedHandler) Stage {
 		reply(q.currentWriter, q.msg, resp)
 		return true, nil
 	}
+}
+
+// upstreamResponseMatchesQuestion reports whether an upstream reply echoes the
+// question we asked: exactly one question with matching name (case-insensitive
+// per RFC 4343), type, and class. A response that omits or alters the question
+// is treated as invalid (potential off-path spoof) rather than trusted.
+func upstreamResponseMatchesQuestion(resp *protocol.Message, want *protocol.Question) bool {
+	if want == nil {
+		return true // nothing to compare against; ID check already passed
+	}
+	if len(resp.Questions) != 1 {
+		return false
+	}
+	got := resp.Questions[0]
+	if got == nil {
+		return false
+	}
+	return got.QType == want.QType && got.QClass == want.QClass && got.Name.Equal(want.Name)
 }
 
 func negativeCacheTTL(resp *protocol.Message) (uint32, bool) {

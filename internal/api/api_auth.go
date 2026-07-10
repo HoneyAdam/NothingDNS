@@ -23,7 +23,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check IP-based rate limit
-	ip := getClientIP(r)
+	ip := s.clientIP(r)
 	if rejected, delay := s.loginLimiter.checkRateLimit(ip); rejected {
 		w.Header().Set("Retry-After", retryAfterSeconds(delay))
 		s.writeError(w, http.StatusTooManyRequests, "Too many requests, try again later")
@@ -107,7 +107,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	defer s.bootstrapMu.Unlock()
 
 	// Get client IP for localhost check — inside lock to ensure atomic check
-	ip := getClientIP(r)
+	ip := s.clientIP(r)
 	isLocalhost := ip == "127.0.0.1" || ip == "::1"
 
 	authStore := s.currentAuthStore()

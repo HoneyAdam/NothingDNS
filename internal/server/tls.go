@@ -33,6 +33,13 @@ const (
 
 	// TLSMaxConnections is the maximum number of concurrent TLS connections.
 	TLSMaxConnections = 1000
+	// TLSMaxConnectionsPerIP caps concurrent DoT connections from a single
+	// source IP so one client cannot monopolize the global pool and deny
+	// service to every other DoT client (the TCP server enforces the same kind
+	// of per-IP limit). Set well above a single stub/forwarder's needs but far
+	// below TLSMaxConnections so no single IP can take more than a fraction of
+	// total capacity.
+	TLSMaxConnectionsPerIP = 100
 
 	// DefaultTLSPort is the default port for DNS over TLS.
 	DefaultTLSPort = 853
@@ -229,7 +236,9 @@ type TLSServer struct {
 	wg     sync.WaitGroup
 
 	// Connection limiting
-	connSem chan struct{}
+	connSem     chan struct{}
+	ipConnMu    sync.Mutex
+	ipConnCount map[string]int
 
 	// Metrics
 	connectionsAccepted uint64
@@ -260,9 +269,10 @@ func NewTLSServerWithWorkers(addr string, handler Handler, tlsConfig *tls.Config
 		handler:   &ServeDNSWithRecovery{Handler: handler},
 		tlsConfig: tlsConfig,
 		workers:   workers,
-		ctx:       ctx,
-		cancel:    cancel,
-		connSem:   make(chan struct{}, TLSMaxConnections),
+		ctx:         ctx,
+		cancel:      cancel,
+		connSem:     make(chan struct{}, TLSMaxConnections),
+		ipConnCount: make(map[string]int),
 	}
 }
 
@@ -311,7 +321,7 @@ func (s *TLSServer) Serve() error {
 			continue
 		}
 
-		// Check connection limit
+		// Check global connection limit
 		select {
 		case s.connSem <- struct{}{}:
 			atomic.AddUint64(&s.connectionsAccepted, 1)
@@ -322,10 +332,25 @@ func (s *TLSServer) Serve() error {
 			continue
 		}
 
+		// Check per-IP connection limit so a single source cannot monopolize
+		// the global pool.
+		ip := getIP(conn.RemoteAddr())
+		s.ipConnMu.Lock()
+		if s.ipConnCount[ip] >= TLSMaxConnectionsPerIP {
+			s.ipConnMu.Unlock()
+			conn.Close()
+			<-s.connSem
+			atomic.AddUint64(&s.errors, 1)
+			continue
+		}
+		s.ipConnCount[ip]++
+		s.ipConnMu.Unlock()
+
 		// Send to worker, respecting shutdown
 		select {
 		case connChan <- conn:
 		case <-s.ctx.Done():
+			s.decrementIPConn(ip)
 			conn.Close()
 			<-s.connSem
 		}
@@ -337,9 +362,23 @@ func (s *TLSServer) worker(connChan <-chan net.Conn) {
 	defer s.wg.Done()
 
 	for conn := range connChan {
+		ip := getIP(conn.RemoteAddr())
 		s.handleConnection(conn)
+		s.decrementIPConn(ip)
 		<-s.connSem // Release slot
 	}
+}
+
+// decrementIPConn releases one per-IP connection slot, deleting the map entry
+// at zero so ipConnCount does not grow unbounded over time.
+func (s *TLSServer) decrementIPConn(ip string) {
+	s.ipConnMu.Lock()
+	defer s.ipConnMu.Unlock()
+	if s.ipConnCount[ip] <= 1 {
+		delete(s.ipConnCount, ip)
+		return
+	}
+	s.ipConnCount[ip]--
 }
 
 // handleConnection processes a single TLS connection.

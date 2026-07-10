@@ -113,7 +113,7 @@ type singleflight[T any] struct {
 // Do deduplicates concurrent calls. If an identical call is already in flight,
 // the caller waits and shares the result. The key should uniquely identify the
 // work item (e.g., "example.com.:A").
-func (sf *singleflight[T]) Do(key string, fn func() (T, error)) (T, error, bool) {
+func (sf *singleflight[T]) Do(key string, fn func() (T, error)) (result T, err error, shared bool) {
 	sf.mu.Lock()
 	if sf.active == nil {
 		sf.active = make(map[string]*call[T])
@@ -127,14 +127,25 @@ func (sf *singleflight[T]) Do(key string, fn func() (T, error)) (T, error, bool)
 	sf.active[key] = c
 	sf.mu.Unlock()
 
+	// Guarantee cleanup even if fn panics. Without this a panic anywhere in the
+	// resolve tree (a parse panic, a nil deref, …) would unwind past close/
+	// delete, leaving c.ready unclosed — every waiter on <-c.ready blocks
+	// forever — and the key stuck in sf.active, so all future resolves for this
+	// (name,qtype) wedge forever and leak a goroutine per query. Recover, record
+	// the panic as an error for this caller and every waiter, and always close +
+	// delete.
+	defer func() {
+		if r := recover(); r != nil {
+			c.err = fmt.Errorf("resolver: panic resolving %q: %v", key, r)
+			result, err, shared = c.result, c.err, false
+		}
+		close(c.ready)
+		sf.mu.Lock()
+		delete(sf.active, key)
+		sf.mu.Unlock()
+	}()
+
 	c.result, c.err = fn()
-
-	close(c.ready)
-
-	sf.mu.Lock()
-	delete(sf.active, key)
-	sf.mu.Unlock()
-
 	return c.result, c.err, false // shared = false (first caller)
 }
 

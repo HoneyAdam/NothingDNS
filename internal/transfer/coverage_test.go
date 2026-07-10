@@ -3205,7 +3205,7 @@ func TestCreateZONEMDRR_SHA256(t *testing.T) {
 		Algorithm: 1, // SHA-256
 	}
 
-	rr, err := s.createZONEMDRR(zonemd, origin)
+	rr, err := s.createZONEMDRR(zonemd, origin, 2026070101)
 	if err != nil {
 		t.Fatalf("createZONEMDRR: %v", err)
 	}
@@ -3221,6 +3221,9 @@ func TestCreateZONEMDRR_SHA256(t *testing.T) {
 	data, ok := rr.Data.(*protocol.RDataZONEMD)
 	if !ok {
 		t.Fatalf("expected *RDataZONEMD, got %T", rr.Data)
+	}
+	if data.Serial != 2026070101 {
+		t.Errorf("Serial = %d, want 2026070101 (must equal SOA serial per RFC 8976)", data.Serial)
 	}
 	if data.Scheme != 1 {
 		t.Errorf("Scheme = %d, want 1", data.Scheme)
@@ -3243,7 +3246,7 @@ func TestCreateZONEMDRR_SHA384(t *testing.T) {
 		Algorithm: 2,
 	}
 
-	rr, err := s.createZONEMDRR(zonemd, origin)
+	rr, err := s.createZONEMDRR(zonemd, origin, 100)
 	if err != nil {
 		t.Fatalf("createZONEMDRR: %v", err)
 	}

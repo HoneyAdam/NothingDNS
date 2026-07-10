@@ -3,6 +3,8 @@
 package main
 
 import (
+	"time"
+
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/server"
@@ -472,10 +474,13 @@ func (h *integratedHandler) resolveCNAMETarget(w server.ResponseWriter, r *proto
 	// 2. Check cache for the target (no DO bit needed — authoritative zone lookup)
 	cacheKey := cache.MakeKey(targetName, qtype, false)
 	if entry := h.cache.Get(cacheKey); entry != nil && !entry.IsNegative && entry.Message != nil {
+		// Age-adjusted copy already decrements TTLs and returns fresh RRs, so
+		// no further rr.Copy() is needed.
+		adjusted := entry.AgeAdjustedMessage(time.Now())
 		var answers []*protocol.ResourceRecord
-		for _, rr := range entry.Message.Answers {
+		for _, rr := range adjusted.Answers {
 			if rr.Type == qtype {
-				answers = append(answers, rr.Copy())
+				answers = append(answers, rr)
 			}
 		}
 		if len(answers) > 0 {

@@ -25,6 +25,7 @@ type Entry struct {
 	// TTL information
 	TTL        uint32    // Original TTL from record
 	ExpireTime time.Time // When this entry expires
+	insertedAt time.Time // When this entry was cached (for age-based TTL decrement on serve)
 
 	// Prefetch tracking
 	CanPrefetch bool      // Whether this entry can be prefetched
@@ -79,6 +80,51 @@ func (e *Entry) RemainingTTL(now time.Time) uint32 {
 		return 0
 	}
 	return remainingSecondsUint32(e.ExpireTime.Sub(now))
+}
+
+// AgeAdjustedMessage returns a deep copy of the entry's cached message with
+// every resource-record TTL decremented by the entry's age (RFC 1035 §4.1.3 /
+// RFC 2181 §5.2): a cache MUST serve a record with its remaining TTL, not the
+// value it was stored with. Serving the original TTL lets downstream caches
+// hold the record for close to double its authoritative lifetime and keeps a
+// rotated/failover record alive long past when the authority intended it to
+// expire. TTLs floor at 1 second (never below, so a still-valid entry is never
+// served as TTL 0 "do not cache"). The cached entry itself is never mutated.
+// Returns nil if the entry or its message is nil.
+func (e *Entry) AgeAdjustedMessage(now time.Time) *protocol.Message {
+	if e == nil || e.Message == nil {
+		return nil
+	}
+	msg := e.Message.Copy()
+	if e.insertedAt.IsZero() {
+		return msg
+	}
+	ageSeconds := int64(now.Sub(e.insertedAt) / time.Second)
+	if ageSeconds <= 0 {
+		return msg
+	}
+	decrementMessageTTLs(msg, ageSeconds)
+	return msg
+}
+
+// decrementMessageTTLs reduces every RR TTL in msg (Answers/Authority/
+// Additional, skipping the OPT pseudo-record) by ageSeconds, flooring at 1.
+func decrementMessageTTLs(msg *protocol.Message, ageSeconds int64) {
+	adjust := func(rrs []*protocol.ResourceRecord) {
+		for _, rr := range rrs {
+			if rr == nil || rr.Type == protocol.TypeOPT {
+				continue
+			}
+			remaining := int64(rr.TTL) - ageSeconds
+			if remaining < 1 {
+				remaining = 1
+			}
+			rr.TTL = uint32(remaining)
+		}
+	}
+	adjust(msg.Answers)
+	adjust(msg.Authorities)
+	adjust(msg.Additionals)
 }
 
 func remainingSecondsUint32(remaining time.Duration) uint32 {
@@ -155,9 +201,20 @@ type cacheShard struct {
 	staleServed uint64
 }
 
+type cacheClock interface {
+	Now() time.Time
+}
+
+type realCacheClock struct{}
+
+func (realCacheClock) Now() time.Time {
+	return time.Now()
+}
+
 // Cache is a sharded, thread-safe DNS cache with LRU eviction per shard.
 type Cache struct {
 	shards [numShards]cacheShard
+	clock  cacheClock
 
 	// Configuration. Reads are lock-free (simple value types, mirroring the
 	// pre-sharding design); UpdateConfig serialises writes via cfgMu.
@@ -181,6 +238,17 @@ type Cache struct {
 // shardOf returns the shard responsible for the given key.
 func (c *Cache) shardOf(key string) *cacheShard {
 	return &c.shards[maphash.String(shardSeed, key)&shardMask]
+}
+
+func (c *Cache) now() time.Time {
+	if c == nil || c.clock == nil {
+		return time.Now()
+	}
+	return c.clock.Now()
+}
+
+func (c *Cache) setClockForTest(clock cacheClock) {
+	c.clock = clock
 }
 
 // Config holds cache configuration.
@@ -214,6 +282,7 @@ func DefaultConfig() Config {
 // New creates a new sharded DNS cache with the given configuration.
 func New(config Config) *Cache {
 	c := &Cache{
+		clock:             realCacheClock{},
 		capacity:          config.Capacity,
 		minTTL:            config.MinTTL,
 		maxTTL:            config.MaxTTL,
@@ -332,7 +401,7 @@ func (c *Cache) Get(key string) *Entry {
 		return nil
 	}
 
-	now := time.Now()
+	now := c.now()
 	if entry.IsExpired(now) {
 		s.mu.RUnlock()
 		// Slow path: remove expired entry under exclusive lock.
@@ -428,7 +497,7 @@ func (c *Cache) GetStale(key string) *Entry {
 		return nil
 	}
 
-	now := time.Now()
+	now := c.now()
 	if !entry.IsExpired(now) {
 		// Not expired — normal Get should be used
 		s.mu.Unlock()
@@ -541,13 +610,15 @@ func (c *Cache) setNegativeEntry(key string, rcode uint8, msg *protocol.Message,
 		ttl = c.maxTTL
 	}
 
-	expireTime := time.Now().Add(ttl)
+	now := c.now()
+	expireTime := now.Add(ttl)
 
 	entry := &Entry{
 		Key:        key,
 		RCode:      rcode,
 		Message:    msg,
 		ExpireTime: expireTime,
+		insertedAt: now,
 		IsNegative: true,
 	}
 
@@ -573,7 +644,7 @@ func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, tt
 		duration = c.maxTTL
 	}
 
-	now := time.Now()
+	now := c.now()
 	expireTime := now.Add(duration)
 
 	// Calculate prefetch time if enabled
@@ -593,6 +664,7 @@ func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, tt
 		Message:     msg,
 		TTL:         ttl,
 		ExpireTime:  expireTime,
+		insertedAt:  now,
 		CanPrefetch: canPrefetch,
 		PrefetchDue: prefetchDue,
 		IsNegative:  false,

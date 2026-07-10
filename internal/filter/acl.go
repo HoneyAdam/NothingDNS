@@ -10,6 +10,29 @@ import (
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
+// validateACLAction rejects any ACL action that is not one of the supported
+// verbs. Without this an operator typo (e.g. action: "block"/"reject"/"drop")
+// compiled cleanly, matched the client's network, then did nothing — the
+// switch in IsAllowed has no default case, so the rule fell through and the
+// query was permitted by the default policy. A control meant to DENY traffic
+// silently failed open with no error at load or -validate-config time. Now such
+// a config is rejected up front.
+func validateACLAction(ruleName, action, redirect string) error {
+	switch action {
+	case "allow", "deny":
+		return nil
+	case "redirect":
+		if redirect == "" {
+			return fmt.Errorf("ACL rule %q: action %q requires a non-empty redirect target", ruleName, action)
+		}
+		return nil
+	case "":
+		return fmt.Errorf("ACL rule %q: missing action (expected allow, deny, or redirect)", ruleName)
+	default:
+		return fmt.Errorf("ACL rule %q: unknown action %q (expected allow, deny, or redirect)", ruleName, action)
+	}
+}
+
 // compiledRule is a pre-processed ACL rule with parsed networks and types.
 type compiledRule struct {
 	Name     string
@@ -67,6 +90,9 @@ func NewACLChecker(rules []config.ACLRule, denyByDefault bool) (*ACLChecker, err
 			}
 		}
 
+		if err := validateACLAction(cr.Name, cr.Action, cr.Redirect); err != nil {
+			return nil, err
+		}
 		compiled = append(compiled, cr)
 	}
 
@@ -153,6 +179,9 @@ func (a *ACLChecker) UpdateRules(rules []config.ACLRule) error {
 			}
 		}
 
+		if err := validateACLAction(cr.Name, cr.Action, cr.Redirect); err != nil {
+			return err
+		}
 		compiled = append(compiled, cr)
 	}
 

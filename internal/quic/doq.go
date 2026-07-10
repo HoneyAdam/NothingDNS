@@ -104,7 +104,16 @@ func (fn DoQHandlerFunc) ServeDoQ(stream *Stream, query []byte) {
 
 // Stream wraps a quic-go stream for the DoQ handler interface.
 type Stream struct {
-	stream *quic.Stream
+	stream     *quic.Stream
+	remoteAddr net.Addr
+}
+
+// RemoteAddr returns the client's network address (the QUIC connection's
+// remote address). Used so DoQ queries carry the real client IP into the
+// request pipeline (ACL, rate limiting, RPZ client policy, split-horizon,
+// DNS cookies) instead of an empty address.
+func (s *Stream) RemoteAddr() net.Addr {
+	return s.remoteAddr
 }
 
 // Read reads data from the stream.
@@ -364,7 +373,14 @@ func (s *DoQServer) handleConnection(conn *quic.Conn, ip string) {
 		s.activeConns--
 		s.activeConnsMu.Unlock()
 		s.ipConnsMu.Lock()
-		s.ipConns[ip]--
+		if s.ipConns[ip] <= 1 {
+			// Delete the key at zero so ipConns does not accumulate a permanent
+			// entry for every distinct client IP ever seen (unbounded map growth
+			// over long uptime).
+			delete(s.ipConns, ip)
+		} else {
+			s.ipConns[ip]--
+		}
 		s.ipConnsMu.Unlock()
 		atomic.AddUint64(&s.connectionsClosed, 1)
 	}()
@@ -393,7 +409,7 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 		stream.CancelWrite(0x00)
 	}()
 
-	wrappedStream := &Stream{stream: stream}
+	wrappedStream := &Stream{stream: stream, remoteAddr: conn.RemoteAddr()}
 
 	// Set stream deadline to prevent slow clients from holding resources.
 	if err := stream.SetReadDeadline(time.Now().Add(DoQStreamIdleTimeout)); err != nil {

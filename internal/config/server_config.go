@@ -118,6 +118,17 @@ type HTTPConfig struct {
 	TLSCertFile string `yaml:"tls_cert_file"`
 	TLSKeyFile  string `yaml:"tls_key_file"`
 
+	// TrustedProxies is a list of CIDR networks (or bare IPs) for reverse
+	// proxies whose X-Forwarded-For / X-Real-IP headers may be trusted. When
+	// RemoteAddr is in this set, the client IP used for rate limiting, login
+	// lockout, and the localhost bootstrap gate is taken from the forwarded
+	// header instead of the proxy's own address. Empty (default) trusts no
+	// header — RemoteAddr is always used. Without this, deploying behind a
+	// same-host reverse proxy collapses every client to 127.0.0.1, enabling a
+	// remote bootstrap-admin takeover window and a shared/global login-lockout
+	// DoS.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+
 	// Authentication token (legacy, single shared token)
 	AuthToken string `yaml:"auth_token"`
 
@@ -225,6 +236,7 @@ func unmarshalServer(node *Node, cfg *ServerConfig) error {
 		cfg.HTTP.Bind = httpNode.GetString("bind")
 		cfg.HTTP.TLSCertFile = httpNode.GetString("tls_cert_file")
 		cfg.HTTP.TLSKeyFile = httpNode.GetString("tls_key_file")
+		cfg.HTTP.TrustedProxies = getStringSlice(httpNode, "trusted_proxies", cfg.HTTP.TrustedProxies)
 		cfg.HTTP.AuthToken = httpNode.GetString("auth_token")
 		cfg.HTTP.AuthTokenRole = httpNode.GetString("auth_token_role")
 		cfg.HTTP.AuthSecret = httpNode.GetString("auth_secret")
