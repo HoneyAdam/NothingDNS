@@ -460,61 +460,169 @@ func (sm *SlaveManager) performAXFR(ctx context.Context, slaveZone *SlaveZone) (
 	return records, nil
 }
 
-// applyTransferredZone applies transferred records to the slave zone.
+// applyTransferredZone applies transferred records to the slave zone. It
+// dispatches on the wire shape of the response: a full AXFR-style transfer
+// (SOA … SOA) rebuilds the zone from scratch, while an incremental IXFR
+// (SOA(new) [SOA(old) deletions SOA(new) additions]… SOA(new), i.e. an SOA
+// immediately following the leading SOA — RFC 1995 §4) is applied as a diff
+// against the existing zone.
 func (sm *SlaveManager) applyTransferredZone(slaveZone *SlaveZone, records []*protocol.ResourceRecord) error {
 	if len(records) == 0 {
 		return fmt.Errorf("no records received in zone transfer")
 	}
-
-	// Create new zone
-	newZone := zone.NewZone(slaveZone.Config.ZoneName)
-
-	// Extract SOA to get serial
-	var soaSerial uint32
-	for _, rr := range records {
-		if rr.Type == protocol.TypeSOA {
-			if soaData, ok := rr.Data.(*protocol.RDataSOA); ok {
-				soaSerial = soaData.Serial
-
-				// Set SOA in zone
-				newZone.SOA = &zone.SOARecord{
-					MName:   soaData.MName.String(),
-					RName:   soaData.RName.String(),
-					Serial:  soaData.Serial,
-					Refresh: soaData.Refresh,
-					Retry:   soaData.Retry,
-					Expire:  soaData.Expire,
-					Minimum: soaData.Minimum,
-				}
-				break
-			}
-		}
+	if records[0].Type != protocol.TypeSOA {
+		return fmt.Errorf("zone transfer does not begin with an SOA record")
 	}
 
-	if soaSerial == 0 {
+	// A lone SOA means the slave is already current (no changes). Refresh the
+	// timers/serial but keep the existing zone data.
+	if len(records) == 1 {
+		if soa, ok := records[0].Data.(*protocol.RDataSOA); ok {
+			slaveZone.UpdateZone(slaveZone.GetZone(), soa.Serial)
+			return nil
+		}
+		return fmt.Errorf("single-record transfer is not an SOA")
+	}
+
+	// Incremental IXFR responses place an SOA (the first diff block's "old"
+	// serial) immediately after the leading SOA. A full transfer places zone
+	// data there instead.
+	if records[1].Type == protocol.TypeSOA {
+		base := slaveZone.GetZone()
+		if base == nil {
+			return fmt.Errorf("received an incremental IXFR without a base zone to apply it against")
+		}
+		return sm.applyIncrementalIXFR(slaveZone, base, records)
+	}
+
+	return sm.applyFullZone(slaveZone, records)
+}
+
+// applyFullZone rebuilds the slave zone from a full AXFR-style record stream.
+func (sm *SlaveManager) applyFullZone(slaveZone *SlaveZone, records []*protocol.ResourceRecord) error {
+	newZone := zone.NewZone(slaveZone.Config.ZoneName)
+
+	var soaSerial uint32
+	var haveSOA bool
+	for _, rr := range records {
+		if rr.Type == protocol.TypeSOA {
+			if soaData, ok := rr.Data.(*protocol.RDataSOA); ok && !haveSOA {
+				soaSerial = soaData.Serial
+				newZone.SOA = soaFromRData(soaData)
+				haveSOA = true
+			}
+			continue
+		}
+		rec := recordFromRR(rr)
+		newZone.Records[rec.Name] = append(newZone.Records[rec.Name], rec)
+	}
+
+	if !haveSOA {
 		return fmt.Errorf("no SOA record found in zone transfer")
 	}
 
-	// Add all records to zone
-	for _, rr := range records {
-		// Skip SOA records (we already handled the first one)
-		if rr.Type == protocol.TypeSOA {
-			continue
-		}
+	slaveZone.UpdateZone(newZone, soaSerial)
+	return nil
+}
 
-		record := zone.Record{
-			Name:  rr.Name.String(),
-			Type:  protocol.TypeString(rr.Type),
-			TTL:   rr.TTL,
-			RData: rr.Data.String(),
-		}
-		newZone.Records[record.Name] = append(newZone.Records[record.Name], record)
+// applyIncrementalIXFR applies an RFC 1995 incremental diff to a clone of the
+// existing zone. The body between the leading and trailing SOA is a sequence of
+// (SOA-old, deletions, SOA-new, additions) blocks; each interior SOA toggles
+// between the deletion and addition section.
+func (sm *SlaveManager) applyIncrementalIXFR(slaveZone *SlaveZone, base *zone.Zone, records []*protocol.ResourceRecord) error {
+	targetSOA, ok := records[0].Data.(*protocol.RDataSOA)
+	if !ok {
+		return fmt.Errorf("incremental IXFR does not begin with an SOA")
 	}
 
-	// Update the slave zone
-	slaveZone.UpdateZone(newZone, soaSerial)
+	// Clone the base zone so a mid-apply error cannot corrupt the live zone.
+	newZone := zone.NewZone(slaveZone.Config.ZoneName)
+	base.RLock()
+	if base.SOA != nil {
+		soaCopy := *base.SOA
+		newZone.SOA = &soaCopy
+	}
+	for name, recs := range base.Records {
+		cp := make([]zone.Record, len(recs))
+		copy(cp, recs)
+		newZone.Records[name] = cp
+	}
+	base.RUnlock()
 
+	// Walk the diff body (everything between the leading and trailing SOA).
+	deleting := false
+	started := false
+	for _, rr := range records[1 : len(records)-1] {
+		if rr.Type == protocol.TypeSOA {
+			if !started {
+				deleting = true // first interior SOA opens a deletion section
+				started = true
+			} else {
+				deleting = !deleting // alternate delete/add on each SOA boundary
+			}
+			continue
+		}
+		rec := recordFromRR(rr)
+		if deleting {
+			removeZoneRecord(newZone, rec)
+		} else {
+			newZone.Records[rec.Name] = append(newZone.Records[rec.Name], rec)
+		}
+	}
+
+	// The trailing SOA carries the target serial.
+	if newZone.SOA == nil {
+		newZone.SOA = soaFromRData(targetSOA)
+	} else {
+		newZone.SOA.Serial = targetSOA.Serial
+	}
+
+	slaveZone.UpdateZone(newZone, targetSOA.Serial)
 	return nil
+}
+
+// recordFromRR converts a wire RR into a zone.Record, normalizing the owner
+// name to lowercase so it matches zone.Lookup (which lowercases queries) and
+// the parser's stored form.
+func recordFromRR(rr *protocol.ResourceRecord) zone.Record {
+	return zone.Record{
+		Name:  strings.ToLower(rr.Name.String()),
+		Type:  protocol.TypeString(rr.Type),
+		TTL:   rr.TTL,
+		RData: rr.Data.String(),
+	}
+}
+
+// soaFromRData builds a zone.SOARecord from wire SOA rdata.
+func soaFromRData(soa *protocol.RDataSOA) *zone.SOARecord {
+	return &zone.SOARecord{
+		MName:   soa.MName.String(),
+		RName:   soa.RName.String(),
+		Serial:  soa.Serial,
+		Refresh: soa.Refresh,
+		Retry:   soa.Retry,
+		Expire:  soa.Expire,
+		Minimum: soa.Minimum,
+	}
+}
+
+// removeZoneRecord deletes the first record matching rec by owner name
+// (case-insensitive), type, and exact RDATA. TTL is not part of the match, per
+// RFC 1995 deletion semantics.
+func removeZoneRecord(z *zone.Zone, rec zone.Record) {
+	recs, ok := z.Records[rec.Name]
+	if !ok {
+		return
+	}
+	for i, r := range recs {
+		if strings.EqualFold(r.Type, rec.Type) && r.RData == rec.RData {
+			z.Records[rec.Name] = append(recs[:i], recs[i+1:]...)
+			if len(z.Records[rec.Name]) == 0 {
+				delete(z.Records, rec.Name)
+			}
+			return
+		}
+	}
 }
 
 // scheduleRetry schedules a retry of the zone transfer.
