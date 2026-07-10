@@ -79,6 +79,14 @@ type ClusterIntegration struct {
 func NewClusterIntegration(nodeID NodeID, peers []NodeID, peerAddrs map[NodeID]string, addr string, dataDir string, encryptionKey, snapshotEncryptionKey string, rpcTLS *tls.Config, logger *util.Logger) (*ClusterIntegration, error) {
 	config := DefaultConfig()
 	config.NodeID = nodeID
+	// Wire the on-disk data directory so HardState (currentTerm/votedFor) is
+	// persisted and reloaded across restarts. Without this, persistHardStateLocked
+	// silently no-ops and NewNode skips loadHardState, so a restarted node comes
+	// back at term 0 with no vote record and can grant the same term's vote twice
+	// → split-brain (election-safety violation). The WAL and snapshotter use
+	// dataDir/raft-wal and dataDir/snapshots; HardState lives at
+	// dataDir/raft-hardstate.bin, so there is no path collision.
+	config.DataDir = dataDir
 
 	// Derive AEAD from the cluster encryption key (same scheme as gossip).
 	var aead cipher.AEAD
