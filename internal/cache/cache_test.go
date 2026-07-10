@@ -84,7 +84,9 @@ func TestCacheExpiration(t *testing.T) {
 	config.Capacity = 128
 	config.MinTTL = 50 * time.Millisecond
 	config.NegativeTTL = 100 * time.Millisecond
+	clock := newFakeCacheClock()
 	c := New(config)
+	c.setClockForTest(clock)
 
 	key := "test.com:1"
 	c.SetNegative(key, 3)
@@ -95,8 +97,7 @@ func TestCacheExpiration(t *testing.T) {
 		t.Fatal("expected entry to exist")
 	}
 
-	// Wait for expiration
-	time.Sleep(150 * time.Millisecond)
+	clock.Advance(150 * time.Millisecond)
 
 	// Should be expired now
 	entry = c.Get(key)
@@ -202,7 +203,9 @@ func TestCacheNegative(t *testing.T) {
 	config.MinTTL = 50 * time.Millisecond
 	config.NegativeTTL = 100 * time.Millisecond
 	config.Capacity = 128
+	clock := newFakeCacheClock()
 	c := New(config)
+	c.setClockForTest(clock)
 
 	key := "nxdomain.com:1"
 	c.SetNegative(key, 3) // NXDOMAIN
@@ -225,8 +228,7 @@ func TestCacheNegative(t *testing.T) {
 		t.Error("expected nil message for negative entry")
 	}
 
-	// Wait for expiration
-	time.Sleep(150 * time.Millisecond)
+	clock.Advance(150 * time.Millisecond)
 
 	// Should be expired
 	entry = c.Get(key)
@@ -252,9 +254,6 @@ func TestCacheTTLConstraints(t *testing.T) {
 	if entry.IsExpired(time.Now().Add(4 * time.Second)) {
 		t.Error("entry expired too early (should respect minTTL)")
 	}
-
-	// Wait for the original entry to expire
-	time.Sleep(100 * time.Millisecond)
 
 	// Add another entry for max TTL test
 	c.SetNegative("max.com:1", 3)

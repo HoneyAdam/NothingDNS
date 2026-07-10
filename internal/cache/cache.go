@@ -155,9 +155,20 @@ type cacheShard struct {
 	staleServed uint64
 }
 
+type cacheClock interface {
+	Now() time.Time
+}
+
+type realCacheClock struct{}
+
+func (realCacheClock) Now() time.Time {
+	return time.Now()
+}
+
 // Cache is a sharded, thread-safe DNS cache with LRU eviction per shard.
 type Cache struct {
 	shards [numShards]cacheShard
+	clock  cacheClock
 
 	// Configuration. Reads are lock-free (simple value types, mirroring the
 	// pre-sharding design); UpdateConfig serialises writes via cfgMu.
@@ -181,6 +192,17 @@ type Cache struct {
 // shardOf returns the shard responsible for the given key.
 func (c *Cache) shardOf(key string) *cacheShard {
 	return &c.shards[maphash.String(shardSeed, key)&shardMask]
+}
+
+func (c *Cache) now() time.Time {
+	if c == nil || c.clock == nil {
+		return time.Now()
+	}
+	return c.clock.Now()
+}
+
+func (c *Cache) setClockForTest(clock cacheClock) {
+	c.clock = clock
 }
 
 // Config holds cache configuration.
@@ -214,6 +236,7 @@ func DefaultConfig() Config {
 // New creates a new sharded DNS cache with the given configuration.
 func New(config Config) *Cache {
 	c := &Cache{
+		clock:             realCacheClock{},
 		capacity:          config.Capacity,
 		minTTL:            config.MinTTL,
 		maxTTL:            config.MaxTTL,
@@ -332,7 +355,7 @@ func (c *Cache) Get(key string) *Entry {
 		return nil
 	}
 
-	now := time.Now()
+	now := c.now()
 	if entry.IsExpired(now) {
 		s.mu.RUnlock()
 		// Slow path: remove expired entry under exclusive lock.
@@ -428,7 +451,7 @@ func (c *Cache) GetStale(key string) *Entry {
 		return nil
 	}
 
-	now := time.Now()
+	now := c.now()
 	if !entry.IsExpired(now) {
 		// Not expired — normal Get should be used
 		s.mu.Unlock()
@@ -541,7 +564,7 @@ func (c *Cache) setNegativeEntry(key string, rcode uint8, msg *protocol.Message,
 		ttl = c.maxTTL
 	}
 
-	expireTime := time.Now().Add(ttl)
+	expireTime := c.now().Add(ttl)
 
 	entry := &Entry{
 		Key:        key,
@@ -573,7 +596,7 @@ func (c *Cache) setInternal(s *cacheShard, key string, msg *protocol.Message, tt
 		duration = c.maxTTL
 	}
 
-	now := time.Now()
+	now := c.now()
 	expireTime := now.Add(duration)
 
 	// Calculate prefetch time if enabled

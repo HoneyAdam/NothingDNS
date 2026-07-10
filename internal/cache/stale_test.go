@@ -1,19 +1,44 @@
 package cache
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
 )
 
-func newStaleTestCache() *Cache {
+type fakeCacheClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newFakeCacheClock() *fakeCacheClock {
+	return &fakeCacheClock{now: time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *fakeCacheClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeCacheClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(d)
+	c.mu.Unlock()
+}
+
+func newStaleTestCache() (*Cache, *fakeCacheClock) {
 	cfg := DefaultConfig()
 	cfg.ServeStale = true
 	cfg.StaleGrace = 1 * time.Hour
 	cfg.MinTTL = 1 * time.Second
 	cfg.MaxTTL = 24 * time.Hour
-	return New(cfg)
+	clock := newFakeCacheClock()
+	cache := New(cfg)
+	cache.setClockForTest(clock)
+	return cache, clock
 }
 
 func newTestMessage() *protocol.Message {
@@ -41,11 +66,12 @@ func newTestMessage() *protocol.Message {
 func TestGetStaleDisabled(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ServeStale = false
+	clock := newFakeCacheClock()
 	c := New(cfg)
+	c.setClockForTest(clock)
 
 	c.Set("test:1", newTestMessage(), 1)
-	// Wait for expiry
-	time.Sleep(2 * time.Second)
+	clock.Advance(2 * time.Second)
 
 	stale := c.GetStale("test:1")
 	if stale != nil {
@@ -54,7 +80,7 @@ func TestGetStaleDisabled(t *testing.T) {
 }
 
 func TestGetStaleEnabled(t *testing.T) {
-	c := newStaleTestCache()
+	c, clock := newStaleTestCache()
 
 	msg := newTestMessage()
 	c.Set("test:1", msg, 1) // 1 second TTL
@@ -71,8 +97,7 @@ func TestGetStaleEnabled(t *testing.T) {
 		t.Error("expected entry from normal Get before expiry")
 	}
 
-	// Wait for expiry
-	time.Sleep(2 * time.Second)
+	clock.Advance(2 * time.Second)
 
 	// Normal Get should return nil
 	entry = c.Get("test:1")
@@ -131,12 +156,12 @@ func TestGetStaleGracePeriodExpired(t *testing.T) {
 	cfg.ServeStale = true
 	cfg.StaleGrace = 1 * time.Second // Very short grace
 	cfg.MinTTL = 1 * time.Second
+	clock := newFakeCacheClock()
 	c := New(cfg)
+	c.setClockForTest(clock)
 
 	c.Set("test:1", newTestMessage(), 1)
-
-	// Wait for TTL + grace to expire
-	time.Sleep(3 * time.Second)
+	clock.Advance(3 * time.Second)
 
 	// Normal Get returns nil (removes the entry since past grace)
 	entry := c.Get("test:1")
@@ -175,7 +200,7 @@ func TestStaleDeadlineReachedBoundary(t *testing.T) {
 }
 
 func TestGetStaleNotFound(t *testing.T) {
-	c := newStaleTestCache()
+	c, _ := newStaleTestCache()
 
 	stale := c.GetStale("nonexistent:1")
 	if stale != nil {
@@ -184,10 +209,10 @@ func TestGetStaleNotFound(t *testing.T) {
 }
 
 func TestStaleServedCounter(t *testing.T) {
-	c := newStaleTestCache()
+	c, clock := newStaleTestCache()
 
 	c.Set("test:1", newTestMessage(), 1)
-	time.Sleep(2 * time.Second)
+	clock.Advance(2 * time.Second)
 
 	// Serve stale twice
 	c.GetStale("test:1")
@@ -200,10 +225,10 @@ func TestStaleServedCounter(t *testing.T) {
 }
 
 func TestStaleStats(t *testing.T) {
-	c := newStaleTestCache()
+	c, clock := newStaleTestCache()
 
 	c.Set("test:1", newTestMessage(), 1)
-	time.Sleep(2 * time.Second)
+	clock.Advance(2 * time.Second)
 
 	c.GetStale("test:1")
 
@@ -214,10 +239,10 @@ func TestStaleStats(t *testing.T) {
 }
 
 func TestServeStalePreservesEntry(t *testing.T) {
-	c := newStaleTestCache()
+	c, clock := newStaleTestCache()
 
 	c.Set("test:1", newTestMessage(), 1)
-	time.Sleep(2 * time.Second)
+	clock.Advance(2 * time.Second)
 
 	// Get (normal) should not delete the entry when serve-stale is on
 	c.Get("test:1")
