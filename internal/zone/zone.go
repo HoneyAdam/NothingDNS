@@ -722,12 +722,14 @@ func (p *parser) parseRecordOwned(line string, ownerInherited bool) error {
 	}
 
 	// Look for TTL, Class, and Type in the next fields
+	ttlSet := false
 	for fieldIdx < len(fields) && !isType(fields[fieldIdx]) {
 		field := fields[fieldIdx]
 
 		// Check if it's a TTL
 		if ttl, err := parseTTL(field); err == nil {
 			record.TTL = ttl
+			ttlSet = true
 			fieldIdx++
 			continue
 		}
@@ -755,8 +757,10 @@ func (p *parser) parseRecordOwned(line string, ownerInherited bool) error {
 		record.RData = strings.Join(fields[fieldIdx:], " ")
 	}
 
-	// Use default TTL if not specified
-	if record.TTL == 0 {
+	// Use the zone default TTL only when no TTL field was present on the record.
+	// An explicit TTL of 0 (RFC 2181 §8 — "do not cache") is a deliberate value
+	// and must be preserved, not silently replaced by $TTL.
+	if !ttlSet {
 		record.TTL = p.zone.DefaultTTL
 	}
 

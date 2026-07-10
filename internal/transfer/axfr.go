@@ -298,7 +298,11 @@ func (s *AXFRServer) generateAXFRRecords(z *zone.Zone) ([]*protocol.ResourceReco
 
 	// Add ZONEMD record if present (RFC 8976)
 	if z.ZONEMD != nil {
-		zonemdRR, err := s.createZONEMDRR(z.ZONEMD, origin)
+		var zonemdSerial uint32
+		if z.SOA != nil {
+			zonemdSerial = z.SOA.Serial
+		}
+		zonemdRR, err := s.createZONEMDRR(z.ZONEMD, origin, zonemdSerial)
 		if err != nil {
 			util.Warnf("axfr: failed to create ZONEMD record: %v", err)
 		} else {
@@ -345,11 +349,13 @@ func (s *AXFRServer) createSOARR(soa *zone.SOARecord, origin *protocol.Name) (*p
 
 // createZONEMDRR creates a ResourceRecord from ZONEMD
 // RFC 8976 - Message Digests for DNS Zones
-func (s *AXFRServer) createZONEMDRR(zonemd *zone.ZONEMD, origin *protocol.Name) (*protocol.ResourceRecord, error) {
+func (s *AXFRServer) createZONEMDRR(zonemd *zone.ZONEMD, origin *protocol.Name, soaSerial uint32) (*protocol.ResourceRecord, error) {
 	// ZONEMD RData format:
 	// Serial (4 bytes) | Scheme (1 byte) | Hash Algorithm (1 byte) | Digest
+	// RFC 8976 §2.2 requires the ZONEMD Serial field to equal the zone's SOA
+	// serial; a mismatch makes every RFC-8976 validator reject the digest.
 	zonemdData := &protocol.RDataZONEMD{
-		Serial:    0, // Current SOA serial
+		Serial:    soaSerial,
 		Scheme:    1, // Simple ZONEMD scheme per RFC 8976
 		Algorithm: zonemd.Algorithm,
 		Digest:    zonemd.Hash,
