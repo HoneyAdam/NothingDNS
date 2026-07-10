@@ -216,7 +216,77 @@ func (r *Resolver) Resolve(ctx context.Context, name string, qtype uint16) (*pro
 	// shared message and corrupt each other's transaction IDs. Copy for ALL callers
 	// — copying only waiters would still race the first caller's in-place mutation
 	// against the waiters' reads.
-	return msg.Copy(), err
+	out := msg.Copy()
+	// Defense-in-depth: strip any Answer RR that a (possibly hostile)
+	// authority slipped in that is neither on the CNAME/DNAME chain from the
+	// query name nor the answered RRset, so unsolicited out-of-chain records
+	// never reach the client. Applied to the per-caller copy only — the cached
+	// entry is untouched.
+	pruneAnswerToChain(out, name, qtype)
+	return out, err
+}
+
+// pruneAnswerToChain removes Answer records that are not part of the resolution
+// chain for (name, qtype): the queried name's RRset, the CNAME chain that leads
+// to it, and the DNAME(s) whose subtree the chain passed through. Records whose
+// owner is off-chain are dropped. It is conservative — it only prunes when more
+// than one answer is present and never drops chain/DNAME records — so legitimate
+// multi-record answers, CNAME chains, DNAME synthesis, and RRSIGs (owned by the
+// name they cover) are preserved.
+func pruneAnswerToChain(msg *protocol.Message, qname string, qtype uint16) {
+	if msg == nil || len(msg.Answers) <= 1 {
+		return
+	}
+	norm := func(s string) string { return strings.ToLower(strings.TrimSuffix(s, ".")) }
+
+	// 1. Build the set of valid owner names by walking the CNAME chain from
+	// qname. Bounded by the number of answers to avoid loops.
+	chain := map[string]bool{norm(qname): true}
+	current := norm(qname)
+	for range msg.Answers {
+		var next string
+		for _, rr := range msg.Answers {
+			if rr == nil || rr.Name == nil || rr.Type != protocol.TypeCNAME {
+				continue
+			}
+			if norm(rr.Name.String()) != current {
+				continue
+			}
+			if cn, ok := rr.Data.(*protocol.RDataCNAME); ok && cn.CName != nil {
+				next = norm(cn.CName.String())
+			}
+		}
+		if next == "" || chain[next] {
+			break
+		}
+		chain[next] = true
+		current = next
+	}
+
+	// A DNAME legitimately owns an ancestor of a chain name (it synthesizes the
+	// CNAMEs we followed), so keep DNAMEs whose owner is a suffix of a chain name.
+	ancestorOfChain := func(owner string) bool {
+		for name := range chain {
+			if name == owner || strings.HasSuffix(name, "."+owner) {
+				return true
+			}
+		}
+		return false
+	}
+
+	kept := make([]*protocol.ResourceRecord, 0, len(msg.Answers))
+	for _, rr := range msg.Answers {
+		if rr == nil || rr.Name == nil {
+			continue
+		}
+		owner := norm(rr.Name.String())
+		if chain[owner] || (rr.Type == protocol.TypeDNAME && ancestorOfChain(owner)) {
+			kept = append(kept, rr)
+		}
+	}
+	if len(kept) != len(msg.Answers) {
+		msg.Answers = kept
+	}
 }
 
 func (r *Resolver) resolve(ctx context.Context, name string, qtype uint16, cnameDepth int) (*protocol.Message, error) {
