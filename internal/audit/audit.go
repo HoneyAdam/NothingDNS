@@ -93,7 +93,24 @@ type AuditLogger struct {
 	// mutex. Close() flips it concurrently with in-flight Log* calls.
 	enabled atomic.Bool
 	lastErr error
+
+	// Async writer: audit logging must never block the DNS request path.
+	// Log* enqueue formatted lines onto a bounded channel that a single
+	// background goroutine drains to a buffered file writer. A synchronous
+	// write under a global mutex (the previous design) meant a full disk or a
+	// stalled network volume would hold the lock and stall ALL resolution.
+	lines     chan string
+	syncReq   chan chan struct{}
+	done      chan struct{}
+	wg        sync.WaitGroup
+	dropped   atomic.Uint64
+	closeOnce sync.Once
 }
+
+// auditQueueSize bounds the in-memory backlog of pending audit lines. When full
+// (writer can't keep up with the disk), new lines are dropped rather than
+// blocking the request path — a dropped audit line is preferable to stalled DNS.
+const auditQueueSize = 8192
 
 // NewAuditLogger creates a new audit logger.
 // If queryLogFile is non-empty, opens the file for append.
@@ -119,12 +136,93 @@ func NewAuditLogger(queryLog bool, queryLogFile string) (*AuditLogger, error) {
 		output = f
 	}
 
+	return newAuditLogger(output, file), nil
+}
+
+// newAuditLogger builds an enabled logger over output and starts its background
+// writer. output is captured before the goroutine starts, so it must be set
+// here (not swapped afterward).
+func newAuditLogger(output io.Writer, file *os.File) *AuditLogger {
 	al := &AuditLogger{
-		output: output,
-		file:   file,
+		output:  output,
+		file:    file,
+		lines:   make(chan string, auditQueueSize),
+		syncReq: make(chan chan struct{}),
+		done:    make(chan struct{}),
 	}
 	al.enabled.Store(true)
-	return al, nil
+	al.wg.Add(1)
+	go al.run()
+	return al
+}
+
+// Sync blocks until every line queued before the call has been written and
+// flushed. Intended for tests and graceful checkpoints; the request path never
+// calls it.
+func (a *AuditLogger) Sync() {
+	if !a.enabled.Load() || a.syncReq == nil {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case a.syncReq <- ack:
+		<-ack
+	case <-a.done:
+	}
+}
+
+// run is the single background writer. It drains queued lines to a buffered
+// writer, flushing periodically so entries reach disk promptly, and drains +
+// flushes on shutdown.
+func (a *AuditLogger) run() {
+	defer a.wg.Done()
+	var sb strings.Builder
+
+	// writeBatch coalesces the triggering line plus every other line currently
+	// queued into a single write, cutting syscalls under load. a.output is read
+	// only here (on a channel event), so a test that swaps a.output before its
+	// first Log is safe via the channel's happens-before edge.
+	writeBatch := func(first string) {
+		sb.Reset()
+		if first != "" {
+			sb.WriteString(first)
+			sb.WriteByte('\n')
+		}
+		for drained := false; !drained; {
+			select {
+			case line := <-a.lines:
+				sb.WriteString(line)
+				sb.WriteByte('\n')
+			default:
+				drained = true
+			}
+		}
+		if sb.Len() == 0 {
+			return
+		}
+		if _, err := io.WriteString(a.output, sb.String()); err != nil {
+			a.setErr(err)
+		}
+	}
+
+	for {
+		select {
+		case line := <-a.lines:
+			writeBatch(line)
+		case ack := <-a.syncReq:
+			writeBatch("") // drain + write everything queued before the Sync
+			close(ack)
+		case <-a.done:
+			writeBatch("") // final drain before exit
+			return
+		}
+	}
+}
+
+func (a *AuditLogger) setErr(err error) {
+	a.mu.Lock()
+	a.lastErr = err
+	a.mu.Unlock()
 }
 
 // LogQuery writes a query audit entry.
@@ -175,26 +273,26 @@ func (a *AuditLogger) LogReload(entry ReloadAuditEntry) {
 	a.writeLine(formatReloadAuditLine(entry))
 }
 
+// writeLine enqueues a formatted line for the background writer. It NEVER
+// blocks the caller (the DNS request path): if the queue is full or the logger
+// is shutting down, the line is dropped and counted. a.lines is never closed
+// (shutdown is signalled via a.done), so the non-blocking send cannot panic.
 func (a *AuditLogger) writeLine(line string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	// Backstop re-check under the lock: Close() may have disabled the
-	// logger (and closed the file) after the caller's fast-path check.
 	if !a.enabled.Load() {
 		return
 	}
-	if n, err := io.WriteString(a.output, line); err != nil {
-		a.lastErr = err
-		return
-	} else if n != len(line) {
-		a.lastErr = io.ErrShortWrite
-		return
+	select {
+	case a.lines <- line:
+	case <-a.done:
+		// shutting down — drop
+	default:
+		a.dropped.Add(1)
 	}
-	if n, err := io.WriteString(a.output, "\n"); err != nil {
-		a.lastErr = err
-	} else if n != 1 {
-		a.lastErr = io.ErrShortWrite
-	}
+}
+
+// Dropped returns the number of audit lines dropped because the queue was full.
+func (a *AuditLogger) Dropped() uint64 {
+	return a.dropped.Load()
 }
 
 // LastError returns the most recent write or close error observed by the logger.
@@ -216,15 +314,21 @@ func (a *AuditLogger) LastError() error {
 // Idempotent: re-entry observes enabled=false and a.file==nil and
 // returns cleanly.
 func (a *AuditLogger) Close() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.file != nil {
-		if err := a.file.Close(); err != nil {
-			a.lastErr = err
+	a.closeOnce.Do(func() {
+		a.enabled.Store(false)
+		if a.done != nil {
+			close(a.done)  // signal the writer to drain + flush + exit
+			a.wg.Wait()    // wait for all queued lines to reach the file
 		}
-		a.file = nil
-	}
-	a.enabled.Store(false)
+		a.mu.Lock()
+		if a.file != nil {
+			if err := a.file.Close(); err != nil {
+				a.lastErr = err
+			}
+			a.file = nil
+		}
+		a.mu.Unlock()
+	})
 }
 
 func formatQueryAuditLine(e QueryAuditEntry) string {

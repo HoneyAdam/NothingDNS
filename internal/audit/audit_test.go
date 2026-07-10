@@ -59,7 +59,9 @@ func TestAuditLogger_Disabled_NoWrite(t *testing.T) {
 	al.LogUpdate(UpdateAuditEntry{ClientIP: huge, Zone: huge})
 	al.LogReload(ReloadAuditEntry{Error: huge})
 
+	al.Sync()
 	if buf.Len() != 0 {
+		al.Sync()
 		t.Errorf("disabled logger wrote %d bytes, want 0", buf.Len())
 	}
 	if al.LastError() != nil {
@@ -100,7 +102,9 @@ func TestAuditLogger_LogAfterClose(t *testing.T) {
 	al.Close()
 
 	al.LogQuery(QueryAuditEntry{QueryName: "after-close.example.com", QueryType: "A"})
+	al.Sync()
 	if buf.Len() != 0 {
+		al.Sync()
 		t.Errorf("logger wrote %d bytes after Close, want 0", buf.Len())
 	}
 }
@@ -146,6 +150,7 @@ func TestAuditLogger_LogQuery_Stdout(t *testing.T) {
 		Upstream:  "8.8.8.8:53",
 	})
 
+	al.Sync()
 	output := buf.String()
 	if !strings.Contains(output, "client=10.0.0.1") {
 		t.Errorf("expected client IP in output, got: %s", output)
@@ -180,6 +185,7 @@ func TestAuditLogger_LogQuery_CacheHit(t *testing.T) {
 		CacheHit:  true,
 	})
 
+	al.Sync()
 	output := buf.String()
 	if !strings.Contains(output, "cache=hit") {
 		t.Errorf("expected cache=hit in output, got: %s", output)
@@ -201,6 +207,7 @@ func TestAuditLogger_LogQuery_NoUpstream(t *testing.T) {
 		Rcode:     "0",
 	})
 
+	al.Sync()
 	output := buf.String()
 	if !strings.Contains(output, "upstream=-") {
 		t.Errorf("expected upstream=- in output, got: %s", output)
@@ -219,6 +226,7 @@ func TestAuditLogger_LogQuery_RecordsWriteError(t *testing.T) {
 		QueryType: "A",
 		Rcode:     "0",
 	})
+	al.Sync() // let the background writer attempt (and fail) the write
 
 	if !errors.Is(al.LastError(), errAuditWrite) {
 		t.Fatalf("LastError() = %v, want %v", al.LastError(), errAuditWrite)
@@ -372,6 +380,7 @@ func TestLogAXFR(t *testing.T) {
 		Latency:     50 * time.Millisecond,
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "zone=example.com.") {
 		t.Error("expected zone in line")
@@ -400,6 +409,7 @@ func TestLogIXFR(t *testing.T) {
 		Latency:     10 * time.Millisecond,
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "zone=test.com.") {
 		t.Error("expected zone in line")
@@ -420,6 +430,7 @@ func TestLogNOTIFY(t *testing.T) {
 		Action:    "received",
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "zone=example.com.") {
 		t.Error("expected zone in line")
@@ -446,6 +457,7 @@ func TestLogUpdate(t *testing.T) {
 		Deleted:   1,
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "zone=dyn.example.com.") {
 		t.Error("expected zone in line")
@@ -472,6 +484,7 @@ func TestLogReload(t *testing.T) {
 		Error:     "",
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "zones=5") {
 		t.Error("expected zones count in line")
@@ -492,6 +505,7 @@ func TestLogReload_WithError(t *testing.T) {
 		Error:     "parse error at line 10",
 	})
 
+	al.Sync()
 	line := buf.String()
 	if !strings.Contains(line, "error=parse error at line 10") {
 		t.Error("expected error in line")
