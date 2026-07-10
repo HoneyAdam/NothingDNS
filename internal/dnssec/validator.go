@@ -648,12 +648,16 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 			// No signature for this RRset. We only reach validateMessage when
 			// the chain proved the query name's zone is SIGNED (Insecure
 			// subtrees are short-circuited in ValidateResponse). A missing
-			// signature on the QUERIED name's own RRset is therefore a
-			// stripped-RRSIG downgrade — Bogus, never Secure, regardless of
-			// RequireDNSSEC. For other owners (e.g. a CNAME target served by a
-			// different/unsigned zone) stay lenient unless strict mode is on,
-			// since those names are validated by their own chain.
-			if v.config.RequireDNSSEC || sameDNSName(owner, queryName) {
+			// signature is a stripped-RRSIG downgrade — Bogus — for any RRset
+			// that is (a) the queried name itself, or (b) IN-BAILIWICK of the
+			// signing zone. Case (b) is the critical one: without it an on-path
+			// attacker could strip the RRSIG on an in-zone record reached via a
+			// CNAME chain (e.g. query www.example.com, CNAME to
+			// foo.example.com, then a forged foo.example.com A with its
+			// signature removed) and the message would still be declared Secure
+			// with AD=1. Only genuinely out-of-bailiwick owners (a different
+			// zone, validated by their own chain) stay lenient.
+			if v.config.RequireDNSSEC || sameDNSName(owner, queryName) || inBailiwick(owner, zoneLink.zone) {
 				return ValidationBogus
 			}
 			continue
@@ -680,6 +684,20 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 // case (RFC 1035 §2.3.3) and a single trailing root dot.
 func sameDNSName(a, b string) bool {
 	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
+}
+
+// inBailiwick reports whether owner is equal to, or a subdomain of, zone
+// (case-insensitive, trailing-dot-insensitive). The root zone ("" or ".")
+// contains every name. Used to decide which Answer RRsets MUST carry a valid
+// signature from the signing zone's keys — an in-bailiwick RRset with no
+// signature is a stripped-RRSIG downgrade attack, not lenient cross-zone data.
+func inBailiwick(owner, zone string) bool {
+	o := strings.ToLower(strings.TrimSuffix(owner, "."))
+	z := strings.ToLower(strings.TrimSuffix(zone, "."))
+	if z == "" {
+		return true
+	}
+	return o == z || strings.HasSuffix(o, "."+z)
 }
 
 // findRRSIG finds an RRSIG record for the given name and type.
