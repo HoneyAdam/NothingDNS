@@ -339,7 +339,14 @@ type responseContext struct {
 // encryptResponse seals dnsResponse and produces the wire-format
 // ObliviousDoHMessage bytes to return to the proxy.
 func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
-	aead, nonce, err := rc.suite.deriveResponseAEAD(rc.enc, rc.queryPlain, rc.responseLabel)
+	// RFC 9230 §4.2: response_nonce = random(max(Nk, Nn)). Nk >= Nn for every
+	// supported AEAD, so aeadKeyLen() is that maximum.
+	responseNonce := make([]byte, rc.suite.aeadKeyLen())
+	if _, err := rand.Read(responseNonce); err != nil {
+		return nil, fmt.Errorf("odoh: response nonce: %w", err)
+	}
+
+	aead, nonce, err := rc.suite.deriveResponseAEAD(rc.enc, rc.queryPlain, responseNonce, rc.responseLabel)
 	if err != nil {
 		return nil, err
 	}
@@ -348,10 +355,9 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// AAD = 0x02 || u16(0) || []   (RFC 9230 §4.1.2 response AAD: just the
-	// message type and empty key_id — see §6.1, key_id length is 0 for
-	// responses since the recipient is the client, not a server key).
-	aad := []byte{odohMsgTypeResponse, 0x00, 0x00}
+	// Response AAD binds the random response_nonce (carried in the message's
+	// key_id field) so a proxy can't detach the nonce from the ciphertext.
+	aad := responseAAD(responseNonce)
 
 	// Plaintext envelope:  u16 dns_len || dns || u16 pad_len || pad
 	pt := make([]byte, 0, 4+len(dnsResponse))
@@ -363,10 +369,20 @@ func (rc *responseContext) encryptResponse(dnsResponse []byte) ([]byte, error) {
 
 	msg := &odohMessage{
 		msgType:          odohMsgTypeResponse,
-		keyID:            nil, // responses carry no key_id (RFC 9230 §6.1)
+		keyID:            responseNonce, // RFC 9230 §4.2: response_nonce on the wire
 		encryptedMessage: ct,
 	}
 	return marshalODoHMessage(msg)
+}
+
+// responseAAD builds the RFC 9230 §4.1.2 response AAD:
+// msg_type(0x02) || u16(len(response_nonce)) || response_nonce.
+func responseAAD(responseNonce []byte) []byte {
+	aad := make([]byte, 0, 3+len(responseNonce))
+	aad = append(aad, odohMsgTypeResponse)
+	aad = append(aad, u16BE(uint16(len(responseNonce)))...)
+	aad = append(aad, responseNonce...)
+	return aad
 }
 
 // decryptResponse is the client side of encryptResponse.
@@ -378,16 +394,19 @@ func (qc *queryContext) decryptResponse(msgBytes []byte, queryPlain []byte) ([]b
 	if msg.msgType != odohMsgTypeResponse {
 		return nil, fmt.Errorf("odoh: wrong response type %d", msg.msgType)
 	}
-	if len(msg.keyID) != 0 {
-		return nil, errors.New("odoh: response key_id must be empty")
+	// The response carries response_nonce in its key_id field (RFC 9230 §4.2),
+	// which must equal max(Nk, Nn) = aeadKeyLen for the negotiated suite.
+	responseNonce := msg.keyID
+	if len(responseNonce) != qc.suite.aeadKeyLen() {
+		return nil, fmt.Errorf("odoh: response_nonce length %d, want %d", len(responseNonce), qc.suite.aeadKeyLen())
 	}
 
-	aead, nonce, err := qc.suite.deriveResponseAEAD(qc.enc, queryPlain, odohResponseLabel)
+	aead, nonce, err := qc.suite.deriveResponseAEAD(qc.enc, queryPlain, responseNonce, odohResponseLabel)
 	if err != nil {
 		return nil, err
 	}
 
-	aad := []byte{odohMsgTypeResponse, 0x00, 0x00}
+	aad := responseAAD(responseNonce)
 	pt, err := aead.Open(nil, nonce, msg.encryptedMessage, aad)
 	if err != nil {
 		return nil, fmt.Errorf("odoh: open response: %w", err)
@@ -403,10 +422,21 @@ func (qc *queryContext) decryptResponse(msgBytes []byte, queryPlain []byte) ([]b
 	return append([]byte(nil), pt[2:2+dnsLen]...), nil
 }
 
-// deriveResponseAEAD turns (enc, query_plaintext) into a fresh AEAD
-// key+nonce for the response transit, per RFC 9230 §4.1.2.
-func (s hpkeSuite) deriveResponseAEAD(enc, queryPlain, label []byte) (cipher.AEAD, []byte, error) {
-	secret, err := hkdf.Extract(s.hkdfHash(), queryPlain, enc)
+// deriveResponseAEAD turns (enc, query_plaintext, response_nonce) into a fresh
+// AEAD key+nonce for the response transit, per RFC 9230 §4.2. The random
+// per-response responseNonce is folded into the HKDF salt so that even a
+// byte-identical replayed query (same enc, same queryPlain) yields a UNIQUE
+// (key, nonce) for every response. Without it the key+nonce were a pure
+// function of the query, so replaying a query and observing the differing
+// responses (TTL countdown, answer rotation) reused the same AES-GCM nonce —
+// enabling plaintext recovery (C1⊕C2 = P1⊕P2) and GHASH-subkey recovery
+// (forged responses) by an untrusted ODoH proxy.
+func (s hpkeSuite) deriveResponseAEAD(enc, queryPlain, responseNonce, label []byte) (cipher.AEAD, []byte, error) {
+	// salt = enc || response_nonce; ikm = query_plaintext.
+	salt := make([]byte, 0, len(enc)+len(responseNonce))
+	salt = append(salt, enc...)
+	salt = append(salt, responseNonce...)
+	secret, err := hkdf.Extract(s.hkdfHash(), queryPlain, salt)
 	if err != nil {
 		return nil, nil, fmt.Errorf("odoh: response hkdf extract: %w", err)
 	}
