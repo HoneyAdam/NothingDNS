@@ -675,7 +675,7 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 		// rrsig.Labels is part of the signed RRSIG RDATA, so an attacker cannot
 		// forge the wildcard path — tampering Labels breaks the signature above.
 		if int(rrsig.Labels) < len(rrSet[0].Name.LabelsSlice()) {
-			if !v.wildcardExpansionProven(msg, owner, rrSet[0].Type, chain) {
+			if !v.wildcardExpansionProven(msg, owner, rrsig.Labels, rrSet[0].Type, chain) {
 				return ValidationBogus
 			}
 		}
@@ -693,14 +693,30 @@ func (v *Validator) validateMessage(ctx context.Context, msg *protocol.Message, 
 }
 
 // wildcardExpansionProven reports whether msg carries an authenticated
-// (zone-signed) NSEC or NSEC3 proving that `owner` has NO exact match in the
-// zone — the RFC 4035 §5.3.4 precondition for trusting a wildcard-expanded
-// positive answer. For NSEC it requires a strict range-cover (the QNAME falling
-// in an NSEC gap), never a NoData (owner==query) match. For NSEC3 it requires
-// the closest-encloser + next-closer proof (RFC 5155 §8.8) WITHOUT the wildcard
-// cover (the wildcard exists — it answered). Without such a proof the answer
-// stays fail-closed (Bogus), never fail-open.
-func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string, qtype uint16, chain []*chainLink) bool {
+// (zone-signed) NSEC/NSEC3 proof that legitimizes a wildcard-expanded positive
+// answer for `owner` whose signature was made over "*.<closest encloser>",
+// where the closest encloser is the rightmost sigLabels labels of owner
+// (RFC 4035 §5.3.4 / RFC 5155 §8.8).
+//
+// The critical binding: the wildcard's DEPTH must match the PROVEN closest
+// encloser. Verifying only "owner has no exact match" is NOT enough — a genuine
+// shallow "*.example.com" RRSIG could otherwise be replayed onto a deep
+// a.sub.example.com that must be NXDOMAIN (its real source of synthesis
+// "*.sub.example.com" does not exist). We bind the depth by requiring proof
+// that the NEXT CLOSER name — the rightmost (sigLabels+1) labels of owner — does
+// NOT exist, so the wildcard's closest encloser really is the closest encloser.
+// (When the wildcard is exactly one level above owner, the next closer equals
+// owner and this reduces to proving owner's nonexistence.) Without such a proof
+// the answer stays fail-closed (Bogus), never fail-open.
+func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string, sigLabels uint8, qtype uint16, chain []*chainLink) bool {
+	ownerLabels := splitLabels(owner)
+	if int(sigLabels) >= len(ownerLabels) {
+		return false // not a wildcard expansion — caller should not have branched
+	}
+	// Next closer = one label deeper than the wildcard's closest encloser,
+	// toward owner (rightmost sigLabels+1 labels of owner).
+	nextCloser := strings.Join(ownerLabels[len(ownerLabels)-int(sigLabels)-1:], ".")
+
 	authenticated := v.authenticatedDenialRRs(msg, chain)
 	var nsec3RRs []*protocol.ResourceRecord
 	checks := 0
@@ -719,7 +735,10 @@ func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string,
 				continue
 			}
 			nsecOwner := rr.Name.String()
-			if !sameDNSName(nsecOwner, owner) && v.validateNSEC(nsecOwner, owner, qtype, nsec) {
+			// Require a strict range-cover of the NEXT CLOSER (nonexistence),
+			// which binds the wildcard depth. A NoData (owner==name) match is
+			// rejected via the sameDNSName guard.
+			if !sameDNSName(nsecOwner, nextCloser) && v.validateNSEC(nsecOwner, nextCloser, qtype, nsec) {
 				return true
 			}
 		case protocol.TypeNSEC3:
@@ -727,7 +746,10 @@ func (v *Validator) wildcardExpansionProven(msg *protocol.Message, owner string,
 		}
 	}
 	if len(nsec3RRs) > 0 {
-		if _, _, ok := v.nsec3ClosestEncloserAndNextCloser(owner, nsec3RRs); ok {
+		// The proven closest encloser must have EXACTLY sigLabels labels, i.e.
+		// equal the wildcard's closest encloser — otherwise a deeper real
+		// closest encloser (as in the a.sub.example.com attack) is rejected.
+		if ce, _, ok := v.nsec3ClosestEncloserAndNextCloser(owner, nsec3RRs); ok && len(splitLabels(ce)) == int(sigLabels) {
 			return true
 		}
 	}
