@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -90,4 +91,37 @@ func containsSubstring(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestEmptyFSOpen(t *testing.T) {
+	var fs emptyFS
+	_, err := fs.Open("nonexistent")
+	if err == nil {
+		t.Error("Open should return error")
+	}
+}
+
+func TestSPAHandlerInitError(t *testing.T) {
+	// Save original, restore after test
+	orig := staticInitErr
+	staticInitErr = fmt.Errorf("simulated init error")
+	defer func() { staticInitErr = orig }()
+
+	handler := SPAHandler()
+	if handler == nil {
+		t.Fatal("SPAHandler returned nil")
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+func TestNonEmptyFS(t *testing.T) {
+	var fs emptyFS
+	if _, ok := any(fs).(emptyFS); !ok {
+		t.Error("emptyFS should be a zero-value struct")
+	}
 }
