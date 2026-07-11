@@ -381,6 +381,14 @@ func TestDoQServerEndToEnd(t *testing.T) {
 		copy(receivedQuery, q)
 		queryCh <- q
 
+		// Exercise uncovered Stream wrapper methods
+		_ = s.RemoteAddr()
+		_ = s.StreamID()
+		_ = s.SetReadDeadline(time.Time{})
+		_ = s.SetWriteDeadline(time.Time{})
+		_ = s.SetDeadline(time.Time{})
+		_ = s.Context()
+
 		// Echo back the query as response
 		_, _ = s.Write(q)
 		_ = s.Close()
