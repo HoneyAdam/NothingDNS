@@ -39,9 +39,9 @@ services:
       # Prometheus metrics
       - "9153:9153/tcp"
 
-    environment:
-      #TZ: "UTC"
-      #NOTHINGDNS_CONFIG: /etc/nothingdns/nothingdns.yaml
+    # environment:
+    #   TZ: "UTC"
+    #   NOTHINGDNS_CONFIG: /etc/nothingdns/nothingdns.yaml
 
     volumes:
       # Configuration file
