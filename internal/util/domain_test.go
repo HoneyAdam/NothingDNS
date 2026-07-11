@@ -345,3 +345,15 @@ func TestLongestCommonSuffix(t *testing.T) {
 		}
 	}
 }
+
+func TestEqualFold(t *testing.T) {
+	if !equalFold("hello", "HELLO") {
+		t.Error("equalFold('hello', 'HELLO') should be true")
+	}
+	if equalFold("hello", "world") {
+		t.Error("equalFold('hello', 'world') should be false")
+	}
+	if !equalFold("", "") {
+		t.Error("equalFold('', '') should be true")
+	}
+}
