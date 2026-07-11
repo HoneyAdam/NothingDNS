@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -910,5 +911,67 @@ func TestReadFrame_ExtendedLength_RejectsHighBit(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "frame too large") {
 		t.Errorf("expected error to mention 'frame too large', got %v", err)
+	}
+}
+
+func TestIsSameOrigin(t *testing.T) {
+	tests := []struct {
+		name   string
+		origin string
+		tls    bool
+		host   string
+		want   bool
+	}{
+		{name: "http match", origin: "http://example.com", host: "example.com", want: true},
+		{name: "https match", origin: "https://secure.com", tls: true, host: "secure.com", want: true},
+		{name: "mismatch", origin: "http://evil.com", host: "example.com", want: false},
+		{name: "port mismatch", origin: "http://example.com:8080", host: "example.com", want: false},
+		{name: "https mismatch", origin: "http://example.com", tls: true, host: "example.com", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &http.Request{Host: tc.host}
+			if tc.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			got := isSameOrigin(tc.origin, req)
+			if got != tc.want {
+				t.Errorf("isSameOrigin(%q) = %v, want %v", tc.origin, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsOriginAllowed(t *testing.T) {
+	if !isOriginAllowed("http://example.com", []string{"http://example.com"}) {
+		t.Error("should allow matching origin")
+	}
+	if isOriginAllowed("http://evil.com", []string{"http://example.com"}) {
+		t.Error("should reject non-matching origin")
+	}
+	if isOriginAllowed("http://example.com", nil) {
+		t.Error("should reject nil allowed list")
+	}
+	if isOriginAllowed("http://example.com", []string{}) {
+		t.Error("should reject empty allowed list")
+	}
+	if !isOriginAllowed("http://example.com", []string{"http://other.com", "http://example.com"}) {
+		t.Error("should allow origin in multi-entry list")
+	}
+}
+
+func TestTruncateCloseReason(t *testing.T) {
+	short := "normal close"
+	got := truncateCloseReason(short)
+	if got != short {
+		t.Errorf("truncateCloseReason(%q) = %q, want %q", short, got, short)
+	}
+	if truncateCloseReason("") != "" {
+		t.Error("truncateCloseReason('') should be empty")
+	}
+	long := string(make([]byte, 200))
+	got = truncateCloseReason(long)
+	if len(got) > 125 {
+		t.Errorf("truncated len = %d, want <=125", len(got))
 	}
 }
