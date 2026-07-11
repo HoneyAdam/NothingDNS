@@ -2592,3 +2592,17 @@ example.com. 300 IN RRSIG A 13 1 300 1609459200 1606780800 %d example.com. %s
 		t.Errorf("output missing parse error: %q", output)
 	}
 }
+
+func TestIsNilDigRData(t *testing.T) {
+	if !isNilDigRData(nil) {
+		t.Error("isNilDigRData(nil) should be true")
+	}
+	var ni *protocol.RDataA
+	if !isNilDigRData(ni) {
+		t.Error("isNilDigRData(nil *RDataA) should be true")
+	}
+	notNil := &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}}
+	if isNilDigRData(notNil) {
+		t.Error("isNilDigRData(&RDataA{}) should be false")
+	}
+}
