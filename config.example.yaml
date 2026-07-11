@@ -131,11 +131,13 @@ cluster:
 # =============================================================================
 zones:
   # Local zone files (BIND format)
-  - /etc/nothingdns/zones/example.com.zone
-  - /etc/nothingdns/zones/internal.zone
+  # Paths are relative to the working directory.
+  # In Docker: mount ./zones/:/etc/nothingdns/zones/ and use absolute paths.
+  - ./examples/example.com.zone
+  # - ./zones/myzone.zone
 
 # Zone directory for bulk loading
-# zone_dir: /etc/nothingdns/zones
+# zone_dir: ./zones
 
 # Enable ZONEMD message digests (RFC 8976)
 zonemd: false

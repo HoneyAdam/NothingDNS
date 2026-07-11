@@ -1,0 +1,34 @@
+; Example zone file for nothingdns
+; Place in your zones/ directory and reference from config.yaml
+$ORIGIN example.com.
+$TTL 3600
+
+; SOA record
+@       IN      SOA     ns1.example.com. admin.example.com. (
+                2024010101      ; Serial
+                3600            ; Refresh
+                900             ; Retry
+                86400           ; Expire
+                300             ; Minimum TTL
+                )
+
+; Name servers
+@       IN      NS      ns1.example.com.
+@       IN      NS      ns2.example.com.
+
+; A records
+@       IN      A       192.0.2.1
+ns1     IN      A       192.0.2.1
+ns2     IN      A       192.0.2.2
+www     IN      A       192.0.2.10
+mail    IN      A       192.0.2.20
+
+; AAAA records
+@       IN      AAAA    2001:db8::1
+www     IN      AAAA    2001:db8::10
+
+; MX record
+@       IN      MX      10 mail.example.com.
+
+; CNAME records
+alias   IN      CNAME   www.example.com.
