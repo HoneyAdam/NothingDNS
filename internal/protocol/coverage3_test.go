@@ -534,7 +534,7 @@ func TestParseLOCAltitude(t *testing.T) {
 		t.Fatalf("parseLOCAltitude(100m) = %d, want %d", val, 10000000+10000)
 	}
 
-	val, ok = parseLOCAltitude("-10m")
+	_, ok = parseLOCAltitude("-10m")
 	if !ok {
 		t.Fatal("parseLOCAltitude returned !ok for -10m")
 	}
@@ -851,7 +851,7 @@ func TestParseQuotedRDataFields(t *testing.T) {
 	}
 
 	// Trailing backslash inside quotes leaves quotes unclosed
-	fields, ok = parseQuotedRDataFields(`"test\`)
+	_, ok = parseQuotedRDataFields(`"test\`)
 	if ok {
 		t.Error("parseQuotedRDataFields should fail with trailing backslash")
 	}
@@ -1441,7 +1441,7 @@ func TestRDataLOCPackUnpackRoundTrip(t *testing.T) {
 func TestRDataLOCPackTooSmall(t *testing.T) {
 	loc := &RDataLOC{
 		Version: 0,
-		Size: 1, HorizPrecision: 2, VertPrecision: 3,
+		Size:    1, HorizPrecision: 2, VertPrecision: 3,
 		Latitude: 1 << 31, Longitude: 1 << 31, Altitude: 10000100,
 	}
 
