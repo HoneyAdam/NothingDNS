@@ -1,8 +1,10 @@
 package doh
 
 import (
+	"bytes"
 	"encoding/json"
 	"net"
+	"strings"
 	"testing"
 
 	"github.com/nothingdns/nothingdns/internal/protocol"
@@ -639,4 +641,115 @@ func makeAAAA(addr string) *protocol.RDataAAAA {
 	var a protocol.RDataAAAA
 	copy(a.Address[:], ip.To16())
 	return &a
+}
+
+func TestJSONRDataString(t *testing.T) {
+	tests := []struct {
+		name string
+		data protocol.RData
+		want string
+	}{
+		{name: "nil data", data: nil, want: ""},
+		{name: "A record", data: &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}}, want: "192.0.2.1"},
+		{name: "AAAA record", data: makeAAAA("2001:db8::1"), want: "2001:db8::1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := jsonRDataString(tc.data)
+			if got != tc.want {
+				t.Errorf("jsonRDataString() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterOPT(t *testing.T) {
+	a := &protocol.ResourceRecord{Type: protocol.TypeA}
+	opt := &protocol.ResourceRecord{Type: protocol.TypeOPT}
+	ns := &protocol.ResourceRecord{Type: protocol.TypeNS}
+	tests := []struct {
+		name  string
+		input []*protocol.ResourceRecord
+		want  int
+	}{
+		{name: "nil slice", input: nil, want: 0},
+		{name: "empty slice", input: []*protocol.ResourceRecord{}, want: 0},
+		{name: "no OPT", input: []*protocol.ResourceRecord{a, ns}, want: 2},
+		{name: "with OPT", input: []*protocol.ResourceRecord{a, opt, ns}, want: 2},
+		{name: "only OPT", input: []*protocol.ResourceRecord{opt}, want: 0},
+		{name: "nil elements", input: []*protocol.ResourceRecord{nil, a}, want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filterOPT(tc.input)
+			if len(got) != tc.want {
+				t.Errorf("filterOPT returned %d records, want %d", len(got), tc.want)
+			}
+		})
+	}
+}
+
+func TestEncodeRecords(t *testing.T) {
+	if got := encodeRecords(nil); got != nil {
+		t.Error("encodeRecords(nil) should return nil")
+	}
+	if got := encodeRecords([]*protocol.ResourceRecord{}); got != nil {
+		t.Error("encodeRecords(empty) should return nil")
+	}
+	rec := &protocol.ResourceRecord{Name: protocol.NewName([]string{"example", "com"}, true), Type: protocol.TypeA, TTL: 300, Data: &protocol.RDataA{Address: [4]byte{192, 0, 2, 1}}}
+	got := encodeRecords([]*protocol.ResourceRecord{rec})
+	if len(got) != 1 {
+		t.Fatalf("encodeRecords returned %d records, want 1", len(got))
+	}
+	if got[0].Name != "example.com." {
+		t.Errorf("Name = %q, want example.com.", got[0].Name)
+	}
+	if got[0].TTL != 300 {
+		t.Errorf("TTL = %d, want 300", got[0].TTL)
+	}
+	// Nil record in slice
+	got2 := encodeRecords([]*protocol.ResourceRecord{nil, rec})
+	if len(got2) != 1 {
+		t.Errorf("encodeRecords with nil element = %d, want 1", len(got2))
+	}
+	// Nil name in record
+	nilName := &protocol.ResourceRecord{Name: nil, Type: protocol.TypeA}
+	got3 := encodeRecords([]*protocol.ResourceRecord{nilName})
+	if got3 != nil {
+		t.Error("encodeRecords with nil name should return nil")
+	}
+}
+
+func TestReadLimitedDoHBody(t *testing.T) {
+	// Normal body
+	data, err := readLimitedDoHBody(strings.NewReader("hello"))
+	if err != nil {
+		t.Fatalf("readLimitedDoHBody: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Errorf("got %q, want hello", string(data))
+	}
+	// Empty body
+	data, err = readLimitedDoHBody(strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("readLimitedDoHBody(empty): %v", err)
+	}
+	if len(data) != 0 {
+		t.Errorf("len = %d, want 0", len(data))
+	}
+	// Body exceeding max size
+	big := make([]byte, MaxDNSMessageSize+10)
+	_, err = readLimitedDoHBody(bytes.NewReader(big))
+	if err != errBodyTooLarge {
+		t.Errorf("expected errBodyTooLarge, got %v", err)
+	}
+	// Exactly max size
+	exact := make([]byte, MaxDNSMessageSize)
+	data, err = readLimitedDoHBody(bytes.NewReader(exact))
+	if err != nil {
+		t.Fatalf("readLimitedDoHBody(exact): %v", err)
+	}
+	if len(data) != MaxDNSMessageSize {
+		t.Errorf("len = %d, want %d", len(data), MaxDNSMessageSize)
+	}
 }
