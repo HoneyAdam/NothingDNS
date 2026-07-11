@@ -391,6 +391,13 @@ func TestDoQServerEndToEnd(t *testing.T) {
 		s.CancelRead(0)
 		s.CancelWrite(0)
 
+		// Read the wrapper — post-echo the stream is half-closed
+		// (client closed its write side), so Read returns io.EOF
+		// without blocking. s.Read goes through the wrapper, not
+		// the raw quic-go stream.
+		buf := make([]byte, 1)
+		_, _ = s.Read(buf)
+
 		// Echo back the query as response
 		_, _ = s.Write(q)
 		_ = s.Close()
