@@ -388,6 +388,8 @@ func TestDoQServerEndToEnd(t *testing.T) {
 		_ = s.SetWriteDeadline(time.Time{})
 		_ = s.SetDeadline(time.Time{})
 		_ = s.Context()
+		s.CancelRead(0)
+		s.CancelWrite(0)
 
 		// Echo back the query as response
 		_, _ = s.Write(q)
