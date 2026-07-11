@@ -72,7 +72,7 @@ This pipeline is **well-structured and defensively coded**. Panic recovery wraps
 | `internal/zone/` | BIND-format parser, radix tree, wildcard lookup | ~10,000 | **Good** | RFC-compliant `$GENERATE`, `$INCLUDE` |
 | `internal/resolver/` | Recursive resolver, CNAME chasing | ~8,000 | **Good** | Iterative + forwarder modes |
 | `internal/dnssec/` | Signing, validation, key rollover | ~12,000 | **Good** | RSA/ECDSA/Ed25519, RFC 7583 rollover |
-| `internal/cluster/` | SWIM gossip + Raft consensus | ~10,000 | **Good** | SWIM is default; Raft tested (0.78 ratio); snapshot data not applied |
+| `internal/cluster/` | SWIM gossip + Raft consensus | ~10,000 | **Good** | SWIM is default; Raft tested (0.78 ratio); snapshot implemented with full persist/load/restore + optional AES-256-GCM encryption |
 | `internal/transfer/` | AXFR/IXFR/DDNS/NOTIFY/TSIG/XoT/Slave | ~12,000 | **Good** | Very well-tested (447 tests); XoT IXFR uses journal for incremental transfers |
 | `internal/storage/` | KV store, WAL, TLV serialization | ~8,000 | **Good** | In-memory KV with WAL journaling |
 | `internal/config/` | Custom YAML parser, hot reload | ~5,000 | **Good** | Hand-written parser, no anchors/multiline |
@@ -383,7 +383,7 @@ Documented deviations are tracked in `.project/SPEC_DEVIATIONS.md`:
 | F-012 | `go.mod` contains external deps despite zero-dep marketing | **Low** | ✅ FIXED | `go.mod`, `docs/SECURITY.md` |
 | F-013 | GeoDNS pure IPv6 lookup crashes (`ip.To4()` overwrites to nil, `nil.To16()` returns nil) | **Medium** | ✅ FIXED | `internal/geodns/geodns.go:226-231` |
 | F-014 | XoT IXFR falls back to full AXFR instead of incremental changes | **Low** | ✅ FIXED | `internal/transfer/xot.go:490` — journal store wired via `SetJournalStore`, `buildIncrementalIXFR` implements RFC 1995 pattern |
-| F-015 | Raft `handleSnapshotRequest` clears log without applying snapshot data | **Low** | **Open** | `internal/cluster/raft/raft.go:682-702` |
+| F-015 | Raft snapshot data streaming — 475-line `snapshot.go` with AES-256-GCM optional encryption, proper persist/load/restore pipeline, and `Snapshotter` API | **Low** | **✅ FIXED** | `internal/cluster/raft/snapshot.go` (475 lines) |
 
 ---
 

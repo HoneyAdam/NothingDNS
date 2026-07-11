@@ -1,5 +1,7 @@
 # NothingDNS — Task Breakdown
 
+> **STATUS: Implementation complete** — this document is a historical reference from early development (2026-03). Most items are implemented.
+
 > Granular task list for implementation. Each task is a self-contained, testable unit.
 > Estimated total: ~24 weeks for solo developer.
 

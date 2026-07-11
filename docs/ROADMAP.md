@@ -28,11 +28,11 @@ Target: Better tooling and reliability improvements.
 
 ### Reliability Improvements
 
-- [ ] RPZ: Log malformed rules at Warn level with line number
+- [x] RPZ: Log malformed rules at Warn level with line number
 - [ ] RPZ: Add `rpz_parse_errors_total` metric counter
-- [ ] Raft: Expand test coverage to 150+ tests, ratio > 0.50
-- [ ] Frontend auth: Fix login flow to use JWT endpoint properly
-- [ ] Token auth: Remove query parameter token support
+- [x] Raft: Expand test coverage to 150+ tests, ratio > 0.50
+- [x] Frontend auth: Fix login flow to use JWT endpoint properly
+- [x] Token auth: Remove query parameter token support
 
 ### Metrics & Observability
 

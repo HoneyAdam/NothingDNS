@@ -315,7 +315,7 @@ NothingDNS is a **production-grade DNS server** with a mature core, comprehensiv
 |----------|-------|-------|
 | 🔴 Blocker | 0 | All resolved |
 | 🟡 High | 0 | All resolved |
-| 🟢 Low | 2 | F-015: Raft snapshot clears log without applying data (raft.go:697); RSA signing speed (documented limitation) |
+| 🟢 Low | 1 | RSA signing speed (documented limitation) |
 
 ---
 

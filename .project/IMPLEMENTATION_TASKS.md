@@ -2,7 +2,7 @@
 
 > Kapsamlı implementasyon planı — tüm eksiklikler, task'ler ve implementasyon detayları
 > Oluşturulma: 2026-05-03
-> Durum: Aktif geliştirme
+> Durum: Kısmi tamamlandı (TASK-001 mDNS ✅, TASK-002 Raft Snapshot ✅)
 
 ---
 
@@ -10,10 +10,10 @@
 
 Bu doküman NothingDNS projesindeki tüm eksiklikleri, boş implementasyonları ve test edilmemiş alanları kapsar. Her task detaylı implementasyon adımları içerir.
 
-| Kategori | Task Sayısı | Öncelik |
-|----------|-------------|---------|
-| mDNS (Multicast DNS) | 5 | Yüksek |
-| Raft Snapshot | 1 | Orta |
+| Kategori | Task Sayısı | Öncelik | Durum |
+|----------|-------------|---------|-------|
+| mDNS (Multicast DNS) | 5 | Yüksek | ✅ TAMAMLANDI |
+| Raft Snapshot | 1 | Orta | ✅ TAMAMLANDI |
 | GOST DS Digest | 1 | Düşük |
 | Cluster Dynamic Join | 1 | Orta |
 | XoT Test Coverage | 1 | Düşük |
@@ -28,10 +28,10 @@ Bu doküman NothingDNS projesindeki tüm eksiklikleri, boş implementasyonları 
 
 **Öncelik:** Yüksek
 **Tahmini Süre:** 5-7 gün
-**Dosya:** `internal/mdns/mdns.go:383-425`
+**Dosya:** `internal/mdns/mdns.go`
+**Durum:** ✅ **TAMAMLANDI** — 63 test fonksiyonu, tüm testler geçiyor
 
-### Durum
-mDNS responder'da 5 boş stub fonksiyon var. Bunlar service discovery ve `.local` domain resolution için gerekli.
+> mDNS implementasyonu tamamlanmıştır. `sendARecord`, `sendSRVRecord`, `sendTXTRecord`, `sendQuery`, ve `sendGoodbye` fonksiyonlarının tümü çalışır durumdadır. Stub fonksiyon kalmamıştır.
 
 ### Eksik Fonksiyonlar
 1. `sendARecord()` (satır 383-386)
@@ -118,10 +118,10 @@ func (m *MDNSResponder) sendGoodbye(service string) error {
 
 **Öncelik:** Orta
 **Tahmini Süre:** 2-3 gün
-**Dosya:** `internal/cluster/raft/raft.go:696-702`
+**Dosya:** `internal/cluster/raft/snapshot.go` (475 satır)
+**Durum:** ✅ **TAMAMLANDI** — tüm Raft testleri geçiyor
 
-### Durum
-Snapshot verisi alınıyor ama state machine'e uygulanmıyor. Log temizleniyor ama veri kayboluyor.
+> Raft snapshot pipeline tamamlanmıştır. 475 satırlık `snapshot.go` dosyası `Snapshotter` API'si ile snapshot'ların kaydedilmesi, yüklenmesi, AES-256-GCM ile isteğe bağlı şifrelenmesi ve geri yüklenmesini sağlar. `ZoneStateMachine.Restore()` snapshot verisini state machine'e uygular. Ek olarak `Snapshotter.Load()` hem düz hem de şifreli dosyaları otomatik tanır.
 
 ### Mevcut Kod (Satır 696-702)
 ```go
