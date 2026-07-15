@@ -49,7 +49,7 @@ func (h *integratedHandler) handleAXFR(w server.ResponseWriter, r *protocol.Mess
 
 	// Get client IP for access control
 	// Handle AXFR using the AXFR server
-	records, tsigKey, err := h.axfrServer.HandleAXFR(r, clientIP)
+	records, tsigKey, err := h.transfer.AXFRServer.HandleAXFR(r, clientIP)
 	if err != nil {
 		h.logger.Warnf("[%s] AXFR failed for %s: %v", reqID, qname, err)
 		if h.auditLogger != nil {
@@ -170,7 +170,7 @@ func (h *integratedHandler) handleIXFR(w server.ResponseWriter, r *protocol.Mess
 	}
 
 	// Handle IXFR using the IXFR server
-	records, err := h.ixfrServer.HandleIXFR(r, clientIP)
+	records, err := h.transfer.IXFRServer.HandleIXFR(r, clientIP)
 	if err != nil {
 		h.logger.Warnf("[%s] IXFR failed for %s: %v", reqID, qname, err)
 		// Check if the error indicates AXFR fallback is needed
@@ -265,7 +265,7 @@ func (h *integratedHandler) handleNOTIFY(w server.ResponseWriter, r *protocol.Me
 	}
 
 	// Handle NOTIFY using the NOTIFY handler
-	resp, err := h.notifyHandler.HandleNOTIFY(r, clientIP)
+	resp, err := h.transfer.NotifyHandler.HandleNOTIFY(r, clientIP)
 	if err != nil {
 		h.logger.Warnf("[%s] NOTIFY handling failed for %s: %v", reqID, zoneName, err)
 		if h.auditLogger != nil {
@@ -308,14 +308,14 @@ func (h *integratedHandler) handleNOTIFY(w server.ResponseWriter, r *protocol.Me
 
 // processNotifyEvents listens for NOTIFY events and triggers zone transfers.
 func (h *integratedHandler) processNotifyEvents() {
-	notifyChan := h.notifyHandler.GetNotifyChannel()
+	notifyChan := h.transfer.NotifyHandler.GetNotifyChannel()
 	for req := range notifyChan {
 		h.logger.Infof("Processing NOTIFY for zone %s (serial %d)", req.ZoneName, req.Serial)
 
 		// Forward to slave manager if we have one
-		if h.slaveManager != nil {
+		if h.transfer.SlaveManager != nil {
 			select {
-			case h.slaveManager.GetNotifyChannel() <- req:
+			case h.transfer.SlaveManager.GetNotifyChannel() <- req:
 				h.logger.Debugf("Forwarded NOTIFY for %s to slave manager", req.ZoneName)
 			default:
 				h.logger.Warnf("Slave manager notify channel full, dropping NOTIFY for %s", req.ZoneName)
@@ -349,7 +349,7 @@ func (h *integratedHandler) handleUPDATE(w server.ResponseWriter, r *protocol.Me
 	}
 
 	// Handle UPDATE using the Dynamic DNS handler
-	resp, err := h.ddnsHandler.HandleUpdate(r, clientIP)
+	resp, err := h.transfer.DDNSHandler.HandleUpdate(r, clientIP)
 	if err != nil {
 		h.logger.Warnf("[%s] UPDATE handling failed for %s: %v", reqID, zoneName, err)
 		if h.auditLogger != nil {
@@ -401,7 +401,7 @@ func (h *integratedHandler) handleUPDATE(w server.ResponseWriter, r *protocol.Me
 
 // processUpdateEvents listens for update events and applies changes to zones.
 func (h *integratedHandler) processUpdateEvents() {
-	updateChan := h.ddnsHandler.GetUpdateChannel()
+	updateChan := h.transfer.DDNSHandler.GetUpdateChannel()
 	for req := range updateChan {
 		h.logger.Infof("Processing UPDATE for zone %s", req.ZoneName)
 
@@ -438,7 +438,7 @@ func (h *integratedHandler) processUpdateEvents() {
 		}
 
 		// Record the change in the IXFR journal
-		if h.ixfrServer != nil && z.SOA != nil {
+		if h.transfer.IXFRServer != nil && z.SOA != nil {
 			newSerial := z.SOA.Serial
 			var added, deleted []zone.RecordChange
 			for _, op := range req.Updates {
@@ -486,11 +486,11 @@ func (h *integratedHandler) processUpdateEvents() {
 // recordZoneChange records a zone modification to the IXFR journal.
 // This should be called whenever a zone is modified via dynamic updates.
 func (h *integratedHandler) recordZoneChange(zoneName string, oldSerial, newSerial uint32, added, deleted []zone.RecordChange) {
-	if h.ixfrServer == nil {
+	if h.transfer.IXFRServer == nil {
 		return
 	}
 
-	h.ixfrServer.RecordChange(zoneName, oldSerial, newSerial, added, deleted)
+	h.transfer.IXFRServer.RecordChange(zoneName, oldSerial, newSerial, added, deleted)
 	h.logger.Debugf("Recorded zone change for %s: serial %d -> %d (added: %d, deleted: %d)",
 		zoneName, oldSerial, newSerial, len(added), len(deleted))
 }

@@ -89,8 +89,8 @@ func metricsStage(h *integratedHandler) Stage {
 func aclStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		clientIP := w.ClientInfo().IP()
-		if h.aclChecker != nil && clientIP != nil {
-			allowed, redirect := h.aclChecker.IsAllowed(clientIP, q.qtype)
+		if h.security.ACLChecker != nil && clientIP != nil {
+			allowed, redirect := h.security.ACLChecker.IsAllowed(clientIP, q.qtype)
 			if !allowed {
 				if redirect != "" {
 					h.logger.Infof("ACL redirect: %s %s from %s -> %s", q.qname, typeToString(q.qtype), clientIP, redirect)
@@ -110,8 +110,8 @@ func aclStage(h *integratedHandler) Stage {
 func rpzClientStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		clientIP := w.ClientInfo().IP()
-		if h.rpzEngine != nil && clientIP != nil {
-			if rule := h.rpzEngine.ClientIPPolicy(clientIP); rule != nil {
+		if h.security.RPZEngine != nil && clientIP != nil {
+			if rule := h.security.RPZEngine.ClientIPPolicy(clientIP); rule != nil {
 				// applyRPZRule returns false for PASSTHRU (whitelist) and writes
 				// no response — the query must then CONTINUE through the pipeline.
 				// The previous unconditional `return true` turned a client-IP
@@ -130,8 +130,8 @@ func rpzClientStage(h *integratedHandler) Stage {
 func rateLimitStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		clientIP := w.ClientInfo().IP()
-		if h.rateLimiter != nil && clientIP != nil {
-			if !h.rateLimiter.Allow(clientIP) {
+		if h.security.RateLimiter != nil && clientIP != nil {
+			if !h.security.RateLimiter.Allow(clientIP) {
 				h.logger.Debugf("RRL dropped: %s %s from %s", q.qname, typeToString(q.qtype), clientIP)
 				if h.metrics != nil {
 					h.metrics.RecordRateLimited()
@@ -230,7 +230,7 @@ func nsecCacheStage(h *integratedHandler) Stage {
 // blocklistStage checks if the query domain is blocklisted.
 func blocklistStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
-		if h.blocklist != nil && h.blocklist.IsBlocked(q.qname) {
+		if h.security.Blocklist != nil && h.security.Blocklist.IsBlocked(q.qname) {
 			// Debug, not Info: blocked queries are a large fraction of traffic
 			// with ad/tracker blocklists active, so Info here floods the log at
 			// query rate. The block is still counted via RecordBlocklistBlock.
@@ -249,8 +249,8 @@ func blocklistStage(h *integratedHandler) Stage {
 // rpzQnameStage checks RPZ QNAME policy.
 func rpzQnameStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
-		if h.rpzEngine != nil {
-			if rule := h.rpzEngine.QNAMEPolicy(q.qname); rule != nil {
+		if h.security.RPZEngine != nil {
+			if rule := h.security.RPZEngine.QNAMEPolicy(q.qname); rule != nil {
 				handled, err := h.applyRPZRuleWithError(w, q.msg, q.q, rule)
 				if handled || err != nil {
 					return handled, err
@@ -573,7 +573,7 @@ func upstreamStage(h *integratedHandler) Stage {
 		}
 
 		// RRL check
-		if h.rrl != nil {
+		if h.security.RRL != nil {
 			clientIP := w.ClientInfo().IP()
 			if clientIP != nil {
 				qtype := uint16(0)
@@ -582,8 +582,8 @@ func upstreamStage(h *integratedHandler) Stage {
 				}
 				queryLen := q.msg.WireLength()
 				responseLen := resp.WireLength()
-				h.rrl.LogSuperlative(clientIP, qtype, resp.Header.Flags.RCODE, queryLen, responseLen)
-				if allowed, suppressed := h.rrl.Allow(clientIP, qtype, resp.Header.Flags.RCODE); !allowed {
+				h.security.RRL.LogSuperlative(clientIP, qtype, resp.Header.Flags.RCODE, queryLen, responseLen)
+				if allowed, suppressed := h.security.RRL.Allow(clientIP, qtype, resp.Header.Flags.RCODE); !allowed {
 					if suppressed {
 						h.sendRefused(q.currentWriter, q.msg)
 						return true, nil
@@ -798,7 +798,7 @@ func anyStage(h *integratedHandler) Stage {
 func transferStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if q.qtype == protocol.TypeAXFR {
-			if h.axfrServer == nil {
+			if h.transfer.AXFRServer == nil {
 				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				return true, nil
 			}
@@ -806,7 +806,7 @@ func transferStage(h *integratedHandler) Stage {
 			return true, nil
 		}
 		if q.qtype == protocol.TypeIXFR {
-			if h.ixfrServer == nil {
+			if h.transfer.IXFRServer == nil {
 				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				return true, nil
 			}
@@ -814,7 +814,7 @@ func transferStage(h *integratedHandler) Stage {
 			return true, nil
 		}
 		if transfer.IsNOTIFYRequest(q.msg) {
-			if h.notifyHandler == nil {
+			if h.transfer.NotifyHandler == nil {
 				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				return true, nil
 			}
@@ -822,7 +822,7 @@ func transferStage(h *integratedHandler) Stage {
 			return true, nil
 		}
 		if transfer.IsUpdateRequest(q.msg) {
-			if h.ddnsHandler == nil {
+			if h.transfer.DDNSHandler == nil {
 				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
 				return true, nil
 			}

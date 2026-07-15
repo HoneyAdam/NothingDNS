@@ -42,11 +42,11 @@ func (h *integratedHandler) handleAuthoritative(z *zone.Zone, w server.ResponseW
 	}
 
 	// ── Step 1: GeoDNS override ──
-	if h.geoEngine != nil {
+	if h.security.GeoEngine != nil {
 		clientIP := w.ClientInfo().IP()
 		if clientIP != nil {
 			typeStr := typeToString(qtype)
-			if geoRData := h.geoEngine.Resolve(qname, typeStr, clientIP); geoRData != "" {
+			if geoRData := h.security.GeoEngine.Resolve(qname, typeStr, clientIP); geoRData != "" {
 				geoRecords := []zone.Record{
 					{
 						Name:  qname,

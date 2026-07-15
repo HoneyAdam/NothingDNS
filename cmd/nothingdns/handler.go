@@ -11,17 +11,14 @@ import (
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/audit"
-	"github.com/nothingdns/nothingdns/internal/blocklist"
 	"github.com/nothingdns/nothingdns/internal/cache"
 	"github.com/nothingdns/nothingdns/internal/cluster"
 	"github.com/nothingdns/nothingdns/internal/config"
 	"github.com/nothingdns/nothingdns/internal/dashboard"
-	"github.com/nothingdns/nothingdns/internal/dns64"
 	"github.com/nothingdns/nothingdns/internal/dnscookie"
 	"github.com/nothingdns/nothingdns/internal/dnssec"
 	"github.com/nothingdns/nothingdns/internal/dso"
 	"github.com/nothingdns/nothingdns/internal/filter"
-	"github.com/nothingdns/nothingdns/internal/geodns"
 	"github.com/nothingdns/nothingdns/internal/mdns"
 	"github.com/nothingdns/nothingdns/internal/metrics"
 	"github.com/nothingdns/nothingdns/internal/otel"
@@ -29,7 +26,6 @@ import (
 	"github.com/nothingdns/nothingdns/internal/resolver"
 	"github.com/nothingdns/nothingdns/internal/rpz"
 	"github.com/nothingdns/nothingdns/internal/server"
-	"github.com/nothingdns/nothingdns/internal/transfer"
 	"github.com/nothingdns/nothingdns/internal/upstream"
 	"github.com/nothingdns/nothingdns/internal/util"
 	"github.com/nothingdns/nothingdns/internal/zone"
@@ -53,7 +49,6 @@ type integratedHandler struct {
 	config        *config.Config
 	runtimeMu     sync.RWMutex
 	logger        *util.Logger
-	cache         *cache.Cache
 	upstream      *upstream.Client
 	loadBalancer  *upstream.LoadBalancer
 	resolver      *resolver.Resolver
@@ -61,9 +56,6 @@ type integratedHandler struct {
 	zonesMu       sync.RWMutex
 	zoneManager   *zone.Manager
 	kvPersistence *zone.KVPersistence
-	blocklist     *blocklist.Blocklist
-	rpzEngine     *rpz.Engine
-	geoEngine     *geodns.Engine
 	metrics       *metrics.MetricsCollector
 	// dashboardServer receives a QueryEvent per request to feed the Query Log
 	// page and the live WebSocket stream. Optional (nil when no dashboard).
@@ -73,26 +65,24 @@ type integratedHandler struct {
 	zoneSignersMu   sync.RWMutex
 	zoneTree        *zone.RadixTree // Radix tree for O(log n) zone matching
 	cluster         *cluster.Cluster
-	axfrServer      *transfer.AXFRServer
-	ixfrServer      *transfer.IXFRServer
-	notifyHandler   *transfer.NOTIFYSlaveHandler
-	ddnsHandler     *transfer.DynamicDNSHandler
-	slaveManager    *transfer.SlaveManager
-	aclChecker      *filter.ACLChecker
-	rateLimiter     *filter.RateLimiter
-	rrl             *filter.RRL
 	splitHorizon    *filter.SplitHorizon
 	viewZones       map[string]map[string]*zone.Zone // view name -> origin -> Zone
 	auditLogger     *audit.AuditLogger
 	tracer          *otel.Tracer
 	serverCtx       context.Context // Root context for all per-query work; cancelled on server shutdown
 	cancelServer    context.CancelFunc
-	nsecCache       *cache.NSECCache // RFC 8198 aggressive NSEC caching
-	dns64Synth      *dns64.Synthesizer
-	cookieJar       *dnscookie.CookieJar
 	idnaEnabled     bool // RFC 5891 IDNA validation enabled
 	mdnsResponder   *mdns.Responder
 	dsoManager      *dso.Manager
+	cookieJar       *dnscookie.CookieJar
+
+	// Component sub-structs (replaced atomically on hot-reload)
+	security SecurityComponents
+	transfer TransferComponents
+
+	// Flat cache fields (kept flat to avoid renaming every h.cache → h.cache.ResponseCache)
+	cache     *cache.Cache
+	nsecCache *cache.NSECCache // RFC 8198 aggressive NSEC caching
 
 	zoneProvider ZoneProvider // unified zone lookup
 
@@ -126,7 +116,7 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 // A records via the same upstream path and returns a synthesized AAAA response.
 // Returns true if a synthesized response was written, false otherwise.
 func (h *integratedHandler) tryDNS64Synthesis(ctx context.Context, w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) bool {
-	if h.dns64Synth == nil {
+	if h.security.DNS64Synth == nil {
 		return false
 	}
 	// RFC 6147 §5.5: when the client sets CD=1 it is performing its own DNSSEC
@@ -135,7 +125,7 @@ func (h *integratedHandler) tryDNS64Synthesis(ctx context.Context, w server.Resp
 	if r.Header.Flags.CD {
 		return false
 	}
-	if !h.dns64Synth.ShouldSynthesize(q, resp) {
+	if !h.security.DNS64Synth.ShouldSynthesize(q, resp) {
 		return false
 	}
 
@@ -183,7 +173,7 @@ func (h *integratedHandler) tryDNS64Synthesis(ctx context.Context, w server.Resp
 		return false
 	}
 
-	synthesized := h.dns64Synth.SynthesizeResponse(q, aResp)
+	synthesized := h.security.DNS64Synth.SynthesizeResponse(q, aResp)
 	if synthesized == nil || len(synthesized.Answers) == 0 {
 		return false
 	}
@@ -244,12 +234,12 @@ func (h *integratedHandler) applyRPZResponsePolicy(w server.ResponseWriter, r *p
 // Returns true if RPZ triggered (caller should return); false to continue.
 // This consolidates the 3× duplicated RPZ response-check blocks in ServeDNS.
 func (h *integratedHandler) applyRPZResponsePolicyWithError(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message, label string) (bool, error) {
-	if h.rpzEngine == nil {
+	if h.security.RPZEngine == nil {
 		return false, nil
 	}
 	respIPs := extractResponseIPs(resp)
 	if len(respIPs) > 0 {
-		if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
+		if rule := h.security.RPZEngine.ResponseIPPolicy(respIPs); rule != nil {
 			h.logger.Debugf("RPZ response IP match for %s (policy: %s)", label, rule.PolicyName)
 			handled, err := h.applyRPZRuleWithError(w, r, q, rule)
 			if handled || err != nil {
@@ -258,7 +248,7 @@ func (h *integratedHandler) applyRPZResponsePolicyWithError(w server.ResponseWri
 		}
 	}
 	for _, nsName := range extractNSNames(resp) {
-		if rule := h.rpzEngine.QNAMEPolicy(nsName); rule != nil {
+		if rule := h.security.RPZEngine.QNAMEPolicy(nsName); rule != nil {
 			h.logger.Debugf("RPZ NSDNAME match for %s (policy: %s)", nsName, rule.PolicyName)
 			handled, err := h.applyRPZRuleWithError(w, r, q, rule)
 			if handled || err != nil {
@@ -284,14 +274,14 @@ func (h *integratedHandler) checkRPZResponseIP(w server.ResponseWriter, r *proto
 }
 
 func (h *integratedHandler) checkRPZResponseIPWithError(w server.ResponseWriter, r *protocol.Message, q *protocol.Question, resp *protocol.Message) (bool, error) {
-	if h.rpzEngine == nil {
+	if h.security.RPZEngine == nil {
 		return false, nil
 	}
 	respIPs := extractResponseIPs(resp)
 	if len(respIPs) == 0 {
 		return false, nil
 	}
-	if rule := h.rpzEngine.ResponseIPPolicy(respIPs); rule != nil {
+	if rule := h.security.RPZEngine.ResponseIPPolicy(respIPs); rule != nil {
 		qname := "<nil>"
 		if q != nil && q.Name != nil {
 			qname = q.Name.String()

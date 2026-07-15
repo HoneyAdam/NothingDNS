@@ -271,13 +271,13 @@ func reloadSecurityComponents(cfg *config.Config, current *SecurityManager, hand
 	result := next.Result()
 	if handler != nil {
 		handler.runtimeMu.Lock()
-		handler.blocklist = result.Blocklist
-		handler.rpzEngine = result.RPZEngine
-		handler.geoEngine = result.GeoEngine
-		handler.dns64Synth = result.DNS64Synth
-		handler.aclChecker = result.ACLChecher
-		handler.rateLimiter = result.RateLimiter
-		handler.rrl = result.RRL
+		handler.security.Blocklist = result.Blocklist
+		handler.security.RPZEngine = result.RPZEngine
+		handler.security.GeoEngine = result.GeoEngine
+		handler.security.DNS64Synth = result.DNS64Synth
+		handler.security.ACLChecker = result.ACLChecher
+		handler.security.RateLimiter = result.RateLimiter
+		handler.security.RRL = result.RRL
 		handler.runtimeMu.Unlock()
 	}
 	if apiServer != nil {
@@ -657,30 +657,34 @@ func run() error {
 		zoneTree:      zone.BuildRadixTree(zones),
 		zoneManager:   zoneManagerInstance,
 		kvPersistence: kvPersistence,
-		blocklist:     bl,
-		rpzEngine:     rpzEngine,
-		geoEngine:     geoEngine,
 		metrics:       metricsCollector,
 		validator:     validator,
 		zoneSigners:   zoneSigners,
 		idnaEnabled:   idnaEnabled,
 		cluster:       clusterMgr,
-		axfrServer:    transferManager.Result().AXFRServer,
-		ixfrServer:    transferManager.Result().IXFRServer,
-		notifyHandler: transferManager.Result().NotifyHandler,
-		ddnsHandler:   transferManager.Result().DDNSHandler,
-		slaveManager:  transferManager.Result().SlaveManager,
-		aclChecker:    aclChecker,
-		rateLimiter:   rateLimiter,
-		rrl:           securityManager.Result().RRL,
 		splitHorizon:  splitHorizon,
 		viewZones:     viewZones,
 		auditLogger:   auditLogger,
 		nsecCache:     cache.NewNSECCache(10000),
-		dns64Synth:    dns64Synth,
 		cookieJar:     cookieJar,
 		mdnsResponder: mdnsResponder,
 		dsoManager:    dsoManager,
+		security: SecurityComponents{
+			Blocklist:   bl,
+			RPZEngine:   rpzEngine,
+			GeoEngine:   geoEngine,
+			DNS64Synth:  dns64Synth,
+			ACLChecker:  aclChecker,
+			RateLimiter: rateLimiter,
+			RRL:         securityManager.Result().RRL,
+		},
+		transfer: TransferComponents{
+			AXFRServer:    transferManager.Result().AXFRServer,
+			IXFRServer:    transferManager.Result().IXFRServer,
+			NotifyHandler: transferManager.Result().NotifyHandler,
+			DDNSHandler:   transferManager.Result().DDNSHandler,
+			SlaveManager:  transferManager.Result().SlaveManager,
+		},
 		zoneProvider: NewMultiZoneProvider(
 			zones,
 			zoneManagerInstance,

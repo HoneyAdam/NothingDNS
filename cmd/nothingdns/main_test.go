@@ -264,7 +264,7 @@ func TestServeDNS_Blocklist(t *testing.T) {
 	if err := bl.Load(); err != nil {
 		t.Fatalf("failed to load blocklist: %v", err)
 	}
-	h.blocklist = bl
+	h.security.Blocklist = bl
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "blocked.example.com.", protocol.TypeA))
@@ -300,7 +300,7 @@ func TestServeDNS_BlocklistBeatsCache(t *testing.T) {
 	// 2) Add the domain to the blocklist AFTER it was cached (hot-reload / late add).
 	bl := blocklist.New(blocklist.Config{Enabled: true})
 	bl.AddDomain("cached-then-blocked.example.com")
-	h.blocklist = bl
+	h.security.Blocklist = bl
 
 	// 3) The query must be BLOCKED (NXDOMAIN), not served from the warm cache.
 	w := newCaptureWriter("10.0.0.1", "udp")
@@ -545,7 +545,7 @@ func TestServeDNS_ACLDeny(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create ACL: %v", err)
 	}
-	h.aclChecker = acl
+	h.security.ACLChecker = acl
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "anything.com.", protocol.TypeA))
@@ -570,7 +570,7 @@ func TestServeDNS_ACLAllow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create ACL: %v", err)
 	}
-	h.aclChecker = acl
+	h.security.ACLChecker = acl
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "unknown.com.", protocol.TypeA))
@@ -586,8 +586,8 @@ func TestServeDNS_ACLAllow(t *testing.T) {
 
 func TestServeDNS_RateLimitExceeded(t *testing.T) {
 	h := newTestHandler()
-	h.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Rate: 1, Burst: 1})
-	defer h.rateLimiter.Stop()
+	h.security.RateLimiter = filter.NewRateLimiter(config.RRLConfig{Rate: 1, Burst: 1})
+	defer h.security.RateLimiter.Stop()
 
 	// First request should succeed
 	w1 := newCaptureWriter("10.0.0.1", "udp")
@@ -679,7 +679,7 @@ func TestServeDNS_ACLRedirect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create ACL: %v", err)
 	}
-	h.aclChecker = acl
+	h.security.ACLChecker = acl
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "anything.com.", protocol.TypeA))
@@ -2990,7 +2990,7 @@ func TestApplyRPZResponsePolicy_NoEngine(t *testing.T) {
 
 func TestApplyRPZResponsePolicy_NoMatch(t *testing.T) {
 	h := newTestHandler()
-	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	h.security.RPZEngine = rpz.NewEngine(rpz.Config{Enabled: true})
 	w := newCaptureWriter("10.0.0.1", "udp")
 	msg := newTestQuery(t, "example.com.", protocol.TypeA)
 	resp := &protocol.Message{
@@ -3021,7 +3021,7 @@ func TestCheckRPZResponseIP_NoEngine(t *testing.T) {
 
 func TestCheckRPZResponseIP_NoIPs(t *testing.T) {
 	h := newTestHandler()
-	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	h.security.RPZEngine = rpz.NewEngine(rpz.Config{Enabled: true})
 	w := newCaptureWriter("10.0.0.1", "udp")
 	msg := newTestQuery(t, "example.com.", protocol.TypeA)
 	resp := &protocol.Message{}
@@ -3424,7 +3424,7 @@ func TestReloadSecurityComponentsAppliesNewBlocklistConfig(t *testing.T) {
 	cfg.Blocklist.Files = []string{blocklistFile}
 	h := newTestHandler()
 	oldBlocklist := blocklist.New(blocklist.Config{Enabled: true})
-	h.blocklist = oldBlocklist
+	h.security.Blocklist = oldBlocklist
 
 	manager, result, err := reloadSecurityComponents(cfg, nil, h, nil, util.NewLogger(util.ERROR, util.TextFormat, nil))
 	if err != nil {
@@ -3434,10 +3434,10 @@ func TestReloadSecurityComponentsAppliesNewBlocklistConfig(t *testing.T) {
 	if result.Blocklist == nil {
 		t.Fatal("expected reloaded blocklist")
 	}
-	if h.blocklist == oldBlocklist {
+	if h.security.Blocklist == oldBlocklist {
 		t.Fatal("expected handler blocklist pointer to be replaced")
 	}
-	if !h.blocklist.IsBlocked("blocked.example") {
+	if !h.security.Blocklist.IsBlocked("blocked.example") {
 		t.Fatal("expected new blocklist source to be active")
 	}
 }
@@ -3756,8 +3756,8 @@ func TestServeDNS_CacheNegativeHit(t *testing.T) {
 
 func TestServeDNS_RPZ_QNAME(t *testing.T) {
 	h := newTestHandler()
-	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
-	h.rpzEngine.AddQNAMERule("blocked.com", rpz.ActionNXDOMAIN, "")
+	h.security.RPZEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	h.security.RPZEngine.AddQNAMERule("blocked.com", rpz.ActionNXDOMAIN, "")
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "blocked.com.", protocol.TypeA))
@@ -3934,7 +3934,7 @@ func TestRebuildZoneTree_WithManagers(t *testing.T) {
 
 func TestServeDNS_RPZ_ClientIP(t *testing.T) {
 	h := newTestHandler()
-	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	h.security.RPZEngine = rpz.NewEngine(rpz.Config{Enabled: true})
 	// The RPZ engine loads from files normally, but we can add rules directly
 	// For client IP, we need to add via the engine's internal methods.
 	// NewEngine doesn't expose AddClientIPRule, so let's use AddQNAMERule for QNAME instead.
@@ -4194,8 +4194,8 @@ func TestServeDNS_Referral(t *testing.T) {
 
 func TestServeDNS_GeoDNS(t *testing.T) {
 	h := newTestHandler()
-	h.geoEngine = geodns.NewEngine(geodns.Config{Enabled: true})
-	h.geoEngine.SetRule("www.example.com.", "A", &geodns.GeoRecord{
+	h.security.GeoEngine = geodns.NewEngine(geodns.Config{Enabled: true})
+	h.security.GeoEngine.SetRule("www.example.com.", "A", &geodns.GeoRecord{
 		Default: "192.168.1.1",
 		Type:    "A",
 		TTL:     300,
@@ -4456,9 +4456,9 @@ func TestServeDNS_RPZ_Authoritative(t *testing.T) {
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "1.2.3.4"},
 	})
-	h.rpzEngine = rpz.NewEngine(rpz.Config{Enabled: true})
+	h.security.RPZEngine = rpz.NewEngine(rpz.Config{Enabled: true})
 	// QNAME policy that matches www.example.com.
-	h.rpzEngine.AddQNAMERule("www.example.com", rpz.ActionNXDOMAIN, "")
+	h.security.RPZEngine.AddQNAMERule("www.example.com", rpz.ActionNXDOMAIN, "")
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "www.example.com.", protocol.TypeA))
@@ -4784,7 +4784,7 @@ func TestCheckRPZResponseIP_Match(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "4.3.2.1"},
@@ -4933,7 +4933,7 @@ www 3600 IN A 192.0.2.10
 
 func TestTryDNS64Synthesis_NoUpstream(t *testing.T) {
 	h := newTestHandler()
-	h.dns64Synth, _ = dns64.NewSynthesizer("", 0)
+	h.security.DNS64Synth, _ = dns64.NewSynthesizer("", 0)
 
 	q := &protocol.Question{
 		Name:   func() *protocol.Name { n, _ := protocol.ParseName("example.com."); return n }(),
@@ -4961,7 +4961,7 @@ func TestTryDNS64Synthesis_Success(t *testing.T) {
 	h.upstream = uc
 
 	synth, _ := dns64.NewSynthesizer("", 0)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	q := &protocol.Question{Name: mustParseName(t, "test.example."), QType: protocol.TypeAAAA, QClass: protocol.ClassIN}
@@ -5025,7 +5025,7 @@ func TestServeDNS_RRL_Suppressed(t *testing.T) {
 	uc, _ := upstream.NewClient(upstream.Config{Servers: []string{addr}, Timeout: 2 * time.Second, HealthCheck: 0})
 	defer uc.Close()
 	h.upstream = uc
-	h.rrl = filter.NewRRL(filter.RRLConfig{Enabled: true, Rate: 1, Burst: 1})
+	h.security.RRL = filter.NewRRL(filter.RRLConfig{Enabled: true, Rate: 1, Burst: 1})
 
 	// Exhaust burst with rapid queries for non-authoritative names.
 	// Use different names to avoid cache hits; RRL bucket is per (clientIP, qtype, rcode).
@@ -5248,7 +5248,7 @@ func TestServeDNS_Referral_RPZ_Glue(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "sub.example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.sub.example.com."},
@@ -5885,7 +5885,7 @@ func TestHandleAXFR_UDP(t *testing.T) {
 func TestHandleAXFR_TCP_Unauthorized(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{"example.com.": {Origin: "example.com.", Records: map[string][]zone.Record{}}}
-	h.axfrServer = transfer.NewAXFRServer(zones)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones)
 	w := newCaptureWriter("10.0.0.1", "tcp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAXFR, QClass: protocol.ClassIN}
 	h.handleAXFR(w, newTestQuery(t, "example.com.", protocol.TypeAXFR), q)
@@ -5920,8 +5920,8 @@ func TestHandleIXFR_TCP_FallbackToAXFR(t *testing.T) {
 		},
 	}
 	// IXFR server with no journal will return ErrNoJournal, triggering AXFR fallback
-	h.axfrServer = transfer.NewAXFRServer(zones)
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones)
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 	w := newCaptureWriter("10.0.0.1", "tcp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeIXFR, QClass: protocol.ClassIN}
 	msg := newTestQuery(t, "example.com.", protocol.TypeIXFR)
@@ -5945,7 +5945,7 @@ func TestHandleIXFR_TCP_FallbackToAXFR(t *testing.T) {
 func TestHandleNOTIFY_Refused(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeSOA, QClass: protocol.ClassIN}
 	h.handleNOTIFY(w, newTestQuery(t, "example.com.", protocol.TypeSOA), q)
@@ -5960,7 +5960,7 @@ func TestHandleNOTIFY_Refused(t *testing.T) {
 func TestHandleUPDATE_Error(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeSOA, QClass: protocol.ClassIN}
 	h.handleUPDATE(w, newTestQuery(t, "example.com.", protocol.TypeSOA), q)
@@ -6008,8 +6008,8 @@ func TestServeDNS_RateLimiter_Suppressed(t *testing.T) {
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "192.168.1.1"},
 	})
-	h.rateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 1, Burst: 1})
-	defer h.rateLimiter.Stop()
+	h.security.RateLimiter = filter.NewRateLimiter(config.RRLConfig{Enabled: true, Rate: 1, Burst: 1})
+	defer h.security.RateLimiter.Stop()
 
 	var lastResp *protocol.Message
 	for i := 0; i < 5; i++ {
@@ -6126,7 +6126,7 @@ func TestHandleAXFR_TCP_Success(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.example.com."},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
 
 	w := newCaptureWriter("10.0.0.1", "tcp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAXFR, QClass: protocol.ClassIN}
@@ -6143,7 +6143,7 @@ func TestHandleAXFR_TCP_Success(t *testing.T) {
 func TestHandleUPDATE_WrongOpcode(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeSOA, QClass: protocol.ClassIN}
 	msg := newTestQuery(t, "example.com.", protocol.TypeSOA)
@@ -6160,7 +6160,7 @@ func TestHandleUPDATE_WrongOpcode(t *testing.T) {
 func TestHandleUPDATE_NoZone(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeSOA, QClass: protocol.ClassIN}
 	msg := newTestQuery(t, "example.com.", protocol.TypeSOA)
@@ -6182,8 +6182,8 @@ func TestProcessNotifyEvents_NoSlave(t *testing.T) {
 			SOA:    &zone.SOARecord{Serial: 1},
 		},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
 	// slaveManager is nil
 
 	go h.processNotifyEvents()
@@ -6196,7 +6196,7 @@ func TestProcessNotifyEvents_NoSlave(t *testing.T) {
 		TTL:   300,
 		Data:  &protocol.RDataSOA{Serial: 2, MName: mustParseName(t, "ns1.example.com."), RName: mustParseName(t, "admin.example.com.")},
 	}}
-	h.notifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
+	h.transfer.NotifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -6208,9 +6208,9 @@ func TestProcessNotifyEvents_Forward(t *testing.T) {
 			SOA:    &zone.SOARecord{Serial: 1},
 		},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
-	h.slaveManager = transfer.NewSlaveManager(transfer.NewKeyStore())
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.SlaveManager = transfer.NewSlaveManager(transfer.NewKeyStore())
 
 	go h.processNotifyEvents()
 
@@ -6222,7 +6222,7 @@ func TestProcessNotifyEvents_Forward(t *testing.T) {
 		TTL:   300,
 		Data:  &protocol.RDataSOA{Serial: 2, MName: mustParseName(t, "ns1.example.com."), RName: mustParseName(t, "admin.example.com.")},
 	}}
-	h.notifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
+	h.transfer.NotifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -6234,12 +6234,12 @@ func TestProcessNotifyEvents_FullChannel(t *testing.T) {
 			SOA:    &zone.SOARecord{Serial: 1},
 		},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
-	h.slaveManager = transfer.NewSlaveManager(transfer.NewKeyStore())
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.SlaveManager = transfer.NewSlaveManager(transfer.NewKeyStore())
 	// Fill slave manager channel to force default case
 	for i := 0; i < 100; i++ {
-		h.slaveManager.GetNotifyChannel() <- &transfer.NOTIFYRequest{ZoneName: "example.com."}
+		h.transfer.SlaveManager.GetNotifyChannel() <- &transfer.NOTIFYRequest{ZoneName: "example.com."}
 	}
 
 	go h.processNotifyEvents()
@@ -6252,7 +6252,7 @@ func TestProcessNotifyEvents_FullChannel(t *testing.T) {
 		TTL:   300,
 		Data:  &protocol.RDataSOA{Serial: 2, MName: mustParseName(t, "ns1.example.com."), RName: mustParseName(t, "admin.example.com.")},
 	}}
-	h.notifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
+	h.transfer.NotifyHandler.HandleNOTIFY(msg, net.ParseIP("10.0.0.1"))
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -6263,8 +6263,8 @@ func TestProcessUpdateEvents(t *testing.T) {
 	}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
-	h.ddnsHandler.SetZonesMu(&h.zonesMu)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler.SetZonesMu(&h.zonesMu)
 
 	// Set up TSIG key
 	ks := transfer.NewKeyStore()
@@ -6273,7 +6273,7 @@ func TestProcessUpdateEvents(t *testing.T) {
 		Algorithm: transfer.HmacSHA256,
 		Secret:    []byte("test-secret-key-12345678901234"),
 	})
-	h.ddnsHandler.SetKeyStore(ks)
+	h.transfer.DDNSHandler.SetKeyStore(ks)
 
 	go h.processUpdateEvents()
 
@@ -6308,7 +6308,7 @@ func TestProcessUpdateEvents(t *testing.T) {
 	}, 300)
 	req.Additionals = append(req.Additionals, tsigRR)
 
-	_, err := h.ddnsHandler.HandleUpdate(req, net.ParseIP("127.0.0.1"))
+	_, err := h.transfer.DDNSHandler.HandleUpdate(req, net.ParseIP("127.0.0.1"))
 	if err != nil {
 		t.Fatalf("HandleUpdate error: %v", err)
 	}
@@ -6335,8 +6335,8 @@ func TestRecordZoneChange_WithIXFR(t *testing.T) {
 			SOA:     &zone.SOARecord{Serial: 1},
 		},
 	}
-	h.axfrServer = transfer.NewAXFRServer(zones)
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones)
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 
 	h.recordZoneChange("example.com.", 1, 2, []zone.RecordChange{
 		{Name: "www.example.com.", Type: protocol.TypeA, TTL: 300, RData: "192.0.2.1"},
@@ -6352,8 +6352,8 @@ func TestHandleIXFR_TCP_SerialCurrent(t *testing.T) {
 			SOA:     &zone.SOARecord{Serial: 5, MName: "ns1.example.com.", RName: "admin.example.com."},
 		},
 	}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 
 	w := newCaptureWriter("10.0.0.1", "tcp")
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeIXFR, QClass: protocol.ClassIN}
@@ -6387,9 +6387,9 @@ func TestHandleIXFR_TCP_Incremental(t *testing.T) {
 			SOA:     &zone.SOARecord{Serial: 5, MName: "ns1.example.com.", RName: "admin.example.com."},
 		},
 	}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
-	h.ixfrServer.RecordChange("example.com.", 3, 4, []zone.RecordChange{
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
+	h.transfer.IXFRServer.RecordChange("example.com.", 3, 4, []zone.RecordChange{
 		{Name: "www.example.com.", Type: protocol.TypeA, TTL: 300, RData: "192.0.2.1"},
 	}, nil)
 
@@ -6420,8 +6420,8 @@ func TestHandleUPDATE_Success(t *testing.T) {
 	}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
-	h.ddnsHandler.SetZonesMu(&h.zonesMu)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler.SetZonesMu(&h.zonesMu)
 	h.metrics = metrics.New(metrics.Config{Enabled: true})
 
 	ks := transfer.NewKeyStore()
@@ -6430,7 +6430,7 @@ func TestHandleUPDATE_Success(t *testing.T) {
 		Algorithm: transfer.HmacSHA256,
 		Secret:    []byte("test-secret-key-12345678901234"),
 	})
-	h.ddnsHandler.SetKeyStore(ks)
+	h.transfer.DDNSHandler.SetKeyStore(ks)
 
 	name, _ := protocol.ParseName("example.com.")
 	updateName, _ := protocol.ParseName("new.example.com.")
@@ -6562,10 +6562,10 @@ func (f *failingResolverTransport) QueryContext(ctx context.Context, msg *protoc
 
 func TestProcessUpdateEvents_ZoneNotFound(t *testing.T) {
 	h := newTestHandler()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(map[string]*zone.Zone{})
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(map[string]*zone.Zone{})
 	go h.processUpdateEvents()
 
-	val := reflect.ValueOf(h.ddnsHandler).Elem().FieldByName("updateChan")
+	val := reflect.ValueOf(h.transfer.DDNSHandler).Elem().FieldByName("updateChan")
 	ch := *(*chan *transfer.UpdateRequest)(unsafe.Pointer(val.UnsafeAddr()))
 	ch <- &transfer.UpdateRequest{
 		ZoneName: "missing.com.",
@@ -6583,10 +6583,10 @@ func TestProcessUpdateEvents_ApplyUpdateError(t *testing.T) {
 	}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
 	go h.processUpdateEvents()
 
-	val := reflect.ValueOf(h.ddnsHandler).Elem().FieldByName("updateChan")
+	val := reflect.ValueOf(h.transfer.DDNSHandler).Elem().FieldByName("updateChan")
 	ch := *(*chan *transfer.UpdateRequest)(unsafe.Pointer(val.UnsafeAddr()))
 	ch <- &transfer.UpdateRequest{
 		ZoneName: "example.com.",
@@ -6607,11 +6607,11 @@ func TestProcessUpdateEvents_AuditLogger(t *testing.T) {
 	}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
 	h.auditLogger, _ = audit.NewAuditLogger(true, "")
 	go h.processUpdateEvents()
 
-	val := reflect.ValueOf(h.ddnsHandler).Elem().FieldByName("updateChan")
+	val := reflect.ValueOf(h.transfer.DDNSHandler).Elem().FieldByName("updateChan")
 	ch := *(*chan *transfer.UpdateRequest)(unsafe.Pointer(val.UnsafeAddr()))
 	ch <- &transfer.UpdateRequest{
 		ZoneName: "example.com.",
@@ -6735,7 +6735,7 @@ func TestServeDNS_DNS64Synthesis(t *testing.T) {
 	h.upstream = client
 
 	synth, _ := dns64.NewSynthesizer("64:ff9b::", 96)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "dns64.example.com.", protocol.TypeAAAA))
@@ -7029,7 +7029,7 @@ func TestHandleAXFR_WriteError(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.example.com."},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
 
 	w := &errorWriter{client: &server.ClientInfo{Addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 12345}, Protocol: "tcp"}}
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAXFR, QClass: protocol.ClassIN}
@@ -7060,7 +7060,7 @@ func TestDoQResponseWriter_Write_PackError(t *testing.T) {
 func TestTryDNS64Synthesis_AlreadyHasAAAA(t *testing.T) {
 	h := newTestHandler()
 	synth, _ := dns64.NewSynthesizer("64:ff9b::", 96)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeAAAA, QClass: protocol.ClassIN}
 	resp := &protocol.Message{
 		Header: protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
@@ -7081,7 +7081,7 @@ func TestTryDNS64Synthesis_AlreadyHasAAAA(t *testing.T) {
 func TestTryDNS64Synthesis_UpstreamFail(t *testing.T) {
 	h := newTestHandler()
 	synth, _ := dns64.NewSynthesizer("64:ff9b::", 96)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -7123,7 +7123,7 @@ func TestTryDNS64Synthesis_UpstreamFail(t *testing.T) {
 func TestTryDNS64Synthesis_UpstreamNoData(t *testing.T) {
 	h := newTestHandler()
 	synth, _ := dns64.NewSynthesizer("64:ff9b::", 96)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -7173,7 +7173,7 @@ func TestCheckRPZResponseIP_NODATA(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "4.3.2.1"},
@@ -7203,7 +7203,7 @@ func TestCheckRPZResponseIP_Redirect(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addZoneRecords(t, h, "example.com.", []zone.Record{
 		{Name: "www.example.com.", TTL: 300, Class: "IN", Type: "A", RData: "4.3.2.1"},
@@ -7348,8 +7348,8 @@ func TestHandleNOTIFY_WriteError(t *testing.T) {
 			SOA:    &zone.SOARecord{Serial: 1},
 		},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
 
 	w := &errorWriter{client: &server.ClientInfo{Addr: &net.UDPAddr{IP: net.ParseIP("10.0.0.1"), Port: 12345}, Protocol: "udp"}}
 	q := &protocol.Question{Name: mustParseName(t, "example.com."), QType: protocol.TypeSOA, QClass: protocol.ClassIN}
@@ -7363,14 +7363,14 @@ func TestProcessUpdateEvents_IXFRJournal(t *testing.T) {
 	sharedZones := map[string]*zone.Zone{"example.com.": z}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
 
 	axfrServer := transfer.NewAXFRServer(sharedZones)
-	h.ixfrServer = transfer.NewIXFRServer(axfrServer)
+	h.transfer.IXFRServer = transfer.NewIXFRServer(axfrServer)
 
 	go h.processUpdateEvents()
 
-	val := reflect.ValueOf(h.ddnsHandler).Elem().FieldByName("updateChan")
+	val := reflect.ValueOf(h.transfer.DDNSHandler).Elem().FieldByName("updateChan")
 	ch := *(*chan *transfer.UpdateRequest)(unsafe.Pointer(val.UnsafeAddr()))
 	ch <- &transfer.UpdateRequest{
 		ZoneName: "example.com.",
@@ -7414,7 +7414,7 @@ func TestServeDNS_NOTIFY_Branch(t *testing.T) {
 	zones := map[string]*zone.Zone{
 		"example.com.": {Origin: "example.com.", SOA: &zone.SOARecord{Serial: 1}},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	msg := newTestQuery(t, "example.com.", protocol.TypeSOA)
 	msg.Header.Flags.Opcode = protocol.OpcodeNotify
@@ -7427,7 +7427,7 @@ func TestServeDNS_NOTIFY_Branch(t *testing.T) {
 func TestServeDNS_UPDATE_Branch(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 	w := newCaptureWriter("10.0.0.1", "udp")
 	msg := newTestQuery(t, "example.com.", protocol.TypeSOA)
 	msg.Header.Flags.Opcode = protocol.OpcodeUpdate
@@ -7566,11 +7566,11 @@ func TestProcessUpdateEvents_PersistZoneError(t *testing.T) {
 	zm := zone.NewManager()
 	zm.SetZoneDir("/nonexistent/path/that/cannot/be/created")
 	h.zoneManager = zm
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(sharedZones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(sharedZones)
 
 	go h.processUpdateEvents()
 
-	val := reflect.ValueOf(h.ddnsHandler).Elem().FieldByName("updateChan")
+	val := reflect.ValueOf(h.transfer.DDNSHandler).Elem().FieldByName("updateChan")
 	ch := *(*chan *transfer.UpdateRequest)(unsafe.Pointer(val.UnsafeAddr()))
 	ch <- &transfer.UpdateRequest{
 		ZoneName: "example.com.",
@@ -7661,7 +7661,7 @@ func TestServeDNS_RPZClientIP(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "example.com.", protocol.TypeA))
 	if w.msg == nil {
@@ -7850,7 +7850,7 @@ func TestServeDNS_RPZResponseIP_Upstream(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -7901,7 +7901,7 @@ func TestHandleAXFR_Success_Audit(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.example.com."},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -7926,7 +7926,7 @@ func TestHandleAXFR_WriteError_Audit(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.example.com."},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -7946,8 +7946,8 @@ func TestHandleIXFR_Success_Audit(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "NS", RData: "ns1.example.com."},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -7980,8 +7980,8 @@ func TestHandleIXFR_WriteError_Audit(t *testing.T) {
 		{Name: "example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.example.com. admin.example.com. 2 3600 600 86400 300"},
 	}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones, transfer.WithAllowList([]string{"10.0.0.0/8"}))
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -8002,8 +8002,8 @@ func TestHandleIXFR_WriteError_Audit(t *testing.T) {
 func TestHandleNOTIFY_Error_Audit(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
 
@@ -8025,7 +8025,7 @@ func TestHandleNOTIFY_Error_Audit(t *testing.T) {
 func TestHandleUPDATE_Failure_Audit(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{}
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
 
@@ -8224,8 +8224,8 @@ func TestServeDNS_RRLFull(t *testing.T) {
 	cfg.RRL.Burst = 1
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	sm, _ := NewSecurityManager(cfg, logger)
-	h.rrl = sm.Result().RRL
-	h.rateLimiter = sm.Result().RateLimiter
+	h.security.RRL = sm.Result().RRL
+	h.security.RateLimiter = sm.Result().RateLimiter
 
 	// Send multiple queries to trigger rate limiting
 	for i := 0; i < 10; i++ {
@@ -8242,7 +8242,7 @@ func TestServeDNS_ACLRefused(t *testing.T) {
 	}}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	sm, _ := NewSecurityManager(cfg, logger)
-	h.aclChecker = sm.Result().ACLChecher
+	h.security.ACLChecker = sm.Result().ACLChecher
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "example.com.", protocol.TypeA))
@@ -8261,7 +8261,7 @@ func TestServeDNS_RPZ_QNAME_NoMatch(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "allowed.example.com.", protocol.TypeA))
@@ -8326,7 +8326,7 @@ func TestServeDNS_BlocklistMatch(t *testing.T) {
 		Files:   []string{blFile},
 	})
 	_ = bl.Load()
-	h.blocklist = bl
+	h.security.Blocklist = bl
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "blocked.example.com.", protocol.TypeA))
@@ -8609,7 +8609,7 @@ func TestServeDNS_RPZ_QNAMEBlock(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "blockme.example.com.", protocol.TypeA))
@@ -8633,7 +8633,7 @@ func TestServeDNS_RPZ_Wildcard(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "anything.example.com.", protocol.TypeA))
@@ -8658,7 +8658,7 @@ func TestServeDNS_RPZ_Passthru(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -8686,7 +8686,7 @@ func TestServeDNS_RPZ_Drop(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "dropme.example.com.", protocol.TypeA))
@@ -9057,7 +9057,7 @@ func TestServeDNS_RPZ_ResponseIP_Trigger(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	// Custom upstream that returns 1.2.3.4 as A record
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -9123,7 +9123,7 @@ func TestServeDNS_RPZ_OverrideIP(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -9154,7 +9154,7 @@ func TestServeDNS_RPZ_TCPOnly(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -9181,7 +9181,7 @@ func TestServeDNS_GeoDNS_Override(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSecurityManager: %v", err)
 	}
-	h.geoEngine = sm.Result().GeoEngine
+	h.security.GeoEngine = sm.Result().GeoEngine
 
 	addZoneRecords(t, h, "geo.example.com.", []zone.Record{
 		{Name: "geo.example.com.", TTL: 300, Class: "IN", Type: "SOA", RData: "ns1.geo.example.com. admin.geo.example.com. 1 3600 600 86400 300"},
@@ -10191,7 +10191,7 @@ func TestHandleAXFR_Unauthorized(t *testing.T) {
 	z := zone.NewZone("example.com.")
 	z.SOA = &zone.SOARecord{Name: "example.com.", MName: "ns1.example.com.", RName: "admin.example.com.", Serial: 1}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones) // no allow list
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones) // no allow list
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -10213,8 +10213,8 @@ func TestHandleIXFR_Unauthorized(t *testing.T) {
 	z := zone.NewZone("example.com.")
 	z.SOA = &zone.SOARecord{Name: "example.com.", MName: "ns1.example.com.", RName: "admin.example.com.", Serial: 2}
 	zones := map[string]*zone.Zone{"example.com.": z}
-	h.axfrServer = transfer.NewAXFRServer(zones)
-	h.ixfrServer = transfer.NewIXFRServer(h.axfrServer)
+	h.transfer.AXFRServer = transfer.NewAXFRServer(zones)
+	h.transfer.IXFRServer = transfer.NewIXFRServer(h.transfer.AXFRServer)
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -10241,8 +10241,8 @@ func TestHandleNOTIFY_SlaveOK(t *testing.T) {
 			SOA:    &zone.SOARecord{Serial: 2},
 		},
 	}
-	h.notifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
-	h.notifyHandler.AddNotifyAllowed("10.0.0.0/8")
+	h.transfer.NotifyHandler = transfer.NewNOTIFYSlaveHandler(zones)
+	h.transfer.NotifyHandler.AddNotifyAllowed("10.0.0.0/8")
 
 	// Notify with higher serial
 	msg := &protocol.Message{
@@ -10272,7 +10272,7 @@ func TestHandleNOTIFY_SlaveOK(t *testing.T) {
 func TestHandleUPDATE_Refused(t *testing.T) {
 	h := newTestHandler()
 	zones := map[string]*zone.Zone{} // no zones configured
-	h.ddnsHandler = transfer.NewDynamicDNSHandler(zones)
+	h.transfer.DDNSHandler = transfer.NewDynamicDNSHandler(zones)
 
 	al, _ := audit.NewAuditLogger(true, "")
 	h.auditLogger = al
@@ -10431,7 +10431,7 @@ func TestServeDNS_RPZ_NSDNAME(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	// Custom upstream that includes NS in authority section
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -10506,7 +10506,7 @@ func TestServeDNS_RPZ_NSDNAME_UPstream(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	// Custom upstream that returns response with matching NS
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -10581,7 +10581,7 @@ func TestServeDNS_RPZ_ResponseIP_NoMatch(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -10610,7 +10610,7 @@ func TestServeDNS_RPZ_ResponseIP_Redirect(t *testing.T) {
 	if err := engine.Load(); err != nil {
 		t.Fatalf("failed to load rpz: %v", err)
 	}
-	h.rpzEngine = engine
+	h.security.RPZEngine = engine
 
 	addr, cleanup := startTestUpstream(t)
 	defer cleanup()
@@ -10796,7 +10796,7 @@ func TestServeDNS_DNS64_AAAAQueryNoAnswers(t *testing.T) {
 	h.upstream = client
 
 	synth, _ := dns64.NewSynthesizer("64:ff9b::", 96)
-	h.dns64Synth = synth
+	h.security.DNS64Synth = synth
 
 	// AAAA query → should try DNS64 synthesis
 	w := newCaptureWriter("10.0.0.1", "udp")

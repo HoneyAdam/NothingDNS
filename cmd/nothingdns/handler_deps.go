@@ -50,9 +50,10 @@ type SecurityComponents struct {
 	Blocklist   *blocklist.Blocklist
 	RPZEngine   *rpz.Engine
 	GeoEngine   *geodns.Engine
-	ACLChecher  *filter.ACLChecker
+	ACLChecker  *filter.ACLChecker
 	RateLimiter *filter.RateLimiter
 	RRL         *filter.RRL
+	DNS64Synth  *dns64.Synthesizer
 }
 
 // DNSSEC components for signature validation and zone signing.
