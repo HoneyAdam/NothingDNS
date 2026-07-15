@@ -1,6 +1,0 @@
-# NOTICE: This file is orphaned — the project uses npm, not pnpm
-# (see package-lock.json, web/package.json scripts, Makefile targets).
-# It is kept only to document a one-time excluded version during a
-# brief pnpm evaluation. Remove it when safe to do so.
-minimumReleaseAgeExclude:
-  - react-hook-form@7.79.0
