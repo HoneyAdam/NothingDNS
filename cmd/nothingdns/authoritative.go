@@ -316,8 +316,18 @@ func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protoc
 	qtype := q.QType
 
 	// Build the DNAME resource record
-	qnameParsed, _ := protocol.ParseName(qname)
-	dnameOwner, _ := protocol.ParseName(dnameRecord.Name)
+	qnameParsed, err := protocol.ParseName(qname)
+	if err != nil {
+		h.logger.Debugf("Failed to parse DNAME query name %q: %v", qname, err)
+		sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "invalid query name")
+		return
+	}
+	dnameOwner, err := protocol.ParseName(dnameRecord.Name)
+	if err != nil {
+		h.logger.Debugf("Failed to parse DNAME owner %q: %v", dnameRecord.Name, err)
+		sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "invalid DNAME owner")
+		return
+	}
 	dnameData := parseRData("DNAME", dnameRecord.RData)
 
 	dnameRR := &protocol.ResourceRecord{
@@ -329,7 +339,12 @@ func (h *integratedHandler) handleDNAMERecord(w server.ResponseWriter, r *protoc
 	}
 
 	// Build the synthesized CNAME resource record
-	synthCNAMETargetParsed, _ := protocol.ParseName(synthCNAMETarget)
+	synthCNAMETargetParsed, err := protocol.ParseName(synthCNAMETarget)
+	if err != nil {
+		h.logger.Debugf("Failed to parse CNAME target %q: %v", synthCNAMETarget, err)
+		sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "invalid CNAME target")
+		return
+	}
 	cnameRR := &protocol.ResourceRecord{
 		Name:  qnameParsed,
 		Type:  protocol.TypeCNAME,

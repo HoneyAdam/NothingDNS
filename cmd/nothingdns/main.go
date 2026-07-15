@@ -1187,6 +1187,9 @@ func loadZoneFile(path string) (*zone.Zone, error) {
 	if err != nil {
 		return nil, err
 	}
+	if z == nil {
+		return nil, fmt.Errorf("zone.ParseFile returned nil zone for %s", path)
+	}
 
 	if err := z.Validate(); err != nil {
 		return nil, fmt.Errorf("zone validation: %w", err)

@@ -224,25 +224,29 @@ func writeCachePersistFile(path string, data []byte) error {
 	}()
 
 	if err := util.WriteFull(tmp, data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Chmod(0644); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
+		// writeCachePersistFile is a package-level function with no
+		// access to the server logger; discard the close error since
+		// the data was already synced to disk at this point.
+		_ = err
 		return err
 	}
+	keepTemp = true // prevent defer from removing the now-renamed file
 
 	if err := os.Rename(tmpPath, path); err != nil {
 		return err
 	}
-	keepTemp = true
 	return nil
 }
 

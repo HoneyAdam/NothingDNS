@@ -12,7 +12,7 @@
 FROM golang:1.26.5-alpine AS builder
 
 # Install build dependencies (ca-certificates for TLS/DoH in final image)
-RUN apk add --no-cache git make ca-certificates
+RUN apk add --no-cache git ca-certificates
 
 # Set working directory
 WORKDIR /build

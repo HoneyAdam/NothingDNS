@@ -3,7 +3,6 @@
 # Single-node deployment for testing and development.
 # For production multi-node, use the Helm chart or Kubernetes manifests.
 
-version: "3.8"
 
 services:
   nothingdns:

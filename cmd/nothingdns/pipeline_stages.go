@@ -149,8 +149,9 @@ func rateLimitStage(h *integratedHandler) Stage {
 func doBitStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if opt := q.msg.GetOPT(); opt != nil {
-			optHdr := protocol.ParseEDNS0Header(opt)
-			q.doBit = optHdr.DO
+			if optHdr := protocol.ParseEDNS0Header(opt); optHdr != nil {
+				q.doBit = optHdr.DO
+			}
 		}
 		q.cacheKey = cache.MakeKey(q.qname, q.qtype, q.doBit)
 		return false, nil
@@ -450,7 +451,7 @@ func upstreamStage(h *integratedHandler) Stage {
 		}
 
 		h.logger.Debugf("Forwarding query for %s to upstream", q.qname)
-		if h.metrics != nil {
+		if h.metrics != nil && h.config != nil {
 			if len(h.config.Upstream.Servers) > 0 {
 				h.metrics.RecordUpstreamQuery(h.config.Upstream.Servers[0])
 			} else if len(h.config.Upstream.AnycastGroups) > 0 {
@@ -791,21 +792,40 @@ func anyStage(h *integratedHandler) Stage {
 }
 
 // transferStage handles AXFR, IXFR, NOTIFY, and UPDATE requests.
+// Each handler is nil-guarded: if the corresponding sub-server was not
+// initialised (disabled config or startup failure), the request is refused
+// rather than panicking on a nil pointer dereference.
 func transferStage(h *integratedHandler) Stage {
 	return func(ctx context.Context, q *query, w server.ResponseWriter) (bool, error) {
 		if q.qtype == protocol.TypeAXFR {
+			if h.axfrServer == nil {
+				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
+				return true, nil
+			}
 			h.handleAXFR(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if q.qtype == protocol.TypeIXFR {
+			if h.ixfrServer == nil {
+				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
+				return true, nil
+			}
 			h.handleIXFR(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if transfer.IsNOTIFYRequest(q.msg) {
+			if h.notifyHandler == nil {
+				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
+				return true, nil
+			}
 			h.handleNOTIFY(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}
 		if transfer.IsUpdateRequest(q.msg) {
+			if h.ddnsHandler == nil {
+				sendError(q.currentWriter, q.msg, protocol.RcodeRefused)
+				return true, nil
+			}
 			h.handleUPDATE(q.currentWriter, q.msg, q.q)
 			return true, nil
 		}

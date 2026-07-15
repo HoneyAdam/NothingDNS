@@ -70,14 +70,25 @@ func (p *Pipeline) ServeDNS(h *integratedHandler, w server.ResponseWriter, r *pr
 	reqID := util.GenerateRequestID()
 	start := time.Now()
 
-	// Panic recovery — prevents handler crashes from crashing the server
+	// q is declared at function scope so the panic-recovery defer (above)
+	// can reference it. It is populated below after tracing setup.
+	var q *query
+
+	// Panic recovery — prevents handler crashes from crashing the server.
+	// w may be nil if the panic occurs before q.currentWriter is assigned
+	// (line 185 below). Use q.currentWriter instead when available, as it
+	// survives stage-level writer wrapping (e.g. cookieStage).
 	defer func() {
 		if rec := recover(); rec != nil {
 			h.logger.Errorf("Panic in ServeDNS: internal error (req_id=%s)", reqID)
 			if h.metrics != nil {
 				h.metrics.RecordResponse(protocol.RcodeServerFailure)
 			}
-			sendErrorWithEDE(w, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "internal server error")
+			wr := w
+			if q != nil && q.currentWriter != nil {
+				wr = q.currentWriter
+			}
+			sendErrorWithEDE(wr, r, protocol.RcodeServerFailure, protocol.EDEOtherError, "internal server error")
 		}
 	}()
 
@@ -88,7 +99,11 @@ func (p *Pipeline) ServeDNS(h *integratedHandler, w server.ResponseWriter, r *pr
 	if h.serverCtx != nil {
 		reqCtx, reqCancel = context.WithCancel(h.serverCtx)
 	} else {
-		reqCtx, reqCancel = context.WithCancel(context.Background())
+		// serverCtx is nil during early startup or test misconfiguration.
+		// context.TODO flags this as a placeholder — the derived context will
+		// NOT be cancelled on server shutdown, so outstanding requests may
+		// block graceful termination.
+		reqCtx, reqCancel = context.WithCancel(context.TODO())
 	}
 	defer reqCancel()
 
@@ -98,7 +113,7 @@ func (p *Pipeline) ServeDNS(h *integratedHandler, w server.ResponseWriter, r *pr
 		)
 	}
 
-	q := &query{
+	q = &query{
 		msg:    r,
 		start:  start,
 		reqID:  reqID,

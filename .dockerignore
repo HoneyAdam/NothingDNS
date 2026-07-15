@@ -5,7 +5,10 @@
 *.key
 *.crt
 security-report/
-.web/
+# web/ is the React frontend — its dist/ and node_modules/ are
+# excluded below. The orphaned pattern .web/ (from an older layout)
+# is intentionally removed after confirming the directory does not
+# exist anywhere in the project tree.
 web/node_modules/
 web/dist/
 build/

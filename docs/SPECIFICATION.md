@@ -73,6 +73,14 @@ NothingDNS is a modern, production-grade DNS server that combines authoritative 
 
 ### 2.2 Module Structure
 
+> **Note:** The tree below is aspirational and reflects the planned module
+> layout. The actual source tree is flat in `internal/` — see `tree -d` or
+> the project README for the current layout. Key differences: there is no
+> `internal/api/rest/` or `internal/api/grpc/` (API lives flat in
+> `internal/api/`), no `internal/dynamic/` (DDNS is in `internal/transfer/`),
+> and the `internal/util/` used here does not correspond to a single
+> `internal/util/` package.
+
 ```
 nothingdns/
 ├── cmd/
@@ -200,8 +208,8 @@ nothingdns/
 │   └── example.com.zone     # Example BIND zone file
 ├── blocklists/
 │   └── default.txt          # Default ad/tracker blocklist
-├── go.mod                   # Zero dependencies — only "module" line
-├── go.sum                   # Empty
+├── go.mod                   # Minimal external dependencies (quic-go, golang.org/x/...)
+├── go.sum                   # Module checksums (populated)
 ├── Makefile
 ├── Dockerfile
 ├── README.md
@@ -1221,7 +1229,7 @@ bench:
 | Feature | NothingDNS | BIND 9 | CoreDNS | PowerDNS | Unbound |
 |---------|-----------|--------|---------|----------|---------|
 | Language | Go | C | Go | C++ | C |
-| Dependencies | Zero | Many | Many (plugins) | Many | Several |
+| Dependencies | Minimal (2 direct) | Many | Many (plugins) | Many | Several |
 | Single Binary | ✅ | ❌ | ✅ | ❌ | ❌ |
 | Authoritative | ✅ | ✅ | ✅ (plugin) | ✅ | ❌ |
 | Recursive | ✅ | ✅ | ✅ (plugin) | ✅ (recursor) | ✅ |
@@ -1290,8 +1298,7 @@ bench:
 - Windows service manager (use NSSM externally)
 - LDAP/Active Directory integration
 - HTTP-based zone API that replaces zone files entirely (API and zone files coexist)
-- mDNS / DNS-SD (multicast DNS for local networks)
-- Full QUIC implementation beyond DNS-focused subset
+- Full QUIC implementation beyond DNS-focused subset (mDNS is implemented — see `internal/mdns/`)
 - Commercial GeoIP database bundling (user provides their own)
 
 ---
