@@ -747,6 +747,30 @@ func run() error {
 	// to prevent data races on the shared zones map
 	transferManager.SetZonesMu(&handler.zonesMu)
 
+	// ── Build hot-reload state (shared by the API callback and SIGHUP) ──
+	reloadState := &reloadableState{
+		cfg:             &cfg,
+		cfgMu:           &cfgMu,
+		securityManager: &securityManager,
+		bl:              &bl,
+		rpzEngine:       &rpzEngine,
+		geoEngine:       &geoEngine,
+		dns64Synth:      &dns64Synth,
+		aclChecker:      &aclChecker,
+		rateLimiter:     &rateLimiter,
+		upstreamManager: &upstreamManager,
+		dnssecManager:   &dnssecManager,
+		client:          &client,
+		loadBalancer:    &loadBalancer,
+		validator:       &validator,
+		zoneFiles:       &zoneFiles,
+		zoneMgr:         zoneManagerInstance,
+		handler:         handler,
+		apiServer:       nil, // set below after apiServer is created
+		logger:          logger,
+		auditLog:        auditLogger,
+	}
+
 	// Initialize API server
 	dashboardServer := dashboard.NewServer()
 	dashboardServer.SetAllowedOrigins(cfg.Server.HTTP.AllowedOrigins)
@@ -759,102 +783,26 @@ func run() error {
 	var apiServer *api.Server
 	apiServer = api.NewServer(httpConfig, zoneManagerInstance, dnsCache, func() error {
 		logger.Info("Reloading configuration via API...")
-		now := time.Now().UTC().Format(time.RFC3339)
-		if auditLogger != nil {
-			auditLogger.LogReload(audit.ReloadAuditEntry{
-				Timestamp: now,
-				Action:    "start",
-			})
-		}
-		reloadCfg, cfgErr := loadReloadConfig(*configPath)
-		if cfgErr != nil {
-			logger.Warnf("Failed to reload config: %v", cfgErr)
-			if auditLogger != nil {
-				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Action:    "complete",
-					Error:     cfgErr.Error(),
-				})
-			}
-			return cfgErr
-		}
-		zonePlan, reloadZonesErr := prepareConfiguredZoneFiles(reloadCfg.Zones, loadZoneFile)
-		reloadedZones := len(zonePlan)
-		if reloadZonesErr != nil {
-			logger.Warnf("Failed to reload configured zone files: %v", reloadZonesErr)
-			if auditLogger != nil {
-				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Action:    "complete",
-					Zones:     reloadedZones,
-					Error:     reloadZonesErr.Error(),
-				})
-			}
-			return reloadZonesErr
-		}
-		viewPlan, viewCount, reloadViewsErr := prepareConfiguredViews(handler, reloadCfg.Views, loadZoneFile)
-		if reloadViewsErr != nil {
-			logger.Warnf("Failed to reload split-horizon views: %v", reloadViewsErr)
-			if auditLogger != nil {
-				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Action:    "complete",
-					Zones:     reloadedZones,
-					Error:     reloadViewsErr.Error(),
-				})
-			}
-			return reloadViewsErr
-		}
-		upstreamPlan, reloadUpstreamErr := prepareUpstreamComponents(reloadCfg, logger)
-		if reloadUpstreamErr != nil {
-			logger.Warnf("Failed to reload upstream components: %v", reloadUpstreamErr)
-			if auditLogger != nil {
-				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Action:    "complete",
-					Zones:     reloadedZones,
-					Error:     reloadUpstreamErr.Error(),
-				})
-			}
-			return reloadUpstreamErr
-		}
-		nextSecurityManager, securityResult, reloadSecurityErr := reloadSecurityComponents(reloadCfg, securityManager, handler, apiServer, logger)
-		if reloadSecurityErr != nil {
-			upstreamPlan.upstreamManager.Stop()
-			if auditLogger != nil {
-				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: time.Now().UTC().Format(time.RFC3339),
-					Action:    "complete",
-					Zones:     reloadedZones,
-					Error:     reloadSecurityErr.Error(),
-				})
-			}
-			return reloadSecurityErr
-		}
-		securityManager = nextSecurityManager
-		bl = securityResult.Blocklist
-		rpzEngine = securityResult.RPZEngine
-		geoEngine = securityResult.GeoEngine
-		dns64Synth = securityResult.DNS64Synth
-		aclChecker = securityResult.ACLChecher
-		rateLimiter = securityResult.RateLimiter
-		applyConfiguredZoneFiles(handler, zoneManagerInstance, zoneFiles, zonePlan, logger)
-		applyConfiguredViews(handler, viewPlan, viewCount, logger)
-		applyUpstreamComponents(upstreamPlan, upstreamManager, handler, apiServer)
-		upstreamManager = upstreamPlan.upstreamManager
-		dnssecManager = upstreamPlan.dnssecManager
-		client = upstreamManager.Client
-		loadBalancer = upstreamManager.LoadBalancer
-		validator = dnssecManager.Validator
-		commitLoadedConfig(reloadCfg, &cfgMu, &cfg, handler)
 		if auditLogger != nil {
 			auditLogger.LogReload(audit.ReloadAuditEntry{
 				Timestamp: time.Now().UTC().Format(time.RFC3339),
-				Action:    "complete",
-				Zones:     reloadedZones,
+				Action:    "start",
 			})
 		}
-		return nil
+		n, err := reloadConfig(*configPath, reloadState)
+		if auditLogger != nil {
+			errStr := ""
+			if err != nil {
+				errStr = err.Error()
+			}
+			auditLogger.LogReload(audit.ReloadAuditEntry{
+				Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Action:    "complete",
+				Zones:     n,
+				Error:     errStr,
+			})
+		}
+		return err
 	}, handler, clusterMgr, dashboardServer).
 		WithConfigGetter(func() *config.Config {
 			cfgMu.RLock()
@@ -874,6 +822,7 @@ func run() error {
 		WithGeoDNS(geoEngine).
 		WithSlaveManager(transferManager.Result().SlaveManager).
 		WithRateLimiter(rateLimiter)
+	reloadState.apiServer = apiServer // wire apiServer back into reload state
 
 	// Initialize ODoH (RFC 9230) if enabled
 	if httpConfig.ODoHEnabled {
@@ -1056,90 +1005,25 @@ func run() error {
 
 		case syscall.SIGHUP:
 			logger.Info("Received SIGHUP, reloading configuration...")
-			now := time.Now().UTC().Format(time.RFC3339)
 			if auditLogger != nil {
 				auditLogger.LogReload(audit.ReloadAuditEntry{
-					Timestamp: now,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Action:    "start",
 				})
 			}
-			// Reload the config file to pick up changes
-			reloadCfg, cfgErr := loadReloadConfig(*configPath)
-			if cfgErr != nil {
-				logger.Warnf("Failed to reload config: %v", cfgErr)
-			}
-			// Reload zone files
-			if cfgErr != nil {
-				cfgMu.RLock()
-				reloadCfg = cfg // keep current config on error
-				cfgMu.RUnlock()
-			}
-			zonePlan, reloadZonesErr := prepareConfiguredZoneFiles(reloadCfg.Zones, loadZoneFile)
-			reloadedZones := len(zonePlan)
-			if reloadZonesErr != nil {
-				logger.Warnf("Failed to reload configured zone files: %v", reloadZonesErr)
-			}
-			viewPlan, viewCount, reloadViewsErr := prepareConfiguredViews(handler, reloadCfg.Views, loadZoneFile)
-			if reloadViewsErr != nil {
-				logger.Warnf("Failed to reload split-horizon views: %v", reloadViewsErr)
-			}
-			var upstreamPlan *upstreamReloadPlan
-			var reloadUpstreamErr error
-			if reloadZonesErr == nil && reloadViewsErr == nil {
-				upstreamPlan, reloadUpstreamErr = prepareUpstreamComponents(reloadCfg, logger)
-			}
-			if reloadUpstreamErr != nil {
-				logger.Warnf("Failed to reload upstream components: %v", reloadUpstreamErr)
-			}
-			var reloadSecurityErr error
-			if reloadZonesErr == nil && reloadViewsErr == nil && reloadUpstreamErr == nil {
-				var nextSecurityManager *SecurityManager
-				var securityResult *SecurityManagerResult
-				nextSecurityManager, securityResult, reloadSecurityErr = reloadSecurityComponents(reloadCfg, securityManager, handler, apiServer, logger)
-				if reloadSecurityErr == nil {
-					securityManager = nextSecurityManager
-					bl = securityResult.Blocklist
-					rpzEngine = securityResult.RPZEngine
-					geoEngine = securityResult.GeoEngine
-					dns64Synth = securityResult.DNS64Synth
-					aclChecker = securityResult.ACLChecher
-					rateLimiter = securityResult.RateLimiter
-					applyConfiguredZoneFiles(handler, zoneManagerInstance, zoneFiles, zonePlan, logger)
-					applyConfiguredViews(handler, viewPlan, viewCount, logger)
-					applyUpstreamComponents(upstreamPlan, upstreamManager, handler, apiServer)
-					upstreamManager = upstreamPlan.upstreamManager
-					dnssecManager = upstreamPlan.dnssecManager
-					client = upstreamManager.Client
-					loadBalancer = upstreamManager.LoadBalancer
-					validator = dnssecManager.Validator
-				}
-			}
-			if reloadSecurityErr != nil {
-				if upstreamPlan != nil && upstreamPlan.upstreamManager != nil {
-					upstreamPlan.upstreamManager.Stop()
-				}
-				logger.Warnf("Failed to reload security components: %v", reloadSecurityErr)
-			}
-			if cfgErr == nil && reloadZonesErr == nil && reloadSecurityErr == nil && reloadViewsErr == nil && reloadUpstreamErr == nil {
-				commitLoadedConfig(reloadCfg, &cfgMu, &cfg, handler)
+			n, err := reloadConfig(*configPath, reloadState)
+			if err != nil {
+				logger.Warnf("SIGHUP reload failed (keeping old config): %v", err)
 			}
 			if auditLogger != nil {
 				errStr := ""
-				if cfgErr != nil {
-					errStr = cfgErr.Error()
-				} else if reloadZonesErr != nil {
-					errStr = reloadZonesErr.Error()
-				} else if reloadViewsErr != nil {
-					errStr = reloadViewsErr.Error()
-				} else if reloadUpstreamErr != nil {
-					errStr = reloadUpstreamErr.Error()
-				} else if reloadSecurityErr != nil {
-					errStr = reloadSecurityErr.Error()
+				if err != nil {
+					errStr = err.Error()
 				}
 				auditLogger.LogReload(audit.ReloadAuditEntry{
 					Timestamp: time.Now().UTC().Format(time.RFC3339),
 					Action:    "complete",
-					Zones:     reloadedZones,
+					Zones:     n,
 					Error:     errStr,
 				})
 			}
