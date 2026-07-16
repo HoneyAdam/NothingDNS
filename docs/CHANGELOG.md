@@ -5,7 +5,7 @@ All notable changes to NothingDNS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-07-15
 
 ### Security
 
@@ -152,6 +152,30 @@ Lifted across multiple packages:
   symbols no longer shipped in the production binary),
   `ErrMMDBNotSupported` sentinel (LoadMMDB returns specific decode
   errors now), unused `DynamicDNSHandler.closed` field.
+- Stale `web/go.mod` artifact, orphaned `web/pnpm-workspace.yaml`.
+- Coverage `.out` files from git tracking (already gitignored).
+- `docs/archive/NOTHING.md`, `docs/archive/PRODUCTION_READINESS.md` moved to `docs/legacy/`.
+
+### Refactored
+
+- **Hot-reload logic extraction**: SIGHUP handler and `/config/reload` API
+  callback consolidated into `reloadConfig()` in `cmd/nothingdns/reload.go`.
+  Net **-116 lines** in `main.go`. (Phase 2-A)
+- **Handler sub-structs**: 12 flat `integratedHandler` fields grouped into
+  `SecurityComponents` (7) and `TransferComponents` (5) sub-structs.
+  ~365 net lines removed across 15 files. (Phase 2-B)
+- **Codebase audit**: Full static analysis (security-check, bug-hunter) with
+  8 code-quality fixes, 6 infrastructure cleanups, 4 documentation corrections.
+  `go vet ./...` and all tests pass after fixes.
+
+### Testing
+
+- **Frontend unit test suite**: Vitest v4 + React Testing Library v16 with
+  jsdom environment. 51 tests across 8 files covering the API client
+  (`api.ts`), auth store (`authStore.ts`), configuration mutation hooks,
+  theme context, `ErrorBoundary`, `ErrorState`/`EmptyState`, `ConfirmDialog`,
+  and utility functions. Wired into CI via `npm test` in the web workflow.
+  (Phase 3-A)
 
 ## [0.1.1] — 2026-04-12
 

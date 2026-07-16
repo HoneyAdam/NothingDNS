@@ -476,7 +476,7 @@ dnsctl server status
 ```
 Server Status:
   Status:    ok
-  Version:   0.1.1
+  Version:   1.0.0
   Timestamp: 2026-07-06T12:00:00Z
   Cache:
     Size:     123
@@ -510,7 +510,7 @@ dnsctl version
 
 **Output**:
 ```
-dnsctl version 0.1.1
+dnsctl version 1.0.0
 ```
 
 `dnsctl -version` prints the same version line.

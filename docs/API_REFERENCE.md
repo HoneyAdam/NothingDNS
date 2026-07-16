@@ -211,7 +211,7 @@ Authorization: Bearer <token>
 {
   "status": "ok",
   "timestamp": "2026-07-06T12:00:00Z",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "cache": {
     "size": 123,
     "capacity": 10000,
