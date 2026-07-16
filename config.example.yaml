@@ -20,6 +20,13 @@ server:
   http:
     enabled: true
     bind: "0.0.0.0:8080"
+    # SECURITY: Binding to 0.0.0.0 exposes the REST API, dashboard, and
+    # DoH endpoint to every network interface. For production deployments
+    # use one of:
+    #   1. Bind to 127.0.0.1:8080 behind a reverse proxy (nginx, Caddy)
+    #   2. Enable TLS below for HTTPS encryption
+    #   3. Use a firewall to restrict access to trusted networks
+    # See docs/SECURITY.md and docs/DEPLOYMENT_CHECKLIST.md.
     # TLS configuration (optional, enables HTTPS)
     # tls_cert_file: /etc/nothingdns/tls/server.crt
     # tls_key_file: /etc/nothingdns/tls/server.key

@@ -64,6 +64,24 @@ All cryptographic operations use Go's standard library `crypto/*` packages. No t
 - IP-based access control for queries and management
 - Rate limiting (RRL) for query amplification prevention
 
+### API Security
+
+- **HTTP bind address**: The default `http.bind` in `config.example.yaml` is
+  `"0.0.0.0:8080"`, which listens on every network interface. In production,
+  bind to `"127.0.0.1:8080"` behind a reverse proxy (nginx, Caddy), enable
+  TLS for HTTPS encryption, or restrict access with a firewall.
+- **CORS wildcard origins**: The production config validator
+  (`validateProduction`) rejects `allowed_origins: ["*"]` when `http.bind`
+  is a public (`0.0.0.0` / `::`) address. Use explicit origin lists in
+  production (`allowed_origins: ["https://dns.example.com"]`).
+- **Rate limiting**: Login endpoints are rate-limited per-IP and per-account
+  with configurable lockout thresholds. Unauthenticated requests consume rate
+  limit budget before authentication (prevents tie-to-IP bypass via brute
+  force).
+- **Auth token storage**: Bearer tokens are held in memory only
+  (Zustand store), never written to localStorage. The backend HttpOnly cookie
+  is never read from JavaScript.
+
 ## Authorization Model
 
 ### RBAC and Zone Access

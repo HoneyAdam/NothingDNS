@@ -34,7 +34,8 @@ DNS dinleyicileri ve yönetim arayüzleri.
 | `xot.bind` | string | `:853` | hayır | XoT dinleme adresi |
 | `xot.min_tls_version` | int | `12` | evet | `12` = TLS 1.2, `13` = TLS 1.3 |
 | `http.enabled` | bool | `true` | hayır | HTTP API ve dashboard |
-| `http.bind` | string | `:8080` | hayır | HTTP dinleme adresi |
+| `http.bind` | string | `:8080` | hayır | HTTP dinleme adresi. **Güvenlik:** `0.0.0.0:8080` tüm ağ arayüzlerini dinler. Production'da reverse proxy arkasında `127.0.0.1:8080` kullanın veya TLS etkinleştirin. Bkz: `docs/SECURITY.md` |
+| `http.allowed_origins` | `[]string` | — | evet | CORS izin verilen originler. **Güvenlik:** Public bind'da wildcard (`["*"]`) production validator tarafından reddedilir. Production'da açık liste kullanın: `["https://dns.example.com"]` |
 | `http.auth_token` | string | "" | evet | API bearer token (boş = auth yok) |
 | `http.users` | []object | — | evet | Çoklu kullanıcı: `username`, `password`, `role` (admin/operator/viewer) |
 | `http.auth_secret` | string | otomatik | hayır | JWT imzalama anahtarı (boşsa otomatik üretilir, restart'ta korunur) |
