@@ -125,9 +125,13 @@ Dashboard available at `http://localhost:8080`:
 server:
   http:
     enabled: true
-    bind: "0.0.0.0:8080"
+    bind: "127.0.0.1:8080"    # Use 127.0.0.1 behind a reverse proxy
     auth_secret: "replace-with-32-byte-random-secret"
 ```
+
+> ⚠️ **Security**: Binding to `0.0.0.0:8080` exposes the dashboard and API to
+> every network interface. For production, bind to `127.0.0.1` behind a reverse
+> proxy or enable TLS. See [docs/SECURITY.md](docs/SECURITY.md).
 
 Configure `server.http.users` for per-user dashboard login, or use the legacy
 `server.http.auth_token` mode for a single shared bearer token.
@@ -154,8 +158,7 @@ dnsctl dig +dnssec example.com A
 ## Docker with Custom Config
 
 ```yaml
-# docker-compose.yml
-version: "3.8"
+# docker-compose.yml (Compose v2, no `version:` key needed)
 services:
   nothingdns:
     image: ghcr.io/nothingdns/nothingdns:latest

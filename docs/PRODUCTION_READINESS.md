@@ -149,7 +149,9 @@ Do not commit literal secret values to any config file. The config validator rej
 ## Promotion Checklist
 
 - All release gates above pass on a clean checkout.
+- `npm --prefix web run test` passes (51 unit tests, 0 failures).
 - `npm --prefix web run build` output is committed under `internal/dashboard/static/dist/`.
 - Container image is built from the verified tree and includes SBOM/provenance.
 - Deployment config validates with real secret values in the target environment.
 - DNS, DoH, metrics, health, readiness, liveness, cluster, and dashboard endpoints are smoke-tested after rollout with `scripts/production-smoke.sh`.
+- Binary version reports `NothingDNS version 1.0.0` (or the tagged release version).

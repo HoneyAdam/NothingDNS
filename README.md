@@ -100,6 +100,7 @@ The web package uses npm scripts:
 cd web
 npm install
 npm run build
+npm test          # 51 unit tests with Vitest + RTL
 npm run lint
 ```
 
