@@ -344,7 +344,8 @@ func (c *Client) selectRandom() *Server {
 
 	// Simple round-robin via incrementing counter for now
 	// (True random requires math/rand which we'd need to seed)
-	idx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(healthy)
+	// Modulo in uint32 space: int(uint32) can go negative on 32-bit.
+	idx := int(atomic.AddUint32(&roundRobinIndex, 1) % uint32(len(healthy)))
 	return healthy[idx]
 }
 
@@ -362,7 +363,7 @@ func (c *Client) selectRoundRobin() *Server {
 	}
 
 	// Try to find a healthy server starting from current index
-	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(servers)
+	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1) % uint32(len(servers)))
 	for i := 0; i < len(servers); i++ {
 		idx := (startIdx + i) % len(servers)
 		server := servers[idx]

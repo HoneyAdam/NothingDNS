@@ -496,7 +496,9 @@ func (lb *LoadBalancer) selectRandom() *Server {
 		return firstServer(lb.servers, 0)
 	}
 
-	idx := int(time.Now().UnixNano()) % len(healthy)
+	// Modulo in uint32 space: int(time.Now().UnixNano()) truncates negative
+	// on 32-bit platforms and would index out of range.
+	idx := int(atomic.AddUint32(&roundRobinIndex, 1) % uint32(len(healthy)))
 	return healthy[idx]
 }
 
@@ -508,7 +510,7 @@ func (lb *LoadBalancer) selectRoundRobin() *Server {
 	}
 
 	// Try to find a healthy server
-	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1)) % len(servers)
+	startIdx := int(atomic.AddUint32(&roundRobinIndex, 1) % uint32(len(servers)))
 	for i := 0; i < len(servers); i++ {
 		idx := (startIdx + i) % len(servers)
 		server := servers[idx]
