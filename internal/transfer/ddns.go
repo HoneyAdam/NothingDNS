@@ -564,13 +564,7 @@ func applyOperationToZone(z *zone.Zone, op UpdateOperation) error {
 		if err := zone.ValidateRecordData(name, op.RData); err != nil {
 			return err
 		}
-		record := zone.Record{
-			Name:  name,
-			Type:  protocol.TypeString(op.Type),
-			TTL:   op.TTL,
-			RData: op.RData,
-		}
-		z.Records[name] = append(z.Records[name], record)
+		return applyAddToZone(z, name, op)
 
 	case UpdateOpDelete:
 		// Delete specific record (name + type + rdata)
@@ -585,6 +579,91 @@ func applyOperationToZone(z *zone.Zone, op UpdateOperation) error {
 		zoneDeleteName(z, op.Name)
 	}
 
+	return nil
+}
+
+// applyAddToZone implements the RFC 2136 §3.4.2.2 Add semantics. The
+// previous implementation appended unconditionally, which duplicated
+// identical RRs on replayed UPDATEs, allowed CNAME to coexist with other
+// data, and stacked multiple SOA records at the apex.
+//
+// Rules applied (caller holds z.Lock()):
+//   - Owner has a CNAME and the add is not a CNAME → silently ignored.
+//   - Add is a CNAME and owner has non-CNAME data → silently ignored.
+//   - Add is a CNAME over an existing CNAME → replaces it (singleton RRset).
+//   - Add is an SOA: ignored unless at the apex with an RFC 1982-newer
+//     serial, in which case it replaces the existing SOA.
+//   - Identical name+type+rdata already present → TTL updated in place,
+//     no duplicate appended.
+func applyAddToZone(z *zone.Zone, name string, op UpdateOperation) error {
+	typeStr := protocol.TypeString(op.Type)
+	existing := z.Records[name]
+
+	if typeStr == "CNAME" {
+		for i, r := range existing {
+			if r.Type == "CNAME" {
+				// Singleton RRset: replace in place.
+				existing[i].TTL = op.TTL
+				existing[i].RData = op.RData
+				return nil
+			}
+		}
+		if len(existing) > 0 {
+			return nil // non-CNAME data exists at owner: ignore
+		}
+	} else {
+		for _, r := range existing {
+			if r.Type == "CNAME" {
+				return nil // owner is an alias: ignore non-CNAME adds
+			}
+		}
+	}
+
+	if typeStr == "SOA" {
+		apex := strings.ToLower(z.Origin)
+		if !strings.HasSuffix(apex, ".") {
+			apex += "."
+		}
+		if name != apex {
+			return nil // SOA outside the apex: ignore
+		}
+		newSOA := zone.ParseSOAFromRData(op.RData)
+		if newSOA == nil {
+			return fmt.Errorf("ddns: malformed SOA rdata")
+		}
+		if z.SOA != nil && !zone.SerialIsNewer(newSOA.Serial, z.SOA.Serial) {
+			return nil // not newer (RFC 1982): ignore
+		}
+		newSOA.Name = name
+		newSOA.TTL = op.TTL
+		z.SOA = newSOA
+		for i, r := range existing {
+			if r.Type == "SOA" {
+				existing[i].TTL = op.TTL
+				existing[i].RData = op.RData
+				return nil
+			}
+		}
+		z.Records[name] = append(existing, zone.Record{
+			Name: name, Type: typeStr, TTL: op.TTL, RData: op.RData,
+		})
+		return nil
+	}
+
+	// Duplicate suppression: identical RDATA updates the TTL only.
+	for i, r := range existing {
+		if r.Type == typeStr && r.RData == op.RData {
+			existing[i].TTL = op.TTL
+			return nil
+		}
+	}
+
+	z.Records[name] = append(existing, zone.Record{
+		Name:  name,
+		Type:  typeStr,
+		TTL:   op.TTL,
+		RData: op.RData,
+	})
 	return nil
 }
 

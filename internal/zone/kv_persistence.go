@@ -242,6 +242,14 @@ func (k *KVPersistence) storedRecordsToZone(meta storage.ZoneMeta, records map[s
 	return z
 }
 
+// ParseSOAFromRData parses SOA record fields from an RData string.
+// Format: "mname rname serial refresh retry expire minimum"
+// Returns nil on parse failure. Exported for DDNS (RFC 2136 §3.4.2.2
+// SOA-replacement rule needs the incoming serial).
+func ParseSOAFromRData(rdata string) *SOARecord {
+	return parseSOAFromRData(rdata)
+}
+
 // parseSOAFromRData parses SOA record fields from RData string.
 // Format: "mname rname serial refresh retry expire minimum"
 // Example: "ns1.example.com. hostmaster.example.com. 2024010101 3600 900 604800 86400"
