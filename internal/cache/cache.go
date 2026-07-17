@@ -127,6 +127,27 @@ func decrementMessageTTLs(msg *protocol.Message, ageSeconds int64) {
 	adjust(msg.Additionals)
 }
 
+// clampMessageTTLs caps every RR TTL in msg (Answers/Authority/Additional,
+// skipping the OPT pseudo-record) at maxTTL. Used for stale serving: RFC 8767
+// §4 requires stale data to go out with a short TTL (30s recommended) so
+// downstream caches re-check quickly once the authority recovers — serving
+// the original (possibly hours-long) TTLs would pin stale data downstream.
+func clampMessageTTLs(msg *protocol.Message, maxTTL uint32) {
+	clamp := func(rrs []*protocol.ResourceRecord) {
+		for _, rr := range rrs {
+			if rr == nil || rr.Type == protocol.TypeOPT {
+				continue
+			}
+			if rr.TTL > maxTTL {
+				rr.TTL = maxTTL
+			}
+		}
+	}
+	clamp(msg.Answers)
+	clamp(msg.Authorities)
+	clamp(msg.Additionals)
+}
+
 func remainingSecondsUint32(remaining time.Duration) uint32 {
 	seconds := int64(remaining / time.Second)
 	if seconds <= 0 {
@@ -533,6 +554,9 @@ func (c *Cache) GetStale(key string) *Entry {
 	// never mutated in place, so copying from it unlocked is safe. Callers
 	// own the returned copy and may hand it to reply() directly.
 	staleEntry.Message = cachedMsg.Copy()
+	// RFC 8767 §4: stale answers must carry a short TTL (30s), not the
+	// TTLs the records were cached with.
+	clampMessageTTLs(staleEntry.Message, 30)
 	return staleEntry
 }
 

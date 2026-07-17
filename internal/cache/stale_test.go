@@ -146,8 +146,11 @@ func TestGetStaleReturnsMessageCopy(t *testing.T) {
 	if stale.Message.Header.ID != 1234 {
 		t.Fatalf("stale message aliases cached header: got %#x", stale.Message.Header.ID)
 	}
-	if stale.Message.Answers[0].TTL != 300 {
-		t.Fatalf("stale message aliases cached answer: got TTL %d", stale.Message.Answers[0].TTL)
+	// Cached TTL is 300; stale serving clamps it to 30 (RFC 8767 §4). The
+	// aliasing check still holds: had the copy aliased the cached message,
+	// the previous mutation would make this read 1.
+	if stale.Message.Answers[0].TTL != 30 {
+		t.Fatalf("stale message aliases cached answer: got TTL %d, want 30", stale.Message.Answers[0].TTL)
 	}
 }
 
@@ -251,5 +254,38 @@ func TestServeStalePreservesEntry(t *testing.T) {
 	stale := c.GetStale("test:1")
 	if stale == nil {
 		t.Error("expected stale entry to be preserved after normal Get miss")
+	}
+}
+
+// Regression: RFC 8767 §4 — stale answers must be served with a short TTL
+// (30s), not the TTLs the records were originally cached with. GetStale
+// previously set Entry.TTL=30 metadata but left the message's RR TTLs at
+// their original (potentially hours-long) values.
+func TestGetStaleClampsRecordTTLs(t *testing.T) {
+	c, clock := newStaleTestCache()
+
+	msg := newTestMessage()
+	for _, rr := range msg.Answers {
+		rr.TTL = 3600
+	}
+	c.Set("test:clamp", msg, 1)
+
+	clock.Advance(2 * time.Second)
+
+	stale := c.GetStale("test:clamp")
+	if stale == nil {
+		t.Fatal("expected stale entry after expiry")
+	}
+	for _, section := range [][]*protocol.ResourceRecord{
+		stale.Message.Answers, stale.Message.Authorities, stale.Message.Additionals,
+	} {
+		for _, rr := range section {
+			if rr.Type == protocol.TypeOPT {
+				continue
+			}
+			if rr.TTL > 30 {
+				t.Errorf("stale RR %s TTL = %d, want <= 30 (RFC 8767 §4)", rr.Name.String(), rr.TTL)
+			}
+		}
 	}
 }
