@@ -62,8 +62,20 @@ func startServers(cfg *config.Config, handler *integratedHandler, transferMgr *T
 	}()
 	logger.Infof("UDP server listening on %s", udpAddr)
 
+	// DSO (RFC 8490): one shared adapter serves both TCP and DoT — conn
+	// keys are unique across listeners. Installed before Serve starts.
+	var dsoAdapter *dsoConnAdapter
+	if handler.dsoManager != nil {
+		dsoAdapter = newDSOConnAdapter(handler.dsoManager, logger)
+	}
+
 	// TCP
 	s.tcp = server.NewTCPServerWithWorkers(tcpAddr, handler, cfg.Server.TCPWorkers)
+	if dsoAdapter != nil {
+		// Session creation still refuses plain TCP unless the DSO manager
+		// was configured with AllowPlainTCP (RFC 8490 §5.1).
+		s.tcp.SetDSOHandler(dsoAdapter)
+	}
 	if err := s.tcp.Listen(); err != nil {
 		return s, fmt.Errorf("starting TCP server: %w", err)
 	}
@@ -76,7 +88,7 @@ func startServers(cfg *config.Config, handler *integratedHandler, transferMgr *T
 
 	// TLS (DoT)
 	if cfg.Server.TLS.Enabled {
-		if err := s.startTLS(cfg, handler, logger); err != nil {
+		if err := s.startTLS(cfg, handler, dsoAdapter, logger); err != nil {
 			return s, err
 		}
 	}
@@ -99,7 +111,7 @@ func startServers(cfg *config.Config, handler *integratedHandler, transferMgr *T
 }
 
 // startTLS starts the DNS-over-TLS server.
-func (s *servers) startTLS(cfg *config.Config, handler *integratedHandler, logger *util.Logger) error {
+func (s *servers) startTLS(cfg *config.Config, handler *integratedHandler, dsoAdapter *dsoConnAdapter, logger *util.Logger) error {
 	tlsAddr := cfg.Server.TLS.Bind
 	if tlsAddr == "" {
 		tlsAddr = fmt.Sprintf(":%d", server.DefaultTLSPort)
@@ -111,6 +123,9 @@ func (s *servers) startTLS(cfg *config.Config, handler *integratedHandler, logge
 	}
 
 	s.tls = server.NewTLSServer(tlsAddr, handler, tlsConfig)
+	if dsoAdapter != nil {
+		s.tls.SetDSOHandler(dsoAdapter)
+	}
 	if err := s.tls.Listen(); err != nil {
 		return fmt.Errorf("starting TLS server: %w", err)
 	}

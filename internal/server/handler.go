@@ -106,6 +106,31 @@ type Handler interface {
 	ServeDNS(w ResponseWriter, req *protocol.Message)
 }
 
+// DSOConnHandler handles DNS Stateful Operations messages (RFC 8490,
+// opcode 6) for connection-oriented transports. DSO is per-connection
+// state: implementations own the session bound to each conn.
+//
+// HandleDSO processes one DSO message received on conn and returns the
+// response to write (nil for no response). An error is a fatal session
+// error per RFC 8490 §5.2 — the caller MUST forcibly abort the connection.
+// ConnClosed MUST be called exactly once when the transport connection
+// terminates so the session state can be torn down.
+type DSOConnHandler interface {
+	HandleDSO(conn net.Conn, msg *protocol.Message) (*protocol.Message, error)
+	ConnClosed(conn net.Conn)
+}
+
+// dsoErrorResponse builds a minimal DSO response (opcode 6, zero section
+// counts) carrying the given RCODE, echoing the request ID.
+func dsoErrorResponse(req *protocol.Message, rcode uint8) *protocol.Message {
+	resp := &protocol.Message{}
+	resp.Header.ID = req.Header.ID
+	resp.Header.Flags.QR = true
+	resp.Header.Flags.Opcode = protocol.OpcodeDSO
+	resp.Header.Flags.RCODE = rcode
+	return resp
+}
+
 // HandlerFunc is an adapter to allow use of functions as handlers.
 type HandlerFunc func(w ResponseWriter, req *protocol.Message)
 

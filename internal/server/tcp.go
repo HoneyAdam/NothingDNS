@@ -71,6 +71,11 @@ type TCPServer struct {
 	// Buffer pool for zero-alloc response path
 	responsePool sync.Pool
 
+	// dsoHandler, when non-nil, receives DSO (RFC 8490, opcode 6) messages
+	// instead of the regular handler. Set before Serve; not safe to change
+	// while serving.
+	dsoHandler DSOConnHandler
+
 	// Metrics
 	connectionsAccepted uint64
 	connectionsClosed   uint64
@@ -234,6 +239,9 @@ func (s *TCPServer) handleConnection(conn net.Conn) {
 
 	defer func() {
 		wg.Wait()
+		if s.dsoHandler != nil {
+			s.dsoHandler.ConnClosed(conn)
+		}
 		conn.Close()
 		atomic.AddUint64(&s.connectionsClosed, 1)
 	}()
@@ -307,6 +315,13 @@ func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mute
 	}
 	defer msg.Release()
 
+	// DSO (RFC 8490, opcode 6) is per-connection stateful and never enters
+	// the regular query pipeline.
+	if msg.Header.Flags.Opcode == protocol.OpcodeDSO {
+		s.handleDSO(conn, msg, writeMu)
+		return
+	}
+
 	// Build client info
 	client := &ClientInfo{
 		Addr:     conn.RemoteAddr(),
@@ -325,6 +340,47 @@ func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mute
 
 	// Call handler
 	s.handler.ServeDNS(rw, msg)
+}
+
+// SetDSOHandler installs the DSO (RFC 8490) handler for this server.
+// Must be called before Serve.
+func (s *TCPServer) SetDSOHandler(h DSOConnHandler) {
+	s.dsoHandler = h
+}
+
+// handleDSO dispatches a DSO message (opcode 6) to the configured
+// DSOConnHandler. Without a handler the server answers NOTIMP; a handler
+// error is fatal per RFC 8490 §5.2 and forcibly aborts the connection.
+func (s *TCPServer) handleDSO(conn net.Conn, msg *protocol.Message, writeMu *sync.Mutex) {
+	rw := &tcpResponseWriter{
+		conn:    conn,
+		client:  &ClientInfo{Addr: conn.RemoteAddr(), Protocol: "tcp"},
+		maxSize: TCPMaxMessageSize,
+		server:  s,
+		writeMu: writeMu,
+	}
+
+	if s.dsoHandler == nil {
+		if msg.Header.ID != 0 {
+			if _, err := rw.Write(dsoErrorResponse(msg, protocol.RcodeNotImplemented)); err != nil {
+				atomic.AddUint64(&s.errors, 1)
+			}
+		}
+		return
+	}
+
+	resp, err := s.dsoHandler.HandleDSO(conn, msg)
+	if err != nil {
+		atomic.AddUint64(&s.errors, 1)
+		conn.Close()
+		return
+	}
+	// RFC 8490 §5.4: unidirectional messages (ID 0) MUST NOT be answered.
+	if resp != nil && msg.Header.ID != 0 {
+		if _, err := rw.Write(resp); err != nil {
+			atomic.AddUint64(&s.errors, 1)
+		}
+	}
 }
 
 // tcpResponseWriter implements ResponseWriter for TCP.

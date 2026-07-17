@@ -240,6 +240,11 @@ type TLSServer struct {
 	ipConnMu    sync.Mutex
 	ipConnCount map[string]int
 
+	// dsoHandler, when non-nil, receives DSO (RFC 8490, opcode 6) messages
+	// instead of the regular handler. Set before Serve; not safe to change
+	// while serving.
+	dsoHandler DSOConnHandler
+
 	// Metrics
 	connectionsAccepted uint64
 	connectionsClosed   uint64
@@ -384,6 +389,9 @@ func (s *TLSServer) decrementIPConn(ip string) {
 // handleConnection processes a single TLS connection.
 func (s *TLSServer) handleConnection(conn net.Conn) {
 	defer func() {
+		if s.dsoHandler != nil {
+			s.dsoHandler.ConnClosed(conn)
+		}
 		conn.Close()
 		atomic.AddUint64(&s.connectionsClosed, 1)
 	}()
@@ -477,6 +485,14 @@ func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
 	}
 	defer msg.Release()
 
+	// DSO (RFC 8490, opcode 6) is per-connection stateful and never enters
+	// the regular query pipeline. DoT is the RFC 8490 §5.1 recommended
+	// transport for DSO.
+	if msg.Header.Flags.Opcode == protocol.OpcodeDSO {
+		s.handleDSO(conn, msg)
+		return
+	}
+
 	// Build client info
 	client := &ClientInfo{
 		Addr:     conn.RemoteAddr(),
@@ -493,6 +509,45 @@ func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
 
 	// Call handler
 	s.handler.ServeDNS(rw, msg)
+}
+
+// SetDSOHandler installs the DSO (RFC 8490) handler for this server.
+// Must be called before Serve.
+func (s *TLSServer) SetDSOHandler(h DSOConnHandler) {
+	s.dsoHandler = h
+}
+
+// handleDSO dispatches a DSO message (opcode 6) to the configured
+// DSOConnHandler. Without a handler the server answers NOTIMP; a handler
+// error is fatal per RFC 8490 §5.2 and forcibly aborts the connection.
+func (s *TLSServer) handleDSO(conn *tls.Conn, msg *protocol.Message) {
+	rw := &tlsResponseWriter{
+		conn:    conn,
+		client:  &ClientInfo{Addr: conn.RemoteAddr(), Protocol: "dot"},
+		maxSize: TLSMaxMessageSize,
+	}
+
+	if s.dsoHandler == nil {
+		if msg.Header.ID != 0 {
+			if _, err := rw.Write(dsoErrorResponse(msg, protocol.RcodeNotImplemented)); err != nil {
+				atomic.AddUint64(&s.errors, 1)
+			}
+		}
+		return
+	}
+
+	resp, err := s.dsoHandler.HandleDSO(conn, msg)
+	if err != nil {
+		atomic.AddUint64(&s.errors, 1)
+		conn.Close()
+		return
+	}
+	// RFC 8490 §5.4: unidirectional messages (ID 0) MUST NOT be answered.
+	if resp != nil && msg.Header.ID != 0 {
+		if _, err := rw.Write(resp); err != nil {
+			atomic.AddUint64(&s.errors, 1)
+		}
+	}
 }
 
 // tlsResponseWriter implements ResponseWriter for TLS.
