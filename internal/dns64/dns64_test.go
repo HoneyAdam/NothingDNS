@@ -621,3 +621,69 @@ func TestSynthesizerNilReceiverSafe(t *testing.T) {
 		t.Fatal("nil IsEnabled() = true, want false")
 	}
 }
+
+// Regression: RFC 6147 §5.3.1 — when the A response was reached through a
+// CNAME chain, the chain must be preserved in the synthesized AAAA answer.
+// SynthesizeResponse previously dropped CNAME records, leaving synthesized
+// AAAAs owned by the canonical name with no link to the queried name.
+func TestSynthesizeResponse_PreservesCNAMEChain(t *testing.T) {
+	s, err := NewSynthesizer("64:ff9b::", 96)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	question := &protocol.Question{
+		Name:   mustName(t, "www.example.com."),
+		QType:  protocol.TypeAAAA,
+		QClass: protocol.ClassIN,
+	}
+
+	var addr [4]byte
+	copy(addr[:], net.ParseIP("192.0.2.1").To4())
+	aResp := &protocol.Message{
+		Header: protocol.Header{
+			ID:    0x4242,
+			Flags: protocol.Flags{QR: true, RCODE: protocol.RcodeSuccess},
+		},
+		Answers: []*protocol.ResourceRecord{
+			{
+				Name:  mustName(t, "www.example.com."),
+				Type:  protocol.TypeCNAME,
+				Class: protocol.ClassIN,
+				TTL:   300,
+				Data:  &protocol.RDataCNAME{CName: mustName(t, "host.example.net.")},
+			},
+			{
+				Name:  mustName(t, "host.example.net."),
+				Type:  protocol.TypeA,
+				Class: protocol.ClassIN,
+				TTL:   120,
+				Data:  &protocol.RDataA{Address: addr},
+			},
+		},
+	}
+	aResp.Header.ANCount = 2
+
+	synResp := s.SynthesizeResponse(question, aResp)
+	if synResp == nil {
+		t.Fatal("SynthesizeResponse returned nil")
+	}
+	if len(synResp.Answers) != 2 {
+		t.Fatalf("answer count: got %d, want 2 (CNAME + synthesized AAAA)", len(synResp.Answers))
+	}
+	if synResp.Answers[0].Type != protocol.TypeCNAME {
+		t.Fatalf("first answer type: got %d, want CNAME", synResp.Answers[0].Type)
+	}
+	if synResp.Answers[0].Name.String() != "www.example.com." {
+		t.Fatalf("CNAME owner: got %s, want www.example.com.", synResp.Answers[0].Name.String())
+	}
+	if synResp.Answers[1].Type != protocol.TypeAAAA {
+		t.Fatalf("second answer type: got %d, want AAAA", synResp.Answers[1].Type)
+	}
+	if synResp.Answers[1].Name.String() != "host.example.net." {
+		t.Fatalf("AAAA owner: got %s, want host.example.net.", synResp.Answers[1].Name.String())
+	}
+	if synResp.Header.ANCount != 2 {
+		t.Fatalf("ANCount: got %d, want 2", synResp.Header.ANCount)
+	}
+}

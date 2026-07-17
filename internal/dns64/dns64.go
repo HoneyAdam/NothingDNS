@@ -297,9 +297,20 @@ func (s *Synthesizer) SynthesizeResponse(originalQuestion *protocol.Question, aR
 	})
 	msg.Header.QDCount = 1
 
-	// Synthesize AAAA records from A records.
+	// Synthesize AAAA records from A records, preserving the CNAME/DNAME
+	// chain. RFC 6147 §5.3.1: when the A response was reached through a
+	// CNAME (or DNAME) chain, the chain MUST appear in the synthesized
+	// answer — without it the synthesized AAAAs are owned by the canonical
+	// name and strict stub resolvers cannot link them to the queried name.
 	for _, rr := range aResponse.Answers {
-		if rr == nil || rr.Name == nil || rr.Type != protocol.TypeA {
+		if rr == nil || rr.Name == nil {
+			continue
+		}
+		if rr.Type == protocol.TypeCNAME || rr.Type == protocol.TypeDNAME {
+			msg.Answers = append(msg.Answers, rr.Copy())
+			continue
+		}
+		if rr.Type != protocol.TypeA {
 			continue
 		}
 		aData, ok := rr.Data.(*protocol.RDataA)
