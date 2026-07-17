@@ -26,8 +26,8 @@ func (m *mockTransport) SendAppendEntries(ctx context.Context, peerID NodeID, re
 	return m.appendResp, m.appendRespErr
 }
 
-func (m *mockTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
-	return nil
+func (m *mockTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) (*SnapshotResponse, error) {
+	return &SnapshotResponse{Term: req.Term, Success: true}, nil
 }
 
 func TestNewNode(t *testing.T) {

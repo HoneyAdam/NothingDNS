@@ -142,6 +142,16 @@ type SnapshotRequest struct {
 	LastTerm  Term
 }
 
+// SnapshotResponse acknowledges a snapshot install. Success reports
+// whether the follower actually restored and installed the snapshot —
+// the leader must not advance matchIndex on anything less (an
+// unacknowledged install would let the leader count an uninstalled
+// snapshot toward quorum).
+type SnapshotResponse struct {
+	Term    Term
+	Success bool
+}
+
 // Commit represents a committed entry ready to be applied.
 type Commit struct {
 	Entries []entry

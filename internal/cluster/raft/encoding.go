@@ -186,6 +186,8 @@ func encodeNative(msg any) ([]byte, error) {
 		return encodeAppendResponse(m)
 	case SnapshotRequest:
 		return encodeSnapshotRequest(m)
+	case SnapshotResponse:
+		return encodeSnapshotResponse(m)
 	default:
 		// Fallback for unknown types — should not reach here in practice.
 		return nil, fmt.Errorf("unsupported message type %T", msg)
@@ -205,6 +207,8 @@ func decodeNative(msg any, data []byte) error {
 		return decodeAppendResponse(m, data)
 	case *SnapshotRequest:
 		return decodeSnapshotRequest(m, data)
+	case *SnapshotResponse:
+		return decodeSnapshotResponse(m, data)
 	default:
 		return fmt.Errorf("unsupported message type %T", msg)
 	}
@@ -588,5 +592,29 @@ func decodeEntrySlice(entries *[]entry, data []byte) error {
 		off += 8
 		*entries = append(*entries, e)
 	}
+	return nil
+}
+
+// --- SnapshotResponse ---
+//
+// Wire format:
+//   Term     8 bytes
+//   Success  1 byte
+
+func encodeSnapshotResponse(s SnapshotResponse) ([]byte, error) {
+	buf := make([]byte, 9)
+	binary.BigEndian.PutUint64(buf[0:], uint64(s.Term))
+	if s.Success {
+		buf[8] = 1
+	}
+	return buf, nil
+}
+
+func decodeSnapshotResponse(s *SnapshotResponse, data []byte) error {
+	if len(data) < 9 {
+		return fmt.Errorf("SnapshotResponse: short data %d", len(data))
+	}
+	s.Term = Term(binary.BigEndian.Uint64(data[0:]))
+	s.Success = data[8] == 1
 	return nil
 }

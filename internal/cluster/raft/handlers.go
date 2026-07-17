@@ -268,18 +268,20 @@ func (n *Node) HandleAppendRequest(req AppendRequest) AppendResponse {
 
 // HandleSnapshotRequest is the exported RPC handler for snapshot requests.
 // Installs a snapshot from the leader, restoring state machine state.
-func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
+// The returned response tells the leader whether the install actually
+// happened — only a Success=true acknowledgement may advance matchIndex.
+func (n *Node) HandleSnapshotRequest(req SnapshotRequest) SnapshotResponse {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
 	if req.Term < n.currentTerm {
-		return
+		return SnapshotResponse{Term: n.currentTerm, Success: false}
 	}
 
 	if req.Term > n.currentTerm {
 		if err := n.advanceTermLocked(req.Term); err != nil {
 			util.Errorf("raft: snapshot request term advance failed: %v", err)
-			return
+			return SnapshotResponse{Term: n.currentTerm, Success: false}
 		}
 	}
 
@@ -295,7 +297,7 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	if len(req.Data) > 0 && n.stateMachine != nil {
 		if err := n.stateMachine.Restore(req.Data); err != nil {
 			util.Errorf("failed to restore state machine from snapshot: %v", err)
-			return
+			return SnapshotResponse{Term: n.currentTerm, Success: false}
 		}
 	}
 
@@ -318,6 +320,7 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) {
 	if n.onSnapshotInstalled != nil {
 		n.onSnapshotInstalled(req.LastIndex)
 	}
+	return SnapshotResponse{Term: n.currentTerm, Success: true}
 }
 
 // handleAppendResponse handles an AppendEntries response from a peer.

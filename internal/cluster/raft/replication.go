@@ -209,10 +209,11 @@ func (n *Node) installLeaderSnapshot(index Index, term Term, data []byte) {
 	}
 }
 
-// sendInstallSnapshot streams a snapshot to a peer and, on success,
-// optimistically advances its progress to just past the snapshot so the next
-// AppendEntries resumes cleanly. (SendSnapshot is one-way; the follower
-// installs synchronously on receipt.)
+// sendInstallSnapshot streams a snapshot to a peer and advances its
+// progress only after the follower ACKNOWLEDGES the install. A transport
+// success alone is not enough: the follower may refuse the install
+// (stale term, Restore failure), and advancing matchIndex on an
+// uninstalled snapshot would let the leader count it toward quorum.
 func (n *Node) sendInstallSnapshot(peerID NodeID, req SnapshotRequest) {
 	if n.transport == nil {
 		return
@@ -225,10 +226,23 @@ func (n *Node) sendInstallSnapshot(peerID NodeID, req SnapshotRequest) {
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 		defer cancel()
-		if err := n.transport.SendSnapshot(ctx, peerID, req); err != nil {
+		resp, err := n.transport.SendSnapshot(ctx, peerID, req)
+		if err != nil || resp == nil {
 			return
 		}
 		n.mu.Lock()
+		defer n.mu.Unlock()
+		if resp.Term > n.currentTerm {
+			// Follower is in a newer term: step down.
+			if err := n.advanceTermLocked(resp.Term); err != nil {
+				util.Errorf("raft: snapshot response term advance failed: %v", err)
+			}
+			n.state = StateFollower
+			return
+		}
+		if !resp.Success {
+			return
+		}
 		if n.state == StateLeader && n.currentTerm == req.Term {
 			if req.LastIndex > n.matchIndex[peerID] {
 				n.matchIndex[peerID] = req.LastIndex
@@ -237,6 +251,5 @@ func (n *Node) sendInstallSnapshot(peerID NodeID, req SnapshotRequest) {
 				n.nextIndex[peerID] = req.LastIndex + 1
 			}
 		}
-		n.mu.Unlock()
 	}()
 }

@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	msgTypeVoteRequest    uint8 = 1
-	msgTypeVoteResponse   uint8 = 2
-	msgTypeAppendRequest  uint8 = 3
-	msgTypeAppendResponse uint8 = 4
-	msgTypeSnapshot       uint8 = 5
+	msgTypeVoteRequest      uint8 = 1
+	msgTypeVoteResponse     uint8 = 2
+	msgTypeAppendRequest    uint8 = 3
+	msgTypeAppendResponse   uint8 = 4
+	msgTypeSnapshot         uint8 = 5
+	msgTypeSnapshotResponse uint8 = 6
 )
 
 // Transport is the network transport interface for Raft RPC.
@@ -31,8 +32,11 @@ type Transport interface {
 	SendRequestVote(ctx context.Context, peerID NodeID, req VoteRequest) (*VoteResponse, error)
 	// SendAppendEntries sends an AppendEntries RPC to a peer.
 	SendAppendEntries(ctx context.Context, peerID NodeID, req AppendRequest) (*AppendResponse, error)
-	// SendSnapshot sends a snapshot to a peer.
-	SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error
+	// SendSnapshot sends a snapshot to a peer and returns the follower's
+	// acknowledgement. The leader must only advance matchIndex when the
+	// response reports Success — a fire-and-forget install would let the
+	// leader count an uninstalled snapshot toward quorum.
+	SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) (*SnapshotResponse, error)
 }
 
 // RPCHandler handles incoming RPCs.
@@ -41,8 +45,9 @@ type RPCHandler interface {
 	HandleVoteRequest(req VoteRequest) VoteResponse
 	// HandleAppendRequest handles an AppendEntries RPC.
 	HandleAppendRequest(req AppendRequest) AppendResponse
-	// HandleSnapshotRequest handles a Snapshot RPC.
-	HandleSnapshotRequest(req SnapshotRequest)
+	// HandleSnapshotRequest handles a Snapshot RPC and reports whether the
+	// snapshot was actually installed.
+	HandleSnapshotRequest(req SnapshotRequest) SnapshotResponse
 }
 
 // RPCServer is the RPC server that handles incoming connections.
@@ -241,7 +246,10 @@ func (s *RPCServer) handleConn(conn net.Conn, nodeID NodeID) {
 			if err := decodeNative(&req, payload); err != nil {
 				return
 			}
-			s.handler.HandleSnapshotRequest(req)
+			resp := s.handler.HandleSnapshotRequest(req)
+			if err := fw.writeFramed(msgTypeSnapshotResponse, resp); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -385,9 +393,14 @@ func (t *TCPTransport) SendAppendEntries(ctx context.Context, peerID NodeID, req
 	return &resp, nil
 }
 
-// SendSnapshot sends a snapshot to a peer (one-way; no response frame).
-func (t *TCPTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
-	return t.exchange(ctx, peerID, msgTypeSnapshot, req, 0, nil)
+// SendSnapshot sends a snapshot to a peer and reads the install
+// acknowledgement frame.
+func (t *TCPTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) (*SnapshotResponse, error) {
+	var resp SnapshotResponse
+	if err := t.exchange(ctx, peerID, msgTypeSnapshot, req, msgTypeSnapshotResponse, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // getConn gets or creates a connection to a peer.
@@ -565,17 +578,20 @@ func (t *InMemoryTransport) SendAppendEntries(ctx context.Context, peerID NodeID
 	}
 }
 
-func (t *InMemoryTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) error {
+func (t *InMemoryTransport) SendSnapshot(ctx context.Context, peerID NodeID, req SnapshotRequest) (*SnapshotResponse, error) {
 	h, err := t.getHandler(peerID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// Snapshot install is typically large; run async so ctx timeout applies.
-	go h.HandleSnapshotRequest(req)
+	type result struct{ resp SnapshotResponse }
+	ch := make(chan result, 1)
+	go func() {
+		ch <- result{resp: h.HandleSnapshotRequest(req)}
+	}()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	default:
-		return nil
+		return nil, ctx.Err()
+	case r := <-ch:
+		return &r.resp, nil
 	}
 }

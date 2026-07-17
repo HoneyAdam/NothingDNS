@@ -393,12 +393,16 @@ func (ci *ClusterIntegration) applyLoop() {
 				// store mutated past the appliedIndex it records.
 				ci.applyMu.Lock()
 				if e.Term != 0 {
-					if err := ci.stateMachine.Apply(e); err != nil {
-						// F050: an apply failure means this node has diverged
-						// from the cluster's intended state. Log loudly but
-						// still advance appliedIndex — re-applying the same
-						// failed entry would just busy-loop. Treat as Sev-1.
-						ci.logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d: %v", e.Index, e.Term, err)
+					// F050 (revised): an apply failure means this node's
+					// state machine is diverging from the committed log.
+					// Advancing appliedIndex anyway would mark the entry
+					// "applied" and hide the divergence forever. Instead,
+					// retry with backoff (transient I/O errors heal) and,
+					// if the node is shutting down, exit without advancing
+					// so the entry is re-applied on restart.
+					if err := ci.applyWithRetry(e); err != nil {
+						ci.applyMu.Unlock()
+						return
 					}
 					ci.runApplyHook(e)
 				}
@@ -408,6 +412,43 @@ func (ci *ClusterIntegration) applyLoop() {
 				ci.node.mu.Unlock()
 				ci.applyMu.Unlock()
 			}
+		}
+	}
+}
+
+// applyWithRetry applies a committed entry to the state machine, retrying
+// with capped exponential backoff on failure. A committed entry MUST
+// eventually be applied — skipping it silently diverges this node from the
+// cluster. Blocking here is deliberate: appliedIndex stops advancing, which
+// is observable (Sev-1 logs, lag metrics) instead of a hidden divergence.
+// Returns a non-nil error only when the integration is shutting down.
+func (ci *ClusterIntegration) applyWithRetry(e entry) error {
+	return applyEntryWithRetry(ci.stateMachine.Apply, e, ci.stopCh, ci.logger)
+}
+
+// applyEntryWithRetry is the testable core of applyWithRetry: retries
+// apply with capped exponential backoff until it succeeds or stopCh
+// closes. Backoff starts at 100ms and caps at 5s.
+func applyEntryWithRetry(apply func(entry) error, e entry, stopCh <-chan struct{}, logger *util.Logger) error {
+	backoff := 100 * time.Millisecond
+	const maxBackoff = 5 * time.Second
+	for attempt := 1; ; attempt++ {
+		err := apply(e)
+		if err == nil {
+			if attempt > 1 {
+				logger.Warnf("raft: stateMachine.Apply for index=%d succeeded after %d attempts", e.Index, attempt)
+			}
+			return nil
+		}
+		logger.Errorf("raft: stateMachine.Apply failed for index=%d term=%d (attempt %d, Sev-1): %v", e.Index, e.Term, attempt, err)
+		select {
+		case <-stopCh:
+			return fmt.Errorf("raft: shutting down with entry index=%d unapplied: %w", e.Index, err)
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
 		}
 	}
 }

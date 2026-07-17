@@ -247,7 +247,9 @@ func (h *blockingHandler) HandleAppendRequest(req AppendRequest) AppendResponse 
 	return AppendResponse{Term: req.Term, Success: true}
 }
 
-func (h *blockingHandler) HandleSnapshotRequest(req SnapshotRequest) {}
+func (h *blockingHandler) HandleSnapshotRequest(req SnapshotRequest) SnapshotResponse {
+	return SnapshotResponse{Term: req.Term, Success: true}
+}
 
 // noResponseHandler blocks forever on every handler call.
 // Used to test that InMemoryTransport respects context deadlines.
@@ -263,6 +265,7 @@ func (h *noResponseHandler) HandleAppendRequest(AppendRequest) AppendResponse {
 	panic("unreachable")
 }
 
-func (h *noResponseHandler) HandleSnapshotRequest(SnapshotRequest) {
+func (h *noResponseHandler) HandleSnapshotRequest(SnapshotRequest) SnapshotResponse {
 	<-make(chan struct{})
+	panic("unreachable")
 }

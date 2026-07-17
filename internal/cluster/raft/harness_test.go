@@ -57,13 +57,13 @@ func (t *inMemTransport) SendAppendEntries(_ context.Context, peerID NodeID, req
 	return &resp, nil
 }
 
-func (t *inMemTransport) SendSnapshot(_ context.Context, peerID NodeID, req SnapshotRequest) error {
+func (t *inMemTransport) SendSnapshot(_ context.Context, peerID NodeID, req SnapshotRequest) (*SnapshotResponse, error) {
 	n := t.lookup(peerID)
 	if n == nil {
-		return context.Canceled
+		return nil, context.Canceled
 	}
-	n.HandleSnapshotRequest(req)
-	return nil
+	resp := n.HandleSnapshotRequest(req)
+	return &resp, nil
 }
 
 // newClusterNode builds one node whose peer set is every other id.
