@@ -428,15 +428,19 @@ func (c *Cache) Get(key string) *Entry {
 		// Slow path: remove expired entry under exclusive lock.
 		s.mu.Lock()
 		// Re-verify the same entry is still there (may have changed).
+		// The expiration counter tracks actual removals: an expired entry
+		// retained for stale serving used to bump it on EVERY Get during
+		// the grace window, inflating the metric per-lookup.
 		if e, ok := s.entries[key]; ok && e == entry {
 			if c.serveStale {
 				if staleDeadlineReached(now, entry, c.staleGrace) {
 					s.removeEntry(entry)
+					atomic.AddUint64(&s.expirations, 1)
 				}
 			} else {
 				s.removeEntry(entry)
+				atomic.AddUint64(&s.expirations, 1)
 			}
-			atomic.AddUint64(&s.expirations, 1)
 		}
 		atomic.AddUint64(&s.misses, 1)
 		s.mu.Unlock()

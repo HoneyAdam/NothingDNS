@@ -267,8 +267,10 @@ func (m *Monitor) check() {
 func (m *Monitor) handleStateChange(oldState, newState State, usagePct float64) {
 	switch newState {
 	case StateCritical:
+		// HeapAlloc, not Sys: the percentage is computed from HeapAlloc, so
+		// the logged byte count must be the same metric.
 		util.Errorf("memory: CRITICAL - usage %.1f%% of limit (%d/%d bytes), clearing caches",
-			usagePct, m.stats.Sys, m.config.LimitBytes)
+			usagePct, m.stats.HeapAlloc, m.config.LimitBytes)
 		if m.evictor != nil {
 			m.evictor.Clear()
 		}
@@ -276,7 +278,7 @@ func (m *Monitor) handleStateChange(oldState, newState State, usagePct float64) 
 
 	case StateWarning:
 		util.Warnf("memory: WARNING - usage %.1f%% of limit (%d/%d bytes), evicting 50%% of cache",
-			usagePct, m.stats.Sys, m.config.LimitBytes)
+			usagePct, m.stats.HeapAlloc, m.config.LimitBytes)
 		if m.evictor != nil {
 			m.evictor.Evict(50)
 		}

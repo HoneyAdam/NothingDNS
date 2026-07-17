@@ -261,15 +261,41 @@ func TestServeHTTP_SecurityHeaders(t *testing.T) {
 	}
 }
 
+// RFC 7830 §4 + RFC 8467 §4.1: when the client's query carries a Padding
+// option, the response is padded — inside the OPT record, not as trailing
+// bytes after the wire message (the old implementation broke RFC 1035
+// framing) — up to a multiple of 468 bytes.
 func TestDoHResponseWriter_WithPadding(t *testing.T) {
-	queryData, _ := createTestQuery()
-	encoded := base64.RawURLEncoding.EncodeToString(queryData)
+	query := &protocol.Message{
+		Header: protocol.Header{ID: 1234, Flags: protocol.NewQueryFlags(), QDCount: 1, ARCount: 1},
+		Questions: []*protocol.Question{
+			{Name: mustName("www.example.com."), QType: protocol.TypeA, QClass: protocol.ClassIN},
+		},
+		Additionals: []*protocol.ResourceRecord{
+			{
+				Name:  mustName("."),
+				Type:  protocol.TypeOPT,
+				Class: 1232,
+				Data:  &protocol.RDataOPT{Options: []protocol.EDNS0Option{{Code: EDNS0OptionPadding, Data: make([]byte, 16)}}},
+			},
+		},
+	}
+	buf := make([]byte, query.WireLength())
+	n, err := query.Pack(buf)
+	if err != nil {
+		t.Fatalf("packing padded query: %v", err)
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(buf[:n])
 
 	handler := NewHandlerWithPadding(server.HandlerFunc(func(w server.ResponseWriter, r *protocol.Message) {
 		resp := &protocol.Message{
 			Header:    protocol.Header{Flags: protocol.NewResponseFlags(protocol.RcodeSuccess)},
 			Questions: r.Questions,
+			Additionals: []*protocol.ResourceRecord{
+				{Name: mustName("."), Type: protocol.TypeOPT, Class: 1232, Data: &protocol.RDataOPT{}},
+			},
 		}
+		resp.Header.ARCount = 1
 		w.Write(resp)
 	}))
 
@@ -280,10 +306,26 @@ func TestDoHResponseWriter_WithPadding(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("Expected 200, got %d", rr.Code)
 	}
-
-	// Response should be larger than MinPaddingSize due to RFC 7830 padding
-	if rr.Body.Len() < MinPaddingSize {
-		t.Errorf("Expected padded response > %d bytes, got %d", MinPaddingSize, rr.Body.Len())
+	if rr.Body.Len()%paddingBlockSize != 0 {
+		t.Errorf("padded response length %d is not a multiple of %d (RFC 8467 §4.1)", rr.Body.Len(), paddingBlockSize)
+	}
+	// The padded response must still be a valid DNS message with the
+	// Padding option inside the OPT record.
+	respMsg, err := protocol.UnpackMessage(rr.Body.Bytes())
+	if err != nil {
+		t.Fatalf("padded response is not a valid DNS message: %v", err)
+	}
+	var foundPadding bool
+	for _, rr2 := range respMsg.Additionals {
+		if rr2.Type != protocol.TypeOPT {
+			continue
+		}
+		if opt, ok := rr2.Data.(*protocol.RDataOPT); ok && opt.GetOption(EDNS0OptionPadding) != nil {
+			foundPadding = true
+		}
+	}
+	if !foundPadding {
+		t.Error("response OPT record missing RFC 7830 Padding option")
 	}
 }
 

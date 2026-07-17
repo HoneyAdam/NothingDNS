@@ -1,7 +1,6 @@
 package doh
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -24,16 +23,9 @@ const (
 	MaxBase64DNSSize = 90000
 	// ContentTypeDNSMessage is the MIME type for DNS wire format (RFC 8484)
 	ContentTypeDNSMessage = "application/dns-message"
-	// MinPaddingSize is the minimum padding size per RFC 7830
-	MinPaddingSize = 32
-	// MaxPaddingSize is the maximum padding size per RFC 7830
-	MaxPaddingSize = 512
 )
 
-var (
-	secureRandomReader io.Reader = rand.Reader
-	errBodyTooLarge              = errors.New("doh body too large")
-)
+var errBodyTooLarge = errors.New("doh body too large")
 
 // Handler handles DNS over HTTPS requests (RFC 8484).
 type Handler struct {
@@ -149,8 +141,11 @@ func (h *Handler) serveJSON(w http.ResponseWriter, r *http.Request) {
 		query, err = ParseJSONQueryParams(name, qtype)
 
 	case http.MethodPost:
-		ct := r.Header.Get("Content-Type")
-		if ct != ContentTypeDNSJSON {
+		// mime.ParseMediaType tolerates parameters (charset=...) — plain
+		// string equality rejected "application/dns-json; charset=utf-8"
+		// while handlePOST accepted the equivalent for wire format.
+		ct, _, ctErr := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if ctErr != nil || ct != ContentTypeDNSJSON {
 			http.Error(w, "unsupported Content-Type", http.StatusBadRequest)
 			return
 		}
@@ -353,14 +348,17 @@ func (rw *dohResponseWriter) Write(msg *protocol.Message) (int, error) {
 		return 0, err
 	}
 
-	// Add RFC 7830 padding if enabled
-	if rw.padding {
-		padded, err := padMessage(buf[:n])
-		if err != nil {
-			util.Warnf("doh: failed to add response padding: %v", err)
-		} else {
-			buf = padded
-			n = len(buf)
+	// RFC 7830 §4: pad the response if and only if the query was padded.
+	// The Padding option lives inside the OPT record, so the message is
+	// re-packed after the option is added.
+	if rw.padding && queryHasPaddingOption(rw.query) {
+		if padResponseMessage(msg, n) {
+			buf = make([]byte, msg.WireLength())
+			n, err = msg.Pack(buf)
+			if err != nil {
+				http.Error(rw.w, "Failed to encode response", http.StatusInternalServerError)
+				return 0, err
+			}
 		}
 	}
 
@@ -409,42 +407,55 @@ func parsePort(port string) int {
 	return int(p)
 }
 
-// generatePadding generates random padding per RFC 7830.
-// Returns a byte slice of random size between MinPaddingSize and MaxPaddingSize.
-func generatePadding() ([]byte, error) {
-	// Random size between MinPaddingSize and MaxPaddingSize.
-	// Range is 481 (MaxPaddingSize - MinPaddingSize + 1), which exceeds 256,
-	// so we use a 2-byte value for rejection sampling to avoid modulo bias.
-	maxPad := MaxPaddingSize - MinPaddingSize + 1 // 481
-	var padSize int
-	var b [2]byte
-	// Threshold: largest multiple of maxPad that fits in 16 bits
-	threshold := (65536 / maxPad) * maxPad
-	for {
-		if _, err := io.ReadFull(secureRandomReader, b[:]); err != nil {
-			return nil, err
+// EDNS0OptionPadding is the RFC 7830 Padding option code (12).
+const EDNS0OptionPadding = 12
+
+// paddingBlockSize is the RFC 8467 §4.1 recommended block size for
+// server response padding (468 bytes).
+const paddingBlockSize = 468
+
+// queryHasPaddingOption reports whether the client's query carried an
+// RFC 7830 Padding option. Per RFC 7830 §4 a server MUST pad a response
+// if and only if the corresponding query was padded.
+func queryHasPaddingOption(query *protocol.Message) bool {
+	if query == nil {
+		return false
+	}
+	for _, rr := range query.Additionals {
+		if rr == nil || rr.Type != protocol.TypeOPT {
+			continue
 		}
-		val := int(b[0])<<8 | int(b[1])
-		if val < threshold {
-			padSize = MinPaddingSize + val%maxPad
+		if opt, ok := rr.Data.(*protocol.RDataOPT); ok && opt.GetOption(EDNS0OptionPadding) != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// padResponseMessage appends a zero-filled RFC 7830 Padding option to the
+// response's OPT record, sizing the packed response up to a multiple of
+// paddingBlockSize (RFC 8467 §4.1). The previous implementation appended
+// random bytes AFTER the packed wire message — trailing garbage that
+// breaks RFC 1035 framing rather than valid padding. Returns false when
+// the response carries no OPT record to hold the option (nothing padded).
+func padResponseMessage(msg *protocol.Message, packedLen int) bool {
+	var opt *protocol.RDataOPT
+	for _, rr := range msg.Additionals {
+		if rr == nil || rr.Type != protocol.TypeOPT {
+			continue
+		}
+		if o, ok := rr.Data.(*protocol.RDataOPT); ok {
+			opt = o
 			break
 		}
 	}
-
-	// Generate random padding data
-	padding := make([]byte, padSize)
-	if _, err := io.ReadFull(secureRandomReader, padding); err != nil {
-		return nil, err
+	if opt == nil {
+		return false
 	}
-	return padding, nil
-}
-
-// padMessage adds RFC 7830 padding to a DNS message wire format.
-// Padding is appended as trailing bytes to obfuscate response size.
-func padMessage(wire []byte) ([]byte, error) {
-	padding, err := generatePadding()
-	if err != nil {
-		return wire, err
-	}
-	return append(wire, padding...), nil
+	// The option itself costs 4 header bytes; the zero-filled data brings
+	// the total up to the next block boundary.
+	withOptionHeader := packedLen + 4
+	padLen := (paddingBlockSize - withOptionHeader%paddingBlockSize) % paddingBlockSize
+	opt.AddOption(EDNS0OptionPadding, make([]byte, padLen))
+	return true
 }

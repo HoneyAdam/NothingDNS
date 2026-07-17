@@ -401,12 +401,18 @@ func (s *DoQServer) handleConnection(conn *quic.Conn, ip string) {
 // handleStream processes a single DNS query stream.
 func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	defer s.wg.Done()
+	// DOQ_NO_ERROR (0x0) per RFC 9250 §4.3. Cancels are cleanup for error/
+	// panic paths; after a clean response + stream.Close() they would emit
+	// gratuitous STOP_SENDING/RESET_STREAM frames.
+	streamDone := false
 	defer func() {
 		if r := recover(); r != nil {
 			atomic.AddUint64(&s.errors, 1)
 		}
-		stream.CancelRead(0x00) // STOP_SENDING
-		stream.CancelWrite(0x00)
+		if !streamDone {
+			stream.CancelRead(0x00) // STOP_SENDING
+			stream.CancelWrite(0x00)
+		}
 	}()
 
 	wrappedStream := &Stream{stream: stream, remoteAddr: conn.RemoteAddr()}
@@ -462,7 +468,9 @@ func (s *DoQServer) handleStream(conn *quic.Conn, stream *quic.Stream) {
 	if err := stream.Close(); err != nil {
 		atomic.AddUint64(&s.errors, 1)
 		util.Warnf("doq: failed to close stream: %v", err)
+		return
 	}
+	streamDone = true
 }
 
 // Stop gracefully shuts down the DoQ server.

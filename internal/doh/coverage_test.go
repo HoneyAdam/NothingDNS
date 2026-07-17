@@ -453,12 +453,6 @@ func TestIsJSONRequest(t *testing.T) {
 	}
 }
 
-type failingReader struct{}
-
-func (failingReader) Read([]byte) (int, error) {
-	return 0, errors.New("random source failed")
-}
-
 func TestNewHandler(t *testing.T) {
 	h := NewHandler(nil)
 	if h == nil {
@@ -500,78 +494,81 @@ func TestHandlerServeHTTPRejectsUninitializedHandler(t *testing.T) {
 	}
 }
 
-func TestGeneratePadding(t *testing.T) {
-	padding, err := generatePadding()
-	if err != nil {
-		t.Fatalf("generatePadding failed: %v", err)
+func TestQueryHasPaddingOption(t *testing.T) {
+	if queryHasPaddingOption(nil) {
+		t.Error("nil query must not report a padding option")
 	}
-	if len(padding) < MinPaddingSize {
-		t.Errorf("padding too small: %d < %d", len(padding), MinPaddingSize)
+	plain := &protocol.Message{}
+	if queryHasPaddingOption(plain) {
+		t.Error("query without OPT must not report a padding option")
 	}
-	if len(padding) > MaxPaddingSize {
-		t.Errorf("padding too large: %d > %d", len(padding), MaxPaddingSize)
+	withOpt := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			{Type: protocol.TypeOPT, Data: &protocol.RDataOPT{}},
+		},
 	}
-}
-
-func TestGeneratePadding_MultipleCalls(t *testing.T) {
-	sizes := make(map[int]bool)
-	for i := 0; i < 100; i++ {
-		padding, err := generatePadding()
-		if err != nil {
-			t.Fatalf("generatePadding failed: %v", err)
-		}
-		sizes[len(padding)] = true
+	if queryHasPaddingOption(withOpt) {
+		t.Error("OPT without padding option must not report one")
 	}
-	// With random sizing, we should get multiple distinct sizes
-	if len(sizes) < 3 {
-		t.Errorf("expected varied padding sizes, got %d distinct values", len(sizes))
+	withPadding := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			{Type: protocol.TypeOPT, Data: &protocol.RDataOPT{
+				Options: []protocol.EDNS0Option{{Code: EDNS0OptionPadding, Data: []byte{0, 0}}},
+			}},
+		},
 	}
-}
-
-func TestPadMessage(t *testing.T) {
-	original := []byte{0x00, 0x01, 0x02, 0x03}
-	padded, err := padMessage(original)
-	if err != nil {
-		t.Fatalf("padMessage failed: %v", err)
-	}
-	if len(padded) <= len(original) {
-		t.Errorf("padded message should be longer: %d <= %d", len(padded), len(original))
-	}
-	// Original bytes should be preserved
-	for i, b := range original {
-		if padded[i] != b {
-			t.Errorf("byte %d mismatch: %x != %x", i, padded[i], b)
-		}
+	if !queryHasPaddingOption(withPadding) {
+		t.Error("OPT with padding option must be detected")
 	}
 }
 
-func TestPadMessage_Empty(t *testing.T) {
-	padded, err := padMessage([]byte{})
-	if err != nil {
-		t.Fatalf("padMessage failed: %v", err)
+func TestPadResponseMessage(t *testing.T) {
+	// No OPT record → nothing to pad.
+	noOpt := &protocol.Message{}
+	if padResponseMessage(noOpt, 100) {
+		t.Error("padResponseMessage must return false without an OPT record")
 	}
-	if len(padded) < MinPaddingSize {
-		t.Errorf("padded empty should have at least MinPaddingSize: %d", len(padded))
+
+	// With OPT: option data sizes the message up to the next 468 block.
+	msg := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			{Type: protocol.TypeOPT, Data: &protocol.RDataOPT{}},
+		},
+	}
+	const packedLen = 100
+	if !padResponseMessage(msg, packedLen) {
+		t.Fatal("padResponseMessage must pad when an OPT record exists")
+	}
+	opt := msg.Additionals[0].Data.(*protocol.RDataOPT)
+	po := opt.GetOption(EDNS0OptionPadding)
+	if po == nil {
+		t.Fatal("padding option not added")
+	}
+	if got := packedLen + 4 + len(po.Data); got%paddingBlockSize != 0 {
+		t.Errorf("padded size %d is not a multiple of %d", got, paddingBlockSize)
 	}
 }
 
-func TestPadMessage_RandomFailureReturnsOriginalAndError(t *testing.T) {
-	originalReader := secureRandomReader
-	secureRandomReader = failingReader{}
-	t.Cleanup(func() { secureRandomReader = originalReader })
-
-	original := []byte{0x00, 0x01, 0x02, 0x03}
-	padded, err := padMessage(original)
-	if err == nil {
-		t.Fatal("padMessage should return random source error")
+// padResponseMessage sizing edge: a message already at a block boundary
+// (after the 4-byte option header) gets a zero-length padding option, not
+// an extra full block.
+func TestPadResponseMessage_ExactBoundary(t *testing.T) {
+	msg := &protocol.Message{
+		Additionals: []*protocol.ResourceRecord{
+			{Type: protocol.TypeOPT, Data: &protocol.RDataOPT{}},
+		},
 	}
-	if len(padded) != len(original) {
-		t.Fatalf("failed padding should return original length: got %d, want %d", len(padded), len(original))
+	packedLen := paddingBlockSize - 4 // header lands exactly on the boundary
+	if !padResponseMessage(msg, packedLen) {
+		t.Fatal("padResponseMessage must pad when an OPT record exists")
 	}
-	for i, b := range original {
-		if padded[i] != b {
-			t.Errorf("byte %d mismatch: %x != %x", i, padded[i], b)
-		}
+	opt := msg.Additionals[0].Data.(*protocol.RDataOPT)
+	po := opt.GetOption(EDNS0OptionPadding)
+	if po == nil {
+		t.Fatal("padding option not added")
+	}
+	if len(po.Data) != 0 {
+		t.Errorf("expected zero-length padding data at exact boundary, got %d", len(po.Data))
 	}
 }
 
