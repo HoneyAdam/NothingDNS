@@ -3936,15 +3936,21 @@ func TestPackNameWithCompressionHit(t *testing.T) {
 		t.Fatalf("PackName with compression hit failed: %v", err)
 	}
 
-	// PackName checks suffixes: i=1 matches "example.com", so it only writes
-	// a 2-byte compression pointer (no labels are written before the match)
-	if n != 2 {
-		t.Errorf("PackName with compression: got %d bytes, want 2", n)
+	// RFC 1035 §4.1.4: the suffix "example.com" matches at offset 12, but
+	// the leading "www" label MUST be emitted before the pointer —
+	// 1+3 label bytes + 2 pointer bytes = 6. (The old code jumped straight
+	// to the pointer and the name decoded as "example.com.".)
+	if n != 6 {
+		t.Errorf("PackName with compression: got %d bytes, want 6", n)
 	}
-
-	// Verify pointer bytes (compression pointer has top 2 bits set)
-	if buf[0]&0xC0 != 0xC0 {
-		t.Errorf("First byte should be compression pointer (0xC0|), got 0x%02X", buf[0])
+	if buf[0] != 3 || string(buf[1:4]) != "www" {
+		t.Errorf("leading label = %v %q, want 3 %q", buf[0], buf[1:4], "www")
+	}
+	if buf[4]&0xC0 != 0xC0 {
+		t.Errorf("byte after labels should be compression pointer (0xC0|), got 0x%02X", buf[4])
+	}
+	if ptr := int(buf[4]&0x3F)<<8 | int(buf[5]); ptr != 12 {
+		t.Errorf("pointer offset = %d, want 12", ptr)
 	}
 }
 

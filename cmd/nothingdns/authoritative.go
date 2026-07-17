@@ -3,6 +3,7 @@
 package main
 
 import (
+	"strings"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/cache"
@@ -440,15 +441,42 @@ func (h *integratedHandler) chaseCNAMEInZones(name string) cnameChainResult {
 // findCNAMEInZonesLocked searches all authoritative zones for a CNAME record
 // for the given name. The caller must hold zonesMu (at least RLock).
 // Returns nil if no CNAME is found.
+//
+// File-loaded zones keep the BIND-relative forms in Record.Name/RData
+// ("al" / "www") while the Records map key is fully qualified. The
+// returned copy is qualified against the owning zone's origin so callers
+// can build wire answers and chase the chain with absolute names —
+// serving the raw relative forms produced answers like "al. CNAME www."
+// (owner and target both wrong, chain resolution broken).
 func (h *integratedHandler) findCNAMEInZonesLocked(name string) *zone.Record {
 	cname := canonicalize(name)
 	for _, z := range h.zones {
 		recs := z.Lookup(cname, "CNAME")
 		if len(recs) > 0 {
-			return &recs[0]
+			rec := recs[0]
+			rec.Name = qualifyAgainstOrigin(rec.Name, z.Origin)
+			rec.RData = qualifyAgainstOrigin(rec.RData, z.Origin)
+			return &rec
 		}
 	}
 	return nil
+}
+
+// qualifyAgainstOrigin expands a BIND-relative name to its absolute form:
+// "@" means the origin itself, names without a trailing dot are relative
+// to the origin, absolute names pass through unchanged.
+func qualifyAgainstOrigin(name, origin string) string {
+	if !strings.HasSuffix(origin, ".") {
+		origin += "."
+	}
+	switch {
+	case name == "" || name == "@":
+		return origin
+	case strings.HasSuffix(name, "."):
+		return name
+	default:
+		return name + "." + origin
+	}
 }
 
 // resolveCNAMETarget attempts to resolve a CNAME target using local zones,

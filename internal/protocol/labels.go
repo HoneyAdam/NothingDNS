@@ -400,12 +400,33 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 	for i := 0; i < labelIndex; i++ {
 		suffix := presentation[suffixStarts[i]:]
 		if ptrOffset, ok := compression[suffix]; ok && ptrOffset < PointerOffsetMask {
+			// RFC 1035 §4.1.4: a name may end with a pointer, but the
+			// labels BEFORE the matched suffix must still be emitted.
+			// The old code jumped straight to the pointer for any suffix
+			// match, silently dropping the leading labels — packing
+			// "www.example.com." after "a.example.com." produced a name
+			// that decoded as "example.com.".
+			wireIdx := 0
+			for l := 0; l < i; l++ {
+				labelLen := int(name.wire[wireIdx])
+				prefixSuffix := presentation[suffixStarts[l]:]
+				if _, exists := compression[prefixSuffix]; !exists {
+					compression[prefixSuffix] = offset
+				}
+				if offset+1+labelLen > len(buf) {
+					return 0, ErrBufferTooSmall
+				}
+				copy(buf[offset:offset+1+labelLen], name.wire[wireIdx:wireIdx+1+labelLen])
+				offset += 1 + labelLen
+				wireIdx += 1 + labelLen
+			}
 			if offset+2 > len(buf) {
 				return 0, ErrBufferTooSmall
 			}
 			pointer := uint16(PointerMask<<8) | uint16(ptrOffset)
 			PutUint16(buf[offset:], pointer)
-			return offset + 2 - originalOffset, nil
+			offset += 2
+			return offset - originalOffset, nil
 		}
 	}
 
