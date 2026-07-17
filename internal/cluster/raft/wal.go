@@ -251,16 +251,32 @@ func (w *WAL) ReadAll() ([]entry, error) {
 	return w.readAllLocked()
 }
 
+// ErrWALCorrupt reports mid-file corruption (bad CRC or an impossible
+// length on a fully-present record). It is deliberately fatal: the node
+// refuses to boot rather than silently discard fsync-acked, committed
+// entries — matching etcd's WAL, which repairs only a torn tail.
+var ErrWALCorrupt = errors.New("raft: WAL corruption detected")
+
 // readAllLocked reads every v1 entry from the start of the file. Caller
 // must hold w.mu.
 //
-// Torn-tail repair: a crash mid-Write leaves a partial record at the end
-// of the file. The legacy reader errored out on that, which made the node
-// UNABLE TO BOOT after an unlucky power loss. Instead, any short read or
-// CRC mismatch truncates the file back to the last intact record and
-// replay continues with what was durable — the same contract as
-// storage.WAL and etcd. Entries lost this way were never fsync-acked, so
-// dropping them is equivalent to crashing a moment earlier.
+// Two failure modes are treated DIFFERENTLY, because conflating them
+// destroys data:
+//
+//   - Torn tail — a crash mid-Write left the LAST record incomplete, so
+//     reading it returns a short read (io.ErrUnexpectedEOF). Those bytes
+//     were never fsync-acked (Write fsyncs before AppendEntries acks), so
+//     truncating them back to the last intact record is safe and lets the
+//     node boot. A legit torn write can only truncate the byte stream, so
+//     it never fabricates an oversized length (the length was correct when
+//     written) — hence oversized length is NOT treated as a torn tail.
+//
+//   - Mid-file corruption — a fully-present record whose CRC fails, or a
+//     record header whose length field is impossible. The record WAS
+//     fsync-acked and may be committed cluster-wide; truncating from here
+//     would silently drop committed entries and let this node win a later
+//     election with a shorter log, losing them everywhere. This is fatal
+//     (ErrWALCorrupt): operator intervention / restore-from-peer required.
 func (w *WAL) readAllLocked() ([]entry, error) {
 	if _, err := w.logFile.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -282,9 +298,9 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 	goodOffset := int64(len(walMagic)) // end of the last intact record
 	buf := make([]byte, 1024)          // reusable command buffer
 
-	truncateTail := func(reason string, err error) ([]entry, error) {
-		util.Warnf("raft: WAL %s at offset %d (%v) — truncating torn/corrupt tail, %d intact entries kept",
-			reason, goodOffset, err, len(entries))
+	truncateTail := func(err error) ([]entry, error) {
+		util.Warnf("raft: WAL torn tail at offset %d (%v) — truncating, %d intact entries kept",
+			goodOffset, err, len(entries))
 		if terr := w.logFile.Truncate(goodOffset); terr != nil {
 			return nil, fmt.Errorf("truncate WAL tail: %w", terr)
 		}
@@ -304,7 +320,7 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 				break // clean end of WAL
 			}
 			if errors.Is(err, io.ErrUnexpectedEOF) {
-				return truncateTail("torn record header", err)
+				return truncateTail(fmt.Errorf("torn record header: %w", err))
 			}
 			return nil, fmt.Errorf("read WAL header: %w", err)
 		}
@@ -314,10 +330,12 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 		e.Term = Term(binary.BigEndian.Uint64(header[12:20]))
 		cmdLen := binary.BigEndian.Uint64(header[20:28])
 
-		// VULN-047: cap command length to prevent unbounded allocation from
-		// a corrupt WAL. Treated as corruption → truncate, not boot failure.
+		// An oversized length on a fully-read header cannot come from a
+		// torn write (the length was valid when written); it means the
+		// length bytes are corrupted. Fatal, not a tail truncate.
 		if cmdLen > maxWALCommandBytes {
-			return truncateTail("oversized cmdLen", fmt.Errorf("cmdLen %d exceeds max %d", cmdLen, maxWALCommandBytes))
+			return nil, fmt.Errorf("%w: record at offset %d has impossible cmdLen %d (max %d)",
+				ErrWALCorrupt, goodOffset, cmdLen, maxWALCommandBytes)
 		}
 
 		if uint64(len(buf)) < cmdLen+1 {
@@ -326,7 +344,7 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 		body := buf[:cmdLen+1] // command + trailing type byte
 		if _, err := io.ReadFull(w.logFile, body); err != nil {
 			if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
-				return truncateTail("torn record body", err)
+				return truncateTail(fmt.Errorf("torn record body: %w", err))
 			}
 			return nil, fmt.Errorf("read WAL body (%d bytes): %w", len(body), err)
 		}
@@ -334,7 +352,10 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 		crc := crc32.ChecksumIEEE(header[4:])
 		crc = crc32.Update(crc, crc32.IEEETable, body)
 		if crc != wantCRC {
-			return truncateTail("CRC mismatch", fmt.Errorf("got %08x want %08x", crc, wantCRC))
+			// The full record was present — this is bit-rot on a durable,
+			// possibly-committed entry, not a torn tail. Refuse to boot.
+			return nil, fmt.Errorf("%w: CRC mismatch at offset %d (got %08x want %08x)",
+				ErrWALCorrupt, goodOffset, crc, wantCRC)
 		}
 
 		if cmdLen > 0 {
@@ -352,8 +373,13 @@ func (w *WAL) readAllLocked() ([]entry, error) {
 
 // readLegacyLocked reads a pre-v1 (un-checksummed) WAL:
 // Index(8) + Term(8) + CmdLen(8) + Command + Type(1) per record, no magic.
-// A torn tail is tolerated (entries up to it are returned) so migration
-// after a crash still succeeds. Caller must hold w.mu.
+// A torn tail (short read at EOF) is tolerated so migration after a crash
+// succeeds. An oversized length, however, is fatal (ErrWALCorrupt): a
+// legit legacy torn write never fabricates one, so it means either
+// corruption or — critically — a v1 file whose 8-byte magic got corrupted
+// and was misdetected as legacy. Silently treating that as a torn tail
+// (the old behavior) rewrote the entire log to an empty file. Caller must
+// hold w.mu.
 func (w *WAL) readLegacyLocked() ([]entry, error) {
 	if _, err := w.logFile.Seek(0, io.SeekStart); err != nil {
 		return nil, err
@@ -380,8 +406,8 @@ func (w *WAL) readLegacyLocked() ([]entry, error) {
 		cmdLen := binary.BigEndian.Uint64(header[16:24])
 
 		if cmdLen > maxWALCommandBytes {
-			util.Warnf("raft: legacy WAL oversized cmdLen %d — treating as torn tail, %d intact entries kept", cmdLen, len(entries))
-			break
+			return nil, fmt.Errorf("%w: legacy record has impossible cmdLen %d (corruption, or a v1 WAL with a damaged magic header)",
+				ErrWALCorrupt, cmdLen)
 		}
 
 		if cmdLen > 0 {

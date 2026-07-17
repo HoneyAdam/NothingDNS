@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,7 +83,11 @@ func TestWAL_TornTailIsTruncatedNotFatal(t *testing.T) {
 	}
 }
 
-func TestWAL_CRCMismatchTruncatesFromCorruption(t *testing.T) {
+// Mid-file bit-rot on a FULLY-PRESENT record is fatal, NOT a tail
+// truncate: the record was fsync-acked and may be committed cluster-wide,
+// so discarding it (and everything after) would silently lose committed
+// entries and let this node win a later election with a shorter log.
+func TestWAL_MidFileCorruptionIsFatal(t *testing.T) {
 	dir := t.TempDir()
 	w, err := NewWAL(dir)
 	if err != nil {
@@ -103,8 +108,6 @@ func TestWAL_CRCMismatchTruncatesFromCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	// Layout: magic(8) + rec1(28+7+1) + rec2(...). Corrupt a byte well
-	// inside record 2's command.
 	rec1Size := walRecordHeaderSize + len("cmd-one") + 1
 	corruptAt := len(walMagic) + rec1Size + walRecordHeaderSize + 2
 	data[corruptAt] ^= 0x01
@@ -117,14 +120,60 @@ func TestWAL_CRCMismatchTruncatesFromCorruption(t *testing.T) {
 		t.Fatalf("NewWAL after corruption: %v", err)
 	}
 	defer w2.Close()
-	got, err := w2.ReadAll()
-	if err != nil {
-		t.Fatalf("ReadAll after corruption: %v", err)
+	_, err = w2.ReadAll()
+	if !errors.Is(err, ErrWALCorrupt) {
+		t.Fatalf("ReadAll after mid-file corruption: err = %v, want ErrWALCorrupt", err)
 	}
-	// Only record 1 survives; the corrupted record and everything after it
-	// are truncated (record boundaries are untrustworthy past a bad CRC).
-	if len(got) != 1 || got[0].Index != 1 {
-		t.Fatalf("entries after corruption = %d, want 1 (index 1)", len(got))
+
+	// The file must NOT have been truncated: all three records' bytes are
+	// still on disk for operator recovery / restore-from-peer.
+	after, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if len(after) != len(data) {
+		t.Fatalf("corrupt WAL was truncated (%d -> %d bytes); committed entries must be preserved", len(data), len(after))
+	}
+}
+
+// A corrupted magic header (v1 file misdetected as legacy) must fail-stop,
+// not silently rewrite the whole log to empty.
+func TestWAL_CorruptMagicIsFatalNotWiped(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWAL(dir)
+	if err != nil {
+		t.Fatalf("NewWAL: %v", err)
+	}
+	for _, e := range walTestEntries() {
+		if err := w.Write(e); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	logPath := path.Join(dir, "raft-wal.log")
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	origLen := len(data)
+	data[2] ^= 0xFF // corrupt a magic byte
+	if err := os.WriteFile(logPath, data, 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, err = NewWAL(dir)
+	if !errors.Is(err, ErrWALCorrupt) {
+		t.Fatalf("NewWAL with corrupt magic: err = %v, want ErrWALCorrupt", err)
+	}
+	after, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("stat after: %v", err)
+	}
+	if len(after) != origLen {
+		t.Fatalf("corrupt-magic WAL was rewritten (%d -> %d bytes); must be preserved", origLen, len(after))
 	}
 }
 
@@ -345,5 +394,98 @@ func TestApplyEntryWithRetry_StopUnblocksWithError(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("applyEntryWithRetry did not stop on stopCh close")
+	}
+}
+
+// blockingSnapshotTransport blocks inside SendSnapshot until released, so
+// the test can verify no second send starts while one is outstanding.
+type blockingSnapshotTransport struct {
+	release chan struct{}
+	calls   int32
+}
+
+func (b *blockingSnapshotTransport) SendRequestVote(context.Context, NodeID, VoteRequest) (*VoteResponse, error) {
+	return &VoteResponse{}, nil
+}
+func (b *blockingSnapshotTransport) SendAppendEntries(context.Context, NodeID, AppendRequest) (*AppendResponse, error) {
+	return &AppendResponse{}, nil
+}
+func (b *blockingSnapshotTransport) SendSnapshot(ctx context.Context, _ NodeID, req SnapshotRequest) (*SnapshotResponse, error) {
+	atomic.AddInt32(&b.calls, 1)
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &SnapshotResponse{Term: req.Term, Success: true}, nil
+}
+
+// Regression: sendInstallSnapshot now waits for the follower's ACK, which
+// can exceed the heartbeat interval. Without an in-flight guard every
+// heartbeat tick spawned another full snapshot send to the same peer — a
+// resend storm. Only one send may be outstanding per peer.
+func TestSendInstallSnapshot_InFlightGuard(t *testing.T) {
+	tr := &blockingSnapshotTransport{release: make(chan struct{})}
+	config := DefaultConfig()
+	config.NodeID = "leader"
+	node := NewNode(config, []NodeID{"follower"}, tr)
+
+	node.mu.Lock()
+	node.state = StateLeader
+	node.currentTerm = 2
+	node.mu.Unlock()
+
+	req := SnapshotRequest{Term: 2, LeaderID: "leader", Data: []byte("snap"), LastIndex: 42, LastTerm: 2}
+
+	// Fire ten sends while the first is blocked; only one must reach the wire.
+	for i := 0; i < 10; i++ {
+		node.sendInstallSnapshot("follower", req)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := atomic.LoadInt32(&tr.calls); got != 1 {
+		t.Fatalf("SendSnapshot called %d times while one was in flight, want 1", got)
+	}
+
+	// Release the first; a subsequent send may now proceed.
+	close(tr.release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		node.mu.Lock()
+		inFlight := node.snapshotInFlight["follower"]
+		node.mu.Unlock()
+		if !inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("in-flight flag never cleared after completion")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// Regression: a stale/duplicate snapshot (LastIndex not past what we have)
+// must not rewind commitIndex/lastApplied — it ACKs idempotently instead.
+func TestHandleSnapshotRequest_StaleSnapshotDoesNotRewind(t *testing.T) {
+	transport := &mockTransport{}
+	config := DefaultConfig()
+	config.NodeID = "follower"
+	node := NewNode(config, []NodeID{"leader"}, transport)
+
+	node.mu.Lock()
+	node.currentTerm = 3
+	node.lastSnapshot = 50
+	node.commitIndex = 60
+	node.lastApplied = 60
+	node.mu.Unlock()
+
+	resp := node.HandleSnapshotRequest(SnapshotRequest{Term: 3, LeaderID: "leader", LastIndex: 40, LastTerm: 3})
+	if !resp.Success {
+		t.Fatal("stale snapshot should ACK idempotently (Success=true)")
+	}
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	if node.commitIndex != 60 || node.lastApplied != 60 || node.lastSnapshot != 50 {
+		t.Fatalf("stale snapshot rewound state: commit=%d applied=%d snap=%d",
+			node.commitIndex, node.lastApplied, node.lastSnapshot)
 	}
 }

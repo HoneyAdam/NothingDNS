@@ -218,11 +218,27 @@ func (n *Node) sendInstallSnapshot(peerID NodeID, req SnapshotRequest) {
 	if n.transport == nil {
 		return
 	}
+	// In-flight guard: at most one outstanding snapshot send per peer.
+	// The ACK can take longer than a heartbeat interval, and every
+	// heartbeat that finds the peer still behind lastSnapshot would
+	// otherwise launch another full send — a resend storm that hammers
+	// the follower with repeated Restore+CompactBefore under its lock.
+	n.mu.Lock()
+	if n.snapshotInFlight[peerID] {
+		n.mu.Unlock()
+		return
+	}
+	n.snapshotInFlight[peerID] = true
+	n.mu.Unlock()
+
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				util.Errorf("raft: panic in sendInstallSnapshot: %v", r)
 			}
+			n.mu.Lock()
+			delete(n.snapshotInFlight, peerID)
+			n.mu.Unlock()
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), raftRPCTimeout)
 		defer cancel()

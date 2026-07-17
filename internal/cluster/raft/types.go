@@ -277,6 +277,14 @@ type Node struct {
 	nextIndex  map[NodeID]Index // For each peer, the next log index to send
 	matchIndex map[NodeID]Index // For each peer, the highest replicated index
 
+	// snapshotInFlight guards against a resend storm: sendInstallSnapshot
+	// now waits for the follower's install ACK, which can take longer than
+	// the 150ms heartbeat interval. Without this guard every heartbeat
+	// tick would spawn another full snapshot send to the same lagging peer.
+	// A peer is marked true while a send is outstanding and cleared when it
+	// completes. Guarded by n.mu.
+	snapshotInFlight map[NodeID]bool
+
 	// Membership
 	peers map[NodeID]*Peer
 
@@ -344,26 +352,27 @@ func NewNode(config Config, peers []NodeID, transport Transport) *Node {
 	}
 
 	n := &Node{
-		config:          config,
-		transport:       transport,
-		state:           StateFollower,
-		currentTerm:     0,
-		votedFor:        "",
-		log:             make([]entry, 0),
-		nextIndex:       make(map[NodeID]Index),
-		matchIndex:      make(map[NodeID]Index),
-		peers:           make(map[NodeID]*Peer),
-		voteCh:          make(chan VoteRequest, 10),
-		appendCh:        make(chan AppendRequest, 10),
-		voteRespCh:      make(chan VoteResponse, 10),
-		appendRespCh:    make(chan AppendResponse, 10),
-		commitCh:        make(chan Commit, 10),
-		applyCh:         make(chan Apply, 256),
-		snapshotCh:      make(chan SnapshotRequest, 10),
-		leadershipCh:    make(chan LeadershipState, 10),
-		electionResetCh: make(chan struct{}, 1),
-		stopCh:          make(chan struct{}),
-		rng:             NewLockedRand(),
+		config:           config,
+		transport:        transport,
+		state:            StateFollower,
+		currentTerm:      0,
+		votedFor:         "",
+		log:              make([]entry, 0),
+		nextIndex:        make(map[NodeID]Index),
+		matchIndex:       make(map[NodeID]Index),
+		snapshotInFlight: make(map[NodeID]bool),
+		peers:            make(map[NodeID]*Peer),
+		voteCh:           make(chan VoteRequest, 10),
+		appendCh:         make(chan AppendRequest, 10),
+		voteRespCh:       make(chan VoteResponse, 10),
+		appendRespCh:     make(chan AppendResponse, 10),
+		commitCh:         make(chan Commit, 10),
+		applyCh:          make(chan Apply, 256),
+		snapshotCh:       make(chan SnapshotRequest, 10),
+		leadershipCh:     make(chan LeadershipState, 10),
+		electionResetCh:  make(chan struct{}, 1),
+		stopCh:           make(chan struct{}),
+		rng:              NewLockedRand(),
 	}
 
 	// Restore persistent HardState from disk so currentTerm and votedFor

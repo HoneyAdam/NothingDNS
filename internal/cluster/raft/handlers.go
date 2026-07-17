@@ -285,6 +285,15 @@ func (n *Node) HandleSnapshotRequest(req SnapshotRequest) SnapshotResponse {
 		}
 	}
 
+	// Reject a stale or duplicate snapshot: installing one whose
+	// LastIndex is not past what we already have would rewind
+	// commitIndex/lastApplied and discard log entries this follower
+	// already acknowledged. A delayed retry of an already-installed
+	// snapshot must be idempotent, so ACK success without reinstalling.
+	if req.LastIndex <= n.lastSnapshot || req.LastIndex <= n.commitIndex {
+		return SnapshotResponse{Term: n.currentTerm, Success: true}
+	}
+
 	// If we have a state machine and snapshot data, restore it.
 	// On Restore failure, we MUST NOT advance the snapshot indices
 	// or clear the log: committing to a state we couldn't load means
