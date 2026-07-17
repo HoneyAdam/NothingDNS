@@ -106,6 +106,14 @@ func (h *integratedHandler) ServeDNS(w server.ResponseWriter, r *protocol.Messag
 		h.runtimeMu.Unlock()
 	}
 
+	// The read lock is deliberately held for the WHOLE request, not just
+	// field reads: hot reload swaps components under runtimeMu.Lock() and
+	// then Stop()s the old ones. Holding the RLock until the request
+	// finishes guarantees no in-flight request is still using a component
+	// when it is stopped (the writer waits for all readers to drain).
+	// Cost: a SIGHUP under load stalls new queries until in-flight ones
+	// complete — bounded by the request timeout. Shortening this lock
+	// requires refcounted/deferred component teardown first.
 	h.runtimeMu.RLock()
 	defer h.runtimeMu.RUnlock()
 	pipeline.ServeDNS(h, w, r)
