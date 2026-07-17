@@ -531,7 +531,6 @@ func TestIsJoinable(t *testing.T) {
 	}
 }
 
-
 func TestToASCIITrimSpace(t *testing.T) {
 	got, err := ToASCII("  example.com  ")
 	if err != nil {

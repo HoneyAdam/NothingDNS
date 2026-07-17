@@ -49,8 +49,8 @@ type reloadableState struct {
 	validator       **dnssec.Validator
 
 	// Zone state (mutated in place)
-	zoneFiles  *map[string]string
-	zoneMgr    *zone.Manager
+	zoneFiles *map[string]string
+	zoneMgr   *zone.Manager
 
 	// External references (not replaced, but updated)
 	handler   *integratedHandler
