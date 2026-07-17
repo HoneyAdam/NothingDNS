@@ -405,24 +405,20 @@ func (h *integratedHandler) processUpdateEvents() {
 	for req := range updateChan {
 		h.logger.Infof("Processing UPDATE for zone %s", req.ZoneName)
 
-		// Get the zone
+		// The update was already applied synchronously by
+		// DynamicDNSHandler.HandleUpdate under the zone lock (with
+		// prerequisite re-checks). Re-applying it here would bump the
+		// SOA serial a second time and duplicate added records — this
+		// loop only performs post-apply side effects: IXFR journal,
+		// audit log, and persistence. Serials travel in the request.
+
+		// Skip side effects if the zone has been removed since the
+		// update was applied (zone deletion racing this consumer).
 		h.zonesMu.RLock()
-		z, ok := h.zones[req.ZoneName]
+		_, ok := h.zones[req.ZoneName]
 		h.zonesMu.RUnlock()
 		if !ok {
-			h.logger.Warnf("Zone %s not found for UPDATE", req.ZoneName)
-			continue
-		}
-
-		// Record old serial for IXFR journal
-		var oldSerial uint32
-		if z.SOA != nil {
-			oldSerial = z.SOA.Serial
-		}
-
-		// Apply the update
-		if err := transfer.ApplyUpdate(z, req); err != nil {
-			h.logger.Warnf("Failed to apply UPDATE to zone %s: %v", req.ZoneName, err)
+			h.logger.Warnf("Zone %s not found for UPDATE side effects", req.ZoneName)
 			continue
 		}
 
@@ -438,8 +434,7 @@ func (h *integratedHandler) processUpdateEvents() {
 		}
 
 		// Record the change in the IXFR journal
-		if h.transfer.IXFRServer != nil && z.SOA != nil {
-			newSerial := z.SOA.Serial
+		if h.transfer.IXFRServer != nil && req.NewSerial != req.OldSerial {
 			var added, deleted []zone.RecordChange
 			for _, op := range req.Updates {
 				change := zone.RecordChange{
@@ -455,7 +450,7 @@ func (h *integratedHandler) processUpdateEvents() {
 					deleted = append(deleted, change)
 				}
 			}
-			h.recordZoneChange(req.ZoneName, oldSerial, newSerial, added, deleted)
+			h.recordZoneChange(req.ZoneName, req.OldSerial, req.NewSerial, added, deleted)
 		}
 
 		h.logger.Infof("UPDATE applied to zone %s", req.ZoneName)
@@ -470,10 +465,11 @@ func (h *integratedHandler) processUpdateEvents() {
 			})
 		}
 
-		// DDNS mutates the *zone.Zone directly (transfer.ApplyUpdate above),
-		// bypassing the Manager's mutation methods — fire the mutation hook
-		// manually so KV persistence (and any future hook consumer) sees the
-		// change. All other mutation paths persist automatically via the hook.
+		// DDNS mutates the *zone.Zone directly (transfer.ApplyUpdate in
+		// HandleUpdate), bypassing the Manager's mutation methods — fire the
+		// mutation hook manually so KV persistence (and any future hook
+		// consumer) sees the change. All other mutation paths persist
+		// automatically via the hook.
 		h.zoneManager.NotifyMutated(req.ZoneName)
 
 		// Persist zone file to disk if zoneDir is configured

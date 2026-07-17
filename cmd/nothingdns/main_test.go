@@ -6258,8 +6258,12 @@ func TestProcessNotifyEvents_FullChannel(t *testing.T) {
 
 func TestProcessUpdateEvents(t *testing.T) {
 	h := newTestHandler()
+	testZone := zone.NewZone("example.com.")
+	// Serial ahead of today's YYYYMMDDNN date prefix (RFC 1982-newer), so
+	// IncrementSerial takes the +1 path and each apply is exactly +1.
+	testZone.SOA = &zone.SOARecord{Name: "example.com.", Serial: 4000000000}
 	sharedZones := map[string]*zone.Zone{
-		"example.com.": zone.NewZone("example.com."),
+		"example.com.": testZone,
 	}
 	h.zones = sharedZones
 	h.zoneManager = zone.NewManager()
@@ -6315,14 +6319,21 @@ func TestProcessUpdateEvents(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
+	// Regression: the update must be applied exactly ONCE (synchronously in
+	// HandleUpdate). processUpdateEvents only journals/persists — re-applying
+	// there duplicated added records and double-bumped the SOA serial.
 	h.zonesMu.RLock()
 	z := h.zones["example.com."]
 	h.zonesMu.RUnlock()
 	z.RLock()
 	got := len(z.Records["new.example.com."])
+	serial := z.SOA.Serial
 	z.RUnlock()
-	if got != 2 {
-		t.Errorf("expected record added twice (HandleUpdate + processUpdateEvents), got %d", got)
+	if got != 1 {
+		t.Errorf("expected record added exactly once, got %d", got)
+	}
+	if serial != 4000000001 {
+		t.Errorf("expected SOA serial bumped exactly once (4000000000 -> 4000000001), got %d", serial)
 	}
 }
 

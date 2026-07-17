@@ -66,6 +66,12 @@ type UpdateRequest struct {
 	Prerequisites []UpdatePrerequisite
 	Updates       []UpdateOperation
 	TSIGKeyName   string
+
+	// OldSerial and NewSerial are the zone's SOA serial before and after
+	// the update was applied. HandleUpdate fills them in so channel
+	// consumers can journal the change without re-applying the update.
+	OldSerial uint32
+	NewSerial uint32
 }
 
 // UpdateResponse represents the result of an update request
@@ -240,7 +246,19 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 	// pass. Prereq failures return ErrPrereqFailed → NXRRSET RCODE;
 	// any other error → ServFail.
 	h.zonesMu.Lock()
+	z.RLock()
+	if z.SOA != nil {
+		updateReq.OldSerial = z.SOA.Serial
+	}
+	z.RUnlock()
 	err = ApplyUpdate(z, updateReq)
+	if err == nil {
+		z.RLock()
+		if z.SOA != nil {
+			updateReq.NewSerial = z.SOA.Serial
+		}
+		z.RUnlock()
+	}
 	h.zonesMu.Unlock()
 	if err != nil {
 		if errors.Is(err, ErrPrereqFailed) {
@@ -252,7 +270,9 @@ func (h *DynamicDNSHandler) HandleUpdate(req *protocol.Message, clientIP net.IP)
 		return h.createUpdateResponse(req, protocol.RcodeServerFailure), nil
 	}
 
-	// Notify update channel for audit/logging (non-blocking)
+	// Notify update channel for post-apply side effects (IXFR journal,
+	// audit, persistence). The update is ALREADY applied above — consumers
+	// must never call ApplyUpdate again (non-blocking send).
 	select {
 	case h.updateChan <- updateReq:
 	default:
