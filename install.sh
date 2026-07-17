@@ -9,7 +9,11 @@ set -e
 REPO="NothingDNS/NothingDNS"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nothingdns"
-CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+# Canonical config name (matches the server default, Dockerfile,
+# docker-compose.yml and deploy/nothingdns.service).
+CONFIG_FILE="${CONFIG_DIR}/nothingdns.yaml"
+# Legacy installs (pre-v1.0.0) created config.yaml — keep using it if present.
+LEGACY_CONFIG_FILE="${CONFIG_DIR}/config.yaml"
 BINARY_NAME="nothingdns"
 DNSCTL_NAME="dnsctl"
 SKIP_DOWNLOAD=false
@@ -330,6 +334,13 @@ download_dnsctl() {
 create_config() {
     local port="${1:-53}"
 
+    # Backward compatibility: if only the legacy config.yaml exists, leave it
+    # untouched and keep pointing the service at it. New installs get the
+    # canonical nothingdns.yaml.
+    if [ ! -f "${CONFIG_FILE}" ] && [ -f "${LEGACY_CONFIG_FILE}" ]; then
+        CONFIG_FILE="${LEGACY_CONFIG_FILE}"
+    fi
+
     if [ -f "${CONFIG_FILE}" ]; then
         warn "Config already exists at ${CONFIG_FILE}"
         if is_interactive; then
@@ -524,7 +535,7 @@ setup_service() {
 
         SERVICE_FILE="/etc/systemd/system/nothingdns.service"
 
-        cat > /tmp/nothingdns.service << 'EOF'
+        cat > /tmp/nothingdns.service << EOF
 [Unit]
 Description=NothingDNS DNS Server
 After=network-online.target
@@ -534,16 +545,28 @@ Wants=network-online.target
 Type=simple
 User=nobody
 Group=nogroup
-ExecStart=/usr/local/bin/nothingdns --config /etc/nothingdns/config.yaml
+ExecStart=/usr/local/bin/nothingdns --config ${CONFIG_FILE}
+
+# Reload configuration on SIGHUP
+ExecReload=/bin/kill -HUP \$MAINPID
+
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
 TimeoutStopSec=30s
 
-# Hardening
+# Security - bind to privileged ports without running as root
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# Hardening (keep in sync with deploy/nothingdns.service)
 NoNewPrivileges=true
-ProtectSystem=full
-ProtectHome=read-only
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+PrivateTmp=true
+PrivateDevices=true
 ReadWritePaths=/etc/nothingdns /var/lib/nothingdns /var/log/nothingdns
 
 # Logging

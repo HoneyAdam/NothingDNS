@@ -9,7 +9,11 @@ set -e
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nothingdns"
 BINARY_NAME="nothingdns"
-CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+# Canonical config name; legacy installs (pre-v1.0.0) used config.yaml.
+CONFIG_FILE="${CONFIG_DIR}/nothingdns.yaml"
+if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_DIR}/config.yaml" ]; then
+    CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+fi
 
 # Colors
 RED='\033[0;31m'

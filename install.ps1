@@ -3,19 +3,82 @@
 
 param(
     [string]$InstallPath = "$env:ProgramFiles\NothingDNS",
-    [string]$ConfigPath = "$env:ProgramData\NothingDNS\config.yaml"
+    # Canonical config name (matches the server default nothingdns.yaml)
+    [string]$ConfigPath = "$env:ProgramData\NothingDNS\nothingdns.yaml"
 )
 
 $ErrorActionPreference = "Stop"
+
+# Backward compatibility: legacy installs (pre-v1.0.0) used config.yaml. If only
+# the legacy file exists, keep using it; new installs get nothingdns.yaml.
+$LEGACY_CONFIG_PATH = "$env:ProgramData\NothingDNS\config.yaml"
+if (!$PSBoundParameters.ContainsKey('ConfigPath') -and
+    !(Test-Path $ConfigPath) -and (Test-Path $LEGACY_CONFIG_PATH)) {
+    $ConfigPath = $LEGACY_CONFIG_PATH
+}
 
 $REPO = "NothingDNS/NothingDNS"
 $BINARY_NAME = "nothingdns"
 $DNSCTL_NAME = "dnsctl"
 
+# Release assets are verified against the published SHA256SUMS by default. This
+# is the integrity control that stops a hijacked/MITM'd release from achieving
+# code execution (the binaries are installed and run with admin rights).
+# Override only in trusted/offline environments: $env:NOTHINGDNS_SKIP_CHECKSUM = '1'.
+$SKIP_CHECKSUM = ($env:NOTHINGDNS_SKIP_CHECKSUM -eq '1')
+$CHECKSUMS_PATH = $null
+
 # Colors
 function Write-Info($message) { Write-Host "[INFO] $message" -ForegroundColor Green }
 function Write-Warn($message) { Write-Host "[WARN] $message" -ForegroundColor Yellow }
 function Write-Err($message) { Write-Host "[ERROR] $message" -ForegroundColor Red; exit 1 }
+
+# Download the release SHA256SUMS once. Fails closed unless the operator
+# explicitly opted out via NOTHINGDNS_SKIP_CHECKSUM=1 (mirrors install.sh).
+function Fetch-Checksums {
+    param($Assets)
+
+    if ($script:SKIP_CHECKSUM) {
+        Write-Warn "=========================================================="
+        Write-Warn " NOTHINGDNS_SKIP_CHECKSUM=1"
+        Write-Warn " Release integrity verification is DISABLED."
+        Write-Warn " Downloaded binaries will NOT be checked against SHA256SUMS."
+        Write-Warn "=========================================================="
+        return
+    }
+
+    $url = $Assets | Where-Object { $_.name -eq "SHA256SUMS" } | Select-Object -First 1 -ExpandProperty browser_download_url
+    if (!$url) {
+        Write-Err "SHA256SUMS not found in the release assets. Refusing to install unverified binaries; set `$env:NOTHINGDNS_SKIP_CHECKSUM = '1' to bypass (NOT recommended)."
+    }
+
+    $script:CHECKSUMS_PATH = Join-Path $env:TEMP "nothingdns-SHA256SUMS-$PID.txt"
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $script:CHECKSUMS_PATH -UseBasicParsing | Out-Null
+    } catch {
+        Write-Err "Could not download release checksums ($url): $_. Refusing to install unverified binaries; set `$env:NOTHINGDNS_SKIP_CHECKSUM = '1' to bypass (NOT recommended)."
+    }
+}
+
+# Verify a downloaded file against the published checksum for the given asset
+# name. Aborts on mismatch or a missing entry (fail-closed).
+function Verify-Checksum {
+    param([string]$File, [string]$Asset)
+
+    if ($script:SKIP_CHECKSUM) { return }
+
+    $pattern = "\s\*?" + [regex]::Escape($Asset) + "$"
+    $entry = Select-String -Path $script:CHECKSUMS_PATH -Pattern $pattern | Select-Object -First 1
+    if (!$entry) {
+        Write-Err "No checksum entry for $Asset in SHA256SUMS - refusing to install."
+    }
+    $expected = ($entry.Line.Trim() -split '\s+')[0].ToLowerInvariant()
+    $actual = (Get-FileHash -Path $File -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($expected -ne $actual) {
+        Write-Err "Checksum mismatch for ${Asset}: expected $expected, got $actual. Aborting - the download may be corrupt or tampered with."
+    }
+    Write-Info "Verified $Asset (sha256 $actual)"
+}
 
 Write-Host ""
 Write-Host "======================================" -ForegroundColor Cyan
@@ -47,6 +110,9 @@ if (!(Test-Path $InstallPath)) {
 }
 Write-Info "Install directory: $InstallPath"
 
+# Fetch the release checksums before downloading any binary (fail-closed)
+Fetch-Checksums -Assets $ASSETS
+
 # Download binary
 $BINARY_URL = $ASSETS | Where-Object { $_.name -eq "$BINARY_NAME-$PLATFORM.exe" } | Select-Object -First 1 -ExpandProperty browser_download_url
 if (!$BINARY_URL) {
@@ -55,7 +121,10 @@ if (!$BINARY_URL) {
 
 Write-Info "Downloading nothingdns..."
 $BINARY_PATH = "$InstallPath\$BINARY_NAME.exe"
-Invoke-WebRequest -Uri $BINARY_URL -OutFile $BINARY_PATH -UseBasicParsing | Out-Null
+$BINARY_TEMP = Join-Path $env:TEMP "$BINARY_NAME-$PLATFORM-$PID.exe"
+Invoke-WebRequest -Uri $BINARY_URL -OutFile $BINARY_TEMP -UseBasicParsing | Out-Null
+Verify-Checksum -File $BINARY_TEMP -Asset "$BINARY_NAME-$PLATFORM.exe"
+Move-Item -Path $BINARY_TEMP -Destination $BINARY_PATH -Force
 Write-Info "Downloaded to $BINARY_PATH"
 
 # Download dnsctl
@@ -63,8 +132,16 @@ $DNSCTL_URL = $ASSETS | Where-Object { $_.name -eq "$DNSCTL_NAME-$PLATFORM.exe" 
 if ($DNSCTL_URL) {
     Write-Info "Downloading dnsctl..."
     $DNSCTL_PATH = "$InstallPath\$DNSCTL_NAME.exe"
-    Invoke-WebRequest -Uri $DNSCTL_URL -OutFile $DNSCTL_PATH -UseBasicParsing | Out-Null
+    $DNSCTL_TEMP = Join-Path $env:TEMP "$DNSCTL_NAME-$PLATFORM-$PID.exe"
+    Invoke-WebRequest -Uri $DNSCTL_URL -OutFile $DNSCTL_TEMP -UseBasicParsing | Out-Null
+    Verify-Checksum -File $DNSCTL_TEMP -Asset "$DNSCTL_NAME-$PLATFORM.exe"
+    Move-Item -Path $DNSCTL_TEMP -Destination $DNSCTL_PATH -Force
     Write-Info "Downloaded to $DNSCTL_PATH"
+}
+
+# Clean up the downloaded checksums file
+if ($CHECKSUMS_PATH -and (Test-Path $CHECKSUMS_PATH)) {
+    Remove-Item -Path $CHECKSUMS_PATH -Force -ErrorAction SilentlyContinue
 }
 
 # Create default config
@@ -158,8 +235,36 @@ cluster:
 
     $CONFIG | Out-File -FilePath $Path -Encoding UTF8
     Write-Info "Config created at $Path"
-    Write-Warn "Auth secret generated. Save this secret for API access:"
-    Write-Warn "  $AUTH_SECRET"
+    # Persist the API auth secret to an Administrators-only file rather than
+    # echoing it to stdout, which can leak into terminal scrollback or logs
+    # (mirrors install.sh's root-only credentials file).
+    $CREDENTIALS_PATH = Join-Path $CONFIG_DIR "credentials"
+    "api_auth_secret: $AUTH_SECRET" | Out-File -FilePath $CREDENTIALS_PATH -Encoding UTF8
+    Protect-CredentialsFile -Path $CREDENTIALS_PATH
+    Write-Info "API auth secret saved to $CREDENTIALS_PATH (Administrators only)."
+    Write-Info "Retrieve with: Get-Content $CREDENTIALS_PATH (as Administrator)"
+}
+
+# Restrict a file to Administrators + SYSTEM only (no inherited ACEs), the
+# Windows equivalent of install.sh's chmod 600 root-only credentials file.
+function Protect-CredentialsFile {
+    param([string]$Path)
+
+    $acl = Get-Acl -Path $Path
+    $acl.SetAccessRuleProtection($true, $false)  # drop inherited ACEs
+    foreach ($rule in @($acl.Access)) {
+        $acl.RemoveAccessRule($rule) | Out-Null
+    }
+    $admins = New-Object System.Security.Principal.SecurityIdentifier(
+        [System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+    $system = New-Object System.Security.Principal.SecurityIdentifier(
+        [System.Security.Principal.WellKnownSidType]::LocalSystemSid, $null)
+    foreach ($sid in @($admins, $system)) {
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $sid, "FullControl", "Allow")
+        $acl.AddAccessRule($rule)
+    }
+    Set-Acl -Path $Path -AclObject $acl
 }
 
 Create-DefaultConfig -Path $ConfigPath

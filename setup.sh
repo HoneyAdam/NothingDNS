@@ -9,6 +9,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/nothingdns"
+# Canonical config name; legacy installs (pre-v1.0.0) used config.yaml.
+CONFIG_FILE="${CONFIG_DIR}/nothingdns.yaml"
+if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_DIR}/config.yaml" ]; then
+    CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+fi
 DATA_DIR="/var/lib/nothingdns"
 BINARY_NAME="nothingdns"
 DNSCTL_NAME="dnsctl"
@@ -220,7 +225,7 @@ generate_secret() {
 create_config() {
     section "Creating Configuration"
 
-    local config_file="${CONFIG_DIR}/config.yaml"
+    local config_file="${CONFIG_FILE}"
 
     if [ -f "${config_file}" ]; then
         warn "Config already exists at ${config_file}"
@@ -334,7 +339,7 @@ setup_service() {
     fi
 
     if [ ! -f "/etc/systemd/system/nothingdns.service" ]; then
-        cat > /tmp/nothingdns.service << 'EOF'
+        cat > /tmp/nothingdns.service << EOF
 [Unit]
 Description=NothingDNS Authoritative DNS Server
 Documentation=https://github.com/NothingDNS/NothingDNS
@@ -345,8 +350,8 @@ Wants=network-online.target
 Type=simple
 User=nobody
 Group=nogroup
-ExecStart=/usr/local/bin/nothingdns --config /etc/nothingdns/config.yaml
-ExecReload=/bin/kill -HUP $MAINPID
+ExecStart=/usr/local/bin/nothingdns --config ${CONFIG_FILE}
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
@@ -426,7 +431,7 @@ print_next_steps() {
     echo "Next steps:"
     echo ""
     echo -e "${CYAN}1. Configure zones:${NC}"
-    echo "   sudo nano ${CONFIG_DIR}/config.yaml"
+    echo "   sudo nano ${CONFIG_FILE}"
     echo "   # Add your zones under 'zones:' section"
     echo ""
     echo -e "${CYAN}2. Manage service:${NC}"

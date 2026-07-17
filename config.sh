@@ -7,7 +7,11 @@
 set -e
 
 CONFIG_DIR="/etc/nothingdns"
-CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+# Canonical config name; legacy installs (pre-v1.0.0) used config.yaml.
+CONFIG_FILE="${CONFIG_DIR}/nothingdns.yaml"
+if [ ! -f "${CONFIG_FILE}" ] && [ -f "${CONFIG_DIR}/config.yaml" ]; then
+    CONFIG_FILE="${CONFIG_DIR}/config.yaml"
+fi
 BINARY_NAME="nothingdns"
 EDITOR="${EDITOR:-nano}"
 

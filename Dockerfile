@@ -45,7 +45,7 @@ FROM scratch
 LABEL org.opencontainers.image.title="NothingDNS"
 LABEL org.opencontainers.image.description="Zero-dependency DNS server written in pure Go"
 LABEL org.opencontainers.image.source="https://github.com/nothingdns/nothingdns"
-LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.licenses="MIT"
 
 # Copy binaries from builder
 COPY --from=builder /build/nothingdns /usr/local/bin/nothingdns
