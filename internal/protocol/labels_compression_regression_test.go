@@ -41,3 +41,39 @@ func TestPackName_SuffixCompressionKeepsLeadingLabels(t *testing.T) {
 		t.Errorf("answer[1] owner = %q, want www.example.com. (leading label dropped by compression)", got)
 	}
 }
+
+// Regression: compression bookkeeping was keyed on the unescaped
+// presentation form, so a wire label containing a literal '.' byte
+// ("a.b" as ONE label) desynced the presentation/wire label counts —
+// the emit-before-pointer path wrote the wrong wire labels and the name
+// round-tripped corrupted (e.g. "a.b.example.example.com."). Keys are
+// now derived from the wire bytes themselves.
+func TestPackName_EmbeddedDotLabelNotCorrupted(t *testing.T) {
+	seed, _ := ParseName("example.com.")
+
+	// Build {a.b}{example}{com}: first label is the 3 bytes 'a','.','b'.
+	wire := []byte{3, 'a', '.', 'b', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}
+	inner, _, err := UnpackName(wire, 0)
+	if err != nil {
+		t.Fatalf("unpack embedded-dot name: %v", err)
+	}
+
+	buf := make([]byte, 512)
+	compression := map[string]int{}
+	n1, err := PackName(seed, buf, 0, compression)
+	if err != nil {
+		t.Fatalf("pack seed: %v", err)
+	}
+	n2, err := PackName(inner, buf, n1, compression)
+	if err != nil {
+		t.Fatalf("pack embedded-dot name: %v", err)
+	}
+
+	got, _, err := UnpackName(buf[:n1+n2], n1)
+	if err != nil {
+		t.Fatalf("unpack packed name: %v", err)
+	}
+	if !got.Equal(inner) {
+		t.Fatalf("embedded-dot label corrupted by compression: got %q, want %q", got.String(), inner.String())
+	}
+}

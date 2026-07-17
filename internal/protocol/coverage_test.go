@@ -2684,8 +2684,9 @@ func TestValidateLabelUnderscoreAtStart(t *testing.T) {
 
 func TestPackNameCompressionPointerBufTooSmall(t *testing.T) {
 	name, _ := ParseName("www.example.com.")
+	exKey, _ := ParseName("example.com.")
 	compression := map[string]int{
-		"example.com": 12,
+		wireSuffixKey(exKey.wire): 12,
 	}
 
 	// Buffer with only 1 byte at offset, need 2 for pointer
@@ -3926,8 +3927,9 @@ func TestMessagePackQuestionWithCompressionError(t *testing.T) {
 
 func TestPackNameWithCompressionHit(t *testing.T) {
 	name, _ := ParseName("www.example.com.")
+	exKey, _ := ParseName("example.com.")
 	compression := map[string]int{
-		"example.com": 12, // Simulate "example.com" already packed at offset 12
+		wireSuffixKey(exKey.wire): 12, // Simulate "example.com" already packed at offset 12
 	}
 
 	buf := make([]byte, 512)
@@ -3956,8 +3958,9 @@ func TestPackNameWithCompressionHit(t *testing.T) {
 
 func TestPackNameWithCompressionExactMatch(t *testing.T) {
 	name, _ := ParseName("example.com.")
+	exKey, _ := ParseName("example.com.")
 	compression := map[string]int{
-		"example.com": 0, // Full match
+		wireSuffixKey(exKey.wire): 0, // Full match
 	}
 
 	buf := make([]byte, 512)
@@ -3979,8 +3982,9 @@ func TestPackNameWithCompressionExactMatch(t *testing.T) {
 
 func TestPackNameWithCompressionPointerTooSmall(t *testing.T) {
 	name, _ := ParseName("example.com.")
+	exKey, _ := ParseName("example.com.")
 	compression := map[string]int{
-		"example.com": 0x4000, // Over max pointer offset
+		wireSuffixKey(exKey.wire): 0x4000, // Over max pointer offset
 	}
 
 	buf := make([]byte, 512)

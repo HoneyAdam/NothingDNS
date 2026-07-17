@@ -374,8 +374,28 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 	}
 
 	originalOffset := offset
-	presentation := trimTrailingDot(name.String())
-	if presentation == "" {
+
+	// Compression keys and suffix boundaries are derived from the WIRE
+	// form, not the presentation string: presentationFromWire does not
+	// escape special bytes, so a wire label containing a literal '.'
+	// renders as multiple presentation labels and the two label counts
+	// desync — the old presentation-based bookkeeping emitted wrong
+	// labels and polluted the compression map for such names.
+	var starts [maxLabels]int
+	labelCount := 0
+	for i := 0; i < len(name.wire); {
+		labelLen := int(name.wire[i])
+		if labelLen == 0 {
+			break
+		}
+		if labelCount >= maxLabels {
+			return 0, ErrNameTooLong
+		}
+		starts[labelCount] = i
+		labelCount++
+		i += 1 + labelLen
+	}
+	if labelCount == 0 { // root
 		if offset >= len(buf) {
 			return 0, ErrBufferTooSmall
 		}
@@ -383,42 +403,27 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 		return 1, nil
 	}
 
-	var suffixStarts [maxLabels]byte
-	pos := 0
-	labelIndex := 0
-	for i := 0; i <= len(presentation); i++ {
-		if i == len(presentation) || presentation[i] == '.' {
-			if labelIndex >= maxLabels {
-				return 0, ErrNameTooLong
-			}
-			suffixStarts[labelIndex] = byte(pos)
-			labelIndex++
-			pos = i + 1
-		}
-	}
-
-	for i := 0; i < labelIndex; i++ {
-		suffix := presentation[suffixStarts[i]:]
-		if ptrOffset, ok := compression[suffix]; ok && ptrOffset < PointerOffsetMask {
-			// RFC 1035 §4.1.4: a name may end with a pointer, but the
-			// labels BEFORE the matched suffix must still be emitted.
-			// The old code jumped straight to the pointer for any suffix
-			// match, silently dropping the leading labels — packing
-			// "www.example.com." after "a.example.com." produced a name
-			// that decoded as "example.com.".
-			wireIdx := 0
+	// RFC 1035 §4.1.4: a name may end with a pointer, but the labels
+	// BEFORE the matched suffix must still be emitted (an earlier version
+	// jumped straight to the pointer for any suffix match, silently
+	// dropping the leading labels — packing "www.example.com." after
+	// "a.example.com." produced a name that decoded as "example.com.").
+	for i := 0; i < labelCount; i++ {
+		key := wireSuffixKey(name.wire[starts[i]:])
+		if ptrOffset, ok := compression[key]; ok && ptrOffset < PointerOffsetMask {
 			for l := 0; l < i; l++ {
-				labelLen := int(name.wire[wireIdx])
-				prefixSuffix := presentation[suffixStarts[l]:]
-				if _, exists := compression[prefixSuffix]; !exists {
-					compression[prefixSuffix] = offset
+				start := starts[l]
+				labelLen := int(name.wire[start])
+				if prefixKey := wireSuffixKey(name.wire[start:]); prefixKey != "" {
+					if _, exists := compression[prefixKey]; !exists {
+						compression[prefixKey] = offset
+					}
 				}
 				if offset+1+labelLen > len(buf) {
 					return 0, ErrBufferTooSmall
 				}
-				copy(buf[offset:offset+1+labelLen], name.wire[wireIdx:wireIdx+1+labelLen])
+				copy(buf[offset:offset+1+labelLen], name.wire[start:start+1+labelLen])
 				offset += 1 + labelLen
-				wireIdx += 1 + labelLen
 			}
 			if offset+2 > len(buf) {
 				return 0, ErrBufferTooSmall
@@ -430,21 +435,21 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 		}
 	}
 
-	wireOffset := 0
-	for i := 0; i < len(name.wire); {
-		labelLen := int(name.wire[i])
-		if labelLen == 0 {
-			break
+	// No suffix already packed: emit every label, registering each suffix
+	// (keyed on wire bytes) as a future compression target.
+	for l := 0; l < labelCount; l++ {
+		start := starts[l]
+		labelLen := int(name.wire[start])
+		if key := wireSuffixKey(name.wire[start:]); key != "" {
+			if _, exists := compression[key]; !exists {
+				compression[key] = offset
+			}
 		}
-		suffix := presentation[suffixStarts[wireOffset]:]
-		compression[suffix] = offset
 		if offset+1+labelLen > len(buf) {
 			return 0, ErrBufferTooSmall
 		}
-		copy(buf[offset:offset+1+labelLen], name.wire[i:i+1+labelLen])
+		copy(buf[offset:offset+1+labelLen], name.wire[start:start+1+labelLen])
 		offset += 1 + labelLen
-		i += 1 + labelLen
-		wireOffset++
 	}
 
 	if offset >= len(buf) {
@@ -453,6 +458,27 @@ func PackName(name *Name, buf []byte, offset int, compression map[string]int) (i
 	buf[offset] = 0
 	offset++
 	return offset - originalOffset, nil
+}
+
+// wireSuffixKey returns the case-folded wire bytes of a name suffix
+// (length-prefixed labels, excluding any trailing root byte) for use as a
+// compression-map key. Keying on wire bytes keeps label boundaries exact
+// even when a label contains a literal '.' — the unescaped presentation
+// form is ambiguous for such labels. DNS name compression matches
+// case-insensitively (RFC 1035 §4.1.4), hence the fold.
+func wireSuffixKey(wireSuffix []byte) string {
+	end := len(wireSuffix)
+	if end > 0 && wireSuffix[end-1] == 0 {
+		end--
+	}
+	if end <= 0 {
+		return ""
+	}
+	b := make([]byte, end)
+	for i := 0; i < end; i++ {
+		b[i] = toLower(wireSuffix[i])
+	}
+	return string(b)
 }
 
 // UnpackName unpacks a domain name from wire format.
