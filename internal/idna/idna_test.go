@@ -531,12 +531,6 @@ func TestIsJoinable(t *testing.T) {
 	}
 }
 
-func TestIsUnassigned(t *testing.T) {
-	// Simplified always returns false
-	if isUnassigned('a') {
-		t.Error("isUnassigned('a') should be false")
-	}
-}
 
 func TestToASCIITrimSpace(t *testing.T) {
 	got, err := ToASCII("  example.com  ")

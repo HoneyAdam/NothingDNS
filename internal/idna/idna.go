@@ -1,5 +1,22 @@
 // Package idna implements Internationalized Domain Names in Applications (IDNA)
 // according to RFC 5890, 5891, 5892, 5893, 5895, and RFC 3492 (Punycode).
+//
+// # Security limitations
+//
+// The Punycode codec (RFC 3492) is complete and overflow-hardened, and
+// unassigned code points are rejected against the Go toolchain's Unicode
+// tables. However, the POLICY layer is a simplification of the full IDNA2008
+// suite:
+//
+//   - Bidi rules (RFC 5893) and contextual rules (RFC 5892 Appendix A) are
+//     implemented over simplified script ranges, not the full Unicode
+//     property tables.
+//   - No confusable/homograph detection is performed (that is a
+//     display-layer concern per UTS #39, out of scope for a resolver).
+//
+// Do NOT rely on this package as the sole defense for security-critical
+// name comparison or phishing prevention; it validates wire-level IDNA
+// well-formedness, not visual spoofing resistance.
 package idna
 
 import (
@@ -447,11 +464,22 @@ func isNumberCategory(r rune) bool {
 		(r >= 0x06F0 && r <= 0x06FF)
 }
 
-// isUnassigned returns true if rune is an unassigned code point.
+// isUnassigned returns true if rune is an unassigned code point (general
+// category Cn) per the Go toolchain's Unicode tables. A rune is assigned
+// when it belongs to any general category the unicode package tracks;
+// category Cn has no table of its own, so absence from all of them is the
+// test. The previous implementation was a placeholder returning false,
+// which made AllowUnassigned=false a no-op — unassigned code points
+// sailed through validation.
 func isUnassigned(r rune) bool {
-	// Unassigned ranges in Unicode
-	// Simplified - a full implementation would check Unicode version
-	return false // Placeholder - no unassigned in recent Unicode
+	if r < 0 || r > unicode.MaxRune {
+		return true
+	}
+	// Explicit subcategories: the aggregate unicode.C table also covers Cn
+	// (unassigned), which would defeat the whole check.
+	return !unicode.In(r,
+		unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs,
+		unicode.L, unicode.M, unicode.N, unicode.P, unicode.S, unicode.Z)
 }
 
 // isASCII returns true if string contains only ASCII characters.
