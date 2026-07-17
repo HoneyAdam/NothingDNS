@@ -131,10 +131,12 @@ describe('downloadAuthenticated', () => {
 
   it('triggers download with auth header', async () => {
     useAuthStore.getState().setAuth('tok_dl', 'u', 'admin');
-    const blobContent = new Blob(['zone data']);
+    // Construct the Response from a string, not a Blob: jsdom's Blob lacks
+    // .stream() on some Node versions (CI), which throws in the Response
+    // constructor. downloadAuthenticated only needs response.blob().
     mockFetch.mockResolvedValue(
       Promise.resolve(
-        new Response(blobContent, {
+        new Response('zone data', {
           status: 200,
           headers: { 'Content-Type': 'application/octet-stream' },
         }),
