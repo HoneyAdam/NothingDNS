@@ -330,6 +330,12 @@ func (ci *ClusterIntegration) fastForwardApplied(idx Index) {
 	if idx > ci.appliedIndex {
 		ci.appliedIndex = idx
 		ci.lastAppliedTerm = ci.node.lastSnapshotTerm
+		// The in-memory ledger (ci.stateMachine) only tracks log applies;
+		// an installed snapshot went straight to the real zone store via
+		// the restore fn. The ledger's pre-snapshot contents are now stale
+		// — reset it so GetZoneData returns empty rather than lying.
+		// Authoritative reads go through the zone manager, not this ledger.
+		ci.stateMachine.reset()
 	}
 }
 
@@ -736,7 +742,10 @@ func (ci *ClusterIntegration) ProposeDeleteRecord(zone, name string, rrtype uint
 	return ci.ProposeZoneChange(cmd)
 }
 
-// GetZoneData returns zone data from the state machine.
+// GetZoneData returns zone data from the log-apply ledger. NOTE: this is
+// a debugging/introspection view, NOT the authoritative store — it is
+// reset after a snapshot install (the snapshot restores the real zone
+// store directly). Read zones through the zone manager instead.
 func (ci *ClusterIntegration) GetZoneData(zone string) []RecordEntry {
 	return ci.stateMachine.GetRecords(zone)
 }

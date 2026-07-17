@@ -176,6 +176,18 @@ func (z *ZoneStateMachine) GetZones() []string {
 	return zones
 }
 
+// reset drops all ledger state. Called after a snapshot install: the
+// snapshot bypassed this ledger (it restores the real zone store), so
+// whatever the ledger held predates the snapshot and must not be served.
+func (sm *ZoneStateMachine) reset() {
+	if sm == nil {
+		return
+	}
+	sm.mu.Lock()
+	sm.zones = make(map[string]*ZoneData)
+	sm.mu.Unlock()
+}
+
 // GetRecords returns all records for a zone.
 func (z *ZoneStateMachine) GetRecords(zoneName string) []RecordEntry {
 	z.mu.RLock()
