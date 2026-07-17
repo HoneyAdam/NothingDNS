@@ -30,26 +30,30 @@ import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useTheme } from "@/hooks/useThemeHook";
 import { api } from "@/lib/api";
+import { hasMinRole, type Role } from "@/lib/roles";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/authStore";
 
-const nav = [
+// minRole hides management pages from viewers — their API reads gate on
+// requireOperator (mutations on requireAdmin), matching the RequireRole
+// wrappers on the corresponding routes in App.tsx.
+const nav: { to: string; icon: typeof Globe; label: string; minRole?: Role }[] = [
 	{ to: "/", icon: LayoutDashboard, label: "Dashboard" },
 	{ to: "/zones", icon: Globe, label: "Zones" },
-	{ to: "/dnssec", icon: Key, label: "DNSSEC" },
-	{ to: "/cluster", icon: Network, label: "Cluster" },
+	{ to: "/dnssec", icon: Key, label: "DNSSEC", minRole: "operator" },
+	{ to: "/cluster", icon: Network, label: "Cluster", minRole: "operator" },
 	{ to: "/query-log", icon: ScrollText, label: "Query Log" },
 	{ to: "/top-domains", icon: TrendingUp, label: "Top Domains" },
 	{ to: "/geoip", icon: Globe2, label: "GeoIP" },
-	{ to: "/blocklist", icon: Shield, label: "Blocklist" },
-	{ to: "/rpz", icon: ShieldCheck, label: "RPZ" },
-	{ to: "/acl", icon: Shield, label: "ACL" },
-	{ to: "/upstreams", icon: WifiIcon, label: "Upstreams" },
+	{ to: "/blocklist", icon: Shield, label: "Blocklist", minRole: "operator" },
+	{ to: "/rpz", icon: ShieldCheck, label: "RPZ", minRole: "operator" },
+	{ to: "/acl", icon: Shield, label: "ACL", minRole: "operator" },
+	{ to: "/upstreams", icon: WifiIcon, label: "Upstreams", minRole: "operator" },
 	{ to: "/zone-transfer", icon: ArrowLeftRight, label: "Zone Transfer" },
 	{ to: "/dns64-cookies", icon: CloudCog, label: "DNS64/Cookies" },
 	{ to: "/charts", icon: BarChart3, label: "Charts" },
-	{ to: "/users", icon: Users, label: "Users" },
-	{ to: "/settings", icon: Settings, label: "Settings" },
+	{ to: "/users", icon: Users, label: "Users", minRole: "operator" },
+	{ to: "/settings", icon: Settings, label: "Settings", minRole: "operator" },
 	{ to: "/about", icon: Info, label: "About" },
 ];
 
@@ -141,27 +145,29 @@ export function Sidebar({
 					)}
 				</div>
 				<nav className="flex-1 py-2 space-y-1 px-2 overflow-y-auto">
-					{nav.map(({ to, icon: Icon, label }) => {
-						const active =
-							to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to);
-						return (
-							<NavLink
-								key={to}
-								to={to}
-								className={cn(
-									"flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
-									active
-										? "bg-primary/10 text-primary"
-										: "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-									collapsed && "justify-center px-2",
-								)}
-								onClick={() => setMobileOpen(false)}
-							>
-								<Icon className="h-4 w-4 shrink-0" />
-								{!collapsed && <span className="truncate">{label}</span>}
-							</NavLink>
-						);
-					})}
+					{nav
+						.filter((item) => !item.minRole || hasMinRole(role, item.minRole))
+						.map(({ to, icon: Icon, label }) => {
+							const active =
+								to === "/" ? loc.pathname === "/" : loc.pathname.startsWith(to);
+							return (
+								<NavLink
+									key={to}
+									to={to}
+									className={cn(
+										"flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+										active
+											? "bg-primary/10 text-primary"
+											: "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+										collapsed && "justify-center px-2",
+									)}
+									onClick={() => setMobileOpen(false)}
+								>
+									<Icon className="h-4 w-4 shrink-0" />
+									{!collapsed && <span className="truncate">{label}</span>}
+								</NavLink>
+							);
+						})}
 				</nav>
 				<div className="border-t p-2 space-y-1">
 					{username && (

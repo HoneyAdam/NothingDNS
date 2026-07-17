@@ -72,7 +72,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookie
-	// SECURITY (LOW-018): Secure flag is conditional on r.TLS != nil.
+	// SECURITY (LOW-018): Secure flag is set for direct TLS or when a trusted
+	// proxy forwarded X-Forwarded-Proto: https (see isRequestSecure).
 	// Plaintext deployments transmit cookies unencrypted. Deploy behind TLS
 	// or a TLS-terminating reverse proxy for production.
 	http.SetCookie(w, &http.Cookie{
@@ -80,7 +81,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Value:    token.Token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   s.isRequestSecure(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   cookieMaxAgeSeconds(tokenExpiry),
 	})
@@ -208,7 +209,8 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set cookie
-	// SECURITY (LOW-018): Secure flag is conditional on r.TLS != nil.
+	// SECURITY (LOW-018): Secure flag is set for direct TLS or when a trusted
+	// proxy forwarded X-Forwarded-Proto: https (see isRequestSecure).
 	// Plaintext deployments transmit cookies unencrypted. Deploy behind TLS
 	// or a TLS-terminating reverse proxy for production.
 	http.SetCookie(w, &http.Cookie{
@@ -216,7 +218,7 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 		Value:    token.Token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   s.isRequestSecure(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   cookieMaxAgeSeconds(tokenExpiry),
 	})
@@ -253,7 +255,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   s.isRequestSecure(r),
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})

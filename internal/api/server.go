@@ -1457,6 +1457,32 @@ func (s *Server) clientIP(r *http.Request) string {
 	return peer
 }
 
+// isRequestSecure reports whether the request traveled to the client over
+// HTTPS: either the connection itself is TLS, or the direct peer is a
+// configured trusted proxy (same trust model as clientIP) that forwarded the
+// request with X-Forwarded-Proto: https. Used for the auth cookie's Secure
+// flag, which would otherwise never be set behind a TLS-terminating reverse
+// proxy.
+//
+// SECURITY: X-Forwarded-Proto is client-controlled and is honored ONLY when
+// RemoteAddr matches a trusted proxy — a direct client cannot flip the flag
+// by sending the header.
+func (s *Server) isRequestSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if len(s.trustedProxies) == 0 || !ipInNets(remoteAddrIP(r), s.trustedProxies) {
+		return false
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	// Some proxy chains append values ("https, http"); the leftmost entry is
+	// the scheme the original client used.
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
 // ipInNets reports whether ip (string form) falls within any of nets.
 func ipInNets(ip string, nets []*net.IPNet) bool {
 	parsed := net.ParseIP(ip)

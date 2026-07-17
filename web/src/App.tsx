@@ -9,6 +9,7 @@ import { useQueryStream } from '@/stores/queryStream';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { Sidebar } from '@/components/layout/sidebar';
 import { ErrorBoundary } from '@/components/error-boundary';
+import { RequireRole } from '@/components/require-role';
 import { EmptyState } from '@/components/states';
 import { Button } from '@/components/ui/button';
 import { FileQuestion } from 'lucide-react';
@@ -74,18 +75,21 @@ function RoutedContent() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/zones" element={<ZonesPage />} />
           <Route path="/zones/:name" element={<ZoneDetailPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          {/* Management pages: API reads gate on requireOperator (mutations on
+              requireAdmin), so viewers get an access-denied panel instead of a
+              page of 403s. The sidebar hides these entries for viewers too. */}
+          <Route path="/settings" element={<RequireRole minRole="operator"><SettingsPage /></RequireRole>} />
           <Route path="/about" element={<AboutPage />} />
           <Route path="/query-log" element={<QueryLogPage />} />
           <Route path="/top-domains" element={<TopDomainsPage />} />
-          <Route path="/blocklist" element={<BlocklistPage />} />
-          <Route path="/upstreams" element={<UpstreamsPage />} />
-          <Route path="/users" element={<UsersPage />} />
+          <Route path="/blocklist" element={<RequireRole minRole="operator"><BlocklistPage /></RequireRole>} />
+          <Route path="/upstreams" element={<RequireRole minRole="operator"><UpstreamsPage /></RequireRole>} />
+          <Route path="/users" element={<RequireRole minRole="operator"><UsersPage /></RequireRole>} />
           <Route path="/charts" element={<HistoricalChartsPage />} />
-          <Route path="/dnssec" element={<DNSSECPage />} />
-          <Route path="/cluster" element={<ClusterPage />} />
-          <Route path="/rpz" element={<RPZPage />} />
-          <Route path="/acl" element={<ACLPage />} />
+          <Route path="/dnssec" element={<RequireRole minRole="operator"><DNSSECPage /></RequireRole>} />
+          <Route path="/cluster" element={<RequireRole minRole="operator"><ClusterPage /></RequireRole>} />
+          <Route path="/rpz" element={<RequireRole minRole="operator"><RPZPage /></RequireRole>} />
+          <Route path="/acl" element={<RequireRole minRole="operator"><ACLPage /></RequireRole>} />
           <Route path="/geoip" element={<GeoIPPage />} />
           <Route path="/dns64-cookies" element={<DNS64CookiesPage />} />
           <Route path="/zone-transfer" element={<ZoneTransferPage />} />

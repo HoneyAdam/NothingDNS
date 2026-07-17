@@ -2,6 +2,7 @@ package otel
 
 import (
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nothingdns/nothingdns/internal/util"
@@ -16,8 +17,10 @@ func Middleware(tracer *Tracer) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Start span
-			ctx, span := tracer.StartSpan(r.Context(), r.Method+" "+r.URL.Path)
+			// Start span — spanPath bounds cardinality: raw request paths
+			// (zone names, record IDs, arbitrary probes) would otherwise
+			// mint an unbounded set of span names.
+			ctx, span := tracer.StartSpan(r.Context(), r.Method+" "+spanPath(r.URL.Path))
 			if span == nil {
 				next.ServeHTTP(w, r)
 				return
@@ -47,6 +50,58 @@ func Middleware(tracer *Tracer) func(http.Handler) http.Handler {
 			)
 		})
 	}
+}
+
+// spanPath maps a raw URL path onto a bounded-cardinality span-name path:
+// only the first three segments are kept (the rest collapse to "/*"), and a
+// third segment that looks like a dynamic value — numeric, UUID-like, or
+// longer than 32 characters — is masked as ":id". API routes here are shaped
+// /api/v1/<resource>/<instance>/..., so three segments identify the route
+// family while instance names never reach the span name.
+func spanPath(path string) string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return "/"
+	}
+	segs := strings.Split(trimmed, "/")
+	truncated := false
+	if len(segs) > 3 {
+		segs = segs[:3]
+		truncated = true
+	}
+	if len(segs) == 3 && looksDynamicSegment(segs[2]) {
+		segs[2] = ":id"
+	}
+	out := "/" + strings.Join(segs, "/")
+	if truncated {
+		out += "/*"
+	}
+	return out
+}
+
+// looksDynamicSegment reports whether a path segment looks like a per-entity
+// value rather than a fixed route word: all-numeric, a UUID (dashed 36-char
+// form exceeds the length cap; the dashless 32-hex form is matched here), or
+// simply longer than 32 characters.
+func looksDynamicSegment(seg string) bool {
+	if len(seg) > 32 {
+		return true
+	}
+	if seg == "" {
+		return false
+	}
+	numeric := true
+	hex := len(seg) == 32
+	for i := 0; i < len(seg); i++ {
+		c := seg[i]
+		if c < '0' || c > '9' {
+			numeric = false
+		}
+		if hex && !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			hex = false
+		}
+	}
+	return numeric || hex
 }
 
 type responseWriter struct {

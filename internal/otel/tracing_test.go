@@ -192,6 +192,55 @@ func TestMiddleware_Enabled(t *testing.T) {
 	}
 }
 
+func TestMiddleware_SpanNameBoundedCardinality(t *testing.T) {
+	tracer := NewTracer(Config{Enabled: true, Level: LevelDetailed})
+	var gotName string
+	handler := Middleware(tracer)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if span := SpanFromContext(r.Context()); span != nil {
+			gotName = span.Name
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/zones/example.com./records", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if gotName != "GET /api/v1/zones/*" {
+		t.Errorf("expected span name 'GET /api/v1/zones/*', got %q", gotName)
+	}
+}
+
+func TestSpanPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/", "/"},
+		{"", "/"},
+		{"/metrics", "/metrics"},
+		{"/api/v1", "/api/v1"},
+		{"/api/v1/zones", "/api/v1/zones"},
+		// Deeper paths collapse after the third segment
+		{"/api/v1/zones/example.com./records", "/api/v1/zones/*"},
+		{"/api/v1/auth/users/alice", "/api/v1/auth/*"},
+		// Dynamic-looking third segments are masked
+		{"/api/v1/12345", "/api/v1/:id"},
+		{"/api/v1/deadbeefdeadbeefdeadbeefdeadbeef", "/api/v1/:id"},                                // 32-hex (dashless UUID)
+		{"/api/v1/550e8400-e29b-41d4-a716-446655440000", "/api/v1/:id"},                            // dashed UUID (36 chars > 32)
+		{"/api/v1/" + strings.Repeat("a", 33), "/api/v1/:id"},                                      // over-long segment
+		{"/api/v1/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/records", "/api/v1/:id/*"},                      // 32-hex plus tail
+		{"/one/two/status", "/one/two/status"},                                                     // fixed word survives
+		{"/one/two/deadbeefdeadbeefdeadbeefdeadbeeZ", "/one/two/deadbeefdeadbeefdeadbeefdeadbeeZ"}, // 32 chars, not hex
+	}
+
+	for _, tc := range tests {
+		if got := spanPath(tc.path); got != tc.want {
+			t.Errorf("spanPath(%q) = %q, want %q", tc.path, got, tc.want)
+		}
+	}
+}
+
 // --- TraceHandler tests ---
 
 func TestTraceHandler_Disabled(t *testing.T) {
