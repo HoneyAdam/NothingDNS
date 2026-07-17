@@ -157,3 +157,58 @@ func TestDSO_NotImplementedWithoutHandler(t *testing.T) {
 		t.Errorf("RCODE = %d, want NOTIMP", respMsg.Header.Flags.RCODE)
 	}
 }
+
+// Regression: the DSO inactivity sweeper closes the underlying connection.
+// LastActivity was only updated by DSO messages, so a connection actively
+// serving REGULAR DNS queries (which don't touch the session) got closed
+// ~15s after its last DSO message. Touch(conn), called by the transport
+// on every message, must reset the session's activity.
+func TestDSOAdapter_TouchResetsInactivity(t *testing.T) {
+	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
+	manager := dso.NewManager(dso.Config{
+		Enabled:           true,
+		AllowPlainTCP:     true,
+		MaxSessions:       10,
+		InactivityTimeout: 50 * time.Millisecond,
+	}, logger)
+	manager.Start()
+	defer manager.Stop()
+
+	adapter := newDSOConnAdapter(manager, logger)
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	// Establish a session via a keepalive DSO message.
+	if _, err := adapter.HandleDSO(server, mustUnpackDSO(t, buildDSOKeepaliveRequest(t, 0x1))); err != nil {
+		t.Fatalf("HandleDSO: %v", err)
+	}
+	if manager.SessionCount() != 1 {
+		t.Fatalf("session count = %d, want 1", manager.SessionCount())
+	}
+
+	// Keep touching faster than the inactivity timeout; the session must
+	// survive well past one timeout window.
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		adapter.Touch(server)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if manager.SessionCount() != 1 {
+		t.Fatalf("touched session was reaped: count = %d, want 1", manager.SessionCount())
+	}
+
+	// Touch on an unknown conn is a no-op (must not panic).
+	other, _ := net.Pipe()
+	defer other.Close()
+	adapter.Touch(other)
+}
+
+func mustUnpackDSO(t *testing.T, raw []byte) *protocol.Message {
+	t.Helper()
+	msg, err := protocol.UnpackMessage(raw)
+	if err != nil {
+		t.Fatalf("unpack DSO: %v", err)
+	}
+	return msg
+}

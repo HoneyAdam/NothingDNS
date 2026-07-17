@@ -7,6 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,22 @@ import (
 	"github.com/nothingdns/nothingdns/internal/protocol"
 	"github.com/nothingdns/nothingdns/internal/util"
 )
+
+// ErrDSOFatal marks a DSO protocol violation that RFC 8490 §5.2 requires
+// be handled by forcibly aborting the connection (malformed framing,
+// nonzero section counts, an unsolicited response, or a misplaced TLV).
+// Recoverable conditions (unknown primary TLV → DSOTYPENI, resource
+// exhaustion → error RCODE) return a response with a nil error instead,
+// so the transport keeps the session — and any pipelined regular DNS
+// queries on it — alive.
+var ErrDSOFatal = errors.New("dso: fatal protocol error")
+
+// ErrMaxSessions is returned by CreateSession when the session table is
+// full. The transport answers such a request with SERVFAIL and keeps the
+// connection open (a resource limit is not a reason to abort an otherwise
+// healthy connection carrying regular DNS traffic), rather than treating
+// it as fatal.
+var ErrMaxSessions = errors.New("dso: maximum sessions reached")
 
 var sessionIDRandReader io.Reader = cryptorand.Reader
 
@@ -429,7 +446,7 @@ func (m *Manager) CreateSession(conn net.Conn) (*Session, error) {
 	defer m.sessionsMu.Unlock()
 
 	if len(m.sessions) >= m.maxSessions {
-		return nil, fmt.Errorf("maximum sessions reached: %d", m.maxSessions)
+		return nil, fmt.Errorf("%w: %d", ErrMaxSessions, m.maxSessions)
 	}
 
 	id, err := m.generateSessionID()
@@ -546,13 +563,21 @@ func (m *Manager) cleanupExpiredSessions() {
 
 // HandleDSORequest handles a DSO request message.
 func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*protocol.Message, error) {
+	// RFC 8490 §5.4: receiving an unsolicited DSO *response* (QR=1) is a
+	// fatal protocol error — a server must never treat it as a request or
+	// answer it.
+	if msg.Header.Flags.QR {
+		return nil, fmt.Errorf("%w: unsolicited DSO response (QR=1)", ErrDSOFatal)
+	}
+
 	// Update activity
 	session.UpdateActivity()
 
 	// Parse TLVs from additional section
 	tlvBuf, err := m.extractTLVs(msg)
 	if err != nil {
-		return nil, fmt.Errorf("extracting TLVs: %w", err)
+		// Malformed framing / nonzero section counts are fatal per §5.2.
+		return nil, fmt.Errorf("%w: extracting TLVs: %w", ErrDSOFatal, err)
 	}
 
 	// Process TLVs
@@ -561,7 +586,7 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 	for len(tlvBuf) > 0 {
 		tlv, consumed, err := UnpackTLV(tlvBuf, 0)
 		if err != nil {
-			return nil, fmt.Errorf("unpacking TLV: %w", err)
+			return nil, fmt.Errorf("%w: unpacking TLV: %w", ErrDSOFatal, err)
 		}
 
 		switch tlv.Type {
@@ -605,17 +630,21 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 		case DSOTLVPadding:
 			// Encryption Padding is only valid as an Additional TLV.
 			if isPrimary {
-				return nil, fmt.Errorf("padding TLV not allowed as primary")
+				return nil, fmt.Errorf("%w: padding TLV not allowed as primary", ErrDSOFatal)
 			}
 			// Ignore padding Additional TLVs in requests.
 
 		case DSOTLVRetryDelay:
 			// Not valid in requests
-			return nil, fmt.Errorf("retry delay TLV not allowed in requests")
+			return nil, fmt.Errorf("%w: retry delay TLV not allowed in requests", ErrDSOFatal)
 
 		default:
 			if isPrimary {
-				return nil, fmt.Errorf("unknown primary TLV type: %d", tlv.Type)
+				// RFC 8490 §5.1.1: an unrecognized PRIMARY TLV is answered
+				// with DSOTYPENI and the session STAYS OPEN — it is not a
+				// fatal error. (Aborting the connection here would tear
+				// down any pipelined regular DNS queries riding on it.)
+				return m.buildDSOErrorResponse(msg, protocol.RcodeDSOTypeNI)
 			}
 			// Unknown additional TLVs are ignored per RFC 8490 TLV handling.
 		}
@@ -630,6 +659,23 @@ func (m *Manager) HandleDSORequest(session *Session, msg *protocol.Message) (*pr
 		return nil, err
 	}
 	return response, nil
+}
+
+// buildDSOErrorResponse builds a DSO response (opcode 6, zero section
+// counts, empty TLV body) carrying the given RCODE, echoing the request
+// ID. Used for recoverable conditions (DSOTYPENI, resource exhaustion)
+// where the session must stay open — returned with a nil error so the
+// transport writes it rather than aborting the connection.
+func (m *Manager) buildDSOErrorResponse(request *protocol.Message, rcode uint8) (*protocol.Message, error) {
+	resp := &protocol.Message{Header: request.Header}
+	resp.Header.Flags.QR = true
+	resp.Header.Flags.RCODE = rcode
+	resp.Header.QDCount = 0
+	resp.Header.ANCount = 0
+	resp.Header.NSCount = 0
+	resp.Header.ARCount = 0
+	resp.RawBody = nil
+	return resp, nil
 }
 
 // extractTLVs returns the TLV bytes carried by a DSO message body.

@@ -164,13 +164,23 @@ func TestHandleDSORequest_RetryDelay_RejectedInRequest(t *testing.T) {
 }
 
 func TestHandleDSORequest_UnknownTLV_Rejected(t *testing.T) {
-	// Per RFC 8490 §8.2 the server returns DSO TYPE NOT IMPLEMENTED
-	// (or in our implementation, an error) for unknown primary TLVs.
+	// RFC 8490 §5.1.1: an unrecognized PRIMARY TLV is answered with
+	// DSOTYPENI and the session STAYS OPEN — it is NOT a fatal error
+	// (aborting would tear down pipelined regular DNS queries on the conn).
 	m := NewManager(DefaultConfig(), nil)
 	sess := freshSession()
-	_, err := m.HandleDSORequest(sess, dsoMessage(packTLV(0x7FFF, []byte{1, 2, 3})))
-	if err == nil {
-		t.Error("expected error for unknown TLV type")
+	resp, err := m.HandleDSORequest(sess, dsoMessage(packTLV(0x7FFF, []byte{1, 2, 3})))
+	if err != nil {
+		t.Fatalf("unknown primary TLV must not be a fatal error, got %v", err)
+	}
+	if resp == nil {
+		t.Fatal("expected a DSOTYPENI response, got nil")
+	}
+	if resp.Header.Flags.RCODE != protocol.RcodeDSOTypeNI {
+		t.Errorf("RCODE = %d, want DSOTYPENI (%d)", resp.Header.Flags.RCODE, protocol.RcodeDSOTypeNI)
+	}
+	if !resp.Header.Flags.QR {
+		t.Error("response QR flag not set")
 	}
 }
 

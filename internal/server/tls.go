@@ -485,6 +485,12 @@ func (s *TLSServer) processMessage(conn *tls.Conn, data []byte) {
 	}
 	defer msg.Release()
 
+	// Any message on this connection resets a co-hosted DSO session's
+	// inactivity timer (RFC 8490 §7.1.1).
+	if s.dsoHandler != nil {
+		s.dsoHandler.Touch(conn)
+	}
+
 	// DSO (RFC 8490, opcode 6) is per-connection stateful and never enters
 	// the regular query pipeline. DoT is the RFC 8490 §5.1 recommended
 	// transport for DSO.

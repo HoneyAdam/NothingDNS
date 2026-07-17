@@ -26,6 +26,7 @@ const (
 	RcodeNXRRSet        = 8  // NXRRSet - RR set that should exist does not (RFC 2136)
 	RcodeNotAuth        = 9  // NotAuth - Server not authoritative for zone (RFC 2136)
 	RcodeNotZone        = 10 // NotZone - Name not contained in zone (RFC 2136)
+	RcodeDSOTypeNI      = 11 // DSOTYPENI - DSO-TYPE not implemented (RFC 8490)
 
 	// EDNS extended RCODEs (upper 8 bits)
 	RcodeBadVers   = 16 // Bad OPT version

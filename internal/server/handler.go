@@ -118,6 +118,11 @@ type Handler interface {
 type DSOConnHandler interface {
 	HandleDSO(conn net.Conn, msg *protocol.Message) (*protocol.Message, error)
 	ConnClosed(conn net.Conn)
+	// Touch resets the DSO inactivity timer for conn. The transport calls
+	// it on every message (DSO or regular DNS) so that traffic on a
+	// connection that also hosts a DSO session keeps that session alive
+	// (RFC 8490 §7.1.1). A no-op if conn has no session.
+	Touch(conn net.Conn)
 }
 
 // dsoErrorResponse builds a minimal DSO response (opcode 6, zero section

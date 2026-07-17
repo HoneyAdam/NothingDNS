@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net"
 	"sync"
 
@@ -42,6 +43,18 @@ func (a *dsoConnAdapter) HandleDSO(conn net.Conn, msg *protocol.Message) (*proto
 		sess, err = a.manager.CreateSession(conn)
 		if err != nil {
 			a.mu.Unlock()
+			// A full session table is a resource limit, not a protocol
+			// violation: answer SERVFAIL and keep the connection (and any
+			// pipelined regular DNS queries on it) alive instead of
+			// aborting. Genuine protocol/TLS errors still abort.
+			if errors.Is(err, dso.ErrMaxSessions) {
+				resp := &protocol.Message{Header: msg.Header}
+				resp.Header.Flags.QR = true
+				resp.Header.Flags.RCODE = protocol.RcodeServerFailure
+				resp.Header.QDCount, resp.Header.ANCount = 0, 0
+				resp.Header.NSCount, resp.Header.ARCount = 0, 0
+				return resp, nil
+			}
 			return nil, err
 		}
 		a.sessions[conn] = sess
@@ -49,6 +62,20 @@ func (a *dsoConnAdapter) HandleDSO(conn net.Conn, msg *protocol.Message) (*proto
 	a.mu.Unlock()
 
 	return a.manager.HandleDSORequest(sess, msg)
+}
+
+// Touch implements server.DSOConnHandler: it resets the DSO inactivity
+// timer for conn on ANY message (RFC 8490 §7.1.1 resets the timer on
+// every DNS message on the session). Without this, regular DNS queries
+// sharing the connection did not count as activity, so the sweeper closed
+// an actively-used connection ~15s after the last DSO-specific message.
+func (a *dsoConnAdapter) Touch(conn net.Conn) {
+	a.mu.Lock()
+	sess, ok := a.sessions[conn]
+	a.mu.Unlock()
+	if ok {
+		sess.UpdateActivity()
+	}
 }
 
 // ConnClosed implements server.DSOConnHandler.

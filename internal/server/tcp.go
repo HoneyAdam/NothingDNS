@@ -315,6 +315,12 @@ func (s *TCPServer) handleMessage(conn net.Conn, data []byte, writeMu *sync.Mute
 	}
 	defer msg.Release()
 
+	// Any message on this connection resets a co-hosted DSO session's
+	// inactivity timer (RFC 8490 §7.1.1).
+	if s.dsoHandler != nil {
+		s.dsoHandler.Touch(conn)
+	}
+
 	// DSO (RFC 8490, opcode 6) is per-connection stateful and never enters
 	// the regular query pipeline.
 	if msg.Header.Flags.Opcode == protocol.OpcodeDSO {
