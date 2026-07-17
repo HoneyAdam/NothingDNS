@@ -457,7 +457,13 @@ func NewObliviousTarget(config *ODoHConfig, handler server.Handler) (*ObliviousT
 	if err := validateODoHSuite(config); err != nil {
 		return nil, fmt.Errorf("unsupported HPKE suite: %w", err)
 	}
-	kp, err := newODoHKeyPair()
+	suite := defaultHPKESuite()
+	if config.HPKEAEAD == HPKEAEADAES256GCM {
+		// Honor the configured AEAD: the suite is advertised in the
+		// published ODoH config, so clients follow it.
+		suite.aeadID = hpkeAEADAES256GCM
+	}
+	kp, err := newODoHKeyPairWithSuite(suite)
 	if err != nil {
 		return nil, fmt.Errorf("generating HPKE key pair: %w", err)
 	}
@@ -502,8 +508,9 @@ const HPKEAEADAES128GCM = 3
 //     its long-lived recipient key.
 //  3. Target resolves the query through the configured server.Handler.
 //  4. Target re-encrypts the DNS response under a fresh AEAD key+nonce
-//     derived from the query plaintext (RFC 9230 §4.1.2) and returns
-//     it as an ObliviousDoHMessage (type=0x02).
+//     derived from the HPKE exporter secret (Context.Export, RFC 9230
+//     §4.2) plus a random per-response nonce — never from the query
+//     plaintext — and returns it as an ObliviousDoHMessage (type=0x02).
 //
 // On any decode, decrypt, or resolution failure, HTTP 400 / 500 is
 // returned without leaking which step failed.

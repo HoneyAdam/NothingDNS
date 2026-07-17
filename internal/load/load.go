@@ -2,6 +2,7 @@ package load
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -23,7 +24,11 @@ type Config struct {
 	Timeout  time.Duration // Query timeout
 	Type     uint16        // Query type (A, AAAA, TXT, etc.)
 	Name     string        // Query name
-	Protocol string        // "udp", "tcp", "dot", "doh"
+	Protocol string        // "udp", "tcp", or "dot" (DoH is not supported)
+
+	// TLSInsecureSkipVerify disables certificate verification for "dot".
+	// Lab/benchmark use against self-signed test servers only.
+	TLSInsecureSkipVerify bool
 }
 
 // Result holds load test results.
@@ -69,10 +74,25 @@ func NewRunner(cfg Config) *Runner {
 	}
 }
 
-// Run executes the load test and returns results.
+// Run executes the load test and returns results. An unsupported
+// Protocol yields a Result whose queries all count as errors — the old
+// behavior silently downgraded "dot"/"doh" to plain TCP, which measured
+// the wrong thing while claiming encrypted-transport numbers.
 func (r *Runner) Run(ctx context.Context) *Result {
 	if r.cfg.Timeout == 0 {
 		r.cfg.Timeout = 5 * time.Second
+	}
+	switch r.cfg.Protocol {
+	case "", "udp", "tcp", "dot":
+	default:
+		total := int64(r.cfg.Queries * r.cfg.Workers)
+		return &Result{
+			Queries: total,
+			Errors:  total,
+			ErrorsDetail: map[string]int64{
+				fmt.Sprintf("protocol %q not supported (use udp, tcp, or dot)", r.cfg.Protocol): total,
+			},
+		}
 	}
 
 	start := time.Now()
@@ -95,13 +115,24 @@ func (r *Runner) runWorker(ctx context.Context, workerID int) {
 	var conn net.Conn
 	var err error
 
-	// Use TCP for reliability under load
-	proto := r.cfg.Protocol
-	if proto != "udp" {
-		proto = "tcp"
+	switch r.cfg.Protocol {
+	case "udp":
+		conn, err = net.DialTimeout("udp", r.cfg.Server, r.cfg.Timeout)
+	case "dot":
+		// Real DNS-over-TLS (RFC 7858): TLS handshake + TCP framing.
+		dialer := &net.Dialer{Timeout: r.cfg.Timeout}
+		host, _, splitErr := net.SplitHostPort(r.cfg.Server)
+		if splitErr != nil {
+			host = r.cfg.Server
+		}
+		conn, err = tls.DialWithDialer(dialer, "tcp", r.cfg.Server, &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: r.cfg.TLSInsecureSkipVerify, // lab use, see Config
+			MinVersion:         tls.VersionTLS12,
+		})
+	default: // "tcp"
+		conn, err = net.DialTimeout("tcp", r.cfg.Server, r.cfg.Timeout)
 	}
-
-	conn, err = net.DialTimeout(proto, r.cfg.Server, r.cfg.Timeout)
 	if err != nil {
 		atomic.AddInt64(&r.errors, int64(r.cfg.Queries))
 		return

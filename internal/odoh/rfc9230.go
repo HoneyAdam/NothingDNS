@@ -51,7 +51,15 @@ type odohKeyPair struct {
 // newODoHKeyPair generates a fresh target key pair using the default
 // suite (DHKEM-X25519, HKDF-SHA256, AES-128-GCM).
 func newODoHKeyPair() (*odohKeyPair, error) {
-	suite := defaultHPKESuite()
+	return newODoHKeyPairWithSuite(defaultHPKESuite())
+}
+
+// newODoHKeyPairWithSuite generates a fresh target key pair for the given
+// HPKE suite. The suite's AEAD ID is advertised in the published
+// ObliviousDoHConfigContents, so clients encrypt with the AEAD the
+// operator actually configured (previously the config's AEAD choice was
+// silently ignored and AES-128-GCM was always used).
+func newODoHKeyPairWithSuite(suite hpkeSuite) (*odohKeyPair, error) {
 	skR, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("odoh: gen target key: %w", err)
@@ -309,15 +317,14 @@ func (kp *odohKeyPair) decryptQuery(msgBytes []byte) (dnsQuery []byte, respCtx *
 	dnsQuery = make([]byte, dnsLen)
 	copy(dnsQuery, pt[2:2+dnsLen])
 
-	// Derive a fresh AEAD key+nonce for the response (RFC 9230 §4.1.2):
-	//
-	//   secret = Extract(enc, dns_query_plaintext)        [HKDF-Extract]
-	//   key    = LabeledExpand(secret, "key", "odoh response", aead_key_len)
-	//   nonce  = LabeledExpand(secret, "nonce", "odoh response", aead_nonce_len)
-	//
-	// where dns_query_plaintext is the WHOLE decrypted query envelope
-	// (including padding fields), enc is the ephemeral PK bytes from the
-	// query, and Extract uses the suite's KDF hash.
+	// Capture the context needed to derive the response AEAD later
+	// (deriveResponseAEAD). The response secret is
+	// Context.Export("odoh response", Nk) — bound to the HPKE DH shared
+	// secret, NOT the guessable query plaintext (the old plaintext-IKM
+	// design enabled an offline dictionary attack by the proxy; see
+	// deriveResponseAEAD's doc comment). A fresh random response_nonce is
+	// folded into the HKDF salt per response to prevent AES-GCM nonce
+	// reuse on replayed queries.
 	respCtx = &responseContext{
 		suite:         kp.suite,
 		ctx:           ctx,

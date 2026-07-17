@@ -272,56 +272,6 @@ func TestCanonicalSort_SameNameTypeDifferentRDATA(t *testing.T) {
 // non-matching algorithms. Exercises the `continue` branches.
 // ---------------------------------------------------------------------------
 
-func TestValidateTrustAnchor_NonMatchingAlgorithm(t *testing.T) {
-	v := NewValidator(DefaultValidatorConfig(), NewTrustAnchorStore(), nil)
-
-	anchor := &TrustAnchor{
-		Zone:       "example.com.",
-		KeyTag:     12345,
-		Algorithm:  protocol.AlgorithmECDSAP256SHA256,
-		DigestType: 2,
-		Digest:     make([]byte, 32), // arbitrary digest
-		PublicKey:  nil,
-	}
-
-	name, _ := protocol.ParseName("example.com.")
-
-	// First DNSKEY has a non-matching key tag (should hit continue)
-	// Second DNSKEY has a matching key tag but non-matching algorithm (should hit continue)
-	dnsKeys := []*protocol.ResourceRecord{
-		{
-			Name:  name,
-			Type:  protocol.TypeDNSKEY,
-			Class: protocol.ClassIN,
-			TTL:   3600,
-			Data: &protocol.RDataDNSKEY{
-				Flags:     0x0100,
-				Protocol:  3,
-				Algorithm: protocol.AlgorithmECDSAP256SHA256,
-				PublicKey: make([]byte, 64),
-			},
-		},
-		{
-			Name:  name,
-			Type:  protocol.TypeDNSKEY,
-			Class: protocol.ClassIN,
-			TTL:   3600,
-			Data: &protocol.RDataDNSKEY{
-				Flags:     0x0100,
-				Protocol:  3,
-				Algorithm: protocol.AlgorithmRSASHA256, // non-matching algorithm
-				PublicKey: make([]byte, 128),
-			},
-		},
-	}
-
-	// None should match since KeyTag of the anchor doesn't match any key
-	result := v.validateTrustAnchor(anchor, dnsKeys)
-	if result {
-		t.Error("expected false when no DNSKEY matches the trust anchor")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // signer.go:441 - NSEC3 generation with unsupported algorithm (99).
 // NSEC3Hash will fail, triggering the `continue` in the loop so no NSEC3
@@ -450,75 +400,10 @@ func TestValidateRRSIG_NoMatchingKeyWithIgnoreTime(t *testing.T) {
 // *RDataDNSKEY (wrong Data type). Exercises the `ok=false` continue branch.
 // ---------------------------------------------------------------------------
 
-func TestValidateTrustAnchor_WrongDataType(t *testing.T) {
-	v := NewValidator(DefaultValidatorConfig(), NewTrustAnchorStore(), nil)
-
-	anchor := &TrustAnchor{
-		Zone:      "example.com.",
-		KeyTag:    12345,
-		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-	}
-
-	name, _ := protocol.ParseName("example.com.")
-	dnsKeys := []*protocol.ResourceRecord{
-		{
-			Name:  name,
-			Type:  protocol.TypeDNSKEY,
-			Class: protocol.ClassIN,
-			TTL:   3600,
-			Data:  &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}, // wrong type
-		},
-	}
-
-	result := v.validateTrustAnchor(anchor, dnsKeys)
-	if result {
-		t.Error("expected false when DNSKEY Data is wrong type")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Additional: validateTrustAnchor with matching PublicKey (not Digest).
 // Exercises the `len(anchor.PublicKey) > 0` branch returning true.
 // ---------------------------------------------------------------------------
-
-func TestValidateTrustAnchor_MatchingPublicKey(t *testing.T) {
-	v := NewValidator(DefaultValidatorConfig(), NewTrustAnchorStore(), nil)
-
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-
-	pubKeyData, err := packECDSAPublicKey(&PublicKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: &privKey.PublicKey})
-	if err != nil {
-		t.Fatalf("pack key: %v", err)
-	}
-
-	dnskeyData := &protocol.RDataDNSKEY{
-		Flags:     0x0100,
-		Protocol:  3,
-		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-		PublicKey: pubKeyData,
-	}
-	keyTag := protocol.CalculateKeyTag(dnskeyData.Flags, dnskeyData.Algorithm, dnskeyData.PublicKey)
-
-	anchor := &TrustAnchor{
-		Zone:      "example.com.",
-		KeyTag:    keyTag,
-		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-		PublicKey: pubKeyData,
-	}
-
-	name, _ := protocol.ParseName("example.com.")
-	dnsKeys := []*protocol.ResourceRecord{
-		{Name: name, Type: protocol.TypeDNSKEY, Class: protocol.ClassIN, TTL: 3600, Data: dnskeyData},
-	}
-
-	result := v.validateTrustAnchor(anchor, dnsKeys)
-	if !result {
-		t.Error("expected true when PublicKey matches")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Additional: buildChain returns error when resolver is nil
@@ -542,25 +427,6 @@ func TestBuildChain_NilResolver(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Additional: validateDelegation with non-DS Data type
 // ---------------------------------------------------------------------------
-
-func TestValidateDelegation_WrongDSType(t *testing.T) {
-	v := NewValidator(DefaultValidatorConfig(), NewTrustAnchorStore(), nil)
-
-	parent := &chainLink{zone: "com.", validated: true}
-
-	name, _ := protocol.ParseName("example.com.")
-	dsRecords := []*protocol.ResourceRecord{
-		{Name: name, Type: protocol.TypeDS, Class: protocol.ClassIN, TTL: 3600, Data: &protocol.RDataA{Address: [4]byte{1, 2, 3, 4}}},
-	}
-	childKeys := []*protocol.ResourceRecord{
-		{Name: name, Type: protocol.TypeDNSKEY, Class: protocol.ClassIN, TTL: 3600, Data: &protocol.RDataDNSKEY{Flags: 0x0100, Protocol: 3, Algorithm: 8, PublicKey: make([]byte, 64)}},
-	}
-
-	result := v.validateDelegation(parent, dsRecords, childKeys)
-	if result {
-		t.Error("expected false when DS Data is wrong type")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // crypto.go:66-68 - parseRSAPublicKey with 3-byte exponent length and short data
@@ -1415,50 +1281,6 @@ func (r *childDNSKEYErrorResolver) Query(ctx context.Context, name string, qtype
 // Exercises the digest comparison path where anchor has a Digest and it matches.
 // ---------------------------------------------------------------------------
 
-func TestValidateTrustAnchor_MatchingDigest(t *testing.T) {
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-
-	pub := &PublicKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: &privKey.PublicKey}
-	keyData, err := packECDSAPublicKey(pub)
-	if err != nil {
-		t.Fatalf("pack key: %v", err)
-	}
-
-	dnskeyData := &protocol.RDataDNSKEY{
-		Flags:     protocol.DNSKEYFlagZone | protocol.DNSKEYFlagSEP,
-		Protocol:  3,
-		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-		PublicKey: keyData,
-	}
-	keyTag := protocol.CalculateKeyTag(dnskeyData.Flags, dnskeyData.Algorithm, dnskeyData.PublicKey)
-
-	// Compute correct digest
-	digest := calculateDSDigestFromDNSKEY("example.com.", dnskeyData, 2)
-
-	anchor := &TrustAnchor{
-		Zone:       "example.com.",
-		KeyTag:     keyTag,
-		Algorithm:  protocol.AlgorithmECDSAP256SHA256,
-		DigestType: 2,
-		Digest:     digest,
-		ValidFrom:  time.Now().Add(-time.Hour),
-	}
-
-	name, _ := protocol.ParseName("example.com.")
-	dnsKeys := []*protocol.ResourceRecord{
-		{Name: name, Type: protocol.TypeDNSKEY, Data: dnskeyData},
-	}
-
-	v := NewValidator(DefaultValidatorConfig(), nil, nil)
-	result := v.validateTrustAnchor(anchor, dnsKeys)
-	if !result {
-		t.Error("expected true when digest matches trust anchor")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // validator.go:283-325 validateMessage with empty answers and SECURE negative response.
 // Tests the negative response validation path with an empty answer section.
@@ -2068,45 +1890,6 @@ func TestSignECDSA_PaddingHitProbabilistically(t *testing.T) {
 // validator.go:227-228 validateTrustAnchor - algorithm mismatch continue.
 // Create anchor with matching KeyTag but different Algorithm.
 // ---------------------------------------------------------------------------
-
-func TestValidateTrustAnchor_AlgorithmMismatch(t *testing.T) {
-	v := NewValidator(DefaultValidatorConfig(), NewTrustAnchorStore(), nil)
-
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	pub := &PublicKey{Algorithm: protocol.AlgorithmECDSAP256SHA256, Key: &privKey.PublicKey}
-	keyData, err := packECDSAPublicKey(pub)
-	if err != nil {
-		t.Fatalf("pack key: %v", err)
-	}
-
-	dnskey := &protocol.RDataDNSKEY{
-		Flags:     0x0100,
-		Protocol:  3,
-		Algorithm: protocol.AlgorithmECDSAP256SHA256,
-		PublicKey: keyData,
-	}
-	keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
-
-	// Anchor has same KeyTag but different algorithm (RSASHA256 vs ECDSAP256SHA256)
-	anchor := &TrustAnchor{
-		Zone:      "example.com.",
-		KeyTag:    keyTag,
-		Algorithm: protocol.AlgorithmRSASHA256, // mismatch!
-	}
-
-	name, _ := protocol.ParseName("example.com.")
-	dnsKeys := []*protocol.ResourceRecord{
-		{Name: name, Type: protocol.TypeDNSKEY, Data: dnskey},
-	}
-
-	result := v.validateTrustAnchor(anchor, dnsKeys)
-	if result {
-		t.Error("expected false when algorithm mismatches")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // validator.go:528-530 validateNegativeResponse NSEC3 returning Secure.

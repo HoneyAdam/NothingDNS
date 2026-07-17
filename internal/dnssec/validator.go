@@ -384,85 +384,8 @@ func (v *Validator) buildChain(ctx context.Context, anchor *TrustAnchor, remaini
 	return chain, insecure, nil
 }
 
-// validateTrustAnchor checks if DNSKEY records match the trust anchor.
-func (v *Validator) validateTrustAnchor(anchor *TrustAnchor, dnsKeys []*protocol.ResourceRecord) bool {
-	for _, rr := range dnsKeys {
-		dnskey, ok := rr.Data.(*protocol.RDataDNSKEY)
-		if !ok {
-			continue
-		}
-
-		keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
-		if anchor.KeyTag != keyTag {
-			continue
-		}
-		if anchor.Algorithm != dnskey.Algorithm {
-			continue
-		}
-
-		// If anchor has digest, verify it matches DS computation
-		if len(anchor.Digest) > 0 {
-			digest := calculateDSDigestFromDNSKEY(rr.Name.String(), dnskey, anchor.DigestType)
-			if bytesEqual(digest, anchor.Digest) {
-				return true
-			}
-		}
-
-		// If anchor has public key, compare directly
-		if len(anchor.PublicKey) > 0 && bytesEqual(anchor.PublicKey, dnskey.PublicKey) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// validateDelegation validates a delegation using DS/DNSKEY.
-//
-// KeyTrap mitigation (VULN-040): bounds the DS × DNSKEY comparison work. A
-// malicious parent zone could otherwise publish many DS records with
-// key-tag collisions forcing O(N²) digest computations.
-func (v *Validator) validateDelegation(parent *chainLink, dsRecords, childKeys []*protocol.ResourceRecord) bool {
-	ops := 0
-	for _, dsRR := range dsRecords {
-		ds, ok := dsRR.Data.(*protocol.RDataDS)
-		if !ok {
-			continue
-		}
-
-		for _, keyRR := range childKeys {
-			dnskey, ok := keyRR.Data.(*protocol.RDataDNSKEY)
-			if !ok {
-				continue
-			}
-
-			if ops >= maxDelegationOps {
-				return false
-			}
-			ops++
-
-			// Check if DNSKEY matches DS
-			keyTag := protocol.CalculateKeyTag(dnskey.Flags, dnskey.Algorithm, dnskey.PublicKey)
-			if ds.KeyTag != keyTag {
-				continue
-			}
-			if ds.Algorithm != dnskey.Algorithm {
-				continue
-			}
-
-			// Verify DS digest
-			digest := calculateDSDigestFromDNSKEY(keyRR.Name.String(), dnskey, ds.DigestType)
-			if bytesEqual(digest, ds.Digest) {
-				return true
-			}
-		}
-	}
-
-	return false
-}
-
 // keysMatchingDS returns the child DNSKEYs (KSKs) that a parent DS record
-// authenticates. Same KeyTrap bound as validateDelegation.
+// authenticates. Bounded by maxDelegationOps (KeyTrap / VULN-040).
 func (v *Validator) keysMatchingDS(dsRecords, childKeys []*protocol.ResourceRecord) []*protocol.ResourceRecord {
 	var matched []*protocol.ResourceRecord
 	ops := 0
