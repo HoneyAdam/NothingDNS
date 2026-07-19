@@ -587,7 +587,7 @@ type ZoneManagerResult struct {
 - `Blocklist` — DNS query blocklist with stats
 - `RPZEngine` — Response Policy Zones with multiple trigger types
 - `GeoEngine` — Geographic DNS routing
-- `ACLChecher` — IP-based access control
+- `ACLChecker` — IP-based access control
 - `RateLimiter` — Per-IP rate limiting
 - `RRL` — Response Rate Limiting for amplification detection
 

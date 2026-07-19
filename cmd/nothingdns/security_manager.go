@@ -21,7 +21,7 @@ type SecurityManagerResult struct {
 	RPZEngine   *rpz.Engine
 	GeoEngine   *geodns.Engine
 	DNS64Synth  *dns64.Synthesizer
-	ACLChecher  *filter.ACLChecker
+	ACLChecker  *filter.ACLChecker
 	RateLimiter *filter.RateLimiter
 	RRL         *filter.RRL
 }
@@ -114,7 +114,7 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 	// Initialize ACL checker
 	if len(cfg.ACL) > 0 {
 		var err error
-		mgr.result.ACLChecher, err = filter.NewACLChecker(cfg.ACL, true)
+		mgr.result.ACLChecker, err = filter.NewACLChecker(cfg.ACL, true)
 		if err != nil {
 			return nil, err
 		}
@@ -126,7 +126,7 @@ func NewSecurityManager(cfg *config.Config, logger *util.Logger) (*SecurityManag
 		if err != nil {
 			return nil, err
 		}
-		mgr.result.ACLChecher = aclChecker
+		mgr.result.ACLChecker = aclChecker
 		logger.Warnf("Recursive resolver enabled with no ACL rules and acl_allow_unrestricted_recursion=false; defaulting to deny-by-default (all clients blocked). Set explicit ACL rules or set acl_allow_unrestricted_recursion=true to allow unrestricted access.")
 	}
 

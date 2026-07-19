@@ -4,6 +4,7 @@
 package main
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/nothingdns/nothingdns/internal/zone"
@@ -101,8 +102,6 @@ func (m *MultiZoneProvider) ListZones() map[string]*zone.Zone {
 			result[k] = v
 		}
 	}
-	// Use maps.Copy for cleaner code
-	// (kept as-is for Go version compatibility)
 	return result
 }
 
@@ -223,14 +222,9 @@ func (p *radixZoneProvider) GetZone(origin string) (*zone.Zone, bool) {
 	return zone, canonicalize(zone.Origin) == canonicalize(origin)
 }
 
-// sortZonesByLength sorts zones by origin length descending.
+// sortZonesByLength sorts zones by origin length descending (most specific first).
 func sortZonesByLength(zones []ZoneMatch) {
-	// Using insertion sort for small slices
-	for i := 1; i < len(zones); i++ {
-		j := i
-		for j > 0 && len(zones[j-1].Origin) < len(zones[j].Origin) {
-			zones[j-1], zones[j] = zones[j], zones[j-1]
-			j--
-		}
-	}
+	sort.Slice(zones, func(i, j int) bool {
+		return len(zones[i].Origin) > len(zones[j].Origin)
+	})
 }

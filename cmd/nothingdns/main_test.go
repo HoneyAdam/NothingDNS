@@ -8253,7 +8253,7 @@ func TestServeDNS_ACLRefused(t *testing.T) {
 	}}
 	logger := util.NewLogger(util.ERROR, util.TextFormat, nil)
 	sm, _ := NewSecurityManager(cfg, logger)
-	h.security.ACLChecker = sm.Result().ACLChecher
+	h.security.ACLChecker = sm.Result().ACLChecker
 
 	w := newCaptureWriter("10.0.0.1", "udp")
 	h.ServeDNS(w, newTestQuery(t, "example.com.", protocol.TypeA))
@@ -10686,7 +10686,7 @@ func TestNewSecurityManager_ACLDeny(t *testing.T) {
 	}
 	// Test that ACL denies work
 	result := mgr.Result()
-	if result.ACLChecher == nil {
+	if result.ACLChecker == nil {
 		t.Error("expected ACL checker")
 	}
 	mgr.Stop()

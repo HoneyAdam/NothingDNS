@@ -208,46 +208,7 @@ func (m *CacheManager) saveToFile() {
 }
 
 func writeCachePersistFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	tmp, err := os.CreateTemp(dir, "."+base+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	keepTemp := false
-	defer func() {
-		if !keepTemp {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if err := util.WriteFull(tmp, data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0644); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		// writeCachePersistFile is a package-level function with no
-		// access to the server logger; discard the close error since
-		// the data was already synced to disk at this point.
-		_ = err
-		return err
-	}
-	keepTemp = true // prevent defer from removing the now-renamed file
-
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	return nil
+	return util.AtomicWriteFile(path, data)
 }
 
 // SaveCacheToKV saves the cache to a KVStore bucket (alternative method).

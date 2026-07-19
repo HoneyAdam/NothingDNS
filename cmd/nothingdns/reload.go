@@ -121,7 +121,7 @@ func reloadConfig(configPath string, s *reloadableState) (reloadedZones int, err
 	*s.rpzEngine = secResult.RPZEngine
 	*s.geoEngine = secResult.GeoEngine
 	*s.dns64Synth = secResult.DNS64Synth
-	*s.aclChecker = secResult.ACLChecher
+	*s.aclChecker = secResult.ACLChecker
 	*s.rateLimiter = secResult.RateLimiter
 	*s.upstreamManager = upstreamPlan.upstreamManager
 	*s.client = upstreamPlan.upstreamManager.Client

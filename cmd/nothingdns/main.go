@@ -19,7 +19,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -275,7 +274,7 @@ func reloadSecurityComponents(cfg *config.Config, current *SecurityManager, hand
 		handler.security.RPZEngine = result.RPZEngine
 		handler.security.GeoEngine = result.GeoEngine
 		handler.security.DNS64Synth = result.DNS64Synth
-		handler.security.ACLChecker = result.ACLChecher
+		handler.security.ACLChecker = result.ACLChecker
 		handler.security.RateLimiter = result.RateLimiter
 		handler.security.RRL = result.RRL
 		handler.runtimeMu.Unlock()
@@ -285,7 +284,7 @@ func reloadSecurityComponents(cfg *config.Config, current *SecurityManager, hand
 			WithBlocklist(result.Blocklist).
 			WithRPZ(result.RPZEngine).
 			WithGeoDNS(result.GeoEngine).
-			WithACL(result.ACLChecher).
+			WithACL(result.ACLChecker).
 			WithRateLimiter(result.RateLimiter)
 	}
 	if current != nil {
@@ -428,7 +427,7 @@ func run() error {
 	rpzEngine := securityManager.Result().RPZEngine
 	geoEngine := securityManager.Result().GeoEngine
 	dns64Synth := securityManager.Result().DNS64Synth
-	aclChecker := securityManager.Result().ACLChecher
+	aclChecker := securityManager.Result().ACLChecker
 	rateLimiter := securityManager.Result().RateLimiter
 
 	// Initialize metrics collector
@@ -1196,41 +1195,7 @@ func readLimitedFile(path string, maxSize int64) ([]byte, error) {
 }
 
 func writePIDFile(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	base := filepath.Base(path)
-
-	tmp, err := os.CreateTemp(dir, "."+base+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	keepTemp := false
-	defer func() {
-		if !keepTemp {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	if err := util.WriteFull(tmp, data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	keepTemp = true
-	return nil
+	return util.AtomicWriteFile(path, data)
 }
 
 func parseDNSSECPrivateKey(data []byte, algorithm uint8) (*dnssec.PrivateKey, error) {

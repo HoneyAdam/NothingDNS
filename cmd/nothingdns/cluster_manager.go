@@ -77,15 +77,8 @@ func NewClusterManager(cfg *config.Config, logger *util.Logger, dnsCache *cache.
 	logger.Infof("Cluster initialized with node ID %s", mgr.Cluster.GetNodeID())
 	logger.Infof("Cluster has %d nodes", mgr.Cluster.GetNodeCount())
 
-	// Set up cache invalidation callback for cluster sync
-	if cfg.Cluster.CacheSync && dnsCache != nil {
-		dnsCache.SetInvalidateFunc(func(key string) {
-			if err := mgr.Cluster.InvalidateCache([]string{key}); err != nil {
-				logger.Debugf("Failed to broadcast cache invalidation: %v", err)
-			}
-		})
-		logger.Info("Cache synchronization enabled across cluster")
-	}
+	// Cache sync callbacks are registered in main.go after the cache
+	// manager is fully wired; registering them here would be overwritten.
 
 	// Start cluster metrics updater
 	go mgr.metricsUpdater(metricsCollector, 30*time.Second)
