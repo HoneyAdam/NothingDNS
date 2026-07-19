@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -102,5 +104,77 @@ func TestWriteFull_ZeroProgressGuard(t *testing.T) {
 	err := WriteFull(zeroProgressWriter{}, []byte{1, 2, 3})
 	if !errors.Is(err, io.ErrNoProgress) {
 		t.Fatalf("WriteFull error = %v, want %v", err, io.ErrNoProgress)
+	}
+}
+
+func TestAtomicWriteFile_Success(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.txt")
+
+	payload := []byte("hello atomic")
+	if err := AtomicWriteFile(dst, payload); err != nil {
+		t.Fatalf("AtomicWriteFile error: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("wrote %q, want %q", got, payload)
+	}
+
+	st, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat error: %v", err)
+	}
+	if got := st.Mode().Perm(); got != 0o644 {
+		t.Fatalf("default mode = %v, want 0o644", got)
+	}
+}
+
+func TestAtomicWriteFile_CustomMode(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.txt")
+
+	if err := AtomicWriteFile(dst, []byte("x"), 0o600); err != nil {
+		t.Fatalf("AtomicWriteFile error: %v", err)
+	}
+	st, err := os.Stat(dst)
+	if err != nil {
+		t.Fatalf("Stat error: %v", err)
+	}
+	if got := st.Mode().Perm(); got != 0o600 {
+		t.Fatalf("custom mode = %v, want 0o600", got)
+	}
+}
+
+func TestAtomicWriteFile_ReplacesExisting(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(dst, []byte("OLD"), 0o644); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	if err := AtomicWriteFile(dst, []byte("NEW")); err != nil {
+		t.Fatalf("AtomicWriteFile error: %v", err)
+	}
+
+	got, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(got, []byte("NEW")) {
+		t.Fatalf("wrote %q, want NEW", got)
+	}
+}
+
+func TestAtomicWriteFile_BadDirectory(t *testing.T) {
+	// A path under a non-existent directory should fail at CreateTemp.
+	badDir := filepath.Join(t.TempDir(), "missing", "subdir")
+	dst := filepath.Join(badDir, "out.txt")
+
+	if err := AtomicWriteFile(dst, []byte("x")); err == nil {
+		t.Fatal("AtomicWriteFile should fail when parent dir is missing")
 	}
 }

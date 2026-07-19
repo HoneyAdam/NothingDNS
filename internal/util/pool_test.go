@@ -131,6 +131,52 @@ func TestPooledBufferGrow(t *testing.T) {
 	}
 }
 
+func TestGrowNegative(t *testing.T) {
+	p := NewPooledBuffer()
+	defer p.Release()
+
+	if err := p.Grow(-1); err == nil {
+		t.Fatal("Grow(-1) should return error")
+	}
+}
+
+func TestGrowNoAllocWhenRoomAvailable(t *testing.T) {
+	p := NewPooledBuffer()
+	defer p.Release()
+
+	// Empty pooled buffer has len=0 and cap >= defaultBufferSize.
+	// Growing by a small positive value should be a no-op (no allocation).
+	capBefore := p.Cap()
+	if err := p.Grow(10); err != nil {
+		t.Fatalf("Grow(10) error: %v", err)
+	}
+	if p.Cap() != capBefore {
+		t.Errorf("Grow(10) on empty buffer changed cap from %d to %d (should be unchanged)", capBefore, p.Cap())
+	}
+}
+
+func TestGrowWithPriorData(t *testing.T) {
+	p := NewPooledBuffer()
+	defer p.Release()
+
+	// Fill close to capacity, then Grow enough that allocation triggers.
+	for i := 0; i < p.Cap()-1; i++ {
+		p.WriteByte('a')
+	}
+	capBefore := p.Cap()
+	if err := p.Grow(100); err != nil {
+		t.Fatalf("Grow(100) error: %v", err)
+	}
+	if p.Cap() < p.Len()+100 {
+		t.Errorf("After Grow(100), Cap = %d < %d", p.Cap(), p.Len()+100)
+	}
+	// Existing data must be preserved.
+	if p.Bytes()[0] != 'a' {
+		t.Errorf("Grow corrupted existing data: first byte = %q", p.Bytes()[0])
+	}
+	_ = capBefore
+}
+
 func TestPutBufferNil(t *testing.T) {
 	// Should not panic
 	PutBuffer(nil)

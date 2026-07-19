@@ -9,6 +9,11 @@ function CrashChild({ shouldCrash = false }: { shouldCrash?: boolean }) {
   return <p>All good</p>;
 }
 
+// A child that throws an error with empty message
+function EmptyMessageCrash() {
+  throw new Error('');
+}
+
 // Suppress console.error from React error boundary logging during tests
 vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -83,5 +88,16 @@ describe('ErrorBoundary', () => {
       </ErrorBoundary>,
     );
     expect(screen.getByText('After recovery')).toBeInTheDocument();
+  });
+
+  it('shows fallback message when error has no message', () => {
+    render(
+      <ErrorBoundary>
+        <EmptyMessageCrash />
+      </ErrorBoundary>,
+    );
+    expect(
+      screen.getByText('An unexpected error occurred while rendering this page.'),
+    ).toBeInTheDocument();
   });
 });

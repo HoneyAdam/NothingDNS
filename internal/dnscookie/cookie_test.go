@@ -1087,3 +1087,77 @@ func TestReservedByteMismatch(t *testing.T) {
 		t.Error("should reject when reserved byte is non-zero")
 	}
 }
+
+// ============================================================================
+// maybeRotate() — covers the "skip rotation" branch (deadline not reached)
+// and the "rotate" branch concurrently.
+// ============================================================================
+
+func TestMaybeRotateSkipsEarly(t *testing.T) {
+	jar, err := NewCookieJar(1 * time.Hour)
+	if err != nil {
+		t.Fatalf("NewCookieJar: %v", err)
+	}
+	secretBefore := jar.current
+	jar.maybeRotate() // Interval not elapsed.
+	if jar.current != secretBefore {
+		t.Error("maybeRotate should not rotate before interval elapses")
+	}
+}
+
+func TestMaybeRotateTriggersAfterInterval(t *testing.T) {
+	// 1 nanosecond is the smallest positive duration.
+	jar, err := NewCookieJar(time.Nanosecond)
+	if err != nil {
+		t.Fatalf("NewCookieJar: %v", err)
+	}
+	secretBefore := jar.current
+	time.Sleep(10 * time.Millisecond)
+	jar.maybeRotate()
+	if jar.current == secretBefore {
+		t.Error("maybeRotate should rotate after interval elapses")
+	}
+}
+
+func TestMaybeRotateConcurrentOnlyOneFires(t *testing.T) {
+	jar, err := NewCookieJar(time.Nanosecond)
+	if err != nil {
+		t.Fatalf("NewCookieJar: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	// Many concurrent goroutines, lastRotation recheck should mean at most one rotation.
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func() {
+			jar.maybeRotate()
+			done <- struct{}{}
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+	// After all rotations, hasPrevious must be true.
+	jar.mu.RLock()
+	hasPrev := jar.hasPrevious
+	jar.mu.RUnlock()
+	if !hasPrev {
+		t.Error("hasPrevious should be true after concurrent rotations")
+	}
+}
+
+func TestNewCookieJarZeroIntervalClamps(t *testing.T) {
+	jar, err := NewCookieJar(0)
+	if err != nil {
+		t.Fatalf("NewCookieJar(0): %v", err)
+	}
+	// Verify clamps to nanosecond by forcing a rotation.
+	jar.rotationInterval = time.Nanosecond
+	time.Sleep(2 * time.Millisecond)
+	jar.maybeRotate()
+	jar.mu.RLock()
+	hasPrev := jar.hasPrevious
+	jar.mu.RUnlock()
+	if !hasPrev {
+		t.Error("maybeRotate should still rotate after clamping interval")
+	}
+}

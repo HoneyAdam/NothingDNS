@@ -116,6 +116,50 @@ describe('api()', () => {
     );
     await expect(api('GET', '/api/v1/status')).rejects.toThrow('HTTP 502');
   });
+
+  it('handles invalid JSON error body (SyntaxError)', async () => {
+    mockFetch.mockResolvedValue(
+      Promise.resolve(
+        new Response('not json {{{', {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    );
+    await expect(api('GET', '/api/v1/status')).rejects.toThrow('HTTP 500');
+  });
+
+  it('extracts error message from nested error.message object', async () => {
+    mockFetch.mockResolvedValue(
+      mockJsonResponse({ error: { message: 'nested msg', code: 'X' } }, 400),
+    );
+    await expect(api('GET', '/api/v1/status')).rejects.toThrow('nested msg');
+  });
+
+  it('extracts error code when no message in nested error object', async () => {
+    mockFetch.mockResolvedValue(
+      mockJsonResponse({ error: { code: 'CODE_X' } }, 400),
+    );
+    await expect(api('GET', '/api/v1/status')).rejects.toThrow('CODE_X');
+  });
+
+  it('uses top-level message when no error field', async () => {
+    mockFetch.mockResolvedValue(
+      mockJsonResponse({ message: 'top-level msg' }, 400),
+    );
+    await expect(api('GET', '/api/v1/status')).rejects.toThrow('top-level msg');
+  });
+
+  it('returns empty for non-JSON payload (not an object)', async () => {
+    // No content-type, no body — should return {} as T
+    mockFetch.mockResolvedValue(
+      Promise.resolve(
+        new Response(null, { status: 200, headers: {} }),
+      ),
+    );
+    const r = await api('GET', '/api/v1/health');
+    expect(r).toEqual({});
+  });
 });
 
 describe('downloadAuthenticated', () => {
@@ -156,5 +200,19 @@ describe('downloadAuthenticated', () => {
     await expect(
       downloadAuthenticated('/api/v1/zones/missing/export', 'missing.zone'),
     ).rejects.toThrow('HTTP 404');
+  });
+
+  it('omits Bearer when not authenticated', async () => {
+    mockFetch.mockResolvedValue(
+      Promise.resolve(
+        new Response('data', {
+          status: 200,
+          headers: { 'Content-Type': 'application/octet-stream' },
+        }),
+      ),
+    );
+    await downloadAuthenticated('/api/v1/file', 'f.txt');
+    const headers = mockFetch.mock.calls[0][1].headers;
+    expect(headers.Authorization).toBeUndefined();
   });
 });

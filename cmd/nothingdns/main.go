@@ -331,42 +331,75 @@ func commitLoadedConfig(newCfg *config.Config, cfgMu *sync.RWMutex, cfgRef **con
 	}
 }
 
+// main is the process entry point. All real logic lives in MainDispatch
+// so it can be tested without invoking os.Exit.
 func main() {
-	flag.Parse()
+	os.Exit(MainDispatch(os.Args, os.Stdout, os.Stderr))
+}
 
-	if *validateConfig {
-		if err := validateConfigOnly(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Config validation failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Printf("Config file %s is valid\n", *configPath)
-		os.Exit(0)
+// MainDispatch parses the given arg slice, dispatches to the right
+// sub-command, and returns a process exit code. main() is now just a
+// thin wrapper so tests can exercise every flag combination without
+// terminating the test binary via os.Exit.
+func MainDispatch(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("nothingdns", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+
+	cfgPath := fs.String("config", "config.yaml", "path to configuration file")
+	validateCfg := fs.Bool("validate-config", false, "validate config and exit")
+	validateProdFlag := fs.Bool("validate-production-config", false, "validate production config and exit")
+	showHelp := fs.Bool("help", false, "show help")
+	showHelpShort := fs.Bool("h", false, "show help")
+	showVersion := fs.Bool("version", false, "show version")
+
+	if err := fs.Parse(args[1:]); err != nil {
+		return 2
 	}
 
-	if *validateProd {
-		if err := validateProductionConfigOnly(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Production config validation failed: %v\n", err)
-			os.Exit(1)
+	if *validateCfg {
+		if err := validateConfigOnly(*cfgPath); err != nil {
+			fmt.Fprintf(stderr, "Config validation failed: %v\n", err)
+			return 1
 		}
-		fmt.Printf("Production config file %s is valid\n", *configPath)
-		os.Exit(0)
+		fmt.Fprintf(stdout, "Config file %s is valid\n", *cfgPath)
+		return 0
 	}
 
-	if *showHelp {
-		printHelp()
-		os.Exit(0)
+	if *validateProdFlag {
+		if err := validateProductionConfigOnly(*cfgPath); err != nil {
+			fmt.Fprintf(stderr, "Production config validation failed: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "Production config file %s is valid\n", *cfgPath)
+		return 0
+	}
+
+	if *showHelp || *showHelpShort {
+		printHelpTo(stdout)
+		return 0
 	}
 
 	if *showVersion {
-		fmt.Printf("%s version %s\n", Name, util.Version)
-		os.Exit(0)
+		fmt.Fprintf(stdout, "%s version %s\n", Name, util.Version)
+		return 0
 	}
 
-	// Initialize and start server
+	*configPath = *cfgPath
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+// printHelpTo writes the help text to w. Mirrors the CLI behaviour.
+func printHelpTo(w io.Writer) {
+	fmt.Fprintf(w, "Usage: nothingdns [options]\n\nOptions:\n")
+	fmt.Fprintf(w, "  -config string\n        path to configuration file (default \"config.yaml\")\n")
+	fmt.Fprintf(w, "  -validate-config\n        validate configuration and exit\n")
+	fmt.Fprintf(w, "  -validate-production-config\n        validate production configuration and exit\n")
+	fmt.Fprintf(w, "  -version\n        print version and exit\n")
+	fmt.Fprintf(w, "  -help, -h\n        show this help message\n")
 }
 
 func run() error {
@@ -375,6 +408,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
+	return runWithContext(context.Background(), cfg)
+}
+
+// runWithContext performs the full server lifecycle with the supplied
+// context. Tests typically inject a signal via installFakeSignalHandler
+// to drive shutdown cleanly without sending real OS signals. Production
+// callers should use run() which seeds the context with context.Background().
+func runWithContext(ctx context.Context, cfg *config.Config) error {
 	var cfgMu sync.RWMutex
 
 	// Initialize logger
@@ -879,9 +920,10 @@ func run() error {
 	}
 	startStatsCollector(transports, metricsCollector, stopCh)
 
-	// Setup signal handling
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	// Setup signal handling — delegating to a package-level helper makes
+	// the lifecycle overridable from tests (see main_test.go's
+	// installFakeSignalHandler). Default: real OS signals.
+	sigChan := setupSignalHandler()
 
 	// Capture proper goroutine baseline after all servers are running
 	apiServer.SetGoroutineBaseline()
@@ -1458,4 +1500,30 @@ Examples:
 
 For more information, visit: https://github.com/nothingdns/nothingdns
 `, Name, os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+}
+
+// setupSignalHandler returns the channel that the wait-for-signals loop
+// reads from. Production wires real OS signals into it; tests can
+// replace it via installFakeSignalHandler. Each call returns a fresh
+// channel.
+func setupSignalHandler() <-chan os.Signal {
+	if fakeSigCh != nil {
+		return fakeSigCh
+	}
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	return ch
+}
+
+// fakeSigCh is a process-wide swap point used by tests to bypass real OS
+// signal delivery. Nil means "use real OS signals". Cleared after each
+// test by installFakeSignalHandler.
+var fakeSigCh chan os.Signal
+
+// installFakeSignalHandler swaps setupSignalHandler's output for the
+// supplied channel. Returns a restore function so tests can leave the
+// state clean for subsequent runs.
+func installFakeSignalHandler(ch chan os.Signal) func() {
+	fakeSigCh = ch
+	return func() { fakeSigCh = nil }
 }

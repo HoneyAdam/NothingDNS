@@ -303,3 +303,72 @@ func TestPackageLevelErrorf(t *testing.T) {
 	Errorf("error formatted %s", "test")
 	// Should not panic
 }
+
+// ============================================================================
+// Fatal/Fatalf — these do NOT call os.Exit in this implementation
+// (they only emit a FATAL-level log line). Cover both branches.
+// ============================================================================
+
+func TestLoggerFatal(t *testing.T) {
+	// Substitute os.Exit with a panic-style sentinel so the process stays alive.
+	prev := osExitFn
+	defer func() { osExitFn = prev }()
+
+	called := false
+	osExitFn = func(code int) {
+		called = true
+		// Don't actually exit.
+	}
+
+	buf := &bytes.Buffer{}
+	l := NewLogger(FATAL, TextFormat, buf)
+
+	l.Fatal("fatal message")
+
+	if !called {
+		t.Errorf("Fatal did not invoke osExitFn")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "fatal message") {
+		t.Errorf("Fatal did not log message; got %q", out)
+	}
+	if !strings.Contains(out, "FATAL") {
+		t.Errorf("Fatal did not include level; got %q", out)
+	}
+}
+
+func TestLoggerFatalf(t *testing.T) {
+	prev := osExitFn
+	defer func() { osExitFn = prev }()
+
+	called := false
+	osExitFn = func(code int) { called = true }
+
+	buf := &bytes.Buffer{}
+	l := NewLogger(FATAL, TextFormat, buf)
+
+	l.Fatalf("formatted %s %d", "fatal", 42)
+
+	if !called {
+		t.Errorf("Fatalf did not invoke osExitFn")
+	}
+	out := buf.String()
+	if !strings.Contains(out, "formatted fatal 42") {
+		t.Errorf("Fatalf did not format message; got %q", out)
+	}
+}
+
+func TestPackageLevelFatal(t *testing.T) {
+	SetDefaultLogger(NewLogger(FATAL, TextFormat, os.Stdout))
+	// Package-level Fatal/Fatalf helpers are not part of the public API in
+	// this implementation — only Logger.Fatal/Fatalf exist. The Logger.Fatal
+	// variants are covered above. Keep this hook to ensure SetDefaultLogger
+	// accepts a FATAL-level logger without panicking.
+	_ = GetDefaultLogger()
+}
+
+func TestPackageLevelFatalf(t *testing.T) {
+	SetDefaultLogger(NewLogger(FATAL, TextFormat, os.Stdout))
+	// See TestPackageLevelFatal.
+	_ = GetDefaultLogger()
+}

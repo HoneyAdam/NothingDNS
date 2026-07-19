@@ -187,6 +187,38 @@ func TestParseCatalogMemberRecord(t *testing.T) {
 			want:    nil,
 			wantErr: true,
 		},
+		{
+			name:  "zone with quoted group",
+			rdata: `zone1.example.com. "mygroup"`,
+			want: &CatalogMemberRecord{
+				ZoneName: "zone1.example.com.",
+				Class:    "IN",
+				TTL:      0,
+				Group:    "mygroup",
+			},
+			wantErr: false,
+		},
+		{
+			name:  "zone with full sequence ttl class app",
+			rdata: "zone1.example.com. 600 IN *",
+			want: &CatalogMemberRecord{
+				ZoneName:     "zone1.example.com.",
+				Class:        "IN",
+				TTL:          600,
+				Applications: []string{"*"},
+			},
+			wantErr: false,
+		},
+		{
+			name:  "unknown class defaults to IN",
+			rdata: "zone1.example.com. WEIRDCLASS",
+			want: &CatalogMemberRecord{
+				ZoneName: "zone1.example.com.",
+				Class:    "IN",
+				TTL:      0,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

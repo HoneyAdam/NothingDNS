@@ -47,6 +47,82 @@ func TestDomainIsRoot(t *testing.T) {
 }
 
 // ============================================================================
+// Domain.HasParent — also covers nil receivers, label-count mismatch, mismatch
+// ============================================================================
+
+func TestDomainHasParentBranches(t *testing.T) {
+	child, err := ParseDomain("a.b.example.com")
+	if err != nil {
+		t.Fatalf("ParseDomain error: %v", err)
+	}
+	parent, err := ParseDomain("example.com")
+	if err != nil {
+		t.Fatalf("ParseDomain error: %v", err)
+	}
+
+	if !child.HasParent(parent) {
+		t.Error("a.b.example.com should have parent example.com")
+	}
+	// Case-insensitive: child is upper, parent is lower.
+	upper, _ := ParseDomain("A.B.example.COM")
+	lower, _ := ParseDomain("Example.COM")
+	if !upper.HasParent(lower) {
+		t.Error("HasParent should be case-insensitive")
+	}
+
+	// Parent has more labels than child => false.
+	bigger, _ := ParseDomain("a.b.c.d.example.com")
+	if child.HasParent(bigger) {
+		t.Error("HasParent should be false when parent longer than child")
+	}
+
+	// Labels don't match at the boundary.
+	mismatch, _ := ParseDomain("other.org")
+	if child.HasParent(mismatch) {
+		t.Error("HasParent should be false when boundary labels differ")
+	}
+
+	// Nil receiver / nil parent.
+	var nilDomain *Domain
+	if nilDomain.HasParent(parent) {
+		t.Error("nil domain HasParent should be false")
+	}
+	if child.HasParent(nil) {
+		t.Error("HasParent(nil) should be false")
+	}
+}
+
+// ============================================================================
+// IsSubdomain — covers length-mismatch path and non-boundary offset path
+// ============================================================================
+
+func TestIsSubdomainBranchCoverage(t *testing.T) {
+	if !IsSubdomain("example.com", "example.com") {
+		t.Error("same string counts as its own subdomain (exact match)")
+	}
+	if IsSubdomain("xexample.com", "example.com") {
+		t.Error("non-boundary prefix should not count as subdomain")
+	}
+	if !IsSubdomain("a.example.com", "example.com") {
+		t.Error("a.example.com should be subdomain of example.com")
+	}
+	if !IsSubdomain("sub.Example.com", "example.com") {
+		t.Error("IsSubdomain should be case-insensitive")
+	}
+	// Length mismatch shorter.
+	if IsSubdomain("short.com", "much-longer-parent.com") {
+		t.Error("shorter child should not be subdomain of longer parent")
+	}
+	// Trailing dot normalization.
+	if !IsSubdomain("a.example.com.", "example.com") {
+		t.Error("trailing dot on child should be normalized")
+	}
+	if !IsSubdomain("a.example.com", "example.com.") {
+		t.Error("trailing dot on parent should be normalized")
+	}
+}
+
+// ============================================================================
 // Domain.Parent
 // ============================================================================
 

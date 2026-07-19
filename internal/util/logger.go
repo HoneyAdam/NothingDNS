@@ -188,9 +188,12 @@ func (l *Logger) log(level LogLevel, msg string, fields ...Fields) {
 	fmt.Fprintln(l.output, output)
 
 	if level == FATAL {
-		os.Exit(1)
+		osExitFn(1)
 	}
 }
+
+// osExitFn is overridable for tests. Defaults to os.Exit.
+var osExitFn = os.Exit
 
 // formatText formats log fields as human-readable text.
 func (l *Logger) formatText(fields Fields) string {

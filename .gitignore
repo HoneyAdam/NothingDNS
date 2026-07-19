@@ -132,3 +132,9 @@ Thumbs.db
 
 .dfmt/
 .wrongstack/
+
+# Local temp files (per CLAUDE.md / repo convention)
+.temp_files/
+
+# Frontend coverage output directory
+web/coverage/

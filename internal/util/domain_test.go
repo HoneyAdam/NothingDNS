@@ -356,4 +356,16 @@ func TestEqualFold(t *testing.T) {
 	if !equalFold("", "") {
 		t.Error("equalFold('', '') should be true")
 	}
+	if equalFold("a", "ab") {
+		t.Error("equalFold length-mismatched should be false")
+	}
+	if !equalFold("MiXeD", "mIxEd") {
+		t.Error("equalFold mixed case should be true")
+	}
+	if equalFold("A", "B") {
+		t.Error("equalFold different chars same length should be false")
+	}
+	if equalFold("a!", "a@") {
+		t.Error("equalFold non-letter differing chars should be false")
+	}
 }
